@@ -418,6 +418,27 @@ export const usePluginStore = defineStore('plugins', () => {
     return data.user
   }
 
+  async function logout() {
+    await fetch(`${apiBaseUrl}/v1/auth/logout`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    currentUser.value = null
+  }
+
+  async function updateProfile(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/me/profile`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '更新失败')
+    currentUser.value = data
+    return data
+  }
+
   async function submitPlugin(payload) {
     const response = await fetch(`${apiBaseUrl}/v1/plugins/submissions`, {
       method: 'POST',
@@ -492,6 +513,8 @@ export const usePluginStore = defineStore('plugins', () => {
     loadCurrentUser,
     loginWithGithub,
     loginWithPassword,
+    logout,
+    updateProfile,
     saveSetupConfig,
     loadSystemSettings,
     saveSystemSettings,

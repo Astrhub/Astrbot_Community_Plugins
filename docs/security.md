@@ -10,6 +10,8 @@
 3. GitHub 回调 `/v1/auth/github/callback`，交换 access token 并获取用户信息
 4. 若配置了 `GITHUB_ADMIN_ORG`，自动提升组织成员为管理员
 
+已登录的内部管理员可在个人设置页绑定 GitHub。若该 GitHub 账号此前只作为普通 GitHub 用户登录过，系统会把其插件、评论和提交记录合并到当前管理员账号。
+
 ## 权限
 
 - 核心管理员 — 授予/撤销管理员，发布公告（`/v1/core/*` 端点）

@@ -54,6 +54,18 @@ class MuteUserPayload(BaseModel):
     muted_until: str | None = None
 
 
+class UserProfileUpdate(BaseModel):
+    github_name: str | None = None
+    avatar_url: str | None = None
+
+    @field_validator("github_name", "avatar_url")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip()
+
+
 class RoleUpdatePayload(BaseModel):
     role: str = "user"
 

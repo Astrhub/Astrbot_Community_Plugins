@@ -266,6 +266,53 @@ class InMemoryMarketStore:
         user["updated_at"] = utc_now()
         return deepcopy(user)
 
+    def update_user_profile(
+        self,
+        user_id: str,
+        profile: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        for key in ("github_id", "github_login", "github_name", "avatar_url", "auth_source"):
+            if key in profile:
+                user[key] = profile[key]
+        user["updated_at"] = utc_now()
+        return deepcopy(user)
+
+    def merge_user_into_user(self, from_user_id: str, to_user_id: str) -> dict[str, Any] | None:
+        source = self.get_user_by_id(from_user_id)
+        target = self.get_user_by_id(to_user_id)
+        if not source or not target:
+            return target
+
+        source_login = source.get("github_login", "")
+        for plugin in self.state["plugins"]:
+            if plugin.get("owner_user_id") == from_user_id:
+                plugin["owner_user_id"] = to_user_id
+                plugin["owner_github_login"] = source_login
+            if plugin.get("moderated_by") == from_user_id:
+                plugin["moderated_by"] = to_user_id
+        for submission in self.state["submissions"]:
+            if submission.get("user_id") == from_user_id:
+                submission["user_id"] = to_user_id
+        for comment in self.state["comments"]:
+            if comment.get("user_id") == from_user_id:
+                comment["user_id"] = to_user_id
+            if comment.get("deleted_by") == from_user_id:
+                comment["deleted_by"] = to_user_id
+        for announcement in self.state["announcements"]:
+            if announcement.get("author_user_id") == from_user_id:
+                announcement["author_user_id"] = to_user_id
+        for api_key in self.state["apiKeys"]:
+            if api_key.get("user_id") == from_user_id:
+                api_key["user_id"] = to_user_id
+        for user in self.state["users"]:
+            if user.get("muted_by") == from_user_id:
+                user["muted_by"] = to_user_id
+        self.state["users"] = [user for user in self.state["users"] if user["id"] != from_user_id]
+        return deepcopy(target)
+
     def publish_announcement(
         self,
         title: str,
@@ -868,6 +915,108 @@ class PgRedisMarketStore(InMemoryMarketStore):
             normalize_role(role).value,
         )
         return self._user_from_record(row) if row else None
+
+    async def update_user_profile(
+        self,
+        user_id: str,
+        profile: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        values = {
+            key: profile[key]
+            for key in ("github_id", "github_login", "github_name", "avatar_url", "auth_source")
+            if key in profile
+        }
+        if not values:
+            return await self.get_user_by_id(user_id)
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_users
+               SET github_id = CASE WHEN $2 THEN $3 ELSE github_id END,
+                   github_login = CASE WHEN $4 THEN $5 ELSE github_login END,
+                   github_name = CASE WHEN $6 THEN $7 ELSE github_name END,
+                   avatar_url = CASE WHEN $8 THEN $9 ELSE avatar_url END,
+                   auth_source = CASE WHEN $10 THEN $11 ELSE auth_source END,
+                   updated_at = now()
+             WHERE id = $1
+         RETURNING *
+            """,
+            user_id,
+            "github_id" in profile,
+            profile.get("github_id"),
+            "github_login" in profile,
+            profile.get("github_login"),
+            "github_name" in profile,
+            profile.get("github_name"),
+            "avatar_url" in profile,
+            profile.get("avatar_url"),
+            "auth_source" in profile,
+            profile.get("auth_source"),
+        )
+        return self._user_from_record(row) if row else None
+
+    async def merge_user_into_user(
+        self, from_user_id: str, to_user_id: str
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                source = await connection.fetchrow(
+                    "SELECT * FROM market_users WHERE id = $1 FOR UPDATE",
+                    from_user_id,
+                )
+                target = await connection.fetchrow(
+                    "SELECT * FROM market_users WHERE id = $1 FOR UPDATE",
+                    to_user_id,
+                )
+                if not source or not target:
+                    return self._user_from_record(target) if target else None
+
+                await connection.execute(
+                    """
+                    UPDATE market_plugins
+                       SET owner_user_id = $2, owner_github_login = $3, updated_at = now()
+                     WHERE owner_user_id = $1
+                    """,
+                    from_user_id,
+                    to_user_id,
+                    source["github_login"],
+                )
+                await connection.execute(
+                    "UPDATE market_plugins SET moderated_by = $2 WHERE moderated_by = $1",
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_submissions SET user_id = $2 WHERE user_id = $1",
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_comments SET user_id = $2 WHERE user_id = $1",
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_comments SET deleted_by = $2 WHERE deleted_by = $1",
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_users SET muted_by = $2 WHERE muted_by = $1",
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_announcements SET author_user_id = $2 WHERE author_user_id = $1",
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_api_keys SET user_id = $2 WHERE user_id = $1",
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute("DELETE FROM market_users WHERE id = $1", from_user_id)
+                return self._user_from_record(target)
 
     async def publish_announcement(
         self,

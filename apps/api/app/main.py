@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .auth import (
+    Role,
     can_edit_plugin,
     can_manage_admins,
     can_manage_plugin_submission,
@@ -32,6 +33,7 @@ from .auth import (
     hash_password,
     is_admin,
     is_core_admin,
+    normalize_role,
     require_api_key,
     verify_password,
 )
@@ -49,6 +51,7 @@ from .schemas import (
     SetupConfig,
     SystemSettingsPayload,
     TestEmailPayload,
+    UserProfileUpdate,
 )
 from .store import InMemoryMarketStore
 from .store import PgRedisMarketStore
@@ -323,6 +326,23 @@ def register_routes(app: FastAPI) -> None:
     async def me(request: Request) -> dict[str, Any]:
         return public_user(await require_user(request))
 
+    @app.patch("/v1/me/profile")
+    async def update_my_profile(request: Request, payload: UserProfileUpdate) -> dict[str, Any]:
+        user = await require_user(request)
+        profile = {key: value for key, value in payload.model_dump().items() if value is not None}
+        if not profile:
+            raise error(400, "No fields to update")
+        if (
+            "avatar_url" in profile
+            and profile["avatar_url"]
+            and not is_valid_public_url(profile["avatar_url"])
+        ):
+            raise error(400, "Avatar URL must be http(s)")
+        updated = await call_store(request, "update_user_profile", user["id"], profile)
+        if not updated:
+            raise error(404, "User not found")
+        return public_user(updated)
+
     @app.post("/v1/auth/internal/login")
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
         settings = get_settings(request)
@@ -374,16 +394,12 @@ def register_routes(app: FastAPI) -> None:
 
         access_token = await exchange_github_code(settings, code)
         profile = await fetch_github_profile(access_token)
-        user = await call_store(
-            request,
-            "upsert_github_user",
-            {
-                "id": str(profile["id"]),
-                "login": profile["login"],
-                "name": profile.get("name") or profile["login"],
-                "avatar_url": profile.get("avatar_url") or "",
-            },
-        )
+        current = await current_user(request)
+        profile_payload = github_profile_payload(profile)
+        if current:
+            user = await link_github_profile_to_user(request, current, profile_payload)
+        else:
+            user = await call_store(request, "upsert_github_user", profile_payload)
         await promote_org_admin_if_needed(request, user, access_token)
         session = await call_store(request, "create_session", user["id"])
         response = RedirectResponse(settings.web_url)
@@ -1462,6 +1478,61 @@ def should_write_secret(value: str | None) -> bool:
 
 def preserve_secret(incoming: str, existing: str) -> str:
     return incoming if should_write_secret(incoming) else existing
+
+
+def github_profile_payload(profile: dict[str, Any]) -> dict[str, str]:
+    return {
+        "id": str(profile["id"]),
+        "login": profile["login"],
+        "name": profile.get("name") or profile["login"],
+        "avatar_url": profile.get("avatar_url") or "",
+    }
+
+
+async def link_github_profile_to_user(
+    request: Request,
+    user: dict[str, Any],
+    profile: dict[str, str],
+) -> dict[str, Any]:
+    existing = await call_store(request, "get_user_by_github_login", profile["login"])
+    if existing and existing["id"] != user["id"]:
+        if not can_merge_github_user(user, existing):
+            raise error(409, "This GitHub account is already linked to another user")
+        await transfer_user_owned_records(request, existing["id"], user["id"])
+    updated = await call_store(
+        request,
+        "update_user_profile",
+        user["id"],
+        {
+            "auth_source": "github",
+            "avatar_url": profile.get("avatar_url") or "",
+            "github_id": profile["id"],
+            "github_login": profile["login"],
+            "github_name": profile.get("name") or profile["login"],
+        },
+    )
+    if not updated:
+        raise error(404, "User not found")
+    return updated
+
+
+def can_merge_github_user(current: dict[str, Any], existing: dict[str, Any]) -> bool:
+    return (
+        not existing.get("internal_username")
+        and not existing.get("password_hash")
+        and normalize_role(existing.get("role")) == Role.USER
+        and normalize_role(current.get("role")) in {Role.CORE_ADMIN, Role.ADMIN}
+    )
+
+
+async def transfer_user_owned_records(
+    request: Request,
+    from_user_id: str,
+    to_user_id: str,
+) -> None:
+    transfer = getattr(get_store(request), "merge_user_into_user", None)
+    if transfer:
+        await resolve_optional_awaitable(transfer(from_user_id, to_user_id))
 
 
 def normalize_email_provider(value: str) -> str:

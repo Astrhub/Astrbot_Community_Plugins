@@ -15,9 +15,16 @@
           </template>
           {{ isDarkMode ? '浅色' : '深色' }}
         </n-button>
-        <n-button v-if="currentUser" secondary type="primary">
-          {{ displayUserName }}
-        </n-button>
+        <n-dropdown
+          v-if="currentUser"
+          :options="userMenuOptions"
+          trigger="click"
+          @select="handleUserMenuSelect"
+        >
+          <n-button secondary type="primary">
+            {{ displayUserName }}
+          </n-button>
+        </n-dropdown>
         <n-button v-if="isCoreAdmin" secondary @click="goSettings">系统设置</n-button>
         <n-button v-if="!currentUser" secondary type="primary" @click="openLoginModal">
           <template #icon>
@@ -159,18 +166,21 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, onUnmounted } from 'vue'
+import { computed, h, onMounted, ref, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
-import { NAlert, NCheckbox, NForm, NFormItem, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
+import { NAlert, NCheckbox, NDropdown, NForm, NFormItem, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
 import {
   AddCircleOutline,
   CloseOutline,
   LinkOutline,
   LogInOutline,
+  LogOutOutline,
   LogoGithub,
   Moon,
+  PersonOutline,
   SearchOutline,
+  SettingsOutline,
   Sunny
 } from '@vicons/ionicons5'
 import SearchToolbar from './SearchToolbar.vue'
@@ -196,7 +206,7 @@ const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
 const { isDarkMode, currentUser, siteConfig } = storeToRefs(store)
-const { loginWithGithub, loginWithPassword, toggleTheme } = store
+const { loginWithGithub, loginWithPassword, logout, toggleTheme } = store
 
 const fullHeader = ref(null)
 const showStickyHeader = ref(false)
@@ -217,6 +227,28 @@ const displayUserName = computed(() => (
   currentUser.value?.login ||
   '已登录'
 ))
+const userMenuOptions = computed(() => [
+  {
+    key: 'profile',
+    label: '个人设置',
+    icon: renderIcon(PersonOutline)
+  },
+  {
+    key: 'settings',
+    label: '系统设置',
+    icon: renderIcon(SettingsOutline),
+    disabled: !isCoreAdmin.value
+  },
+  {
+    key: 'divider',
+    type: 'divider'
+  },
+  {
+    key: 'logout',
+    label: '退出登录',
+    icon: renderIcon(LogOutOutline)
+  }
+])
 const agreementText = computed(() => {
   const auth = siteConfig.value.auth || {}
   const parts = []
@@ -252,6 +284,30 @@ const goSubmit = () => {
 
 const goSettings = () => {
   router.push('/settings')
+}
+
+function renderIcon(icon) {
+  return () => h(NIcon, null, { default: () => h(icon) })
+}
+
+async function handleUserMenuSelect(key) {
+  if (key === 'profile') {
+    router.push('/settings/personal')
+    return
+  }
+  if (key === 'settings') {
+    goSettings()
+    return
+  }
+  if (key === 'logout') {
+    try {
+      await logout()
+      message.success('已退出登录')
+      router.push('/')
+    } catch (error) {
+      message.error(error.message || '退出失败')
+    }
+  }
 }
 
 const openLoginModal = () => {

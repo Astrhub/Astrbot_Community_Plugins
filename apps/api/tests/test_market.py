@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
@@ -23,6 +24,10 @@ def make_client(enable_dev_auth: bool = True) -> TestClient:
         }
     )
     return TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+
+
+def make_store_request(store: InMemoryMarketStore) -> SimpleNamespace:
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(store=store)))
 
 
 def make_setup_client(tmp_path) -> TestClient:
@@ -171,6 +176,132 @@ def test_internal_admin_is_core_admin() -> None:
 
     assert admin["role"] == Role.CORE_ADMIN
     assert admin["internal_username"] == "admin"
+
+
+def test_user_can_update_own_profile() -> None:
+    client = make_client()
+    client.get("/v1/auth/debug-login?login=alice")
+
+    response = client.patch(
+        "/v1/me/profile",
+        json={"github_name": "Alice Dev", "avatar_url": "https://example.com/avatar.webp"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["github_name"] == "Alice Dev"
+    assert response.json()["avatar_url"] == "https://example.com/avatar.webp"
+
+
+def test_internal_admin_can_link_existing_github_identity() -> None:
+    client = make_client()
+    store = client.app.state.store
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    linked = asyncio.run(
+        main_module.link_github_profile_to_user(
+            make_store_request(store),
+            store.get_user_by_internal_username("admin"),
+            {
+                "id": "123",
+                "login": "admin-gh",
+                "name": "Admin GH",
+                "avatar_url": "https://example.com/admin.webp",
+            },
+        )
+    )
+
+    assert linked["role"] == Role.CORE_ADMIN
+    assert linked["internal_username"] == "admin"
+    assert linked["github_login"] == "admin-gh"
+
+
+def test_linking_github_merges_plain_github_user_into_admin() -> None:
+    client = make_client()
+    store = client.app.state.store
+    admin = store.create_internal_admin("admin", main_module.hash_password("password123"))
+    github_user = store.upsert_github_user(
+        {
+            "id": "123",
+            "login": "alice",
+            "name": "Alice",
+            "avatar_url": "https://example.com/alice.webp",
+        }
+    )
+    plugin = store.submit_plugin(github_user, plugin_payload())
+
+    linked = asyncio.run(
+        main_module.link_github_profile_to_user(
+            make_store_request(store),
+            admin,
+            {
+                "id": "123",
+                "login": "alice",
+                "name": "Alice",
+                "avatar_url": "https://example.com/alice.webp",
+            },
+        )
+    )
+
+    assert linked["id"] == admin["id"]
+    assert linked["role"] == Role.CORE_ADMIN
+    assert linked["github_login"] == "alice"
+    assert store.get_user_by_id(github_user["id"]) is None
+    assert store.get_plugin(plugin["id"])["owner_user_id"] == admin["id"]
+
+
+def test_github_callback_binds_logged_in_internal_admin(monkeypatch) -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "CORS_ORIGIN": "http://127.0.0.1:5173",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "GITHUB_LOGIN_ENABLED": "true",
+            "GITHUB_CLIENT_ID": "client-id",
+            "GITHUB_CLIENT_SECRET": "client-secret",
+            "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
+        }
+    )
+    store = InMemoryMarketStore()
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    login_response = client.get("/v1/auth/github/login", follow_redirects=False)
+    state = client.cookies.get(settings.oauth_state_cookie_name)
+
+    async def fake_exchange_github_code(settings, code):
+        return "github-token"
+
+    async def fake_fetch_github_profile(access_token):
+        return {
+            "id": 123,
+            "login": "admin-gh",
+            "name": "Admin GH",
+            "avatar_url": "https://example.com/admin.webp",
+        }
+
+    monkeypatch.setattr(main_module, "exchange_github_code", fake_exchange_github_code)
+    monkeypatch.setattr(main_module, "fetch_github_profile", fake_fetch_github_profile)
+
+    response = client.get(
+        f"/v1/auth/github/callback?code=ok&state={state}",
+        follow_redirects=False,
+    )
+    me = client.get("/v1/me")
+
+    assert login_response.status_code == 307
+    assert response.status_code == 307
+    assert me.json()["internal_username"] == "admin"
+    assert me.json()["role"] == Role.CORE_ADMIN
+    assert me.json()["github_login"] == "admin-gh"
 
 
 def test_core_admin_can_manage_admins_while_normal_admin_moderates_plugins() -> None:
