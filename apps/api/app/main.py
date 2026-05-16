@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .auth import (
     can_edit_plugin,
@@ -37,18 +41,34 @@ from .schemas import (
     SetupConfig,
 )
 from .store import InMemoryMarketStore
+from .store import PgRedisMarketStore
 
 GITHUB_REPO_PATTERN = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/?$")
 PLUGIN_NAME_PATTERN = re.compile(r"^astrbot_plugin_[a-z0-9_-]+$", re.IGNORECASE)
+MARKET_WEB_DIST = Path(__file__).resolve().parents[3] / "apps" / "market-web" / "dist"
+RESERVED_WEB_PATHS = {
+    "v1",
+    "health",
+    "plugins.json",
+    "plugins-md5.json",
+    "openapi.json",
+    "docs",
+    "redoc",
+}
+RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
 
 
 def create_app(
     settings: Settings | None = None,
     store: InMemoryMarketStore | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="AstrBot Community Plugins API", version="0.1.0")
+    app = FastAPI(
+        title="AstrBot Community Plugins API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
     app.state.settings = settings or load_settings()
-    app.state.store = store or InMemoryMarketStore()
+    app.state.store = store or create_store(app.state.settings)
 
     app.add_middleware(
         CORSMiddleware,
@@ -59,6 +79,7 @@ def create_app(
     )
     app.add_exception_handler(HTTPException, http_exception_handler)
     register_routes(app)
+    register_market_web_routes(app)
     return app
 
 
@@ -66,6 +87,34 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
     if isinstance(exc.detail, dict):
         return JSONResponse(status_code=exc.status_code, content=exc.detail)
     return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+
+
+def create_store(settings: Settings) -> InMemoryMarketStore | PgRedisMarketStore:
+    if settings.database_url and settings.redis_url:
+        return PgRedisMarketStore(
+            settings.database_url,
+            settings.redis_url,
+            settings.session_max_age_seconds,
+        )
+    return InMemoryMarketStore()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await maybe_call_store_lifecycle(app, "connect")
+    try:
+        yield None
+    finally:
+        await maybe_call_store_lifecycle(app, "close")
+
+
+async def maybe_call_store_lifecycle(app: FastAPI, method_name: str) -> None:
+    method = getattr(app.state.store, method_name, None)
+    if not method:
+        return
+    result = method()
+    if inspect.isawaitable(result):
+        await result
 
 
 def register_routes(app: FastAPI) -> None:
@@ -104,7 +153,7 @@ def register_routes(app: FastAPI) -> None:
         settings = get_settings(request)
         runtime_config = read_runtime_config(settings.runtime_config_path)
         if not can_save_setup_without_auth(settings, runtime_config):
-            user = require_user(request)
+            user = await require_user(request)
             if not is_core_admin(user):
                 raise error(403, "Only core admin can update infrastructure settings")
         validate_setup_payload(payload)
@@ -123,7 +172,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get("/v1/me")
     async def me(request: Request) -> dict[str, Any]:
-        return require_user(request)
+        return await require_user(request)
 
     @app.get("/v1/auth/github/login")
     async def github_login(request: Request) -> Response:
@@ -151,7 +200,9 @@ def register_routes(app: FastAPI) -> None:
         return response
 
     @app.get("/v1/auth/github/callback")
-    async def github_callback(request: Request, code: str | None = None, state: str | None = None) -> Response:
+    async def github_callback(
+        request: Request, code: str | None = None, state: str | None = None
+    ) -> Response:
         settings = get_settings(request)
         expected_state = request.cookies.get(settings.oauth_state_cookie_name)
         if not code or not state or not expected_state or state != expected_state:
@@ -159,16 +210,18 @@ def register_routes(app: FastAPI) -> None:
 
         access_token = await exchange_github_code(settings, code)
         profile = await fetch_github_profile(access_token)
-        user = get_store(request).upsert_github_user(
+        user = await call_store(
+            request,
+            "upsert_github_user",
             {
                 "id": str(profile["id"]),
                 "login": profile["login"],
                 "name": profile.get("name") or profile["login"],
                 "avatar_url": profile.get("avatar_url") or "",
-            }
+            },
         )
         await promote_org_admin_if_needed(request, user, access_token)
-        session = get_store(request).create_session(user["id"])
+        session = await call_store(request, "create_session", user["id"])
         response = RedirectResponse(settings.web_url)
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         response.delete_cookie(settings.oauth_state_cookie_name, path="/")
@@ -179,7 +232,7 @@ def register_routes(app: FastAPI) -> None:
         settings = get_settings(request)
         session_token = request.cookies.get(settings.session_cookie_name)
         if session_token:
-            get_store(request).revoke_session(session_token)
+            await call_store(request, "revoke_session", session_token)
         response.delete_cookie(settings.session_cookie_name, path="/")
 
     @app.get("/v1/auth/debug-login")
@@ -189,19 +242,21 @@ def register_routes(app: FastAPI) -> None:
             raise error(403, "Dev auth is disabled")
         if not login.strip():
             raise error(400, "login is required")
-        user = get_store(request).upsert_github_user({"login": login.strip(), "name": login.strip()})
-        session = get_store(request).create_session(user["id"])
+        user = await call_store(
+            request, "upsert_github_user", {"login": login.strip(), "name": login.strip()}
+        )
+        session = await call_store(request, "create_session", user["id"])
         response = JSONResponse({"user": user, "session": session})
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         return response
 
     @app.get("/v1/auth/session")
     async def auth_session(request: Request) -> dict[str, Any]:
-        return {"authenticated": True, "user": require_user(request)}
+        return {"authenticated": True, "user": await require_user(request)}
 
     @app.get("/v1/admin/check")
     async def admin_check(request: Request) -> dict[str, bool]:
-        user = require_user(request)
+        user = await require_user(request)
         return {
             "core_admin": is_core_admin(user),
             "admin": is_admin(user),
@@ -212,7 +267,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get("/v1/permissions")
     async def permissions(request: Request) -> dict[str, bool]:
-        user = require_user(request)
+        user = await require_user(request)
         return {
             "can_edit_any_plugin": is_admin(user),
             "can_moderate_plugins": can_moderate_plugins(user),
@@ -223,51 +278,53 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get("/v1/plugins")
     async def list_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
-        return {"items": get_store(request).list_public_plugins()}
+        return {"items": await call_store(request, "list_public_plugins")}
 
     @app.get("/plugins.json")
     async def astrbot_plugin_source(request: Request) -> dict[str, dict[str, Any]]:
-        return build_astrbot_plugin_source(get_store(request).list_public_plugins())
+        return build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
 
     @app.get("/plugins-md5.json")
     async def astrbot_plugin_source_md5(request: Request) -> dict[str, str]:
-        feed = build_astrbot_plugin_source(get_store(request).list_public_plugins())
+        feed = build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
         return {"md5": digest_plugin_source(feed)}
 
     @app.get("/v1/astrbot/plugins")
     @app.get("/v1/astrbot/plugins.json")
     async def astrbot_plugin_source_v1(request: Request) -> dict[str, dict[str, Any]]:
-        return build_astrbot_plugin_source(get_store(request).list_public_plugins())
+        return build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
 
     @app.get("/v1/astrbot/plugins-md5.json")
     async def astrbot_plugin_source_v1_md5(request: Request) -> dict[str, str]:
-        feed = build_astrbot_plugin_source(get_store(request).list_public_plugins())
+        feed = build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
         return {"md5": digest_plugin_source(feed)}
 
     @app.get("/v1/plugins/submissions")
     async def list_submissions(request: Request) -> dict[str, list[dict[str, Any]]]:
-        user = require_user(request)
+        user = await require_user(request)
         if not is_admin(user):
             raise error(403, "Forbidden")
-        return {"items": get_store(request).state["submissions"]}
+        return {"items": await call_store(request, "list_submissions")}
 
     @app.post("/v1/plugins/submissions", status_code=201)
     async def submit_plugin(request: Request, payload: PluginSubmission) -> dict[str, Any]:
-        user = require_user(request)
+        user = await require_user(request)
         data = payload.model_dump()
         validate_plugin_submission(data)
         validate_repo_owner(data["repo"], user)
-        return get_store(request).submit_plugin(user, data)
+        return await call_store(request, "submit_plugin", user, data)
 
     @app.get("/v1/plugins/{plugin_id}")
     async def plugin_detail(request: Request, plugin_id: str) -> dict[str, Any]:
-        plugin = get_plugin_or_404(request, plugin_id)
-        return {**plugin, "comments": get_store(request).list_comments(plugin_id)}
+        plugin = await get_plugin_or_404(request, plugin_id)
+        return {**plugin, "comments": await call_store(request, "list_comments", plugin_id)}
 
     @app.patch("/v1/plugins/{plugin_id}")
-    async def update_plugin(request: Request, plugin_id: str, payload: PluginPatch) -> dict[str, Any]:
-        user = require_user(request)
-        plugin = get_plugin_or_404(request, plugin_id)
+    async def update_plugin(
+        request: Request, plugin_id: str, payload: PluginPatch
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        plugin = await get_plugin_or_404(request, plugin_id)
         if not can_edit_plugin(user, plugin):
             raise error(403, "Forbidden")
         patch = payload.model_dump(exclude_unset=True)
@@ -276,161 +333,228 @@ def register_routes(app: FastAPI) -> None:
         if "repo" in patch:
             validate_github_repo(patch["repo"])
             validate_repo_owner(patch["repo"], user)
-        updated = get_store(request).update_plugin_metadata(
+        updated = await call_store(
+            request,
+            "update_plugin_metadata",
             plugin_id,
-            {**patch, "owner_user_id": plugin["owner_user_id"], "owner_github_login": plugin["owner_github_login"]},
+            {
+                **patch,
+                "owner_user_id": plugin["owner_user_id"],
+                "owner_github_login": plugin["owner_github_login"],
+            },
         )
         return updated or {}
 
     @app.post("/v1/plugins/{plugin_id}/like")
     async def like_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
-        plugin = get_plugin_or_404(request, plugin_id)
-        return get_store(request).update_plugin_metadata(plugin_id, {"likes": plugin["likes"] + 1}) or {}
+        plugin = await get_plugin_or_404(request, plugin_id)
+        return (
+            await call_store(
+                request, "update_plugin_metadata", plugin_id, {"likes": plugin["likes"] + 1}
+            )
+            or {}
+        )
 
     @app.post("/v1/plugins/{plugin_id}/unlike")
     async def unlike_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
-        plugin = get_plugin_or_404(request, plugin_id)
-        return get_store(request).update_plugin_metadata(
-            plugin_id,
-            {"likes": max(0, plugin["likes"] - 1)},
-        ) or {}
+        plugin = await get_plugin_or_404(request, plugin_id)
+        return (
+            await call_store(
+                request,
+                "update_plugin_metadata",
+                plugin_id,
+                {"likes": max(0, plugin["likes"] - 1)},
+            )
+            or {}
+        )
 
     @app.post("/v1/plugins/{plugin_id}/comments", status_code=201)
-    async def add_comment(request: Request, plugin_id: str, payload: CommentCreate) -> dict[str, Any]:
-        user = require_user(request)
-        get_plugin_or_404(request, plugin_id)
+    async def add_comment(
+        request: Request, plugin_id: str, payload: CommentCreate
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        await get_plugin_or_404(request, plugin_id)
         if not payload.body:
             raise error(400, "Comment body is required")
         muted_until = parse_iso_datetime(user.get("muted_until"))
         if muted_until and muted_until > datetime.now(UTC):
             raise error(403, "User is muted")
-        return get_store(request).add_comment(plugin_id, user["id"], payload.body, payload.parent_id)
+        return await call_store(
+            request, "add_comment", plugin_id, user["id"], payload.body, payload.parent_id
+        )
 
     @app.post("/v1/plugins/{plugin_id}/reindex")
     async def reindex_plugin(request: Request, plugin_id: str) -> dict[str, bool]:
-        user = require_user(request)
-        plugin = get_plugin_or_404(request, plugin_id)
+        user = await require_user(request)
+        plugin = await get_plugin_or_404(request, plugin_id)
         if not can_manage_plugin_submission(user, plugin):
             raise error(403, "Forbidden")
         return {"ok": True}
 
     @app.get("/v1/admin/users")
     async def admin_users(request: Request) -> dict[str, list[dict[str, Any]]]:
-        require_admin(request)
-        return {"items": get_store(request).state["users"]}
+        await require_admin(request)
+        return {"items": await call_store(request, "list_users")}
 
     @app.get("/v1/admin/plugins")
     async def admin_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
-        require_admin(request)
-        return {"items": get_store(request).state["plugins"]}
+        await require_admin(request)
+        return {"items": await call_store(request, "list_plugins")}
 
     @app.get("/v1/admin/summary")
     async def admin_summary(request: Request) -> dict[str, Any]:
-        user = require_admin(request)
-        state = get_store(request).state
-        return {
-            "users": len(state["users"]),
-            "plugins": len(state["plugins"]),
-            "submissions": len(state["submissions"]),
-            "announcements": len(state["announcements"]),
-            "role": user["role"],
-        }
+        user = await require_admin(request)
+        summary = await call_store(request, "summary")
+        return {**summary, "role": user["role"]}
 
     @app.post("/v1/admin/plugins/{plugin_id}/list")
     async def list_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
-        user = require_user(request)
+        user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
-        updated = get_store(request).update_plugin_status(plugin_id, "listed", user["id"])
+        updated = await call_store(request, "update_plugin_status", plugin_id, "listed", user["id"])
         if not updated:
             raise error(404, "Plugin not found")
         return updated
 
     @app.post("/v1/admin/plugins/{plugin_id}/unlist")
     async def unlist_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
-        user = require_user(request)
+        user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
-        updated = get_store(request).update_plugin_status(plugin_id, "unlisted", user["id"])
+        updated = await call_store(
+            request, "update_plugin_status", plugin_id, "unlisted", user["id"]
+        )
         if not updated:
             raise error(404, "Plugin not found")
         return updated
 
     @app.delete("/v1/admin/comments/{comment_id}")
     async def delete_comment(request: Request, comment_id: str) -> dict[str, Any]:
-        user = require_user(request)
+        user = await require_user(request)
         if not can_moderate_community(user):
             raise error(403, "Forbidden")
-        deleted = get_store(request).delete_comment(comment_id, user["id"])
+        deleted = await call_store(request, "delete_comment", comment_id, user["id"])
         if not deleted:
             raise error(404, "Comment not found")
         return deleted
 
     @app.post("/v1/admin/users/{user_id}/mute")
     async def mute_user(request: Request, user_id: str, payload: MuteUserPayload) -> dict[str, Any]:
-        user = require_user(request)
+        user = await require_user(request)
         if not can_moderate_community(user):
             raise error(403, "Forbidden")
         muted_until = payload.muted_until or (datetime.now(UTC) + timedelta(days=1)).isoformat()
-        muted = get_store(request).mute_user(user_id, muted_until, user["id"])
+        muted = await call_store(request, "mute_user", user_id, muted_until, user["id"])
         if not muted:
             raise error(404, "User not found")
         return muted
 
     @app.post("/v1/core/admins/{user_id}")
-    async def update_admin(request: Request, user_id: str, payload: RoleUpdatePayload) -> dict[str, Any]:
-        user = require_user(request)
+    async def update_admin(
+        request: Request, user_id: str, payload: RoleUpdatePayload
+    ) -> dict[str, Any]:
+        user = await require_user(request)
         if not can_manage_admins(user):
             raise error(403, "Forbidden")
-        target = get_store(request).get_user_by_id(user_id)
+        target = await call_store(request, "get_user_by_id", user_id)
         if not target:
             raise error(404, "User not found")
-        updated = get_store(request).update_user_role(user_id, "admin" if payload.role == "admin" else "user")
+        updated = await call_store(
+            request, "update_user_role", user_id, "admin" if payload.role == "admin" else "user"
+        )
         return updated or {}
 
     @app.post("/v1/core/announcements", status_code=201)
     async def create_announcement(request: Request, payload: AnnouncementCreate) -> dict[str, Any]:
-        user = require_user(request)
+        user = await require_user(request)
         if not can_publish_announcement(user):
             raise error(403, "Forbidden")
         if not payload.title or not payload.body:
             raise error(400, "Announcement title and body are required")
-        return get_store(request).publish_announcement(payload.title, payload.body, user["id"])
+        return await call_store(
+            request, "publish_announcement", payload.title, payload.body, user["id"]
+        )
 
     @app.get("/v1/announcements")
     async def announcements(request: Request) -> dict[str, list[dict[str, Any]]]:
-        return {"items": get_store(request).list_announcements()}
+        return {"items": await call_store(request, "list_announcements")}
 
     @app.post("/v1/api-keys", status_code=201)
     async def issue_api_key(request: Request, payload: ApiKeyCreate) -> dict[str, Any]:
-        user = require_user(request)
+        user = await require_user(request)
         if not is_admin(user):
             raise error(403, "Forbidden")
-        return get_store(request).issue_api_key(payload.name, user["id"], payload.scopes)
+        return await call_store(request, "issue_api_key", payload.name, user["id"], payload.scopes)
 
     @app.get("/v1/api-keys")
     async def api_keys(request: Request) -> dict[str, list[dict[str, Any]]]:
-        keys = all_api_keys(request)
-        ok, status, message = require_api_key(request.headers.get("authorization"), keys, "market:read")
+        keys = await all_api_keys(request)
+        ok, status, message = require_api_key(
+            request.headers.get("authorization"), keys, "market:read"
+        )
         if not ok:
             raise error(status, message)
         return {"items": [public_api_key(key) for key in keys]}
+
+
+def register_market_web_routes(app: FastAPI) -> None:
+    @app.get("/", include_in_schema=False)
+    async def market_web_index() -> Response:
+        return serve_market_web_file("")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def market_web_fallback(full_path: str) -> Response:
+        if is_reserved_api_path(full_path):
+            raise error(404, "Not found")
+        return serve_market_web_file(full_path)
+
+
+def serve_market_web_file(full_path: str) -> FileResponse:
+    index_file = MARKET_WEB_DIST / "index.html"
+    if not index_file.is_file():
+        raise error(404, "Market web build is missing. Run npm run build:web first.")
+
+    requested_file = resolve_market_web_file(full_path)
+    return FileResponse(requested_file or index_file)
+
+
+def resolve_market_web_file(full_path: str) -> Path | None:
+    dist_dir = MARKET_WEB_DIST.resolve()
+    candidate = (dist_dir / full_path).resolve()
+    try:
+        candidate.relative_to(dist_dir)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def is_reserved_api_path(full_path: str) -> bool:
+    path = full_path.strip("/")
+    return path in RESERVED_WEB_PATHS or path.startswith(RESERVED_WEB_PREFIXES)
 
 
 def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_store(request: Request) -> InMemoryMarketStore:
+def get_store(request: Request) -> InMemoryMarketStore | PgRedisMarketStore:
     return request.app.state.store
 
 
-def current_user(request: Request) -> dict[str, Any] | None:
+async def call_store(request: Request, method_name: str, *args: Any) -> Any:
+    method = getattr(get_store(request), method_name)
+    result = method(*args)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def current_user(request: Request) -> dict[str, Any] | None:
     settings = get_settings(request)
-    store = get_store(request)
     session_token = request.cookies.get(settings.session_cookie_name)
     if session_token:
-        user = store.get_user_by_session(session_token)
+        user = await call_store(request, "get_user_by_session", session_token)
         if user:
             return user
 
@@ -439,25 +563,25 @@ def current_user(request: Request) -> dict[str, Any] | None:
     dev_login = request.headers.get("x-dev-github-login", "").strip()
     if not dev_login:
         return None
-    return store.upsert_github_user({"login": dev_login, "name": dev_login})
+    return await call_store(request, "upsert_github_user", {"login": dev_login, "name": dev_login})
 
 
-def require_user(request: Request) -> dict[str, Any]:
-    user = current_user(request)
+async def require_user(request: Request) -> dict[str, Any]:
+    user = await current_user(request)
     if not user:
         raise error(401, "Not authenticated")
     return user
 
 
-def require_admin(request: Request) -> dict[str, Any]:
-    user = require_user(request)
+async def require_admin(request: Request) -> dict[str, Any]:
+    user = await require_user(request)
     if not is_admin(user):
         raise error(403, "Forbidden")
     return user
 
 
-def get_plugin_or_404(request: Request, plugin_id: str) -> dict[str, Any]:
-    plugin = get_store(request).get_plugin(plugin_id)
+async def get_plugin_or_404(request: Request, plugin_id: str) -> dict[str, Any]:
+    plugin = await call_store(request, "get_plugin", plugin_id)
     if not plugin:
         raise error(404, "Plugin not found")
     return plugin
@@ -578,7 +702,12 @@ async def exchange_github_code(settings: Settings, code: str) -> str:
         )
     data = response.json()
     if response.status_code >= 400 or not data.get("access_token"):
-        raise error(502, data.get("error_description") or data.get("error") or "GitHub OAuth token exchange failed")
+        raise error(
+            502,
+            data.get("error_description")
+            or data.get("error")
+            or "GitHub OAuth token exchange failed",
+        )
     return data["access_token"]
 
 
@@ -603,7 +732,7 @@ async def promote_org_admin_if_needed(
     if not settings.github_admin_org or is_admin(user):
         return
     if await is_github_org_member(settings.github_admin_org, access_token):
-        get_store(request).update_user_role(user["id"], "admin")
+        await call_store(request, "update_user_role", user["id"], "admin")
 
 
 async def is_github_org_member(org: str, access_token: str) -> bool:
@@ -626,9 +755,9 @@ def github_headers(access_token: str) -> dict[str, str]:
     }
 
 
-def all_api_keys(request: Request) -> list[ApiKey | dict[str, Any]]:
+async def all_api_keys(request: Request) -> list[ApiKey | dict[str, Any]]:
     settings = get_settings(request)
-    return [*settings.api_keys, *get_store(request).state["apiKeys"]]
+    return [*settings.api_keys, *await call_store(request, "list_api_keys")]
 
 
 def public_api_key(key: ApiKey | dict[str, Any]) -> dict[str, Any]:

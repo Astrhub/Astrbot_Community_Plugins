@@ -31,7 +31,7 @@ API key 可通过环境变量 `MARKET_API_KEYS` 静态配置，也可通过 `/v1
 
 ## 存储
 
-PostgreSQL 是市场数据的持久化存储。Redis 是会话令牌、OAuth 状态、缓存和限流的短期存储。两者均不应存储 GitHub 密钥或超出登录流程所需的最小 OAuth 原始令牌。
+PostgreSQL 是市场数据的持久化存储。Redis 当前用于会话令牌短期存储，并依赖 TTL 自动过期。两者均不应存储 GitHub 密钥或超出登录流程所需的最小 OAuth 原始令牌。
 
 ## 首次启动设置
 
