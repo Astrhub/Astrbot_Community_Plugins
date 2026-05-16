@@ -18,14 +18,10 @@
             <n-icon><logo-github /></n-icon>
             AstrBot 本体
           </a>
-          <a href="https://github.com/AstrBotDevs/Astrbot_Community_Plugins" target="_blank" class="footer-link">
-            <n-icon><document-outline /></n-icon>
-            社区源仓库
-          </a>
         </div>
         <div class="links-group">
           <h4>开发相关</h4>
-          <a href="https://docs.astrbot.app/dev/star/plugin.html" target="_blank" class="footer-link">
+          <a href="https://docs.astrbot.app/dev/star/plugin-new.html" target="_blank" class="footer-link">
             <n-icon><document-text /></n-icon>
             插件开发文档
           </a>
@@ -33,7 +29,7 @@
             <n-icon><git-branch /></n-icon>
             站内提交
           </a>
-          <a href="https://github.com/AstrBotDevs/Astrbot_Community_Plugins" target="_blank" class="footer-link">
+          <a href="https://github.com/Astrhub/Astrbot_Community_Plugins" target="_blank" class="footer-link">
             <n-icon><code-slash /></n-icon>
             市场仓库
           </a>
@@ -61,8 +57,7 @@ import {
   DocumentText, 
   CodeSlash,
   Heart,
-  StarOutline,
-  DocumentOutline
+  StarOutline
 } from '@vicons/ionicons5'
 import { usePluginStore } from '../stores/plugins'
 

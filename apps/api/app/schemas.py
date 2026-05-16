@@ -54,6 +54,18 @@ class MuteUserPayload(BaseModel):
     muted_until: str | None = None
 
 
+class UserProfileUpdate(BaseModel):
+    github_name: str | None = None
+    avatar_url: str | None = None
+
+    @field_validator("github_name", "avatar_url")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip()
+
+
 class RoleUpdatePayload(BaseModel):
     role: str = "user"
 
@@ -94,7 +106,7 @@ class SiteSetupConfig(BaseModel):
     subtitle: str = "全新社区插件市场"
     description: str = "发现、评价和提交 AstrBot 插件。"
     contact_email: str = ""
-    docs_url: str = "https://docs.astrbot.app/dev/star/plugin.html"
+    docs_url: str = "https://docs.astrbot.app/dev/star/plugin-new.html"
 
     @field_validator("name", "icon_url", "subtitle", "description", "contact_email", "docs_url")
     @classmethod

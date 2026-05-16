@@ -9,7 +9,7 @@ const DEFAULT_SITE_CONFIG = Object.freeze({
   subtitle: '全新社区插件市场',
   description: '发现、评价和提交 AstrBot 插件。',
   contact_email: '',
-  docs_url: 'https://docs.astrbot.app/dev/star/plugin.html',
+  docs_url: 'https://docs.astrbot.app/dev/star/plugin-new.html',
   auth: {
     github_login_enabled: false,
     public_login_enabled: true,
@@ -343,7 +343,7 @@ export const usePluginStore = defineStore('plugins', () => {
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '保存失败')
-    if (!data.restart_scheduled) await loadSetupStatus()
+    await loadSetupStatus()
     return data
   }
 
@@ -416,6 +416,27 @@ export const usePluginStore = defineStore('plugins', () => {
     if (!response.ok) throw new Error(data.error || '登录失败')
     currentUser.value = data.user
     return data.user
+  }
+
+  async function logout() {
+    await fetch(`${apiBaseUrl}/v1/auth/logout`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    currentUser.value = null
+  }
+
+  async function updateProfile(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/me/profile`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '更新失败')
+    currentUser.value = data
+    return data
   }
 
   async function submitPlugin(payload) {
@@ -492,6 +513,8 @@ export const usePluginStore = defineStore('plugins', () => {
     loadCurrentUser,
     loginWithGithub,
     loginWithPassword,
+    logout,
+    updateProfile,
     saveSetupConfig,
     loadSystemSettings,
     saveSystemSettings,

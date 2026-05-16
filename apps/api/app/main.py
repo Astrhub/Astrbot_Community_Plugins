@@ -5,9 +5,7 @@ import hashlib
 import html
 import inspect
 import json
-import os
 import re
-import signal
 import smtplib
 import uuid
 from collections.abc import AsyncIterator
@@ -20,11 +18,12 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import httpx
 import asyncpg
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .auth import (
+    Role,
     can_edit_plugin,
     can_manage_admins,
     can_manage_plugin_submission,
@@ -34,6 +33,7 @@ from .auth import (
     hash_password,
     is_admin,
     is_core_admin,
+    normalize_role,
     require_api_key,
     verify_password,
 )
@@ -51,6 +51,7 @@ from .schemas import (
     SetupConfig,
     SystemSettingsPayload,
     TestEmailPayload,
+    UserProfileUpdate,
 )
 from .store import InMemoryMarketStore
 from .store import PgRedisMarketStore
@@ -88,7 +89,6 @@ RESERVED_WEB_PATHS = {
     "redoc",
 }
 RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
-SETUP_RESTART_DELAY_SECONDS = 0.5
 POSTGRES_MAINTENANCE_DATABASE = "postgres"
 
 
@@ -104,7 +104,6 @@ def create_app(
     app.state.settings = settings or load_settings()
     app.state.store = store or create_store(app.state.settings)
     app.state.email_daily_counter = {"date": "", "count": 0}
-    app.state.restart_enabled = parse_bool(os.getenv("SETUP_AUTO_RESTART"), True)
 
     app.add_middleware(
         CORSMiddleware,
@@ -262,7 +261,6 @@ def register_routes(app: FastAPI) -> None:
     async def save_setup(
         request: Request,
         payload: SetupConfig,
-        background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
         settings = get_settings(request)
         runtime_config = read_runtime_config(settings.runtime_config_path)
@@ -275,54 +273,75 @@ def register_routes(app: FastAPI) -> None:
         redis_url = build_redis_url(payload.redis.model_dump())
         core_admin_password_hash = hash_password(payload.admin.password)
         initializer = getattr(
-            request.app.state, "setup_initializer", initialize_setup_infrastructure
+            request.app.state,
+            "setup_initializer",
+            initialize_setup_infrastructure,
         )
-        await resolve_optional_awaitable(
+        new_store = await resolve_optional_awaitable(
             initializer(payload, database_url, redis_url, core_admin_password_hash)
         )
-        write_runtime_config(
-            settings.runtime_config_path,
-            {
-                "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
-                "CORE_ADMIN_USERNAME": payload.admin.username,
-                "DATABASE_URL": database_url,
-                "POSTGRES_DATABASE": payload.postgres.database,
-                "POSTGRES_HOST": payload.postgres.host,
-                "POSTGRES_PASSWORD": payload.postgres.password,
-                "POSTGRES_PORT": str(payload.postgres.port),
-                "POSTGRES_SSL": serialize_bool(payload.postgres.ssl),
-                "POSTGRES_USER": payload.postgres.username,
-                "REDIS_DATABASE": str(payload.redis.database),
-                "REDIS_HOST": payload.redis.host,
-                "REDIS_PASSWORD": payload.redis.password,
-                "REDIS_PORT": str(payload.redis.port),
-                "REDIS_SSL": serialize_bool(payload.redis.ssl),
-                "REDIS_URL": redis_url,
-                "SITE_ICON_URL": payload.site.icon_url,
-                "SITE_NAME": payload.site.name,
-            },
+        try:
+            write_runtime_config(
+                settings.runtime_config_path,
+                {
+                    "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
+                    "CORE_ADMIN_USERNAME": payload.admin.username,
+                    "DATABASE_URL": database_url,
+                    "POSTGRES_DATABASE": payload.postgres.database,
+                    "POSTGRES_HOST": payload.postgres.host,
+                    "POSTGRES_PASSWORD": payload.postgres.password,
+                    "POSTGRES_PORT": str(payload.postgres.port),
+                    "POSTGRES_SSL": serialize_bool(payload.postgres.ssl),
+                    "POSTGRES_USER": payload.postgres.username,
+                    "REDIS_DATABASE": str(payload.redis.database),
+                    "REDIS_HOST": payload.redis.host,
+                    "REDIS_PASSWORD": payload.redis.password,
+                    "REDIS_PORT": str(payload.redis.port),
+                    "REDIS_SSL": serialize_bool(payload.redis.ssl),
+                    "REDIS_URL": redis_url,
+                    "SITE_ICON_URL": payload.site.icon_url,
+                    "SITE_NAME": payload.site.name,
+                },
+            )
+        except Exception:
+            await close_setup_store(new_store)
+            raise
+        request.app.state.settings = settings.with_updates(
+            core_admin_password_hash=core_admin_password_hash,
+            core_admin_username=payload.admin.username,
+            database_url=database_url,
+            redis_url=redis_url,
+            site_icon_url=payload.site.icon_url,
+            site_name=payload.site.name,
         )
-        await call_store(
-            request,
-            "create_internal_admin",
-            payload.admin.username,
-            core_admin_password_hash,
-        )
-        restart_scheduled = schedule_setup_restart(request.app, background_tasks)
+        await activate_setup_store(request.app, new_store)
         return {
             "saved": True,
-            "restart_required": True,
-            "restart_scheduled": restart_scheduled,
-            "message": (
-                "Configuration saved. The API process will restart automatically."
-                if restart_scheduled
-                else "Configuration saved. Restart the API process to use PostgreSQL and Redis."
-            ),
+            "restart_required": False,
+            "activated": True,
+            "message": "Configuration saved and PostgreSQL/Redis storage is active.",
         }
 
     @app.get("/v1/me")
     async def me(request: Request) -> dict[str, Any]:
         return public_user(await require_user(request))
+
+    @app.patch("/v1/me/profile")
+    async def update_my_profile(request: Request, payload: UserProfileUpdate) -> dict[str, Any]:
+        user = await require_user(request)
+        profile = {key: value for key, value in payload.model_dump().items() if value is not None}
+        if not profile:
+            raise error(400, "No fields to update")
+        if (
+            "avatar_url" in profile
+            and profile["avatar_url"]
+            and not is_valid_public_url(profile["avatar_url"])
+        ):
+            raise error(400, "Avatar URL must be http(s)")
+        updated = await call_store(request, "update_user_profile", user["id"], profile)
+        if not updated:
+            raise error(404, "User not found")
+        return public_user(updated)
 
     @app.post("/v1/auth/internal/login")
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
@@ -375,16 +394,12 @@ def register_routes(app: FastAPI) -> None:
 
         access_token = await exchange_github_code(settings, code)
         profile = await fetch_github_profile(access_token)
-        user = await call_store(
-            request,
-            "upsert_github_user",
-            {
-                "id": str(profile["id"]),
-                "login": profile["login"],
-                "name": profile.get("name") or profile["login"],
-                "avatar_url": profile.get("avatar_url") or "",
-            },
-        )
+        current = await current_user(request)
+        profile_payload = github_profile_payload(profile)
+        if current:
+            user = await link_github_profile_to_user(request, current, profile_payload)
+        else:
+            user = await call_store(request, "upsert_github_user", profile_payload)
         await promote_org_admin_if_needed(request, user, access_token)
         session = await call_store(request, "create_session", user["id"])
         response = RedirectResponse(settings.web_url)
@@ -827,30 +842,53 @@ async def initialize_setup_infrastructure(
     database_url: str,
     redis_url: str,
     core_admin_password_hash: str,
-) -> None:
+) -> PgRedisMarketStore:
     await ensure_postgres_database(payload.postgres.model_dump())
     store = PgRedisMarketStore(database_url, redis_url, session_ttl_seconds=60)
     try:
         await store.connect()
         await store.create_internal_admin(payload.admin.username, core_admin_password_hash)
+        return store
     except HTTPException:
+        await store.close()
         raise
     except asyncpg.PostgresError as exc:
+        await store.close()
         raise error(
             400,
             f"PostgreSQL schema initialization failed: {safe_exception_message(exc)}",
         ) from exc
     except OSError as exc:
+        await store.close()
         raise error(
             400, f"Infrastructure connection failed: {safe_exception_message(exc)}"
         ) from exc
     except Exception as exc:
+        await store.close()
         raise error(
             400,
             f"PostgreSQL or Redis initialization failed: {safe_exception_message(exc)}",
         ) from exc
-    finally:
-        await store.close()
+
+
+async def activate_setup_store(app: FastAPI, new_store: Any) -> None:
+    if not new_store:
+        await bootstrap_internal_core_admin(app)
+        return
+
+    old_store = app.state.store
+    app.state.store = new_store
+    if old_store is new_store:
+        return
+    close = getattr(old_store, "close", None)
+    if close:
+        await resolve_optional_awaitable(close())
+
+
+async def close_setup_store(store: Any) -> None:
+    close = getattr(store, "close", None)
+    if close:
+        await resolve_optional_awaitable(close())
 
 
 async def ensure_postgres_database(config: dict[str, Any]) -> None:
@@ -934,21 +972,6 @@ def quote_postgres_identifier(value: str) -> str:
 
 def safe_exception_message(exc: Exception) -> str:
     return str(exc).strip() or exc.__class__.__name__
-
-
-def schedule_setup_restart(app: FastAPI, background_tasks: BackgroundTasks) -> bool:
-    if not bool(getattr(app.state, "restart_enabled", True)):
-        return False
-    background_tasks.add_task(restart_process_after_delay)
-    return True
-
-
-async def restart_process_after_delay(delay: float = SETUP_RESTART_DELAY_SECONDS) -> None:
-    await asyncio.sleep(delay)
-    if os.name == "posix":
-        os.kill(os.getpid(), signal.SIGTERM)
-    else:
-        os._exit(0)
 
 
 def validate_system_settings_payload(
@@ -1455,6 +1478,61 @@ def should_write_secret(value: str | None) -> bool:
 
 def preserve_secret(incoming: str, existing: str) -> str:
     return incoming if should_write_secret(incoming) else existing
+
+
+def github_profile_payload(profile: dict[str, Any]) -> dict[str, str]:
+    return {
+        "id": str(profile["id"]),
+        "login": profile["login"],
+        "name": profile.get("name") or profile["login"],
+        "avatar_url": profile.get("avatar_url") or "",
+    }
+
+
+async def link_github_profile_to_user(
+    request: Request,
+    user: dict[str, Any],
+    profile: dict[str, str],
+) -> dict[str, Any]:
+    existing = await call_store(request, "get_user_by_github_login", profile["login"])
+    if existing and existing["id"] != user["id"]:
+        if not can_merge_github_user(user, existing):
+            raise error(409, "This GitHub account is already linked to another user")
+        await transfer_user_owned_records(request, existing["id"], user["id"])
+    updated = await call_store(
+        request,
+        "update_user_profile",
+        user["id"],
+        {
+            "auth_source": "github",
+            "avatar_url": profile.get("avatar_url") or "",
+            "github_id": profile["id"],
+            "github_login": profile["login"],
+            "github_name": profile.get("name") or profile["login"],
+        },
+    )
+    if not updated:
+        raise error(404, "User not found")
+    return updated
+
+
+def can_merge_github_user(current: dict[str, Any], existing: dict[str, Any]) -> bool:
+    return (
+        not existing.get("internal_username")
+        and not existing.get("password_hash")
+        and normalize_role(existing.get("role")) == Role.USER
+        and normalize_role(current.get("role")) in {Role.CORE_ADMIN, Role.ADMIN}
+    )
+
+
+async def transfer_user_owned_records(
+    request: Request,
+    from_user_id: str,
+    to_user_id: str,
+) -> None:
+    transfer = getattr(get_store(request), "merge_user_into_user", None)
+    if transfer:
+        await resolve_optional_awaitable(transfer(from_user_id, to_user_id))
 
 
 def normalize_email_provider(value: str) -> str:

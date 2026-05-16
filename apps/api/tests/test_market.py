@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
@@ -25,6 +26,10 @@ def make_client(enable_dev_auth: bool = True) -> TestClient:
     return TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
 
 
+def make_store_request(store: InMemoryMarketStore) -> SimpleNamespace:
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(store=store)))
+
+
 def make_setup_client(tmp_path) -> TestClient:
     settings = load_settings(
         {
@@ -34,15 +39,17 @@ def make_setup_client(tmp_path) -> TestClient:
         }
     )
     app = main_module.create_app(settings=settings, store=InMemoryMarketStore())
-    app.state.restart_enabled = False
     app.state.setup_initializer_calls = []
+
+    class FakeSetupStore(InMemoryMarketStore):
+        pass
 
     async def fake_setup_initializer(
         payload,
         database_url: str,
         redis_url: str,
         core_admin_password_hash: str,
-    ) -> None:
+    ) -> FakeSetupStore:
         app.state.setup_initializer_calls.append(
             {
                 "payload": payload,
@@ -51,6 +58,9 @@ def make_setup_client(tmp_path) -> TestClient:
                 "core_admin_password_hash": core_admin_password_hash,
             }
         )
+        store = FakeSetupStore()
+        store.create_internal_admin(payload.admin.username, core_admin_password_hash)
+        return store
 
     app.state.setup_initializer = fake_setup_initializer
     return TestClient(app)
@@ -166,6 +176,132 @@ def test_internal_admin_is_core_admin() -> None:
 
     assert admin["role"] == Role.CORE_ADMIN
     assert admin["internal_username"] == "admin"
+
+
+def test_user_can_update_own_profile() -> None:
+    client = make_client()
+    client.get("/v1/auth/debug-login?login=alice")
+
+    response = client.patch(
+        "/v1/me/profile",
+        json={"github_name": "Alice Dev", "avatar_url": "https://example.com/avatar.webp"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["github_name"] == "Alice Dev"
+    assert response.json()["avatar_url"] == "https://example.com/avatar.webp"
+
+
+def test_internal_admin_can_link_existing_github_identity() -> None:
+    client = make_client()
+    store = client.app.state.store
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    linked = asyncio.run(
+        main_module.link_github_profile_to_user(
+            make_store_request(store),
+            store.get_user_by_internal_username("admin"),
+            {
+                "id": "123",
+                "login": "admin-gh",
+                "name": "Admin GH",
+                "avatar_url": "https://example.com/admin.webp",
+            },
+        )
+    )
+
+    assert linked["role"] == Role.CORE_ADMIN
+    assert linked["internal_username"] == "admin"
+    assert linked["github_login"] == "admin-gh"
+
+
+def test_linking_github_merges_plain_github_user_into_admin() -> None:
+    client = make_client()
+    store = client.app.state.store
+    admin = store.create_internal_admin("admin", main_module.hash_password("password123"))
+    github_user = store.upsert_github_user(
+        {
+            "id": "123",
+            "login": "alice",
+            "name": "Alice",
+            "avatar_url": "https://example.com/alice.webp",
+        }
+    )
+    plugin = store.submit_plugin(github_user, plugin_payload())
+
+    linked = asyncio.run(
+        main_module.link_github_profile_to_user(
+            make_store_request(store),
+            admin,
+            {
+                "id": "123",
+                "login": "alice",
+                "name": "Alice",
+                "avatar_url": "https://example.com/alice.webp",
+            },
+        )
+    )
+
+    assert linked["id"] == admin["id"]
+    assert linked["role"] == Role.CORE_ADMIN
+    assert linked["github_login"] == "alice"
+    assert store.get_user_by_id(github_user["id"]) is None
+    assert store.get_plugin(plugin["id"])["owner_user_id"] == admin["id"]
+
+
+def test_github_callback_binds_logged_in_internal_admin(monkeypatch) -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "CORS_ORIGIN": "http://127.0.0.1:5173",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "GITHUB_LOGIN_ENABLED": "true",
+            "GITHUB_CLIENT_ID": "client-id",
+            "GITHUB_CLIENT_SECRET": "client-secret",
+            "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
+        }
+    )
+    store = InMemoryMarketStore()
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    login_response = client.get("/v1/auth/github/login", follow_redirects=False)
+    state = client.cookies.get(settings.oauth_state_cookie_name)
+
+    async def fake_exchange_github_code(settings, code):
+        return "github-token"
+
+    async def fake_fetch_github_profile(access_token):
+        return {
+            "id": 123,
+            "login": "admin-gh",
+            "name": "Admin GH",
+            "avatar_url": "https://example.com/admin.webp",
+        }
+
+    monkeypatch.setattr(main_module, "exchange_github_code", fake_exchange_github_code)
+    monkeypatch.setattr(main_module, "fetch_github_profile", fake_fetch_github_profile)
+
+    response = client.get(
+        f"/v1/auth/github/callback?code=ok&state={state}",
+        follow_redirects=False,
+    )
+    me = client.get("/v1/me")
+
+    assert login_response.status_code == 307
+    assert response.status_code == 307
+    assert me.json()["internal_username"] == "admin"
+    assert me.json()["role"] == Role.CORE_ADMIN
+    assert me.json()["github_login"] == "admin-gh"
 
 
 def test_core_admin_can_manage_admins_while_normal_admin_moderates_plugins() -> None:
@@ -331,8 +467,8 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     response = client.post("/v1/setup", json=setup_payload(site_name="AstrHub Plugins"))
 
     assert response.status_code == 200
-    assert response.json()["restart_required"] is True
-    assert response.json()["restart_scheduled"] is False
+    assert response.json()["restart_required"] is False
+    assert response.json()["activated"] is True
     assert len(client.app.state.setup_initializer_calls) == 1
     setup_call = client.app.state.setup_initializer_calls[0]
     assert (
@@ -361,7 +497,8 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     )
     assert login.status_code == 200
     assert login.json()["user"]["role"] == Role.CORE_ADMIN
-    assert client.get("/health").json()["setup"] == "required"
+    assert client.get("/health").json()["setup"] == "complete"
+    assert client.get("/v1/setup/status").json()["required"] is False
 
 
 def test_setup_initialization_failure_does_not_write_runtime_config(tmp_path) -> None:
@@ -401,7 +538,7 @@ def test_setup_initializer_creates_database_schema_and_internal_admin(monkeypatc
     monkeypatch.setattr(main_module, "PgRedisMarketStore", FakePgRedisMarketStore)
 
     payload = main_module.SetupConfig.model_validate(setup_payload())
-    asyncio.run(
+    store = asyncio.run(
         main_module.initialize_setup_infrastructure(
             payload,
             "postgresql://market:market@127.0.0.1:5432/market?sslmode=disable",
@@ -410,6 +547,7 @@ def test_setup_initializer_creates_database_schema_and_internal_admin(monkeypatc
         )
     )
 
+    assert isinstance(store, FakePgRedisMarketStore)
     assert calls == [
         ("ensure_database", "market"),
         (
@@ -420,8 +558,43 @@ def test_setup_initializer_creates_database_schema_and_internal_admin(monkeypatc
         ),
         "connect",
         ("admin", "admin", "hash"),
-        "close",
     ]
+
+
+def test_setup_activation_switches_store_without_process_restart(tmp_path) -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "RUNTIME_CONFIG_FILE": str(tmp_path / "runtime.env"),
+        }
+    )
+
+    class ClosableMemoryStore(InMemoryMarketStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    old_store = ClosableMemoryStore()
+    new_store = InMemoryMarketStore()
+    app = main_module.create_app(settings=settings, store=old_store)
+
+    async def fake_setup_initializer(payload, _database_url, _redis_url, password_hash):
+        new_store.create_internal_admin(payload.admin.username, password_hash)
+        return new_store
+
+    app.state.setup_initializer = fake_setup_initializer
+    client = TestClient(app)
+
+    response = client.post("/v1/setup", json=setup_payload())
+
+    assert response.status_code == 200
+    assert response.json()["activated"] is True
+    assert app.state.store is new_store
+    assert old_store.closed is True
+    assert client.get("/health").json()["setup"] == "complete"
 
 
 def test_setup_after_first_run_requires_core_admin(tmp_path) -> None:

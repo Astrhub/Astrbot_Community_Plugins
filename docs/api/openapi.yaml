@@ -20,7 +20,7 @@ paths:
     post:
       responses:
         "200":
-          description: Setup verified, runtime config saved, and API restart scheduled
+          description: Setup verified, runtime config saved, and PostgreSQL/Redis storage activated
         "400":
           description: PostgreSQL or Redis initialization failed
   /v1/site:

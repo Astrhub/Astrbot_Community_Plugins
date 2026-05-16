@@ -4,6 +4,7 @@ import Home from '../views/Home.vue'
 const SubmitPlugin = () => import('../views/SubmitPlugin.vue')
 const Setup = () => import('../views/Setup.vue')
 const Settings = () => import('../views/Settings.vue')
+const PersonalSettings = () => import('../views/PersonalSettings.vue')
 const routes = [
   {
     path: '/',
@@ -24,6 +25,11 @@ const routes = [
     path: '/settings',
     name: 'Settings',
     component: Settings
+  },
+  {
+    path: '/settings/personal',
+    name: 'PersonalSettings',
+    component: PersonalSettings
   }
 ]
 
