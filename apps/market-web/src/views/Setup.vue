@@ -5,7 +5,7 @@
         <div>
           <p class="eyebrow">首次配置</p>
           <h1>{{ formData.site.name || siteConfig.name }}</h1>
-          <p class="subtitle">填写站点信息、PostgreSQL 和 Redis 连接参数，保存后重启服务再进入市场。</p>
+          <p class="subtitle">完成必要连接后，GitHub OAuth、条款、邮件和市场策略可在后台继续配置。</p>
         </div>
         <n-button quaternary circle @click="toggleTheme" :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'">
           <template #icon>
@@ -21,22 +21,35 @@
         <n-card :bordered="false" class="setup-card">
           <template #header>
             <div class="card-title">
-              <h2>运行时配置</h2>
-              <n-tag v-if="setupStatus.required" type="warning" :bordered="false">未完成</n-tag>
+              <h2>安装向导</h2>
+              <n-tag v-if="restartScheduled" type="success" :bordered="false">重启中</n-tag>
+              <n-tag v-else-if="setupStatus.required" type="warning" :bordered="false">未完成</n-tag>
               <n-tag v-else type="success" :bordered="false">已完成</n-tag>
             </div>
           </template>
 
-          <n-alert type="info" :bordered="false" class="setup-alert">
-            PostgreSQL 保存市场数据，Redis 保存会话令牌。默认使用无 SSL 本地连接，需要远程 TLS 时再打开 SSL。
+          <n-alert v-if="restartScheduled" type="success" :bordered="false" class="setup-alert">
+            配置已保存，服务正在自动重启。页面会在服务恢复后进入市场。
           </n-alert>
-          <n-alert v-if="setupStatus.restart_required" type="success" :bordered="false" class="setup-alert">
-            配置已写入运行时文件，请重启 API 服务后继续。重启前不会连接 PostgreSQL 或 Redis。
+          <n-alert v-else type="info" :bordered="false" class="setup-alert">
+            PostgreSQL 用于持久化市场数据，Redis 用于登录会话。保存前会验证连接并初始化数据表。
+          </n-alert>
+          <n-alert
+            v-if="!restartScheduled && setupStatus.restart_required"
+            type="warning"
+            :bordered="false"
+            class="setup-alert"
+          >
+            配置已保存。当前已关闭自动重启，请重启 API 服务后继续。
           </n-alert>
 
-          <n-form ref="formRef" :model="formData" :rules="rules" label-placement="top">
-            <section class="form-section">
-              <h3>站点</h3>
+          <n-steps :current="activeStep + 1" class="setup-steps">
+            <n-step v-for="step in steps" :key="step.id" :title="step.title" />
+          </n-steps>
+
+          <n-form :model="formData" label-placement="top">
+            <section v-if="currentStep.id === 'site'" class="form-section">
+              <h3>站点基础</h3>
               <div class="form-grid">
                 <n-form-item label="站点名称" path="site.name">
                   <n-input v-model:value="formData.site.name" placeholder="AstrBot Community Plugins" />
@@ -44,22 +57,10 @@
                 <n-form-item label="站点图标 URL" path="site.icon_url">
                   <n-input v-model:value="formData.site.icon_url" placeholder="/logo.webp 或 https://..." />
                 </n-form-item>
-                <n-form-item label="副标题" path="site.subtitle">
-                  <n-input v-model:value="formData.site.subtitle" placeholder="全新社区插件市场" />
-                </n-form-item>
-                <n-form-item label="站点描述" path="site.description">
-                  <n-input v-model:value="formData.site.description" placeholder="发现、评价和提交 AstrBot 插件。" />
-                </n-form-item>
-                <n-form-item label="联系邮箱" path="site.contact_email">
-                  <n-input v-model:value="formData.site.contact_email" placeholder="可选" />
-                </n-form-item>
-                <n-form-item label="文档地址" path="site.docs_url">
-                  <n-input v-model:value="formData.site.docs_url" placeholder="https://docs.astrbot.app/..." />
-                </n-form-item>
               </div>
             </section>
 
-            <section class="form-section">
+            <section v-if="currentStep.id === 'admin'" class="form-section">
               <h3>核心管理员</h3>
               <div class="form-grid">
                 <n-form-item label="内部账号" path="admin.username">
@@ -76,161 +77,7 @@
               </div>
             </section>
 
-            <section class="form-section">
-              <h3>登录与条款</h3>
-              <div class="form-grid">
-                <n-form-item label="开放登录" path="auth.public_login_enabled">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.auth.public_login_enabled" />
-                    <span>{{ formData.auth.public_login_enabled ? '允许登录' : '关闭所有登录' }}</span>
-                  </div>
-                </n-form-item>
-                <n-form-item label="GitHub OAuth 登录" path="auth.github_login_enabled">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.auth.github_login_enabled" />
-                    <span>{{ formData.auth.github_login_enabled ? '启用' : '暂不启用' }}</span>
-                  </div>
-                </n-form-item>
-                <n-form-item label="登录条款" path="auth.login_agreement_enabled">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.auth.login_agreement_enabled" />
-                    <span>{{ formData.auth.login_agreement_enabled ? '登录前确认' : '不显示' }}</span>
-                  </div>
-                </n-form-item>
-                <n-form-item label="服务条款" path="auth.service_terms_enabled">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.auth.service_terms_enabled" />
-                    <span>{{ formData.auth.service_terms_enabled ? '显示服务条款' : '不显示' }}</span>
-                  </div>
-                </n-form-item>
-              </div>
-              <n-form-item v-if="formData.auth.login_agreement_enabled" label="登录条款内容" path="auth.login_agreement_text">
-                <n-input
-                  v-model:value="formData.auth.login_agreement_text"
-                  type="textarea"
-                  :autosize="{ minRows: 3, maxRows: 8 }"
-                  placeholder="用户登录前需要同意的条款"
-                />
-              </n-form-item>
-              <n-form-item v-if="formData.auth.service_terms_enabled" label="服务条款内容" path="auth.service_terms_text">
-                <n-input
-                  v-model:value="formData.auth.service_terms_text"
-                  type="textarea"
-                  :autosize="{ minRows: 3, maxRows: 8 }"
-                  placeholder="市场服务条款、社区规则或免责声明"
-                />
-              </n-form-item>
-            </section>
-
-            <section class="form-section">
-              <h3>GitHub OAuth</h3>
-              <div class="form-grid">
-                <n-form-item label="Client ID" path="github.client_id">
-                  <n-input v-model:value="formData.github.client_id" placeholder="GitHub OAuth App Client ID" />
-                </n-form-item>
-                <n-form-item label="Client Secret" path="github.client_secret">
-                  <n-input
-                    v-model:value="formData.github.client_secret"
-                    type="password"
-                    show-password-on="click"
-                    placeholder="留空可稍后配置"
-                  />
-                </n-form-item>
-                <n-form-item label="回调地址" path="github.callback_url">
-                  <n-input v-model:value="formData.github.callback_url" placeholder="https://your-domain/v1/auth/github/callback" />
-                </n-form-item>
-                <n-form-item label="管理员组织" path="github.admin_org">
-                  <n-input v-model:value="formData.github.admin_org" placeholder="可选，GitHub 组织名" />
-                </n-form-item>
-                <n-form-item label="授权范围" path="github.scope">
-                  <n-input v-model:value="formData.github.scope" placeholder="read:user user:email read:org" />
-                </n-form-item>
-              </div>
-            </section>
-
-            <section class="form-section">
-              <h3>市场策略</h3>
-              <div class="form-grid">
-                <n-form-item label="开放插件提交" path="market.submissions_enabled">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.market.submissions_enabled" />
-                    <span>{{ formData.market.submissions_enabled ? '允许提交' : '暂停提交' }}</span>
-                  </div>
-                </n-form-item>
-                <n-form-item label="开放评论" path="market.comments_enabled">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.market.comments_enabled" />
-                    <span>{{ formData.market.comments_enabled ? '允许评论' : '关闭评论' }}</span>
-                  </div>
-                </n-form-item>
-                <n-form-item label="开放点赞" path="market.likes_enabled">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.market.likes_enabled" />
-                    <span>{{ formData.market.likes_enabled ? '允许点赞' : '关闭点赞' }}</span>
-                  </div>
-                </n-form-item>
-                <n-form-item label="自动上架" path="market.plugin_auto_approve_enabled">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.market.plugin_auto_approve_enabled" />
-                    <span>{{ formData.market.plugin_auto_approve_enabled ? '提交后自动上架' : '需要管理员审核' }}</span>
-                  </div>
-                </n-form-item>
-                <n-form-item label="最多标签数" path="market.max_plugin_tags">
-                  <n-input-number v-model:value="formData.market.max_plugin_tags" :min="0" :max="50" />
-                </n-form-item>
-              </div>
-            </section>
-
-            <section class="form-section">
-              <h3>邮件服务</h3>
-              <div class="form-grid">
-                <n-form-item label="邮件服务" path="email.provider">
-                  <n-select v-model:value="formData.email.provider" :options="emailProviderOptions" />
-                </n-form-item>
-                <n-form-item label="每日发送上限" path="email.daily_limit">
-                  <n-input-number v-model:value="formData.email.daily_limit" :min="0" />
-                </n-form-item>
-                <n-form-item label="单邮箱每日验证码上限" path="email.verification_daily_limit_per_user">
-                  <n-input-number v-model:value="formData.email.verification_daily_limit_per_user" :min="0" />
-                </n-form-item>
-              </div>
-              <div v-if="formData.email.provider === 'smtp'" class="form-grid">
-                <n-form-item label="SMTP 主机" path="email.smtp.host">
-                  <n-input v-model:value="formData.email.smtp.host" placeholder="smtp.example.com" />
-                </n-form-item>
-                <n-form-item label="SMTP 端口" path="email.smtp.port">
-                  <n-input-number v-model:value="formData.email.smtp.port" :min="1" :max="65535" />
-                </n-form-item>
-                <n-form-item label="SMTP 账号" path="email.smtp.username">
-                  <n-input v-model:value="formData.email.smtp.username" placeholder="noreply@example.com" />
-                </n-form-item>
-                <n-form-item label="SMTP 密码" path="email.smtp.password">
-                  <n-input v-model:value="formData.email.smtp.password" type="password" show-password-on="click" placeholder="留空表示不更新" />
-                </n-form-item>
-                <n-form-item label="发件邮箱" path="email.smtp.from_address">
-                  <n-input v-model:value="formData.email.smtp.from_address" placeholder="noreply@example.com" />
-                </n-form-item>
-                <n-form-item label="SMTP SSL" path="email.smtp.ssl">
-                  <div class="switch-row">
-                    <n-switch v-model:value="formData.email.smtp.ssl" />
-                    <span>{{ formData.email.smtp.ssl ? '启用 SSL' : '不启用 SSL' }}</span>
-                  </div>
-                </n-form-item>
-              </div>
-              <div v-if="formData.email.provider === 'cloudflare'" class="form-grid">
-                <n-form-item label="Cloudflare Account ID" path="email.cloudflare.account_id">
-                  <n-input v-model:value="formData.email.cloudflare.account_id" placeholder="Cloudflare Account ID" />
-                </n-form-item>
-                <n-form-item label="Cloudflare API Token" path="email.cloudflare.api_token">
-                  <n-input v-model:value="formData.email.cloudflare.api_token" type="password" show-password-on="click" placeholder="留空表示不更新" />
-                </n-form-item>
-                <n-form-item label="发件邮箱" path="email.cloudflare.from_address">
-                  <n-input v-model:value="formData.email.cloudflare.from_address" placeholder="noreply@mail.example.com" />
-                </n-form-item>
-              </div>
-            </section>
-
-            <section class="form-section">
+            <section v-if="currentStep.id === 'postgres'" class="form-section">
               <h3>PostgreSQL</h3>
               <div class="form-grid">
                 <n-form-item label="主机名" path="postgres.host">
@@ -262,7 +109,7 @@
               </div>
             </section>
 
-            <section class="form-section">
+            <section v-if="currentStep.id === 'redis'" class="form-section">
               <h3>Redis</h3>
               <div class="form-grid">
                 <n-form-item label="主机名" path="redis.host">
@@ -290,19 +137,50 @@
                 </n-form-item>
               </div>
             </section>
+
+            <section v-if="currentStep.id === 'review'" class="form-section">
+              <h3>确认配置</h3>
+              <div class="review-grid">
+                <div class="review-item">
+                  <span>站点</span>
+                  <strong>{{ formData.site.name }}</strong>
+                </div>
+                <div class="review-item">
+                  <span>核心管理员</span>
+                  <strong>{{ formData.admin.username }}</strong>
+                </div>
+                <div class="review-item">
+                  <span>PostgreSQL</span>
+                  <strong>{{ formData.postgres.host }}:{{ formData.postgres.port }}/{{ formData.postgres.database }}</strong>
+                </div>
+                <div class="review-item">
+                  <span>Redis</span>
+                  <strong>{{ formData.redis.host }}:{{ formData.redis.port }}/{{ formData.redis.database }}</strong>
+                </div>
+              </div>
+            </section>
           </n-form>
 
           <template #footer>
             <div class="actions">
-              <n-button tertiary @click="reloadStatus">刷新状态</n-button>
-              <n-button
-                type="primary"
-                :loading="saving"
-                :disabled="setupStatus.required && setupStatus.restart_required"
-                @click="save"
-              >
-                保存配置
-              </n-button>
+              <n-button tertiary :disabled="saving || restartScheduled" @click="reloadStatus">刷新状态</n-button>
+              <div class="step-actions">
+                <n-button v-if="!isFirstStep" :disabled="saving || restartScheduled" @click="previousStep">
+                  上一步
+                </n-button>
+                <n-button v-if="!isLastStep" type="primary" :disabled="restartScheduled" @click="nextStep">
+                  下一步
+                </n-button>
+                <n-button
+                  v-else
+                  type="primary"
+                  :loading="saving"
+                  :disabled="restartScheduled"
+                  @click="save"
+                >
+                  保存并重启
+                </n-button>
+              </div>
             </div>
           </template>
         </n-card>
@@ -312,7 +190,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   NAlert,
@@ -324,7 +202,8 @@ import {
   NInput,
   NInputNumber,
   NLayout,
-  NSelect,
+  NStep,
+  NSteps,
   NSwitch,
   NTag,
   useMessage
@@ -337,60 +216,27 @@ const store = usePluginStore()
 const { isDarkMode, setupStatus, siteConfig } = storeToRefs(store)
 const { toggleTheme, loadSetupStatus, saveSetupConfig } = store
 
-const formRef = ref(null)
+const steps = [
+  { id: 'site', title: '站点' },
+  { id: 'admin', title: '管理员' },
+  { id: 'postgres', title: 'PostgreSQL' },
+  { id: 'redis', title: 'Redis' },
+  { id: 'review', title: '确认' }
+]
+
+const activeStep = ref(0)
 const saving = ref(false)
+const restartScheduled = ref(false)
+let restartPollTimer = 0
+
 const formData = reactive({
   site: {
-    name: '',
-    icon_url: '',
-    subtitle: '',
-    description: '',
-    contact_email: '',
-    docs_url: ''
+    name: 'AstrBot Community Plugins',
+    icon_url: '/logo.webp'
   },
   admin: {
     username: 'admin',
     password: ''
-  },
-  auth: {
-    github_login_enabled: false,
-    public_login_enabled: true,
-    login_agreement_enabled: false,
-    login_agreement_text: '',
-    service_terms_enabled: false,
-    service_terms_text: ''
-  },
-  github: {
-    client_id: '',
-    client_secret: '',
-    callback_url: `${window.location.origin}/v1/auth/github/callback`,
-    scope: 'read:user user:email read:org',
-    admin_org: ''
-  },
-  market: {
-    submissions_enabled: true,
-    comments_enabled: true,
-    likes_enabled: true,
-    plugin_auto_approve_enabled: false,
-    max_plugin_tags: 8
-  },
-  email: {
-    provider: 'disabled',
-    smtp: {
-      host: '',
-      port: 587,
-      username: '',
-      password: '',
-      from_address: '',
-      ssl: false
-    },
-    cloudflare: {
-      account_id: '',
-      api_token: '',
-      from_address: ''
-    },
-    daily_limit: 0,
-    verification_daily_limit_per_user: 5
   },
   postgres: {
     host: '127.0.0.1',
@@ -409,142 +255,21 @@ const formData = reactive({
   }
 })
 
-const emailProviderOptions = [
-  { label: '关闭邮件', value: 'disabled' },
-  { label: 'SMTP', value: 'smtp' },
-  { label: 'Cloudflare Email Service', value: 'cloudflare' }
-]
-
-const requiredText = (message) => ({ required: true, message, trigger: 'blur' })
-const rules = {
-  'site.name': [requiredText('请输入站点名称')],
-  'site.icon_url': [
-    requiredText('请输入站点图标 URL'),
-    {
-      validator: (_, value) => String(value || '').startsWith('/') || /^https?:\/\//.test(value),
-      message: '请输入 / 开头路径或 http(s) URL',
-      trigger: 'blur'
-    }
-  ],
-  'site.contact_email': [
-    {
-      validator: (_, value) => !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
-      message: '请输入有效邮箱',
-      trigger: 'blur'
-    }
-  ],
-  'site.docs_url': [
-    {
-      validator: (_, value) => !value || /^https?:\/\//.test(value),
-      message: '请输入 http(s) URL',
-      trigger: 'blur'
-    }
-  ],
-  'admin.username': [requiredText('请输入内部管理员账号')],
-  'admin.password': [
-    requiredText('请输入内部管理员密码'),
-    { min: 8, message: '密码至少 8 位', trigger: 'blur' }
-  ],
-  'auth.login_agreement_text': [
-    {
-      validator: () => !formData.auth.login_agreement_enabled ||
-        Boolean(formData.auth.login_agreement_text.trim()),
-      message: '启用登录条款后必须填写内容',
-      trigger: 'blur'
-    }
-  ],
-  'auth.service_terms_text': [
-    {
-      validator: () => !formData.auth.service_terms_enabled ||
-        Boolean(formData.auth.service_terms_text.trim()),
-      message: '启用服务条款后必须填写内容',
-      trigger: 'blur'
-    }
-  ],
-  'github.client_id': [
-    {
-      validator: () => !formData.auth.github_login_enabled || Boolean(formData.github.client_id.trim()),
-      message: '启用 GitHub 登录后必须填写 Client ID',
-      trigger: 'blur'
-    }
-  ],
-  'github.client_secret': [
-    {
-      validator: () => !formData.auth.github_login_enabled || Boolean(formData.github.client_secret.trim()),
-      message: '启用 GitHub 登录后必须填写 Client Secret',
-      trigger: 'blur'
-    }
-  ],
-  'github.callback_url': [
-    {
-      validator: (_, value) => !formData.auth.github_login_enabled || /^https?:\/\//.test(value),
-      message: '启用 GitHub 登录后必须填写 http(s) 回调地址',
-      trigger: 'blur'
-    }
-  ],
-  'email.smtp.host': [
-    {
-      validator: () => formData.email.provider !== 'smtp' || Boolean(formData.email.smtp.host.trim()),
-      message: '启用 SMTP 后必须填写主机',
-      trigger: 'blur'
-    }
-  ],
-  'email.smtp.from_address': [
-    {
-      validator: () => formData.email.provider !== 'smtp' ||
-        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.smtp.from_address),
-      message: '请输入有效发件邮箱',
-      trigger: 'blur'
-    }
-  ],
-  'email.cloudflare.account_id': [
-    {
-      validator: () => formData.email.provider !== 'cloudflare' ||
-        Boolean(formData.email.cloudflare.account_id.trim()),
-      message: '启用 Cloudflare 后必须填写 Account ID',
-      trigger: 'blur'
-    }
-  ],
-  'email.cloudflare.api_token': [
-    {
-      validator: () => formData.email.provider !== 'cloudflare' ||
-        Boolean(formData.email.cloudflare.api_token.trim()),
-      message: '启用 Cloudflare 后必须填写 API Token',
-      trigger: 'blur'
-    }
-  ],
-  'email.cloudflare.from_address': [
-    {
-      validator: () => formData.email.provider !== 'cloudflare' ||
-        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.cloudflare.from_address),
-      message: '请输入有效发件邮箱',
-      trigger: 'blur'
-    }
-  ],
-  'postgres.host': [requiredText('请输入 PostgreSQL 主机名')],
-  'postgres.port': [
-    { type: 'number', required: true, message: '请输入 PostgreSQL 端口', trigger: 'blur' }
-  ],
-  'postgres.database': [requiredText('请输入数据库名')],
-  'postgres.username': [requiredText('请输入 PostgreSQL 账号')],
-  'postgres.password': [requiredText('请输入 PostgreSQL 密码')],
-  'redis.host': [requiredText('请输入 Redis 主机名')],
-  'redis.port': [
-    { type: 'number', required: true, message: '请输入 Redis 端口', trigger: 'blur' }
-  ],
-  'redis.database': [
-    { type: 'number', required: true, message: '请输入 Redis 数据库编号', trigger: 'blur' }
-  ]
-}
+const currentStep = computed(() => steps[activeStep.value])
+const isFirstStep = computed(() => activeStep.value === 0)
+const isLastStep = computed(() => activeStep.value === steps.length - 1)
 
 function normalizeNumberFields() {
   formData.postgres.port = Number(formData.postgres.port || 5432)
   formData.redis.port = Number(formData.redis.port || 6379)
   formData.redis.database = Number(formData.redis.database || 0)
-  formData.market.max_plugin_tags = Number(formData.market.max_plugin_tags || 0)
-  formData.email.smtp.port = Number(formData.email.smtp.port || 587)
-  formData.email.daily_limit = Number(formData.email.daily_limit || 0)
-  formData.email.verification_daily_limit_per_user = Number(formData.email.verification_daily_limit_per_user || 0)
+}
+
+function applySetupConfig(config = {}) {
+  Object.assign(formData.site, config.site || {})
+  Object.assign(formData.postgres, config.postgres || {})
+  Object.assign(formData.redis, config.redis || {})
+  if (config.admin?.username) formData.admin.username = config.admin.username
 }
 
 async function reloadStatus() {
@@ -552,44 +277,127 @@ async function reloadStatus() {
   applySetupConfig(status.saved_setup)
 }
 
-function applySetupConfig(config = {}) {
-  Object.assign(formData.site, config.site || {})
-  Object.assign(formData.auth, config.auth || {})
-  Object.assign(formData.github, config.github || {})
-  Object.assign(formData.market, config.market || {})
-  Object.assign(formData.email, config.email || {})
-  Object.assign(formData.email.smtp, config.email?.smtp || {})
-  Object.assign(formData.email.cloudflare, config.email?.cloudflare || {})
-  Object.assign(formData.postgres, config.postgres || {})
-  Object.assign(formData.redis, config.redis || {})
-}
-
 function setupPayload() {
   normalizeNumberFields()
-  return JSON.parse(JSON.stringify(formData))
+  return {
+    site: { ...formData.site },
+    admin: { ...formData.admin },
+    postgres: { ...formData.postgres },
+    redis: { ...formData.redis }
+  }
+}
+
+function requireText(value, errorMessage) {
+  if (!String(value || '').trim()) {
+    message.error(errorMessage)
+    return false
+  }
+  return true
+}
+
+function isRootOrHttpUrl(value) {
+  return String(value || '').startsWith('/') || /^https?:\/\//.test(String(value || ''))
+}
+
+function validateStep(index = activeStep.value) {
+  normalizeNumberFields()
+  const stepId = steps[index].id
+  if (stepId === 'site') {
+    if (!requireText(formData.site.name, '请输入站点名称')) return false
+    if (!requireText(formData.site.icon_url, '请输入站点图标 URL')) return false
+    if (!isRootOrHttpUrl(formData.site.icon_url)) {
+      message.error('站点图标必须是 / 开头路径或 http(s) URL')
+      return false
+    }
+  }
+  if (stepId === 'admin') {
+    if (!requireText(formData.admin.username, '请输入核心管理员账号')) return false
+    if (String(formData.admin.password || '').length < 8) {
+      message.error('核心管理员密码至少 8 位')
+      return false
+    }
+  }
+  if (stepId === 'postgres') {
+    if (!requireText(formData.postgres.host, '请输入 PostgreSQL 主机名')) return false
+    if (!formData.postgres.port) {
+      message.error('请输入 PostgreSQL 端口')
+      return false
+    }
+    if (!requireText(formData.postgres.database, '请输入 PostgreSQL 数据库名')) return false
+    if (!requireText(formData.postgres.username, '请输入 PostgreSQL 账号')) return false
+    if (!requireText(formData.postgres.password, '请输入 PostgreSQL 密码')) return false
+  }
+  if (stepId === 'redis') {
+    if (!requireText(formData.redis.host, '请输入 Redis 主机名')) return false
+    if (!formData.redis.port) {
+      message.error('请输入 Redis 端口')
+      return false
+    }
+  }
+  return true
+}
+
+function validateAll() {
+  return steps.every((_, index) => validateStep(index))
+}
+
+function nextStep() {
+  if (!validateStep()) return
+  activeStep.value += 1
+}
+
+function previousStep() {
+  activeStep.value = Math.max(0, activeStep.value - 1)
+}
+
+function stopRestartPolling() {
+  if (restartPollTimer) window.clearTimeout(restartPollTimer)
+  restartPollTimer = 0
+}
+
+function startRestartPolling() {
+  stopRestartPolling()
+  const poll = async () => {
+    try {
+      const status = await loadSetupStatus()
+      if (!status.required && !status.restart_required) {
+        window.location.assign('/')
+        return
+      }
+    } catch {
+      // The API is expected to be unavailable while the process restarts.
+    }
+    restartPollTimer = window.setTimeout(poll, 1500)
+  }
+  restartPollTimer = window.setTimeout(poll, 1000)
 }
 
 async function save() {
-  formRef.value?.validate(async (errors) => {
-    if (errors) {
-      message.error('请完善连接信息')
-      return
-    }
-    saving.value = true
-    try {
-      await saveSetupConfig(setupPayload())
-      message.success('配置已保存，请重启后继续')
+  if (!validateAll()) return
+  saving.value = true
+  try {
+    const result = await saveSetupConfig(setupPayload())
+    restartScheduled.value = Boolean(result.restart_scheduled)
+    if (restartScheduled.value) {
+      message.success('配置已保存，服务正在重启')
+      startRestartPolling()
+    } else {
+      message.success('配置已保存，请重启服务后继续')
       await loadSetupStatus()
-    } catch (error) {
-      message.error(error.message || '保存失败')
-    } finally {
-      saving.value = false
     }
-  })
+  } catch (error) {
+    message.error(error.message || '保存失败')
+  } finally {
+    saving.value = false
+  }
 }
 
 onMounted(async () => {
   await reloadStatus()
+})
+
+onUnmounted(() => {
+  stopRestartPolling()
 })
 </script>
 
@@ -644,7 +452,7 @@ h2 {
 }
 
 .setup-main {
-  max-width: 720px;
+  max-width: 760px;
   margin: 0 auto;
   padding: 20px;
 }
@@ -654,25 +462,29 @@ h2 {
   border-radius: 8px;
 }
 
-.card-title {
+.card-title,
+.actions,
+.step-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
+}
+
+.card-title,
+.actions {
+  justify-content: space-between;
 }
 
 .setup-alert {
   margin-bottom: 18px;
 }
 
-.form-section {
-  padding-top: 4px;
+.setup-steps {
+  margin-bottom: 24px;
 }
 
-.form-section + .form-section {
-  margin-top: 10px;
-  padding-top: 18px;
-  border-top: 1px solid var(--border-color);
+.form-section {
+  min-height: 260px;
 }
 
 .form-section h3 {
@@ -681,7 +493,8 @@ h2 {
   font-size: 15px;
 }
 
-.form-grid {
+.form-grid,
+.review-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px 16px;
@@ -695,10 +508,33 @@ h2 {
   color: var(--text-color-2);
 }
 
-.actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 12px;
+.review-grid {
+  gap: 14px;
+}
+
+.review-item {
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--card-color);
+}
+
+.review-item span,
+.review-item strong {
+  display: block;
+}
+
+.review-item span {
+  color: var(--text-color-3);
+  font-size: 12px;
+}
+
+.review-item strong {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  color: var(--text-color-1);
+  font-size: 14px;
+  font-weight: 700;
 }
 
 @media (max-width: 640px) {
@@ -710,12 +546,18 @@ h2 {
     font-size: 26px;
   }
 
-  .form-grid {
+  .form-grid,
+  .review-grid {
     grid-template-columns: 1fr;
   }
 
   .actions {
+    align-items: stretch;
     flex-direction: column-reverse;
+  }
+
+  .step-actions {
+    justify-content: flex-end;
   }
 }
 </style>

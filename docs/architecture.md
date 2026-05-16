@@ -24,9 +24,9 @@
 - `InMemoryMarketStore` — 开发/首次启动用内存存储，不持久化。
 - `PgRedisMarketStore` — 生产存储，配置 PostgreSQL 和 Redis 连接后自动启用。
 
-PostgreSQL schema 在服务启动时自动创建。插件可变扩展字段使用 `jsonb`，标签字段建立 GIN 索引；用户、插件、评论等核心关系使用主键、唯一约束、外键和状态 CHECK 约束保护数据一致性。Redis session 使用 `SET key value EX seconds` 写入，并在读取 session 时刷新 TTL。
+PostgreSQL schema 在首次配置保存前和服务启动时都会自动创建。插件可变扩展字段使用 `jsonb`，标签字段建立 GIN 索引；用户、插件、评论等核心关系使用主键、唯一约束、外键和状态 CHECK 约束保护数据一致性。Redis session 使用 `SET key value EX seconds` 写入，并在读取 session 时刷新 TTL。
 
-首次启动可通过前端 `/setup` 页面完成基础设施配置。表单按主机名、端口、数据库名、账号、密码和 SSL 开关填写，并创建内部核心管理员。后端写入 `apps/api/data/runtime.env`、生成内部 `DATABASE_URL` / `REDIS_URL`，之后需要重启 API 进程。站点名称、图标、GitHub 登录开关、登录条款和服务条款同样可在此页面配置，并通过 `/v1/site` 提供给前端。
+首次启动可通过前端 `/setup` 页面完成基础设施配置。安装向导分步收集站点名称/图标、内部核心管理员、PostgreSQL 主机/端口/数据库/账号/密码/SSL 和 Redis 主机/端口/数据库/密码/SSL。保存时后端会先创建或确认 PostgreSQL 目标数据库、初始化 schema、验证 Redis，并把内部核心管理员写入目标数据库；全部成功后才写入 `apps/api/data/runtime.env`、生成内部 `DATABASE_URL` / `REDIS_URL`。默认保存后会退出 API 进程，交给 systemd、Docker restart policy 或其他进程管理器拉起新配置。
 
 核心管理员登录后可进入 `/settings` 修改运行时系统设置，范围借鉴 sub2api 的站点/OAuth/登录条款/服务条款/集成配置模型，并只保留本市场需要的字段：站点展示、GitHub OAuth、市场功能开关、自动上架、最大标签数，以及 SMTP / Cloudflare Email Service。除 PostgreSQL 和 Redis 连接变更需要重启外，其余设置保存后会热更新当前 API 进程。
 

@@ -20,7 +20,9 @@ paths:
     post:
       responses:
         "200":
-          description: Setup saved and restart required
+          description: Setup verified, runtime config saved, and API restart scheduled
+        "400":
+          description: PostgreSQL or Redis initialization failed
   /v1/site:
     get:
       responses:

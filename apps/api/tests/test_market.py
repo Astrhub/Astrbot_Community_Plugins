@@ -33,7 +33,27 @@ def make_setup_client(tmp_path) -> TestClient:
             "RUNTIME_CONFIG_FILE": str(tmp_path / "runtime.env"),
         }
     )
-    return TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+    app = main_module.create_app(settings=settings, store=InMemoryMarketStore())
+    app.state.restart_enabled = False
+    app.state.setup_initializer_calls = []
+
+    async def fake_setup_initializer(
+        payload,
+        database_url: str,
+        redis_url: str,
+        core_admin_password_hash: str,
+    ) -> None:
+        app.state.setup_initializer_calls.append(
+            {
+                "payload": payload,
+                "database_url": database_url,
+                "redis_url": redis_url,
+                "core_admin_password_hash": core_admin_password_hash,
+            }
+        )
+
+    app.state.setup_initializer = fake_setup_initializer
+    return TestClient(app)
 
 
 def setup_payload(
@@ -45,14 +65,6 @@ def setup_payload(
     return {
         "site": {"name": site_name, "icon_url": "/custom-logo.webp"},
         "admin": {"username": "admin", "password": "password123"},
-        "auth": {
-            "github_login_enabled": False,
-            "public_login_enabled": True,
-            "login_agreement_enabled": True,
-            "login_agreement_text": "登录即同意社区规则。",
-            "service_terms_enabled": True,
-            "service_terms_text": "请遵守插件市场服务条款。",
-        },
         "postgres": {
             "host": "127.0.0.1",
             "port": postgres_port,
@@ -320,6 +332,15 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
 
     assert response.status_code == 200
     assert response.json()["restart_required"] is True
+    assert response.json()["restart_scheduled"] is False
+    assert len(client.app.state.setup_initializer_calls) == 1
+    setup_call = client.app.state.setup_initializer_calls[0]
+    assert (
+        setup_call["database_url"]
+        == "postgresql://market:market@127.0.0.1:5432/market?sslmode=disable"
+    )
+    assert setup_call["redis_url"] == "redis://127.0.0.1:6379/0"
+    assert setup_call["core_admin_password_hash"].startswith("pbkdf2_sha256")
     runtime_file = (tmp_path / "runtime.env").read_text()
     assert (
         "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market?sslmode=disable"
@@ -328,13 +349,12 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     assert "REDIS_URL=redis://127.0.0.1:6379/0" in runtime_file
     assert "POSTGRES_SSL=false" in runtime_file
     assert 'SITE_NAME="AstrHub Plugins"' in runtime_file
-    assert "SITE_SUBTITLE=全新社区插件市场" in runtime_file
     assert "CORE_ADMIN_USERNAME=admin" in runtime_file
     assert "CORE_ADMIN_PASSWORD_HASH=pbkdf2_sha256" in runtime_file
-    assert "GITHUB_LOGIN_ENABLED=false" in runtime_file
-    assert "LOGIN_AGREEMENT_TEXT=登录即同意社区规则。" in runtime_file
-    assert "MARKET_SUBMISSIONS_ENABLED=true" in runtime_file
-    assert "EMAIL_PROVIDER=disabled" in runtime_file
+    assert "SITE_SUBTITLE" not in runtime_file
+    assert "GITHUB_LOGIN_ENABLED" not in runtime_file
+    assert "MARKET_SUBMISSIONS_ENABLED" not in runtime_file
+    assert "EMAIL_PROVIDER" not in runtime_file
     login = client.post(
         "/v1/auth/internal/login",
         json={"username": "admin", "password": "password123"},
@@ -342,6 +362,66 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     assert login.status_code == 200
     assert login.json()["user"]["role"] == Role.CORE_ADMIN
     assert client.get("/health").json()["setup"] == "required"
+
+
+def test_setup_initialization_failure_does_not_write_runtime_config(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+
+    async def failing_setup_initializer(*_args) -> None:
+        raise main_module.error(400, "PostgreSQL connection failed: refused")
+
+    client.app.state.setup_initializer = failing_setup_initializer
+    response = client.post("/v1/setup", json=setup_payload())
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "PostgreSQL connection failed: refused"
+    assert not (tmp_path / "runtime.env").exists()
+
+
+def test_setup_initializer_creates_database_schema_and_internal_admin(monkeypatch) -> None:
+    calls: list[object] = []
+
+    async def fake_ensure_postgres_database(config: dict[str, object]) -> None:
+        calls.append(("ensure_database", config["database"]))
+
+    class FakePgRedisMarketStore:
+        def __init__(self, database_url: str, redis_url: str, session_ttl_seconds: int) -> None:
+            calls.append(("store", database_url, redis_url, session_ttl_seconds))
+
+        async def connect(self) -> None:
+            calls.append("connect")
+
+        async def create_internal_admin(self, username: str, password_hash: str) -> None:
+            calls.append(("admin", username, password_hash))
+
+        async def close(self) -> None:
+            calls.append("close")
+
+    monkeypatch.setattr(main_module, "ensure_postgres_database", fake_ensure_postgres_database)
+    monkeypatch.setattr(main_module, "PgRedisMarketStore", FakePgRedisMarketStore)
+
+    payload = main_module.SetupConfig.model_validate(setup_payload())
+    asyncio.run(
+        main_module.initialize_setup_infrastructure(
+            payload,
+            "postgresql://market:market@127.0.0.1:5432/market?sslmode=disable",
+            "redis://127.0.0.1:6379/0",
+            "hash",
+        )
+    )
+
+    assert calls == [
+        ("ensure_database", "market"),
+        (
+            "store",
+            "postgresql://market:market@127.0.0.1:5432/market?sslmode=disable",
+            "redis://127.0.0.1:6379/0",
+            60,
+        ),
+        "connect",
+        ("admin", "admin", "hash"),
+        "close",
+    ]
 
 
 def test_setup_after_first_run_requires_core_admin(tmp_path) -> None:
