@@ -11,8 +11,12 @@ from .runtime_config import read_runtime_config
 DEFAULT_RUNTIME_CONFIG_PATH = Path(__file__).resolve().parents[1] / "data" / "runtime.env"
 DEFAULT_SITE_ICON_URL = "/logo.webp"
 DEFAULT_SITE_NAME = "AstrBot Community Plugins"
+DEFAULT_SITE_SUBTITLE = "全新社区插件市场"
+DEFAULT_SITE_DESCRIPTION = "发现、评价和提交 AstrBot 插件。"
+DEFAULT_SITE_DOCS_URL = "https://docs.astrbot.app/dev/star/plugin.html"
 DEFAULT_LOGIN_AGREEMENT_TEXT = ""
 DEFAULT_SERVICE_TERMS_TEXT = ""
+DEFAULT_EMAIL_PROVIDER = "disabled"
 
 
 @dataclass(frozen=True)
@@ -36,12 +40,33 @@ class Settings:
     github_admin_org: str
     site_name: str
     site_icon_url: str
+    site_subtitle: str
+    site_description: str
+    site_contact_email: str
+    site_docs_url: str
     github_login_enabled: bool
     public_login_enabled: bool
     login_agreement_enabled: bool
     login_agreement_text: str
     service_terms_enabled: bool
     service_terms_text: str
+    market_submissions_enabled: bool
+    market_comments_enabled: bool
+    market_likes_enabled: bool
+    plugin_auto_approve_enabled: bool
+    max_plugin_tags: int
+    email_provider: str
+    smtp_host: str
+    smtp_port: int
+    smtp_username: str
+    smtp_password: str
+    smtp_from: str
+    smtp_ssl: bool
+    cloudflare_email_account_id: str
+    cloudflare_email_api_token: str
+    cloudflare_email_from: str
+    email_daily_limit: int
+    email_verification_daily_limit_per_user: int
     core_admin_username: str
     core_admin_password_hash: str
     database_url: str
@@ -65,7 +90,7 @@ class Settings:
             missing.append("redis_url")
         return tuple(missing)
 
-    def with_updates(self, **changes: str) -> "Settings":
+    def with_updates(self, **changes: object) -> "Settings":
         return replace(self, **changes)
 
 
@@ -92,12 +117,35 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         github_admin_org=merged.get("GITHUB_ADMIN_ORG", ""),
         site_name=merged.get("SITE_NAME", DEFAULT_SITE_NAME),
         site_icon_url=merged.get("SITE_ICON_URL", DEFAULT_SITE_ICON_URL),
+        site_subtitle=merged.get("SITE_SUBTITLE", DEFAULT_SITE_SUBTITLE),
+        site_description=merged.get("SITE_DESCRIPTION", DEFAULT_SITE_DESCRIPTION),
+        site_contact_email=merged.get("SITE_CONTACT_EMAIL", ""),
+        site_docs_url=merged.get("SITE_DOCS_URL", DEFAULT_SITE_DOCS_URL),
         github_login_enabled=_bool(merged.get("GITHUB_LOGIN_ENABLED")),
         public_login_enabled=_bool(merged.get("PUBLIC_LOGIN_ENABLED"), default=True),
         login_agreement_enabled=_bool(merged.get("LOGIN_AGREEMENT_ENABLED")),
         login_agreement_text=merged.get("LOGIN_AGREEMENT_TEXT", DEFAULT_LOGIN_AGREEMENT_TEXT),
         service_terms_enabled=_bool(merged.get("SERVICE_TERMS_ENABLED")),
         service_terms_text=merged.get("SERVICE_TERMS_TEXT", DEFAULT_SERVICE_TERMS_TEXT),
+        market_submissions_enabled=_bool(merged.get("MARKET_SUBMISSIONS_ENABLED"), default=True),
+        market_comments_enabled=_bool(merged.get("MARKET_COMMENTS_ENABLED"), default=True),
+        market_likes_enabled=_bool(merged.get("MARKET_LIKES_ENABLED"), default=True),
+        plugin_auto_approve_enabled=_bool(merged.get("PLUGIN_AUTO_APPROVE_ENABLED")),
+        max_plugin_tags=max(0, _int(merged.get("MAX_PLUGIN_TAGS"), 8)),
+        email_provider=_email_provider(merged.get("EMAIL_PROVIDER", DEFAULT_EMAIL_PROVIDER)),
+        smtp_host=merged.get("SMTP_HOST", ""),
+        smtp_port=_int(merged.get("SMTP_PORT"), 587),
+        smtp_username=merged.get("SMTP_USERNAME", ""),
+        smtp_password=merged.get("SMTP_PASSWORD", ""),
+        smtp_from=merged.get("SMTP_FROM", ""),
+        smtp_ssl=_bool(merged.get("SMTP_SSL")),
+        cloudflare_email_account_id=merged.get("CLOUDFLARE_EMAIL_ACCOUNT_ID", ""),
+        cloudflare_email_api_token=merged.get("CLOUDFLARE_EMAIL_API_TOKEN", ""),
+        cloudflare_email_from=merged.get("CLOUDFLARE_EMAIL_FROM", ""),
+        email_daily_limit=max(0, _int(merged.get("EMAIL_DAILY_LIMIT"), 0)),
+        email_verification_daily_limit_per_user=max(
+            0, _int(merged.get("EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER"), 5)
+        ),
         core_admin_username=merged.get("CORE_ADMIN_USERNAME", ""),
         core_admin_password_hash=merged.get("CORE_ADMIN_PASSWORD_HASH", ""),
         database_url=merged.get("DATABASE_URL", ""),
@@ -151,3 +199,8 @@ def _int(value: str | None, default: int) -> int:
         return int(value or default)
     except ValueError:
         return default
+
+
+def _email_provider(value: str) -> str:
+    provider = str(value or "").strip().lower()
+    return provider if provider in {"disabled", "smtp", "cloudflare"} else DEFAULT_EMAIL_PROVIDER

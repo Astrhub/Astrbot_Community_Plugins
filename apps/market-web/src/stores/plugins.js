@@ -6,6 +6,10 @@ const BASE_URL = normalizeBaseUrl(import.meta.env.VITE_BASE_URL) || window.locat
 const DEFAULT_SITE_CONFIG = Object.freeze({
   name: 'AstrBot Community Plugins',
   icon_url: '/logo.webp',
+  subtitle: '全新社区插件市场',
+  description: '发现、评价和提交 AstrBot 插件。',
+  contact_email: '',
+  docs_url: 'https://docs.astrbot.app/dev/star/plugin.html',
   auth: {
     github_login_enabled: false,
     public_login_enabled: true,
@@ -14,19 +18,61 @@ const DEFAULT_SITE_CONFIG = Object.freeze({
     service_terms_enabled: false,
     service_terms_text: '',
     terms_revision: ''
+  },
+  market: {
+    submissions_enabled: true,
+    comments_enabled: true,
+    likes_enabled: true,
+    max_plugin_tags: 8
   }
 })
 
 const createDefaultSetupConfig = () => ({
   site: {
     name: DEFAULT_SITE_CONFIG.name,
-    icon_url: DEFAULT_SITE_CONFIG.icon_url
+    icon_url: DEFAULT_SITE_CONFIG.icon_url,
+    subtitle: DEFAULT_SITE_CONFIG.subtitle,
+    description: DEFAULT_SITE_CONFIG.description,
+    contact_email: DEFAULT_SITE_CONFIG.contact_email,
+    docs_url: DEFAULT_SITE_CONFIG.docs_url
   },
   admin: {
     username: 'admin',
     password: ''
   },
   auth: { ...DEFAULT_SITE_CONFIG.auth },
+  github: {
+    client_id: '',
+    client_secret: '',
+    callback_url: `${BASE_URL}/v1/auth/github/callback`,
+    scope: 'read:user user:email read:org',
+    admin_org: ''
+  },
+  market: {
+    submissions_enabled: true,
+    comments_enabled: true,
+    likes_enabled: true,
+    plugin_auto_approve_enabled: false,
+    max_plugin_tags: 8
+  },
+  email: {
+    provider: 'disabled',
+    smtp: {
+      host: '',
+      port: 587,
+      username: '',
+      password: '',
+      from_address: '',
+      ssl: false
+    },
+    cloudflare: {
+      account_id: '',
+      api_token: '',
+      from_address: ''
+    },
+    daily_limit: 0,
+    verification_daily_limit_per_user: 5
+  },
   postgres: {
     host: '127.0.0.1',
     port: 5432,
@@ -115,7 +161,12 @@ export const usePluginStore = defineStore('plugins', () => {
       name: String(value.name || DEFAULT_SITE_CONFIG.name).trim() || DEFAULT_SITE_CONFIG.name,
       icon_url: String(value.icon_url || DEFAULT_SITE_CONFIG.icon_url).trim() ||
         DEFAULT_SITE_CONFIG.icon_url,
-      auth: { ...DEFAULT_SITE_CONFIG.auth, ...(value.auth || {}) }
+      subtitle: String(value.subtitle ?? DEFAULT_SITE_CONFIG.subtitle).trim(),
+      description: String(value.description ?? DEFAULT_SITE_CONFIG.description).trim(),
+      contact_email: String(value.contact_email || '').trim(),
+      docs_url: String(value.docs_url ?? DEFAULT_SITE_CONFIG.docs_url).trim(),
+      auth: { ...DEFAULT_SITE_CONFIG.auth, ...(value.auth || {}) },
+      market: { ...DEFAULT_SITE_CONFIG.market, ...(value.market || {}) }
     }
   }
 
@@ -267,6 +318,14 @@ export const usePluginStore = defineStore('plugins', () => {
       site: normalizeSiteConfig(value.site || site),
       admin: { ...defaults.admin, ...(value.admin || {}) },
       auth: { ...defaults.auth, ...(value.auth || {}) },
+      github: { ...defaults.github, ...(value.github || {}) },
+      market: { ...defaults.market, ...(value.market || {}) },
+      email: {
+        ...defaults.email,
+        ...(value.email || {}),
+        smtp: { ...defaults.email.smtp, ...(value.email?.smtp || {}) },
+        cloudflare: { ...defaults.email.cloudflare, ...(value.email?.cloudflare || {}) }
+      },
       postgres: { ...defaults.postgres, ...(value.postgres || {}) },
       redis: { ...defaults.redis, ...(value.redis || {}) }
     }
@@ -281,6 +340,47 @@ export const usePluginStore = defineStore('plugins', () => {
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '保存失败')
     await loadSetupStatus()
+    return data
+  }
+
+  async function loadSystemSettings() {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/settings`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载设置失败')
+    return mergeSetupConfig(data, data.site)
+  }
+
+  async function saveSystemSettings(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/settings`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '保存设置失败')
+    if (data.settings?.site) {
+      applySiteConfig({
+        ...data.settings.site,
+        auth: data.settings.auth,
+        market: data.settings.market
+      })
+    }
+    return data
+  }
+
+  async function sendTestEmail(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/settings/email/test`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '测试邮件发送失败')
     return data
   }
 
@@ -389,6 +489,9 @@ export const usePluginStore = defineStore('plugins', () => {
     loginWithGithub,
     loginWithPassword,
     saveSetupConfig,
+    loadSystemSettings,
+    saveSystemSettings,
+    sendTestEmail,
     submitPlugin,
     setSearchQuery,
     setSelectedTag,

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import html
 import inspect
 import json
 import re
+import smtplib
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
@@ -42,12 +46,19 @@ from .schemas import (
     PluginSubmission,
     RoleUpdatePayload,
     SetupConfig,
+    SystemSettingsPayload,
+    TestEmailPayload,
 )
 from .store import InMemoryMarketStore
 from .store import PgRedisMarketStore
 
 GITHUB_REPO_PATTERN = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/?$")
 PLUGIN_NAME_PATTERN = re.compile(r"^astrbot_plugin_[a-z0-9_-]+$", re.IGNORECASE)
+EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+MASKED_SECRET = "********"
+CLOUDFLARE_EMAIL_SEND_ENDPOINT = (
+    "https://api.cloudflare.com/client/v4/accounts/{account_id}/email/sending/send"
+)
 MARKET_WEB_DIST = Path(__file__).resolve().parents[3] / "apps" / "market-web" / "dist"
 DEFAULT_POSTGRES_CONFIG = {
     "host": "127.0.0.1",
@@ -87,6 +98,7 @@ def create_app(
     )
     app.state.settings = settings or load_settings()
     app.state.store = store or create_store(app.state.settings)
+    app.state.email_daily_counter = {"date": "", "count": 0}
 
     app.add_middleware(
         CORSMiddleware,
@@ -169,7 +181,56 @@ def register_routes(app: FastAPI) -> None:
         return {
             **get_site_config(settings),
             "auth": get_public_auth_config(settings),
+            "market": get_public_market_config(settings),
         }
+
+    @app.get("/v1/admin/settings")
+    async def admin_settings(request: Request) -> dict[str, Any]:
+        user = await require_user(request)
+        if not is_core_admin(user):
+            raise error(403, "Only core admin can manage system settings")
+        settings = get_settings(request)
+        runtime_config = read_runtime_config(settings.runtime_config_path)
+        return build_system_settings(settings, runtime_config, include_secrets=False)
+
+    @app.put("/v1/admin/settings")
+    async def update_admin_settings(
+        request: Request,
+        payload: SystemSettingsPayload,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        if not is_core_admin(user):
+            raise error(403, "Only core admin can manage system settings")
+        settings = get_settings(request)
+        runtime_config = read_runtime_config(settings.runtime_config_path)
+        validate_system_settings_payload(payload, runtime_config, settings)
+        write_runtime_config(
+            settings.runtime_config_path,
+            runtime_values_from_system_settings(payload, runtime_config),
+        )
+        updated_runtime_config = read_runtime_config(settings.runtime_config_path)
+        updated = build_system_settings(settings, updated_runtime_config, include_secrets=False)
+        request.app.state.settings = settings_from_system_settings(
+            settings,
+            payload,
+            runtime_config,
+        )
+        return {
+            "saved": True,
+            "restart_required": settings_restart_required(settings, updated_runtime_config),
+            "settings": updated,
+        }
+
+    @app.post("/v1/admin/settings/email/test")
+    async def send_test_email(request: Request, payload: TestEmailPayload) -> dict[str, bool]:
+        user = await require_user(request)
+        if not is_core_admin(user):
+            raise error(403, "Only core admin can test email settings")
+        if not is_valid_email(payload.to):
+            raise error(400, "Invalid recipient email")
+        settings = get_settings(request)
+        await send_email(request.app, settings, payload.to, payload.subject, payload.body)
+        return {"sent": True}
 
     @app.get("/v1/setup/status")
     async def setup_status(request: Request) -> dict[str, Any]:
@@ -188,12 +249,7 @@ def register_routes(app: FastAPI) -> None:
             "redis_configured": bool(settings.redis_url or runtime_redis_url),
             "site": saved_setup["site"],
             "saved_setup": public_setup,
-            "restart_required": bool(runtime_database_url or runtime_redis_url)
-            and (
-                runtime_database_url != settings.database_url
-                or runtime_redis_url != settings.redis_url
-                or saved_setup["site"] != get_site_config(settings)
-            ),
+            "restart_required": settings_restart_required(settings, runtime_config),
         }
 
     @app.post("/v1/setup")
@@ -228,12 +284,23 @@ def register_routes(app: FastAPI) -> None:
                 "REDIS_URL": redis_url,
                 "SITE_ICON_URL": payload.site.icon_url,
                 "SITE_NAME": payload.site.name,
+                "SITE_SUBTITLE": payload.site.subtitle,
+                "SITE_DESCRIPTION": payload.site.description,
+                "SITE_CONTACT_EMAIL": payload.site.contact_email,
+                "SITE_DOCS_URL": payload.site.docs_url,
+                "GITHUB_ADMIN_ORG": payload.github.admin_org,
+                "GITHUB_CALLBACK_URL": payload.github.callback_url,
+                "GITHUB_CLIENT_ID": payload.github.client_id,
+                "GITHUB_CLIENT_SECRET": payload.github.client_secret,
+                "GITHUB_SCOPE": payload.github.scope,
                 "GITHUB_LOGIN_ENABLED": serialize_bool(payload.auth.github_login_enabled),
                 "LOGIN_AGREEMENT_ENABLED": serialize_bool(payload.auth.login_agreement_enabled),
                 "LOGIN_AGREEMENT_TEXT": payload.auth.login_agreement_text,
                 "PUBLIC_LOGIN_ENABLED": serialize_bool(payload.auth.public_login_enabled),
                 "SERVICE_TERMS_ENABLED": serialize_bool(payload.auth.service_terms_enabled),
                 "SERVICE_TERMS_TEXT": payload.auth.service_terms_text,
+                **runtime_values_from_market_settings(payload.market),
+                **runtime_values_from_email_settings(payload.email, {}),
             },
         )
         await call_store(
@@ -402,10 +469,19 @@ def register_routes(app: FastAPI) -> None:
     @app.post("/v1/plugins/submissions", status_code=201)
     async def submit_plugin(request: Request, payload: PluginSubmission) -> dict[str, Any]:
         user = await require_user(request)
+        settings = get_settings(request)
+        if not settings.market_submissions_enabled:
+            raise error(403, "Plugin submissions are closed")
         data = payload.model_dump()
-        validate_plugin_submission(data)
+        validate_plugin_submission(data, settings)
         validate_repo_owner(data["repo"], user)
-        return await call_store(request, "submit_plugin", user, data)
+        plugin = await call_store(request, "submit_plugin", user, data)
+        if settings.plugin_auto_approve_enabled:
+            listed = await call_store(
+                request, "update_plugin_status", plugin["id"], "listed", user["id"]
+            )
+            return listed or plugin
+        return plugin
 
     @app.get("/v1/plugins/{plugin_id}")
     async def plugin_detail(request: Request, plugin_id: str) -> dict[str, Any]:
@@ -426,6 +502,8 @@ def register_routes(app: FastAPI) -> None:
         if "repo" in patch:
             validate_github_repo(patch["repo"])
             validate_repo_owner(patch["repo"], user)
+        if "tags" in patch:
+            validate_plugin_tag_count(patch.get("tags") or [], get_settings(request))
         updated = await call_store(
             request,
             "update_plugin_metadata",
@@ -440,6 +518,8 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/plugins/{plugin_id}/like")
     async def like_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
+        if not get_settings(request).market_likes_enabled:
+            raise error(403, "Plugin likes are closed")
         plugin = await get_plugin_or_404(request, plugin_id)
         return (
             await call_store(
@@ -450,6 +530,8 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/plugins/{plugin_id}/unlike")
     async def unlike_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
+        if not get_settings(request).market_likes_enabled:
+            raise error(403, "Plugin likes are closed")
         plugin = await get_plugin_or_404(request, plugin_id)
         return (
             await call_store(
@@ -465,6 +547,8 @@ def register_routes(app: FastAPI) -> None:
     async def add_comment(
         request: Request, plugin_id: str, payload: CommentCreate
     ) -> dict[str, Any]:
+        if not get_settings(request).market_comments_enabled:
+            raise error(403, "Plugin comments are closed")
         user = await require_user(request)
         await get_plugin_or_404(request, plugin_id)
         if not payload.body:
@@ -684,12 +768,18 @@ async def get_plugin_or_404(request: Request, plugin_id: str) -> dict[str, Any]:
     return plugin
 
 
-def validate_plugin_submission(payload: dict[str, Any]) -> None:
+def validate_plugin_submission(payload: dict[str, Any], settings: Settings | None = None) -> None:
     for field in ("name", "repo", "desc", "author"):
         if not payload.get(field):
             raise error(400, "Missing required plugin fields")
     validate_plugin_name(payload["name"])
     validate_github_repo(payload["repo"])
+    validate_plugin_tag_count(payload.get("tags") or [], settings)
+
+
+def validate_plugin_tag_count(tags: list[str], settings: Settings | None = None) -> None:
+    if settings and settings.max_plugin_tags and len(tags) > settings.max_plugin_tags:
+        raise error(400, f"Plugin can have at most {settings.max_plugin_tags} tags")
 
 
 def validate_plugin_name(name: str) -> None:
@@ -725,16 +815,74 @@ def validate_setup_payload(payload: SetupConfig) -> None:
         raise error(400, "Site icon URL is required")
     if not is_valid_site_icon_url(payload.site.icon_url):
         raise error(400, "Site icon URL must be an absolute URL or root-relative path")
+    validate_system_settings_payload(
+        SystemSettingsPayload(
+            site=payload.site,
+            auth=payload.auth,
+            github=payload.github,
+            market=payload.market,
+            email=payload.email,
+        ),
+        {},
+    )
+
+
+def validate_system_settings_payload(
+    payload: SystemSettingsPayload,
+    runtime_config: dict[str, str],
+    settings: Settings | None = None,
+) -> None:
+    if not payload.site.name:
+        raise error(400, "Site name is required")
+    if not payload.site.icon_url or not is_valid_site_icon_url(payload.site.icon_url):
+        raise error(400, "Site icon URL must be an absolute URL or root-relative path")
+    if payload.site.docs_url and not is_valid_public_url(payload.site.docs_url):
+        raise error(400, "Documentation URL must be http(s)")
+    if payload.site.contact_email and not is_valid_email(payload.site.contact_email):
+        raise error(400, "Contact email is invalid")
     if payload.auth.login_agreement_enabled and not payload.auth.login_agreement_text:
         raise error(400, "Login agreement text is required when enabled")
     if payload.auth.service_terms_enabled and not payload.auth.service_terms_text:
         raise error(400, "Service terms text is required when enabled")
+    if payload.auth.github_login_enabled:
+        if not payload.github.client_id:
+            raise error(400, "GitHub OAuth client ID is required when GitHub login is enabled")
+        existing_github_secret = runtime_config.get("GITHUB_CLIENT_SECRET") or (
+            settings.github_client_secret if settings else ""
+        )
+        if not has_secret_value(payload.github.client_secret, existing_github_secret):
+            raise error(400, "GitHub OAuth client secret is required when GitHub login is enabled")
+        if not payload.github.callback_url or not is_valid_public_url(payload.github.callback_url):
+            raise error(400, "GitHub callback URL must be http(s)")
+    if payload.email.provider == "smtp":
+        if not payload.email.smtp.host:
+            raise error(400, "SMTP host is required when SMTP email is enabled")
+        if not payload.email.smtp.from_address or not is_valid_email(
+            payload.email.smtp.from_address
+        ):
+            raise error(400, "SMTP from address is invalid")
+    if payload.email.provider == "cloudflare":
+        if not payload.email.cloudflare.account_id:
+            raise error(400, "Cloudflare account ID is required")
+        existing_cloudflare_token = runtime_config.get("CLOUDFLARE_EMAIL_API_TOKEN") or (
+            settings.cloudflare_email_api_token if settings else ""
+        )
+        if not has_secret_value(payload.email.cloudflare.api_token, existing_cloudflare_token):
+            raise error(400, "Cloudflare API token is required")
+        if not payload.email.cloudflare.from_address or not is_valid_email(
+            payload.email.cloudflare.from_address
+        ):
+            raise error(400, "Cloudflare from address is invalid")
 
 
 def get_site_config(settings: Settings) -> dict[str, str]:
     return {
         "name": settings.site_name,
         "icon_url": settings.site_icon_url,
+        "subtitle": settings.site_subtitle,
+        "description": settings.site_description,
+        "contact_email": settings.site_contact_email,
+        "docs_url": settings.site_docs_url,
     }
 
 
@@ -747,6 +895,15 @@ def get_public_auth_config(settings: Settings) -> dict[str, Any]:
         "service_terms_enabled": settings.service_terms_enabled,
         "service_terms_text": settings.service_terms_text,
         "terms_revision": digest_terms(settings),
+    }
+
+
+def get_public_market_config(settings: Settings) -> dict[str, Any]:
+    return {
+        "submissions_enabled": settings.market_submissions_enabled,
+        "comments_enabled": settings.market_comments_enabled,
+        "likes_enabled": settings.market_likes_enabled,
+        "max_plugin_tags": settings.max_plugin_tags,
     }
 
 
@@ -768,37 +925,11 @@ def build_saved_setup_config(
 ) -> dict[str, Any]:
     database_url = runtime_config.get("DATABASE_URL") or settings.database_url
     redis_url = runtime_config.get("REDIS_URL") or settings.redis_url
+    system_settings = build_system_settings(settings, runtime_config, include_secrets=False)
     return {
         "postgres": build_saved_postgres_config(runtime_config, database_url),
         "redis": build_saved_redis_config(runtime_config, redis_url),
-        "site": {
-            "name": runtime_config.get("SITE_NAME", settings.site_name),
-            "icon_url": runtime_config.get("SITE_ICON_URL", settings.site_icon_url),
-        },
-        "auth": {
-            "github_login_enabled": parse_bool(
-                runtime_config.get("GITHUB_LOGIN_ENABLED"), settings.github_login_enabled
-            ),
-            "public_login_enabled": parse_bool(
-                runtime_config.get("PUBLIC_LOGIN_ENABLED"), settings.public_login_enabled
-            ),
-            "login_agreement_enabled": parse_bool(
-                runtime_config.get("LOGIN_AGREEMENT_ENABLED"),
-                settings.login_agreement_enabled,
-            ),
-            "login_agreement_text": runtime_config.get(
-                "LOGIN_AGREEMENT_TEXT",
-                settings.login_agreement_text,
-            ),
-            "service_terms_enabled": parse_bool(
-                runtime_config.get("SERVICE_TERMS_ENABLED"),
-                settings.service_terms_enabled,
-            ),
-            "service_terms_text": runtime_config.get(
-                "SERVICE_TERMS_TEXT",
-                settings.service_terms_text,
-            ),
-        },
+        **system_settings,
     }
 
 
@@ -808,8 +939,284 @@ def redact_setup_infrastructure(config: dict[str, Any]) -> dict[str, Any]:
         "redis": {**DEFAULT_REDIS_CONFIG},
         "site": {**config["site"]},
         "auth": {**config["auth"]},
+        "github": redact_github_settings(config.get("github", {})),
+        "market": {**config["market"]},
+        "email": redact_email_settings(config.get("email", {})),
     }
     return redacted
+
+
+def build_system_settings(
+    settings: Settings,
+    runtime_config: dict[str, str],
+    *,
+    include_secrets: bool,
+) -> dict[str, Any]:
+    config = {
+        "site": build_site_settings(settings, runtime_config),
+        "auth": build_auth_settings(settings, runtime_config),
+        "github": build_github_settings(settings, runtime_config),
+        "market": build_market_settings(settings, runtime_config),
+        "email": build_email_settings(settings, runtime_config),
+    }
+    if include_secrets:
+        return config
+    config["github"] = redact_github_settings(config["github"])
+    config["email"] = redact_email_settings(config["email"])
+    return config
+
+
+def build_site_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, str]:
+    return {
+        "name": runtime_config.get("SITE_NAME", settings.site_name),
+        "icon_url": runtime_config.get("SITE_ICON_URL", settings.site_icon_url),
+        "subtitle": runtime_config.get("SITE_SUBTITLE", settings.site_subtitle),
+        "description": runtime_config.get("SITE_DESCRIPTION", settings.site_description),
+        "contact_email": runtime_config.get("SITE_CONTACT_EMAIL", settings.site_contact_email),
+        "docs_url": runtime_config.get("SITE_DOCS_URL", settings.site_docs_url),
+    }
+
+
+def build_auth_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, Any]:
+    return {
+        "github_login_enabled": parse_bool(
+            runtime_config.get("GITHUB_LOGIN_ENABLED"), settings.github_login_enabled
+        ),
+        "public_login_enabled": parse_bool(
+            runtime_config.get("PUBLIC_LOGIN_ENABLED"), settings.public_login_enabled
+        ),
+        "login_agreement_enabled": parse_bool(
+            runtime_config.get("LOGIN_AGREEMENT_ENABLED"),
+            settings.login_agreement_enabled,
+        ),
+        "login_agreement_text": runtime_config.get(
+            "LOGIN_AGREEMENT_TEXT",
+            settings.login_agreement_text,
+        ),
+        "service_terms_enabled": parse_bool(
+            runtime_config.get("SERVICE_TERMS_ENABLED"),
+            settings.service_terms_enabled,
+        ),
+        "service_terms_text": runtime_config.get(
+            "SERVICE_TERMS_TEXT",
+            settings.service_terms_text,
+        ),
+    }
+
+
+def build_github_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, str]:
+    return {
+        "client_id": runtime_config.get("GITHUB_CLIENT_ID", settings.github_client_id),
+        "client_secret": runtime_config.get("GITHUB_CLIENT_SECRET", settings.github_client_secret),
+        "callback_url": runtime_config.get("GITHUB_CALLBACK_URL", settings.github_callback_url),
+        "scope": runtime_config.get("GITHUB_SCOPE", settings.github_scope),
+        "admin_org": runtime_config.get("GITHUB_ADMIN_ORG", settings.github_admin_org),
+    }
+
+
+def build_market_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, Any]:
+    return {
+        "submissions_enabled": parse_bool(
+            runtime_config.get("MARKET_SUBMISSIONS_ENABLED"),
+            settings.market_submissions_enabled,
+        ),
+        "comments_enabled": parse_bool(
+            runtime_config.get("MARKET_COMMENTS_ENABLED"),
+            settings.market_comments_enabled,
+        ),
+        "likes_enabled": parse_bool(
+            runtime_config.get("MARKET_LIKES_ENABLED"),
+            settings.market_likes_enabled,
+        ),
+        "plugin_auto_approve_enabled": parse_bool(
+            runtime_config.get("PLUGIN_AUTO_APPROVE_ENABLED"),
+            settings.plugin_auto_approve_enabled,
+        ),
+        "max_plugin_tags": parse_int(
+            runtime_config.get("MAX_PLUGIN_TAGS"),
+            settings.max_plugin_tags,
+        ),
+    }
+
+
+def build_email_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, Any]:
+    return {
+        "provider": normalize_email_provider(
+            runtime_config.get("EMAIL_PROVIDER", settings.email_provider)
+        ),
+        "smtp": {
+            "host": runtime_config.get("SMTP_HOST", settings.smtp_host),
+            "port": parse_int(runtime_config.get("SMTP_PORT"), settings.smtp_port),
+            "username": runtime_config.get("SMTP_USERNAME", settings.smtp_username),
+            "password": runtime_config.get("SMTP_PASSWORD", settings.smtp_password),
+            "from_address": runtime_config.get("SMTP_FROM", settings.smtp_from),
+            "ssl": parse_bool(runtime_config.get("SMTP_SSL"), settings.smtp_ssl),
+        },
+        "cloudflare": {
+            "account_id": runtime_config.get(
+                "CLOUDFLARE_EMAIL_ACCOUNT_ID", settings.cloudflare_email_account_id
+            ),
+            "api_token": runtime_config.get(
+                "CLOUDFLARE_EMAIL_API_TOKEN", settings.cloudflare_email_api_token
+            ),
+            "from_address": runtime_config.get(
+                "CLOUDFLARE_EMAIL_FROM", settings.cloudflare_email_from
+            ),
+        },
+        "daily_limit": parse_int(
+            runtime_config.get("EMAIL_DAILY_LIMIT"), settings.email_daily_limit
+        ),
+        "verification_daily_limit_per_user": parse_int(
+            runtime_config.get("EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER"),
+            settings.email_verification_daily_limit_per_user,
+        ),
+    }
+
+
+def redact_github_settings(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **config,
+        "client_secret": MASKED_SECRET if config.get("client_secret") else "",
+        "client_secret_configured": bool(config.get("client_secret")),
+    }
+
+
+def redact_email_settings(config: dict[str, Any]) -> dict[str, Any]:
+    smtp = {**config.get("smtp", {})}
+    cloudflare = {**config.get("cloudflare", {})}
+    smtp["password_configured"] = bool(smtp.get("password"))
+    smtp["password"] = MASKED_SECRET if smtp.get("password") else ""
+    cloudflare["api_token_configured"] = bool(cloudflare.get("api_token"))
+    cloudflare["api_token"] = MASKED_SECRET if cloudflare.get("api_token") else ""
+    return {**config, "smtp": smtp, "cloudflare": cloudflare}
+
+
+def runtime_values_from_system_settings(
+    payload: SystemSettingsPayload,
+    runtime_config: dict[str, str],
+) -> dict[str, str]:
+    values = {
+        "SITE_CONTACT_EMAIL": payload.site.contact_email,
+        "SITE_DESCRIPTION": payload.site.description,
+        "SITE_DOCS_URL": payload.site.docs_url,
+        "SITE_ICON_URL": payload.site.icon_url,
+        "SITE_NAME": payload.site.name,
+        "SITE_SUBTITLE": payload.site.subtitle,
+        "GITHUB_LOGIN_ENABLED": serialize_bool(payload.auth.github_login_enabled),
+        "LOGIN_AGREEMENT_ENABLED": serialize_bool(payload.auth.login_agreement_enabled),
+        "LOGIN_AGREEMENT_TEXT": payload.auth.login_agreement_text,
+        "PUBLIC_LOGIN_ENABLED": serialize_bool(payload.auth.public_login_enabled),
+        "SERVICE_TERMS_ENABLED": serialize_bool(payload.auth.service_terms_enabled),
+        "SERVICE_TERMS_TEXT": payload.auth.service_terms_text,
+        "GITHUB_ADMIN_ORG": payload.github.admin_org,
+        "GITHUB_CALLBACK_URL": payload.github.callback_url,
+        "GITHUB_CLIENT_ID": payload.github.client_id,
+        "GITHUB_SCOPE": payload.github.scope,
+        **runtime_values_from_market_settings(payload.market),
+        **runtime_values_from_email_settings(payload.email, runtime_config),
+    }
+    if should_write_secret(payload.github.client_secret):
+        values["GITHUB_CLIENT_SECRET"] = payload.github.client_secret
+    elif "GITHUB_CLIENT_SECRET" in runtime_config:
+        values["GITHUB_CLIENT_SECRET"] = runtime_config["GITHUB_CLIENT_SECRET"]
+    return values
+
+
+def runtime_values_from_market_settings(payload: Any) -> dict[str, str]:
+    return {
+        "MARKET_COMMENTS_ENABLED": serialize_bool(payload.comments_enabled),
+        "MARKET_LIKES_ENABLED": serialize_bool(payload.likes_enabled),
+        "MARKET_SUBMISSIONS_ENABLED": serialize_bool(payload.submissions_enabled),
+        "MAX_PLUGIN_TAGS": str(payload.max_plugin_tags),
+        "PLUGIN_AUTO_APPROVE_ENABLED": serialize_bool(payload.plugin_auto_approve_enabled),
+    }
+
+
+def runtime_values_from_email_settings(
+    payload: Any,
+    runtime_config: dict[str, str],
+) -> dict[str, str]:
+    values = {
+        "CLOUDFLARE_EMAIL_ACCOUNT_ID": payload.cloudflare.account_id,
+        "CLOUDFLARE_EMAIL_FROM": payload.cloudflare.from_address,
+        "EMAIL_DAILY_LIMIT": str(payload.daily_limit),
+        "EMAIL_PROVIDER": payload.provider,
+        "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER": str(payload.verification_daily_limit_per_user),
+        "SMTP_FROM": payload.smtp.from_address,
+        "SMTP_HOST": payload.smtp.host,
+        "SMTP_PORT": str(payload.smtp.port),
+        "SMTP_SSL": serialize_bool(payload.smtp.ssl),
+        "SMTP_USERNAME": payload.smtp.username,
+    }
+    if should_write_secret(payload.smtp.password):
+        values["SMTP_PASSWORD"] = payload.smtp.password
+    elif "SMTP_PASSWORD" in runtime_config:
+        values["SMTP_PASSWORD"] = runtime_config["SMTP_PASSWORD"]
+    if should_write_secret(payload.cloudflare.api_token):
+        values["CLOUDFLARE_EMAIL_API_TOKEN"] = payload.cloudflare.api_token
+    elif "CLOUDFLARE_EMAIL_API_TOKEN" in runtime_config:
+        values["CLOUDFLARE_EMAIL_API_TOKEN"] = runtime_config["CLOUDFLARE_EMAIL_API_TOKEN"]
+    return values
+
+
+def settings_from_system_settings(
+    current: Settings,
+    payload: SystemSettingsPayload,
+    runtime_config: dict[str, str],
+) -> Settings:
+    return current.with_updates(
+        site_name=payload.site.name,
+        site_icon_url=payload.site.icon_url,
+        site_subtitle=payload.site.subtitle,
+        site_description=payload.site.description,
+        site_contact_email=payload.site.contact_email,
+        site_docs_url=payload.site.docs_url,
+        github_login_enabled=payload.auth.github_login_enabled,
+        public_login_enabled=payload.auth.public_login_enabled,
+        login_agreement_enabled=payload.auth.login_agreement_enabled,
+        login_agreement_text=payload.auth.login_agreement_text,
+        service_terms_enabled=payload.auth.service_terms_enabled,
+        service_terms_text=payload.auth.service_terms_text,
+        github_client_id=payload.github.client_id,
+        github_client_secret=preserve_secret(
+            payload.github.client_secret,
+            runtime_config.get("GITHUB_CLIENT_SECRET") or current.github_client_secret,
+        ),
+        github_callback_url=payload.github.callback_url,
+        github_scope=payload.github.scope,
+        github_admin_org=payload.github.admin_org,
+        market_submissions_enabled=payload.market.submissions_enabled,
+        market_comments_enabled=payload.market.comments_enabled,
+        market_likes_enabled=payload.market.likes_enabled,
+        plugin_auto_approve_enabled=payload.market.plugin_auto_approve_enabled,
+        max_plugin_tags=payload.market.max_plugin_tags,
+        email_provider=payload.email.provider,
+        smtp_host=payload.email.smtp.host,
+        smtp_port=payload.email.smtp.port,
+        smtp_username=payload.email.smtp.username,
+        smtp_password=preserve_secret(
+            payload.email.smtp.password,
+            runtime_config.get("SMTP_PASSWORD") or current.smtp_password,
+        ),
+        smtp_from=payload.email.smtp.from_address,
+        smtp_ssl=payload.email.smtp.ssl,
+        cloudflare_email_account_id=payload.email.cloudflare.account_id,
+        cloudflare_email_api_token=preserve_secret(
+            payload.email.cloudflare.api_token,
+            runtime_config.get("CLOUDFLARE_EMAIL_API_TOKEN") or current.cloudflare_email_api_token,
+        ),
+        cloudflare_email_from=payload.email.cloudflare.from_address,
+        email_daily_limit=payload.email.daily_limit,
+        email_verification_daily_limit_per_user=payload.email.verification_daily_limit_per_user,
+    )
+
+
+def settings_restart_required(settings: Settings, runtime_config: dict[str, str]) -> bool:
+    runtime_database_url = runtime_config.get("DATABASE_URL", "")
+    runtime_redis_url = runtime_config.get("REDIS_URL", "")
+    return bool(runtime_database_url or runtime_redis_url) and (
+        runtime_database_url != settings.database_url or runtime_redis_url != settings.redis_url
+    )
 
 
 def build_saved_postgres_config(
@@ -903,6 +1310,170 @@ def is_valid_site_icon_url(value: str) -> bool:
         return True
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def is_valid_public_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def is_valid_email(value: str) -> bool:
+    return bool(EMAIL_PATTERN.match(value or ""))
+
+
+def has_secret_value(incoming: str, existing: str | None) -> bool:
+    return should_write_secret(incoming) or bool(existing)
+
+
+def should_write_secret(value: str | None) -> bool:
+    return bool(value and value != MASKED_SECRET)
+
+
+def preserve_secret(incoming: str, existing: str) -> str:
+    return incoming if should_write_secret(incoming) else existing
+
+
+def normalize_email_provider(value: str) -> str:
+    provider = str(value or "").strip().lower()
+    return provider if provider in {"disabled", "smtp", "cloudflare"} else "disabled"
+
+
+async def send_email(
+    app: FastAPI,
+    settings: Settings,
+    receiver: str,
+    subject: str,
+    content: str,
+) -> None:
+    if settings.email_provider == "disabled":
+        raise error(400, "Email service is disabled")
+    check_email_daily_limit(app, settings)
+    if settings.email_provider == "cloudflare":
+        await send_email_via_cloudflare(settings, receiver, subject, content)
+    elif settings.email_provider == "smtp":
+        await send_email_via_smtp(settings, receiver, subject, content)
+    else:
+        raise error(400, "Unsupported email provider")
+    increment_email_daily_count(app, settings)
+
+
+def check_email_daily_limit(app: FastAPI, settings: Settings) -> None:
+    if settings.email_daily_limit <= 0:
+        return
+    today = datetime.now(UTC).strftime("%Y%m%d")
+    counter = getattr(app.state, "email_daily_counter", {"date": "", "count": 0})
+    if counter.get("date") != today:
+        counter = {"date": today, "count": 0}
+        app.state.email_daily_counter = counter
+    if int(counter.get("count", 0)) >= settings.email_daily_limit:
+        raise error(429, "Daily email limit exceeded")
+
+
+def increment_email_daily_count(app: FastAPI, settings: Settings) -> None:
+    if settings.email_daily_limit <= 0:
+        return
+    today = datetime.now(UTC).strftime("%Y%m%d")
+    counter = getattr(app.state, "email_daily_counter", {"date": today, "count": 0})
+    if counter.get("date") != today:
+        counter = {"date": today, "count": 0}
+    counter["count"] = int(counter.get("count", 0)) + 1
+    app.state.email_daily_counter = counter
+
+
+async def send_email_via_cloudflare(
+    settings: Settings,
+    receiver: str,
+    subject: str,
+    content: str,
+) -> None:
+    if not settings.cloudflare_email_account_id:
+        raise error(400, "Cloudflare account ID is not configured")
+    if not settings.cloudflare_email_api_token:
+        raise error(400, "Cloudflare API token is not configured")
+    if not settings.cloudflare_email_from:
+        raise error(400, "Cloudflare from address is not configured")
+    payload = {
+        "to": receiver,
+        "from": settings.cloudflare_email_from,
+        "subject": subject[:998],
+        "text": content,
+        "html": html.escape(content).replace("\n", "<br>"),
+    }
+    endpoint = CLOUDFLARE_EMAIL_SEND_ENDPOINT.format(
+        account_id=quote(settings.cloudflare_email_account_id, safe="")
+    )
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            endpoint,
+            headers={
+                "authorization": f"Bearer {settings.cloudflare_email_api_token}",
+                "content-type": "application/json",
+            },
+            json=payload,
+        )
+    data = response.json() if response.content else {}
+    if response.status_code == 429:
+        raise error(502, "Cloudflare email service is rate limited")
+    if response.status_code in {401, 403}:
+        raise error(502, "Cloudflare email authentication failed")
+    if response.status_code >= 500:
+        raise error(502, f"Cloudflare email service error: HTTP {response.status_code}")
+    if response.status_code >= 400 or not data.get("success", False):
+        raise error(502, cloudflare_email_error_message(data, response.status_code))
+    permanent_bounces = (data.get("result") or {}).get("permanent_bounces") or []
+    if permanent_bounces:
+        raise error(502, f"Cloudflare email permanently bounced: {permanent_bounces}")
+
+
+def cloudflare_email_error_message(data: dict[str, Any], status_code: int) -> str:
+    errors = data.get("errors") if isinstance(data, dict) else None
+    if isinstance(errors, list) and errors:
+        messages = [
+            f"[{item.get('code')}] {item.get('message')}"
+            for item in errors
+            if isinstance(item, dict)
+        ]
+        return "Cloudflare email API error: " + "; ".join(messages)
+    return f"Cloudflare email API error: HTTP {status_code}"
+
+
+async def send_email_via_smtp(
+    settings: Settings,
+    receiver: str,
+    subject: str,
+    content: str,
+) -> None:
+    if not settings.smtp_host:
+        raise error(400, "SMTP host is not configured")
+    if not settings.smtp_from:
+        raise error(400, "SMTP from address is not configured")
+    try:
+        await asyncio.to_thread(send_email_via_smtp_sync, settings, receiver, subject, content)
+    except smtplib.SMTPException as exc:
+        raise error(502, f"SMTP send failed: {exc}") from exc
+
+
+def send_email_via_smtp_sync(
+    settings: Settings,
+    receiver: str,
+    subject: str,
+    content: str,
+) -> None:
+    message = EmailMessage()
+    message["From"] = settings.smtp_from
+    message["To"] = receiver
+    message["Subject"] = subject
+    message.set_content(content)
+    if settings.smtp_ssl or settings.smtp_port == 465:
+        with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as client:
+            if settings.smtp_username:
+                client.login(settings.smtp_username, settings.smtp_password)
+            client.send_message(message)
+        return
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as client:
+        if settings.smtp_username:
+            client.login(settings.smtp_username, settings.smtp_password)
+        client.send_message(message)
 
 
 def serialize_bool(value: bool) -> str:
