@@ -9,7 +9,7 @@ const DEFAULT_SITE_CONFIG = Object.freeze({
   subtitle: '全新社区插件市场',
   description: '发现、评价和提交 AstrBot 插件。',
   contact_email: '',
-  docs_url: 'https://docs.astrbot.app/dev/star/plugin.html',
+  docs_url: 'https://docs.astrbot.app/dev/star/plugin-new.html',
   auth: {
     github_login_enabled: false,
     public_login_enabled: true,

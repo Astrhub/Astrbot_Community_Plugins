@@ -106,7 +106,7 @@ class SiteSetupConfig(BaseModel):
     subtitle: str = "全新社区插件市场"
     description: str = "发现、评价和提交 AstrBot 插件。"
     contact_email: str = ""
-    docs_url: str = "https://docs.astrbot.app/dev/star/plugin.html"
+    docs_url: str = "https://docs.astrbot.app/dev/star/plugin-new.html"
 
     @field_validator("name", "icon_url", "subtitle", "description", "contact_email", "docs_url")
     @classmethod
