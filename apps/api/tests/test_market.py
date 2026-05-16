@@ -34,15 +34,17 @@ def make_setup_client(tmp_path) -> TestClient:
         }
     )
     app = main_module.create_app(settings=settings, store=InMemoryMarketStore())
-    app.state.restart_enabled = False
     app.state.setup_initializer_calls = []
+
+    class FakeSetupStore(InMemoryMarketStore):
+        pass
 
     async def fake_setup_initializer(
         payload,
         database_url: str,
         redis_url: str,
         core_admin_password_hash: str,
-    ) -> None:
+    ) -> FakeSetupStore:
         app.state.setup_initializer_calls.append(
             {
                 "payload": payload,
@@ -51,6 +53,9 @@ def make_setup_client(tmp_path) -> TestClient:
                 "core_admin_password_hash": core_admin_password_hash,
             }
         )
+        store = FakeSetupStore()
+        store.create_internal_admin(payload.admin.username, core_admin_password_hash)
+        return store
 
     app.state.setup_initializer = fake_setup_initializer
     return TestClient(app)
@@ -331,8 +336,8 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     response = client.post("/v1/setup", json=setup_payload(site_name="AstrHub Plugins"))
 
     assert response.status_code == 200
-    assert response.json()["restart_required"] is True
-    assert response.json()["restart_scheduled"] is False
+    assert response.json()["restart_required"] is False
+    assert response.json()["activated"] is True
     assert len(client.app.state.setup_initializer_calls) == 1
     setup_call = client.app.state.setup_initializer_calls[0]
     assert (
@@ -361,7 +366,8 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     )
     assert login.status_code == 200
     assert login.json()["user"]["role"] == Role.CORE_ADMIN
-    assert client.get("/health").json()["setup"] == "required"
+    assert client.get("/health").json()["setup"] == "complete"
+    assert client.get("/v1/setup/status").json()["required"] is False
 
 
 def test_setup_initialization_failure_does_not_write_runtime_config(tmp_path) -> None:
@@ -401,7 +407,7 @@ def test_setup_initializer_creates_database_schema_and_internal_admin(monkeypatc
     monkeypatch.setattr(main_module, "PgRedisMarketStore", FakePgRedisMarketStore)
 
     payload = main_module.SetupConfig.model_validate(setup_payload())
-    asyncio.run(
+    store = asyncio.run(
         main_module.initialize_setup_infrastructure(
             payload,
             "postgresql://market:market@127.0.0.1:5432/market?sslmode=disable",
@@ -410,6 +416,7 @@ def test_setup_initializer_creates_database_schema_and_internal_admin(monkeypatc
         )
     )
 
+    assert isinstance(store, FakePgRedisMarketStore)
     assert calls == [
         ("ensure_database", "market"),
         (
@@ -420,8 +427,43 @@ def test_setup_initializer_creates_database_schema_and_internal_admin(monkeypatc
         ),
         "connect",
         ("admin", "admin", "hash"),
-        "close",
     ]
+
+
+def test_setup_activation_switches_store_without_process_restart(tmp_path) -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "RUNTIME_CONFIG_FILE": str(tmp_path / "runtime.env"),
+        }
+    )
+
+    class ClosableMemoryStore(InMemoryMarketStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    old_store = ClosableMemoryStore()
+    new_store = InMemoryMarketStore()
+    app = main_module.create_app(settings=settings, store=old_store)
+
+    async def fake_setup_initializer(payload, _database_url, _redis_url, password_hash):
+        new_store.create_internal_admin(payload.admin.username, password_hash)
+        return new_store
+
+    app.state.setup_initializer = fake_setup_initializer
+    client = TestClient(app)
+
+    response = client.post("/v1/setup", json=setup_payload())
+
+    assert response.status_code == 200
+    assert response.json()["activated"] is True
+    assert app.state.store is new_store
+    assert old_store.closed is True
+    assert client.get("/health").json()["setup"] == "complete"
 
 
 def test_setup_after_first_run_requires_core_admin(tmp_path) -> None:

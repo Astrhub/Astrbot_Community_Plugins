@@ -343,7 +343,7 @@ export const usePluginStore = defineStore('plugins', () => {
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '保存失败')
-    if (!data.restart_scheduled) await loadSetupStatus()
+    await loadSetupStatus()
     return data
   }
 

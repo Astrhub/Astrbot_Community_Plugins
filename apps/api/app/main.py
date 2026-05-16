@@ -5,9 +5,7 @@ import hashlib
 import html
 import inspect
 import json
-import os
 import re
-import signal
 import smtplib
 import uuid
 from collections.abc import AsyncIterator
@@ -20,7 +18,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import httpx
 import asyncpg
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
@@ -88,7 +86,6 @@ RESERVED_WEB_PATHS = {
     "redoc",
 }
 RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
-SETUP_RESTART_DELAY_SECONDS = 0.5
 POSTGRES_MAINTENANCE_DATABASE = "postgres"
 
 
@@ -104,7 +101,6 @@ def create_app(
     app.state.settings = settings or load_settings()
     app.state.store = store or create_store(app.state.settings)
     app.state.email_daily_counter = {"date": "", "count": 0}
-    app.state.restart_enabled = parse_bool(os.getenv("SETUP_AUTO_RESTART"), True)
 
     app.add_middleware(
         CORSMiddleware,
@@ -262,7 +258,6 @@ def register_routes(app: FastAPI) -> None:
     async def save_setup(
         request: Request,
         payload: SetupConfig,
-        background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
         settings = get_settings(request)
         runtime_config = read_runtime_config(settings.runtime_config_path)
@@ -275,49 +270,53 @@ def register_routes(app: FastAPI) -> None:
         redis_url = build_redis_url(payload.redis.model_dump())
         core_admin_password_hash = hash_password(payload.admin.password)
         initializer = getattr(
-            request.app.state, "setup_initializer", initialize_setup_infrastructure
+            request.app.state,
+            "setup_initializer",
+            initialize_setup_infrastructure,
         )
-        await resolve_optional_awaitable(
+        new_store = await resolve_optional_awaitable(
             initializer(payload, database_url, redis_url, core_admin_password_hash)
         )
-        write_runtime_config(
-            settings.runtime_config_path,
-            {
-                "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
-                "CORE_ADMIN_USERNAME": payload.admin.username,
-                "DATABASE_URL": database_url,
-                "POSTGRES_DATABASE": payload.postgres.database,
-                "POSTGRES_HOST": payload.postgres.host,
-                "POSTGRES_PASSWORD": payload.postgres.password,
-                "POSTGRES_PORT": str(payload.postgres.port),
-                "POSTGRES_SSL": serialize_bool(payload.postgres.ssl),
-                "POSTGRES_USER": payload.postgres.username,
-                "REDIS_DATABASE": str(payload.redis.database),
-                "REDIS_HOST": payload.redis.host,
-                "REDIS_PASSWORD": payload.redis.password,
-                "REDIS_PORT": str(payload.redis.port),
-                "REDIS_SSL": serialize_bool(payload.redis.ssl),
-                "REDIS_URL": redis_url,
-                "SITE_ICON_URL": payload.site.icon_url,
-                "SITE_NAME": payload.site.name,
-            },
+        try:
+            write_runtime_config(
+                settings.runtime_config_path,
+                {
+                    "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
+                    "CORE_ADMIN_USERNAME": payload.admin.username,
+                    "DATABASE_URL": database_url,
+                    "POSTGRES_DATABASE": payload.postgres.database,
+                    "POSTGRES_HOST": payload.postgres.host,
+                    "POSTGRES_PASSWORD": payload.postgres.password,
+                    "POSTGRES_PORT": str(payload.postgres.port),
+                    "POSTGRES_SSL": serialize_bool(payload.postgres.ssl),
+                    "POSTGRES_USER": payload.postgres.username,
+                    "REDIS_DATABASE": str(payload.redis.database),
+                    "REDIS_HOST": payload.redis.host,
+                    "REDIS_PASSWORD": payload.redis.password,
+                    "REDIS_PORT": str(payload.redis.port),
+                    "REDIS_SSL": serialize_bool(payload.redis.ssl),
+                    "REDIS_URL": redis_url,
+                    "SITE_ICON_URL": payload.site.icon_url,
+                    "SITE_NAME": payload.site.name,
+                },
+            )
+        except Exception:
+            await close_setup_store(new_store)
+            raise
+        request.app.state.settings = settings.with_updates(
+            core_admin_password_hash=core_admin_password_hash,
+            core_admin_username=payload.admin.username,
+            database_url=database_url,
+            redis_url=redis_url,
+            site_icon_url=payload.site.icon_url,
+            site_name=payload.site.name,
         )
-        await call_store(
-            request,
-            "create_internal_admin",
-            payload.admin.username,
-            core_admin_password_hash,
-        )
-        restart_scheduled = schedule_setup_restart(request.app, background_tasks)
+        await activate_setup_store(request.app, new_store)
         return {
             "saved": True,
-            "restart_required": True,
-            "restart_scheduled": restart_scheduled,
-            "message": (
-                "Configuration saved. The API process will restart automatically."
-                if restart_scheduled
-                else "Configuration saved. Restart the API process to use PostgreSQL and Redis."
-            ),
+            "restart_required": False,
+            "activated": True,
+            "message": "Configuration saved and PostgreSQL/Redis storage is active.",
         }
 
     @app.get("/v1/me")
@@ -827,30 +826,53 @@ async def initialize_setup_infrastructure(
     database_url: str,
     redis_url: str,
     core_admin_password_hash: str,
-) -> None:
+) -> PgRedisMarketStore:
     await ensure_postgres_database(payload.postgres.model_dump())
     store = PgRedisMarketStore(database_url, redis_url, session_ttl_seconds=60)
     try:
         await store.connect()
         await store.create_internal_admin(payload.admin.username, core_admin_password_hash)
+        return store
     except HTTPException:
+        await store.close()
         raise
     except asyncpg.PostgresError as exc:
+        await store.close()
         raise error(
             400,
             f"PostgreSQL schema initialization failed: {safe_exception_message(exc)}",
         ) from exc
     except OSError as exc:
+        await store.close()
         raise error(
             400, f"Infrastructure connection failed: {safe_exception_message(exc)}"
         ) from exc
     except Exception as exc:
+        await store.close()
         raise error(
             400,
             f"PostgreSQL or Redis initialization failed: {safe_exception_message(exc)}",
         ) from exc
-    finally:
-        await store.close()
+
+
+async def activate_setup_store(app: FastAPI, new_store: Any) -> None:
+    if not new_store:
+        await bootstrap_internal_core_admin(app)
+        return
+
+    old_store = app.state.store
+    app.state.store = new_store
+    if old_store is new_store:
+        return
+    close = getattr(old_store, "close", None)
+    if close:
+        await resolve_optional_awaitable(close())
+
+
+async def close_setup_store(store: Any) -> None:
+    close = getattr(store, "close", None)
+    if close:
+        await resolve_optional_awaitable(close())
 
 
 async def ensure_postgres_database(config: dict[str, Any]) -> None:
@@ -934,21 +956,6 @@ def quote_postgres_identifier(value: str) -> str:
 
 def safe_exception_message(exc: Exception) -> str:
     return str(exc).strip() or exc.__class__.__name__
-
-
-def schedule_setup_restart(app: FastAPI, background_tasks: BackgroundTasks) -> bool:
-    if not bool(getattr(app.state, "restart_enabled", True)):
-        return False
-    background_tasks.add_task(restart_process_after_delay)
-    return True
-
-
-async def restart_process_after_delay(delay: float = SETUP_RESTART_DELAY_SECONDS) -> None:
-    await asyncio.sleep(delay)
-    if os.name == "posix":
-        os.kill(os.getpid(), signal.SIGTERM)
-    else:
-        os._exit(0)
 
 
 def validate_system_settings_payload(

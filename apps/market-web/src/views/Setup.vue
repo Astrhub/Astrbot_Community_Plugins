@@ -22,25 +22,17 @@
           <template #header>
             <div class="card-title">
               <h2>安装向导</h2>
-              <n-tag v-if="restartScheduled" type="success" :bordered="false">重启中</n-tag>
+              <n-tag v-if="activated" type="success" :bordered="false">已启用</n-tag>
               <n-tag v-else-if="setupStatus.required" type="warning" :bordered="false">未完成</n-tag>
               <n-tag v-else type="success" :bordered="false">已完成</n-tag>
             </div>
           </template>
 
-          <n-alert v-if="restartScheduled" type="success" :bordered="false" class="setup-alert">
-            配置已保存，服务正在自动重启。页面会在服务恢复后进入市场。
+          <n-alert v-if="activated" type="success" :bordered="false" class="setup-alert">
+            配置已保存，PostgreSQL 和 Redis 已在当前服务中启用。
           </n-alert>
           <n-alert v-else type="info" :bordered="false" class="setup-alert">
             PostgreSQL 用于持久化市场数据，Redis 用于登录会话。保存前会验证连接并初始化数据表。
-          </n-alert>
-          <n-alert
-            v-if="!restartScheduled && setupStatus.restart_required"
-            type="warning"
-            :bordered="false"
-            class="setup-alert"
-          >
-            配置已保存。当前已关闭自动重启，请重启 API 服务后继续。
           </n-alert>
 
           <n-steps :current="activeStep + 1" class="setup-steps">
@@ -163,22 +155,22 @@
 
           <template #footer>
             <div class="actions">
-              <n-button tertiary :disabled="saving || restartScheduled" @click="reloadStatus">刷新状态</n-button>
+              <n-button tertiary :disabled="saving || activated" @click="reloadStatus">刷新状态</n-button>
               <div class="step-actions">
-                <n-button v-if="!isFirstStep" :disabled="saving || restartScheduled" @click="previousStep">
+                <n-button v-if="!isFirstStep" :disabled="saving || activated" @click="previousStep">
                   上一步
                 </n-button>
-                <n-button v-if="!isLastStep" type="primary" :disabled="restartScheduled" @click="nextStep">
+                <n-button v-if="!isLastStep" type="primary" :disabled="activated" @click="nextStep">
                   下一步
                 </n-button>
                 <n-button
                   v-else
                   type="primary"
                   :loading="saving"
-                  :disabled="restartScheduled"
+                  :disabled="activated"
                   @click="save"
                 >
-                  保存并重启
+                  保存并启用
                 </n-button>
               </div>
             </div>
@@ -190,7 +182,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   NAlert,
@@ -226,8 +218,7 @@ const steps = [
 
 const activeStep = ref(0)
 const saving = ref(false)
-const restartScheduled = ref(false)
-let restartPollTimer = 0
+const activated = ref(false)
 
 const formData = reactive({
   site: {
@@ -350,41 +341,18 @@ function previousStep() {
   activeStep.value = Math.max(0, activeStep.value - 1)
 }
 
-function stopRestartPolling() {
-  if (restartPollTimer) window.clearTimeout(restartPollTimer)
-  restartPollTimer = 0
-}
-
-function startRestartPolling() {
-  stopRestartPolling()
-  const poll = async () => {
-    try {
-      const status = await loadSetupStatus()
-      if (!status.required && !status.restart_required) {
-        window.location.assign('/')
-        return
-      }
-    } catch {
-      // The API is expected to be unavailable while the process restarts.
-    }
-    restartPollTimer = window.setTimeout(poll, 1500)
-  }
-  restartPollTimer = window.setTimeout(poll, 1000)
-}
-
 async function save() {
   if (!validateAll()) return
   saving.value = true
   try {
-    const result = await saveSetupConfig(setupPayload())
-    restartScheduled.value = Boolean(result.restart_scheduled)
-    if (restartScheduled.value) {
-      message.success('配置已保存，服务正在重启')
-      startRestartPolling()
-    } else {
-      message.success('配置已保存，请重启服务后继续')
-      await loadSetupStatus()
-    }
+    await saveSetupConfig(setupPayload())
+    activated.value = true
+    message.success('配置已保存并已启用')
+    await store.loadPlugins()
+    await store.loadCurrentUser()
+    window.setTimeout(() => {
+      window.location.assign('/')
+    }, 600)
   } catch (error) {
     message.error(error.message || '保存失败')
   } finally {
@@ -394,10 +362,6 @@ async function save() {
 
 onMounted(async () => {
   await reloadStatus()
-})
-
-onUnmounted(() => {
-  stopRestartPolling()
 })
 </script>
 
