@@ -85,7 +85,9 @@ class InMemoryMarketStore:
         )
 
     def list_public_plugins(self) -> list[dict[str, Any]]:
-        return [deepcopy(plugin) for plugin in self.state["plugins"] if plugin["status"] == "listed"]
+        return [
+            deepcopy(plugin) for plugin in self.state["plugins"] if plugin["status"] == "listed"
+        ]
 
     def list_users(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["users"])

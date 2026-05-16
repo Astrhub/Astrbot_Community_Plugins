@@ -49,10 +49,9 @@ def can_edit_plugin(user: Mapping | None, plugin: Mapping | None) -> bool:
         return False
     if is_admin(user):
         return True
-    return (
-        plugin.get("owner_user_id") == user.get("id")
-        or plugin.get("owner_github_login") == user.get("github_login")
-    )
+    return plugin.get("owner_user_id") == user.get("id") or plugin.get(
+        "owner_github_login"
+    ) == user.get("github_login")
 
 
 def can_manage_plugin_submission(user: Mapping | None, plugin: Mapping | None) -> bool:
@@ -61,7 +60,9 @@ def can_manage_plugin_submission(user: Mapping | None, plugin: Mapping | None) -
     return is_admin(user) or plugin.get("owner_user_id") == user.get("id")
 
 
-def authenticate_api_key(auth_header: str | None, api_keys: list[ApiKey | Mapping]) -> ApiKey | Mapping | None:
+def authenticate_api_key(
+    auth_header: str | None, api_keys: list[ApiKey | Mapping]
+) -> ApiKey | Mapping | None:
     token = _bearer_token(auth_header)
     if not token:
         return None

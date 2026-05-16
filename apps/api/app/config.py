@@ -63,7 +63,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     return Settings(
         host=merged.get("HOST", "127.0.0.1"),
         port=_int(merged.get("PORT"), 8787),
-        cors_origins=_list(merged.get("CORS_ORIGIN", "http://127.0.0.1:3000,http://localhost:3000")),
+        cors_origins=_list(
+            merged.get("CORS_ORIGIN", "http://127.0.0.1:3000,http://localhost:3000")
+        ),
         runtime_config_path=runtime_config_path,
         web_url=merged.get("WEB_URL", "http://127.0.0.1:8787"),
         github_client_id=merged.get("GITHUB_CLIENT_ID", ""),

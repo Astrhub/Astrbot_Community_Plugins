@@ -153,9 +153,10 @@ def test_first_run_setup_can_save_database_and_redis_urls(tmp_path) -> None:
 
     assert response.status_code == 200
     assert response.json()["restart_required"] is True
-    assert "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market" in (
-        tmp_path / "runtime.env"
-    ).read_text()
+    assert (
+        "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market"
+        in (tmp_path / "runtime.env").read_text()
+    )
     assert client.get("/health").json()["setup"] == "required"
 
 
@@ -252,7 +253,10 @@ def test_market_web_fallback_does_not_mask_api_routes(tmp_path, monkeypatch) -> 
 
     missing_web_build = client.get("/some-spa-route")
     assert missing_web_build.status_code == 404
-    assert missing_web_build.json()["error"] == "Market web build is missing. Run npm run build:web first."
+    assert (
+        missing_web_build.json()["error"]
+        == "Market web build is missing. Run npm run build:web first."
+    )
 
 
 def test_market_web_serves_built_spa(tmp_path, monkeypatch) -> None:
@@ -295,7 +299,9 @@ def test_pg_redis_store_round_trip_from_env() -> None:
     database_url = os.getenv("ASTRBOT_TEST_DATABASE_URL", "")
     redis_url = os.getenv("ASTRBOT_TEST_REDIS_URL", "")
     if not database_url or not redis_url:
-        pytest.skip("Set ASTRBOT_TEST_DATABASE_URL and ASTRBOT_TEST_REDIS_URL to run integration storage test")
+        pytest.skip(
+            "Set ASTRBOT_TEST_DATABASE_URL and ASTRBOT_TEST_REDIS_URL to run integration storage test"
+        )
 
     asyncio.run(run_pg_redis_store_round_trip(database_url, redis_url))
 
