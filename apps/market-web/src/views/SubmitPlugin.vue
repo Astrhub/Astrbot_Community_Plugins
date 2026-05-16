@@ -40,7 +40,8 @@
       <section class="submit-aside">
         <n-card :bordered="false" class="info-panel">
           <h2>上架规则</h2>
-          <p>提交插件需要使用 GitHub OAuth 登录，用于校验仓库归属。</p>
+          <p v-if="siteConfig.market.submissions_enabled">提交插件需要使用 GitHub OAuth 登录，用于校验仓库归属。</p>
+          <p v-else>当前站点已暂停插件提交。</p>
           <ul>
             <li>仓库必须是公开 GitHub 仓库。</li>
             <li>插件名建议使用 `astrbot_plugin_` 前缀。</li>
@@ -105,7 +106,7 @@
               </n-grid-item>
               <n-grid-item span="2">
                 <n-form-item label="标签" path="tags">
-                  <n-dynamic-tags v-model:value="formData.tags" :max="6" />
+                  <n-dynamic-tags v-model:value="formData.tags" :max="maxPluginTags" />
                 </n-form-item>
               </n-grid-item>
             </n-grid>
@@ -114,7 +115,12 @@
           <template #footer>
             <div class="form-actions">
               <n-button quaternary @click="goBack">取消</n-button>
-              <n-button type="primary" :loading="submitting" :disabled="!currentUser" @click="handleSubmit">
+              <n-button
+                type="primary"
+                :loading="submitting"
+                :disabled="!currentUser || !siteConfig.market.submissions_enabled"
+                @click="handleSubmit"
+              >
                 提交审核
               </n-button>
             </div>
@@ -126,7 +132,7 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import {
@@ -153,6 +159,7 @@ const { isDarkMode, currentUser, siteConfig } = storeToRefs(store)
 const { loginWithGithub, toggleTheme } = store
 const formRef = ref(null)
 const submitting = ref(false)
+const maxPluginTags = computed(() => siteConfig.value.market?.max_plugin_tags || 8)
 
 const formData = reactive({
   name: '',
@@ -193,8 +200,8 @@ const rules = {
   ],
   tags: [
     {
-      validator: (_, value) => !Array.isArray(value) || value.length <= 6,
-      message: '标签最多 6 个',
+      validator: (_, value) => !Array.isArray(value) || value.length <= maxPluginTags.value,
+      message: () => `标签最多 ${maxPluginTags.value} 个`,
       trigger: ['change', 'blur']
     }
   ]
@@ -205,6 +212,10 @@ const goBack = () => {
 }
 
 const handleSubmit = () => {
+  if (!siteConfig.value.market?.submissions_enabled) {
+    message.warning('当前站点已暂停插件提交')
+    return
+  }
   formRef.value?.validate(async (errors) => {
     if (errors) {
       message.error('请完善必填信息')

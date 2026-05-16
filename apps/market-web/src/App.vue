@@ -6,7 +6,7 @@
   >
     <n-message-provider>
       <div class="app-container" :class="{ dark: isDarkMode }">
-        <back-to-top v-if="!isSubmitPage" />
+        <back-to-top v-if="!isFormPage" />
         <router-view />
       </div>
     </n-message-provider>
@@ -36,7 +36,7 @@ const {
 
 const route = useRoute()
 const router = useRouter()
-const isSubmitPage = computed(() => route.path === '/submit')
+const isFormPage = computed(() => ['/submit', '/settings'].includes(route.path))
 
 onMounted(async () => {
   store.initTheme()

@@ -27,4 +27,4 @@ Use concise imperative commit messages like `Add plugin moderation routes`. PRs 
 
 ## Security & Configuration Tips
 
-Do not commit GitHub OAuth secrets, API keys, Redis data, PostgreSQL dumps, or session cookies. PostgreSQL is the durable market store; Redis is for sessions, OAuth state, cache, and rate limits. The first authenticated GitHub user becomes core admin; later admins must be granted explicitly. Plugin owners may edit only their own listings, while normal admins are limited to moderation actions such as list/unlist, comment removal, and user mute.
+Do not commit GitHub OAuth secrets, API keys, Redis data, PostgreSQL dumps, or session cookies. PostgreSQL is the durable market store; Redis is for sessions, OAuth state, cache, and rate limits. The first-run setup creates an internal core admin account; GitHub users never become core admin automatically. Plugin owners may edit only their own listings, while normal admins are limited to moderation actions such as list/unlist, comment removal, and user mute.

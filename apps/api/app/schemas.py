@@ -91,8 +91,12 @@ class ApiKeyCreate(BaseModel):
 class SiteSetupConfig(BaseModel):
     name: str = "AstrBot Community Plugins"
     icon_url: str = "/logo.webp"
+    subtitle: str = "全新社区插件市场"
+    description: str = "发现、评价和提交 AstrBot 插件。"
+    contact_email: str = ""
+    docs_url: str = "https://docs.astrbot.app/dev/star/plugin.html"
 
-    @field_validator("name", "icon_url")
+    @field_validator("name", "icon_url", "subtitle", "description", "contact_email", "docs_url")
     @classmethod
     def strip_required_text(cls, value: str) -> str:
         return value.strip()
@@ -149,9 +153,93 @@ class AuthSetupConfig(BaseModel):
         return value.strip()
 
 
+class GithubSetupConfig(BaseModel):
+    client_id: str = ""
+    client_secret: str = ""
+    callback_url: str = ""
+    scope: str = "read:user user:email read:org"
+    admin_org: str = ""
+
+    @field_validator("client_id", "client_secret", "callback_url", "scope", "admin_org")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class MarketSetupConfig(BaseModel):
+    submissions_enabled: bool = True
+    comments_enabled: bool = True
+    likes_enabled: bool = True
+    plugin_auto_approve_enabled: bool = False
+    max_plugin_tags: int = Field(default=8, ge=0, le=50)
+
+
+class SmtpSetupConfig(BaseModel):
+    host: str = ""
+    port: int = Field(default=587, ge=1, le=65535)
+    username: str = ""
+    password: str = ""
+    from_address: str = ""
+    ssl: bool = False
+
+    @field_validator("host", "username", "password", "from_address")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class CloudflareEmailSetupConfig(BaseModel):
+    account_id: str = ""
+    api_token: str = ""
+    from_address: str = ""
+
+    @field_validator("account_id", "api_token", "from_address")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class EmailSetupConfig(BaseModel):
+    provider: str = "disabled"
+    smtp: SmtpSetupConfig = Field(default_factory=SmtpSetupConfig)
+    cloudflare: CloudflareEmailSetupConfig = Field(default_factory=CloudflareEmailSetupConfig)
+    daily_limit: int = Field(default=0, ge=0)
+    verification_daily_limit_per_user: int = Field(default=5, ge=0)
+
+    @field_validator("provider")
+    @classmethod
+    def normalize_provider(cls, value: str) -> str:
+        provider = value.strip().lower()
+        if provider not in {"disabled", "smtp", "cloudflare"}:
+            raise ValueError("email provider must be disabled, smtp or cloudflare")
+        return provider
+
+
+class SystemSettingsPayload(BaseModel):
+    site: SiteSetupConfig = Field(default_factory=SiteSetupConfig)
+    auth: AuthSetupConfig = Field(default_factory=AuthSetupConfig)
+    github: GithubSetupConfig = Field(default_factory=GithubSetupConfig)
+    market: MarketSetupConfig = Field(default_factory=MarketSetupConfig)
+    email: EmailSetupConfig = Field(default_factory=EmailSetupConfig)
+
+
+class TestEmailPayload(BaseModel):
+    to: str
+    subject: str = "AstrBot Community Plugins test email"
+    body: str = "This is a test email from AstrBot Community Plugins."
+
+    @field_validator("to", "subject", "body")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
 class SetupConfig(BaseModel):
     postgres: PostgresSetupConfig
     redis: RedisSetupConfig
     site: SiteSetupConfig = Field(default_factory=SiteSetupConfig)
     admin: AdminSetupConfig
     auth: AuthSetupConfig = Field(default_factory=AuthSetupConfig)
+    github: GithubSetupConfig = Field(default_factory=GithubSetupConfig)
+    market: MarketSetupConfig = Field(default_factory=MarketSetupConfig)
+    email: EmailSetupConfig = Field(default_factory=EmailSetupConfig)

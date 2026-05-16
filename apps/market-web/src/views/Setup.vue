@@ -44,6 +44,18 @@
                 <n-form-item label="站点图标 URL" path="site.icon_url">
                   <n-input v-model:value="formData.site.icon_url" placeholder="/logo.webp 或 https://..." />
                 </n-form-item>
+                <n-form-item label="副标题" path="site.subtitle">
+                  <n-input v-model:value="formData.site.subtitle" placeholder="全新社区插件市场" />
+                </n-form-item>
+                <n-form-item label="站点描述" path="site.description">
+                  <n-input v-model:value="formData.site.description" placeholder="发现、评价和提交 AstrBot 插件。" />
+                </n-form-item>
+                <n-form-item label="联系邮箱" path="site.contact_email">
+                  <n-input v-model:value="formData.site.contact_email" placeholder="可选" />
+                </n-form-item>
+                <n-form-item label="文档地址" path="site.docs_url">
+                  <n-input v-model:value="formData.site.docs_url" placeholder="https://docs.astrbot.app/..." />
+                </n-form-item>
               </div>
             </section>
 
@@ -108,6 +120,114 @@
                   placeholder="市场服务条款、社区规则或免责声明"
                 />
               </n-form-item>
+            </section>
+
+            <section class="form-section">
+              <h3>GitHub OAuth</h3>
+              <div class="form-grid">
+                <n-form-item label="Client ID" path="github.client_id">
+                  <n-input v-model:value="formData.github.client_id" placeholder="GitHub OAuth App Client ID" />
+                </n-form-item>
+                <n-form-item label="Client Secret" path="github.client_secret">
+                  <n-input
+                    v-model:value="formData.github.client_secret"
+                    type="password"
+                    show-password-on="click"
+                    placeholder="留空可稍后配置"
+                  />
+                </n-form-item>
+                <n-form-item label="回调地址" path="github.callback_url">
+                  <n-input v-model:value="formData.github.callback_url" placeholder="https://your-domain/v1/auth/github/callback" />
+                </n-form-item>
+                <n-form-item label="管理员组织" path="github.admin_org">
+                  <n-input v-model:value="formData.github.admin_org" placeholder="可选，GitHub 组织名" />
+                </n-form-item>
+                <n-form-item label="授权范围" path="github.scope">
+                  <n-input v-model:value="formData.github.scope" placeholder="read:user user:email read:org" />
+                </n-form-item>
+              </div>
+            </section>
+
+            <section class="form-section">
+              <h3>市场策略</h3>
+              <div class="form-grid">
+                <n-form-item label="开放插件提交" path="market.submissions_enabled">
+                  <div class="switch-row">
+                    <n-switch v-model:value="formData.market.submissions_enabled" />
+                    <span>{{ formData.market.submissions_enabled ? '允许提交' : '暂停提交' }}</span>
+                  </div>
+                </n-form-item>
+                <n-form-item label="开放评论" path="market.comments_enabled">
+                  <div class="switch-row">
+                    <n-switch v-model:value="formData.market.comments_enabled" />
+                    <span>{{ formData.market.comments_enabled ? '允许评论' : '关闭评论' }}</span>
+                  </div>
+                </n-form-item>
+                <n-form-item label="开放点赞" path="market.likes_enabled">
+                  <div class="switch-row">
+                    <n-switch v-model:value="formData.market.likes_enabled" />
+                    <span>{{ formData.market.likes_enabled ? '允许点赞' : '关闭点赞' }}</span>
+                  </div>
+                </n-form-item>
+                <n-form-item label="自动上架" path="market.plugin_auto_approve_enabled">
+                  <div class="switch-row">
+                    <n-switch v-model:value="formData.market.plugin_auto_approve_enabled" />
+                    <span>{{ formData.market.plugin_auto_approve_enabled ? '提交后自动上架' : '需要管理员审核' }}</span>
+                  </div>
+                </n-form-item>
+                <n-form-item label="最多标签数" path="market.max_plugin_tags">
+                  <n-input-number v-model:value="formData.market.max_plugin_tags" :min="0" :max="50" />
+                </n-form-item>
+              </div>
+            </section>
+
+            <section class="form-section">
+              <h3>邮件服务</h3>
+              <div class="form-grid">
+                <n-form-item label="邮件服务" path="email.provider">
+                  <n-select v-model:value="formData.email.provider" :options="emailProviderOptions" />
+                </n-form-item>
+                <n-form-item label="每日发送上限" path="email.daily_limit">
+                  <n-input-number v-model:value="formData.email.daily_limit" :min="0" />
+                </n-form-item>
+                <n-form-item label="单邮箱每日验证码上限" path="email.verification_daily_limit_per_user">
+                  <n-input-number v-model:value="formData.email.verification_daily_limit_per_user" :min="0" />
+                </n-form-item>
+              </div>
+              <div v-if="formData.email.provider === 'smtp'" class="form-grid">
+                <n-form-item label="SMTP 主机" path="email.smtp.host">
+                  <n-input v-model:value="formData.email.smtp.host" placeholder="smtp.example.com" />
+                </n-form-item>
+                <n-form-item label="SMTP 端口" path="email.smtp.port">
+                  <n-input-number v-model:value="formData.email.smtp.port" :min="1" :max="65535" />
+                </n-form-item>
+                <n-form-item label="SMTP 账号" path="email.smtp.username">
+                  <n-input v-model:value="formData.email.smtp.username" placeholder="noreply@example.com" />
+                </n-form-item>
+                <n-form-item label="SMTP 密码" path="email.smtp.password">
+                  <n-input v-model:value="formData.email.smtp.password" type="password" show-password-on="click" placeholder="留空表示不更新" />
+                </n-form-item>
+                <n-form-item label="发件邮箱" path="email.smtp.from_address">
+                  <n-input v-model:value="formData.email.smtp.from_address" placeholder="noreply@example.com" />
+                </n-form-item>
+                <n-form-item label="SMTP SSL" path="email.smtp.ssl">
+                  <div class="switch-row">
+                    <n-switch v-model:value="formData.email.smtp.ssl" />
+                    <span>{{ formData.email.smtp.ssl ? '启用 SSL' : '不启用 SSL' }}</span>
+                  </div>
+                </n-form-item>
+              </div>
+              <div v-if="formData.email.provider === 'cloudflare'" class="form-grid">
+                <n-form-item label="Cloudflare Account ID" path="email.cloudflare.account_id">
+                  <n-input v-model:value="formData.email.cloudflare.account_id" placeholder="Cloudflare Account ID" />
+                </n-form-item>
+                <n-form-item label="Cloudflare API Token" path="email.cloudflare.api_token">
+                  <n-input v-model:value="formData.email.cloudflare.api_token" type="password" show-password-on="click" placeholder="留空表示不更新" />
+                </n-form-item>
+                <n-form-item label="发件邮箱" path="email.cloudflare.from_address">
+                  <n-input v-model:value="formData.email.cloudflare.from_address" placeholder="noreply@mail.example.com" />
+                </n-form-item>
+              </div>
             </section>
 
             <section class="form-section">
@@ -204,6 +324,7 @@ import {
   NInput,
   NInputNumber,
   NLayout,
+  NSelect,
   NSwitch,
   NTag,
   useMessage
@@ -221,7 +342,11 @@ const saving = ref(false)
 const formData = reactive({
   site: {
     name: '',
-    icon_url: ''
+    icon_url: '',
+    subtitle: '',
+    description: '',
+    contact_email: '',
+    docs_url: ''
   },
   admin: {
     username: 'admin',
@@ -234,6 +359,38 @@ const formData = reactive({
     login_agreement_text: '',
     service_terms_enabled: false,
     service_terms_text: ''
+  },
+  github: {
+    client_id: '',
+    client_secret: '',
+    callback_url: `${window.location.origin}/v1/auth/github/callback`,
+    scope: 'read:user user:email read:org',
+    admin_org: ''
+  },
+  market: {
+    submissions_enabled: true,
+    comments_enabled: true,
+    likes_enabled: true,
+    plugin_auto_approve_enabled: false,
+    max_plugin_tags: 8
+  },
+  email: {
+    provider: 'disabled',
+    smtp: {
+      host: '',
+      port: 587,
+      username: '',
+      password: '',
+      from_address: '',
+      ssl: false
+    },
+    cloudflare: {
+      account_id: '',
+      api_token: '',
+      from_address: ''
+    },
+    daily_limit: 0,
+    verification_daily_limit_per_user: 5
   },
   postgres: {
     host: '127.0.0.1',
@@ -252,6 +409,12 @@ const formData = reactive({
   }
 })
 
+const emailProviderOptions = [
+  { label: '关闭邮件', value: 'disabled' },
+  { label: 'SMTP', value: 'smtp' },
+  { label: 'Cloudflare Email Service', value: 'cloudflare' }
+]
+
 const requiredText = (message) => ({ required: true, message, trigger: 'blur' })
 const rules = {
   'site.name': [requiredText('请输入站点名称')],
@@ -260,6 +423,20 @@ const rules = {
     {
       validator: (_, value) => String(value || '').startsWith('/') || /^https?:\/\//.test(value),
       message: '请输入 / 开头路径或 http(s) URL',
+      trigger: 'blur'
+    }
+  ],
+  'site.contact_email': [
+    {
+      validator: (_, value) => !value || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
+      message: '请输入有效邮箱',
+      trigger: 'blur'
+    }
+  ],
+  'site.docs_url': [
+    {
+      validator: (_, value) => !value || /^https?:\/\//.test(value),
+      message: '请输入 http(s) URL',
       trigger: 'blur'
     }
   ],
@@ -284,6 +461,66 @@ const rules = {
       trigger: 'blur'
     }
   ],
+  'github.client_id': [
+    {
+      validator: () => !formData.auth.github_login_enabled || Boolean(formData.github.client_id.trim()),
+      message: '启用 GitHub 登录后必须填写 Client ID',
+      trigger: 'blur'
+    }
+  ],
+  'github.client_secret': [
+    {
+      validator: () => !formData.auth.github_login_enabled || Boolean(formData.github.client_secret.trim()),
+      message: '启用 GitHub 登录后必须填写 Client Secret',
+      trigger: 'blur'
+    }
+  ],
+  'github.callback_url': [
+    {
+      validator: (_, value) => !formData.auth.github_login_enabled || /^https?:\/\//.test(value),
+      message: '启用 GitHub 登录后必须填写 http(s) 回调地址',
+      trigger: 'blur'
+    }
+  ],
+  'email.smtp.host': [
+    {
+      validator: () => formData.email.provider !== 'smtp' || Boolean(formData.email.smtp.host.trim()),
+      message: '启用 SMTP 后必须填写主机',
+      trigger: 'blur'
+    }
+  ],
+  'email.smtp.from_address': [
+    {
+      validator: () => formData.email.provider !== 'smtp' ||
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.smtp.from_address),
+      message: '请输入有效发件邮箱',
+      trigger: 'blur'
+    }
+  ],
+  'email.cloudflare.account_id': [
+    {
+      validator: () => formData.email.provider !== 'cloudflare' ||
+        Boolean(formData.email.cloudflare.account_id.trim()),
+      message: '启用 Cloudflare 后必须填写 Account ID',
+      trigger: 'blur'
+    }
+  ],
+  'email.cloudflare.api_token': [
+    {
+      validator: () => formData.email.provider !== 'cloudflare' ||
+        Boolean(formData.email.cloudflare.api_token.trim()),
+      message: '启用 Cloudflare 后必须填写 API Token',
+      trigger: 'blur'
+    }
+  ],
+  'email.cloudflare.from_address': [
+    {
+      validator: () => formData.email.provider !== 'cloudflare' ||
+        /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.cloudflare.from_address),
+      message: '请输入有效发件邮箱',
+      trigger: 'blur'
+    }
+  ],
   'postgres.host': [requiredText('请输入 PostgreSQL 主机名')],
   'postgres.port': [
     { type: 'number', required: true, message: '请输入 PostgreSQL 端口', trigger: 'blur' }
@@ -304,6 +541,10 @@ function normalizeNumberFields() {
   formData.postgres.port = Number(formData.postgres.port || 5432)
   formData.redis.port = Number(formData.redis.port || 6379)
   formData.redis.database = Number(formData.redis.database || 0)
+  formData.market.max_plugin_tags = Number(formData.market.max_plugin_tags || 0)
+  formData.email.smtp.port = Number(formData.email.smtp.port || 587)
+  formData.email.daily_limit = Number(formData.email.daily_limit || 0)
+  formData.email.verification_daily_limit_per_user = Number(formData.email.verification_daily_limit_per_user || 0)
 }
 
 async function reloadStatus() {
@@ -314,6 +555,11 @@ async function reloadStatus() {
 function applySetupConfig(config = {}) {
   Object.assign(formData.site, config.site || {})
   Object.assign(formData.auth, config.auth || {})
+  Object.assign(formData.github, config.github || {})
+  Object.assign(formData.market, config.market || {})
+  Object.assign(formData.email, config.email || {})
+  Object.assign(formData.email.smtp, config.email?.smtp || {})
+  Object.assign(formData.email.cloudflare, config.email?.cloudflare || {})
   Object.assign(formData.postgres, config.postgres || {})
   Object.assign(formData.redis, config.redis || {})
 }

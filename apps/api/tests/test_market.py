@@ -71,6 +71,74 @@ def setup_payload(
     }
 
 
+def plugin_payload(
+    name: str = "astrbot_plugin_demo",
+    repo: str = "https://github.com/alice/astrbot_plugin_demo",
+    tags: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "display_name": "Demo",
+        "desc": "Demo plugin",
+        "author": "Alice",
+        "repo": repo,
+        "tags": tags or ["demo"],
+    }
+
+
+def system_settings_payload() -> dict[str, object]:
+    return {
+        "site": {
+            "name": "AstrHub",
+            "icon_url": "/hub.webp",
+            "subtitle": "社区插件中心",
+            "description": "发现和管理插件。",
+            "contact_email": "ops@example.com",
+            "docs_url": "https://docs.example.com/plugins",
+        },
+        "auth": {
+            "github_login_enabled": True,
+            "public_login_enabled": True,
+            "login_agreement_enabled": True,
+            "login_agreement_text": "登录条款",
+            "service_terms_enabled": True,
+            "service_terms_text": "服务条款",
+        },
+        "github": {
+            "client_id": "client-id",
+            "client_secret": "github-secret",
+            "callback_url": "https://market.example.com/v1/auth/github/callback",
+            "scope": "read:user user:email read:org",
+            "admin_org": "Astrhub",
+        },
+        "market": {
+            "submissions_enabled": True,
+            "comments_enabled": True,
+            "likes_enabled": True,
+            "plugin_auto_approve_enabled": False,
+            "max_plugin_tags": 4,
+        },
+        "email": {
+            "provider": "cloudflare",
+            "smtp": {
+                "host": "",
+                "port": 587,
+                "username": "",
+                "password": "",
+                "from_address": "",
+                "ssl": False,
+            },
+            "cloudflare": {
+                "account_id": "cf-account",
+                "api_token": "cf-token",
+                "from_address": "noreply@example.com",
+            },
+            "daily_limit": 10,
+            "verification_daily_limit_per_user": 3,
+        },
+    }
+
+
 def test_github_users_do_not_become_core_admin_automatically() -> None:
     store = InMemoryMarketStore()
     first = store.upsert_github_user({"login": "alice", "name": "Alice"})
@@ -163,6 +231,64 @@ def test_submission_requires_github_repo_owner() -> None:
     assert response.json()["error"] == "GitHub account must own the repository"
 
 
+def test_market_feature_flags_close_submission_likes_and_comments() -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "MARKET_SUBMISSIONS_ENABLED": "false",
+            "MARKET_COMMENTS_ENABLED": "false",
+            "MARKET_LIKES_ENABLED": "false",
+        }
+    )
+    store = InMemoryMarketStore()
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user = store.get_user_by_id(login.json()["user"]["id"])
+    plugin = store.submit_plugin(user, plugin_payload())
+    store.update_plugin_status(plugin["id"], "listed", user["id"])
+
+    submission = client.post("/v1/plugins/submissions", json=plugin_payload())
+    assert submission.status_code == 403
+    assert submission.json()["error"] == "Plugin submissions are closed"
+    assert client.post(f"/v1/plugins/{plugin['id']}/like").status_code == 403
+    assert (
+        client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"}).status_code
+        == 403
+    )
+
+
+def test_plugin_auto_approve_and_max_tags_are_enforced() -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "PLUGIN_AUTO_APPROVE_ENABLED": "true",
+            "MAX_PLUGIN_TAGS": "1",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+    client.get("/v1/auth/debug-login?login=alice")
+
+    too_many_tags = client.post(
+        "/v1/plugins/submissions",
+        json=plugin_payload(tags=["demo", "tool"]),
+    )
+    assert too_many_tags.status_code == 400
+    assert too_many_tags.json()["error"] == "Plugin can have at most 1 tags"
+
+    submission = client.post("/v1/plugins/submissions", json=plugin_payload(tags=["demo"]))
+    assert submission.status_code == 201
+    assert submission.json()["status"] == "listed"
+    patch = client.patch(
+        f"/v1/plugins/{submission.json()['id']}",
+        json={"tags": ["demo", "tool"]},
+    )
+    assert patch.status_code == 400
+
+
 def test_cors_allows_browser_session_cookies_and_dev_auth_header() -> None:
     client = make_client()
     response = client.options(
@@ -202,10 +328,13 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     assert "REDIS_URL=redis://127.0.0.1:6379/0" in runtime_file
     assert "POSTGRES_SSL=false" in runtime_file
     assert 'SITE_NAME="AstrHub Plugins"' in runtime_file
+    assert "SITE_SUBTITLE=全新社区插件市场" in runtime_file
     assert "CORE_ADMIN_USERNAME=admin" in runtime_file
     assert "CORE_ADMIN_PASSWORD_HASH=pbkdf2_sha256" in runtime_file
     assert "GITHUB_LOGIN_ENABLED=false" in runtime_file
     assert "LOGIN_AGREEMENT_TEXT=登录即同意社区规则。" in runtime_file
+    assert "MARKET_SUBMISSIONS_ENABLED=true" in runtime_file
+    assert "EMAIL_PROVIDER=disabled" in runtime_file
     login = client.post(
         "/v1/auth/internal/login",
         json={"username": "admin", "password": "password123"},
@@ -243,6 +372,14 @@ def test_public_site_config_uses_settings() -> None:
         {
             "SITE_NAME": "AstrHub",
             "SITE_ICON_URL": "https://example.com/icon.webp",
+            "SITE_SUBTITLE": "社区插件中心",
+            "SITE_DESCRIPTION": "浏览 AstrBot 插件。",
+            "SITE_CONTACT_EMAIL": "ops@example.com",
+            "SITE_DOCS_URL": "https://docs.example.com",
+            "MARKET_SUBMISSIONS_ENABLED": "false",
+            "MARKET_COMMENTS_ENABLED": "false",
+            "MARKET_LIKES_ENABLED": "false",
+            "MAX_PLUGIN_TAGS": "3",
         }
     )
     client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
@@ -250,6 +387,10 @@ def test_public_site_config_uses_settings() -> None:
     assert client.get("/v1/site").json() == {
         "name": "AstrHub",
         "icon_url": "https://example.com/icon.webp",
+        "subtitle": "社区插件中心",
+        "description": "浏览 AstrBot 插件。",
+        "contact_email": "ops@example.com",
+        "docs_url": "https://docs.example.com",
         "auth": {
             "github_login_enabled": False,
             "public_login_enabled": True,
@@ -258,6 +399,12 @@ def test_public_site_config_uses_settings() -> None:
             "service_terms_enabled": False,
             "service_terms_text": "",
             "terms_revision": main_module.digest_terms(settings),
+        },
+        "market": {
+            "submissions_enabled": False,
+            "comments_enabled": False,
+            "likes_enabled": False,
+            "max_plugin_tags": 3,
         },
     }
 
@@ -277,6 +424,48 @@ def test_setup_status_redacts_infrastructure_after_initial_setup(tmp_path) -> No
     )
     core_status = client.get("/v1/setup/status").json()
     assert core_status["saved_setup"]["postgres"]["password"] == "market"
+    assert core_status["saved_setup"]["github"]["client_secret"] == ""
+    assert core_status["saved_setup"]["email"]["cloudflare"]["api_token"] == ""
+
+
+def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+    client.post("/v1/setup", json=setup_payload())
+
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    payload = system_settings_payload()
+    saved = client.put("/v1/admin/settings", json=payload)
+    assert saved.status_code == 200
+    settings = saved.json()["settings"]
+    assert settings["site"]["name"] == "AstrHub"
+    assert settings["github"]["client_secret"] == main_module.MASKED_SECRET
+    assert settings["github"]["client_secret_configured"] is True
+    assert settings["email"]["cloudflare"]["api_token"] == main_module.MASKED_SECRET
+    assert settings["email"]["cloudflare"]["api_token_configured"] is True
+    assert client.get("/v1/site").json()["market"]["max_plugin_tags"] == 4
+
+    masked_payload = system_settings_payload()
+    masked_payload["github"]["client_secret"] = main_module.MASKED_SECRET
+    masked_payload["email"]["cloudflare"]["api_token"] = main_module.MASKED_SECRET
+    masked_payload["site"]["name"] = "AstrHub Updated"
+    preserved = client.put("/v1/admin/settings", json=masked_payload)
+    assert preserved.status_code == 200
+    runtime_file = (tmp_path / "runtime.env").read_text()
+    assert "GITHUB_CLIENT_SECRET=github-secret" in runtime_file
+    assert "CLOUDFLARE_EMAIL_API_TOKEN=cf-token" in runtime_file
+    assert 'SITE_NAME="AstrHub Updated"' in runtime_file
+
+
+def test_system_settings_require_core_admin(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+    client.post("/v1/setup", json=setup_payload())
+    client.cookies.clear()
+
+    forbidden = client.get("/v1/admin/settings", headers={"x-dev-github-login": "bob"})
+    assert forbidden.status_code == 403
 
 
 def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
@@ -326,6 +515,118 @@ def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
 
     assert client.get("/plugins-md5.json").json()["md5"]
     assert client.get("/v1/astrbot/plugins.json").json() == feed
+
+
+def test_cloudflare_email_test_uses_official_sending_endpoint(monkeypatch) -> None:
+    requests: list[dict[str, object]] = []
+
+    class FakeCloudflareResponse:
+        status_code = 200
+        content = b"{}"
+
+        def json(self) -> dict[str, object]:
+            return {"success": True, "result": {"permanent_bounces": []}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            pass
+
+        async def post(self, url: str, **kwargs) -> FakeCloudflareResponse:
+            requests.append({"url": url, **kwargs})
+            return FakeCloudflareResponse()
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "EMAIL_PROVIDER": "cloudflare",
+            "CLOUDFLARE_EMAIL_ACCOUNT_ID": "account",
+            "CLOUDFLARE_EMAIL_API_TOKEN": "token",
+            "CLOUDFLARE_EMAIL_FROM": "noreply@example.com",
+        }
+    )
+    store = InMemoryMarketStore()
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    response = client.post(
+        "/v1/admin/settings/email/test",
+        json={"to": "user@example.com", "subject": "Test", "body": "Hello"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"sent": True}
+    assert requests[0]["url"] == (
+        "https://api.cloudflare.com/client/v4/accounts/account/email/sending/send"
+    )
+    assert requests[0]["headers"]["authorization"] == "Bearer token"
+    assert requests[0]["json"] == {
+        "to": "user@example.com",
+        "from": "noreply@example.com",
+        "subject": "Test",
+        "text": "Hello",
+        "html": "Hello",
+    }
+
+
+def test_cloudflare_email_errors_are_reported(monkeypatch) -> None:
+    class FakeCloudflareResponse:
+        status_code = 400
+        content = b"{}"
+
+        def json(self) -> dict[str, object]:
+            return {"success": False, "errors": [{"code": 1000, "message": "bad sender"}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            pass
+
+        async def post(self, url: str, **kwargs) -> FakeCloudflareResponse:
+            return FakeCloudflareResponse()
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "EMAIL_PROVIDER": "cloudflare",
+            "CLOUDFLARE_EMAIL_ACCOUNT_ID": "account",
+            "CLOUDFLARE_EMAIL_API_TOKEN": "token",
+            "CLOUDFLARE_EMAIL_FROM": "noreply@example.com",
+        }
+    )
+    store = InMemoryMarketStore()
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    response = client.post(
+        "/v1/admin/settings/email/test",
+        json={"to": "user@example.com", "subject": "Test", "body": "Hello"},
+    )
+    assert response.status_code == 502
+    assert response.json()["error"] == "Cloudflare email API error: [1000] bad sender"
 
 
 def test_market_web_fallback_does_not_mask_api_routes(tmp_path, monkeypatch) -> None:

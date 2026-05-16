@@ -18,7 +18,8 @@
         <n-button v-if="currentUser" secondary type="primary">
           {{ displayUserName }}
         </n-button>
-        <n-button v-else secondary type="primary" @click="openLoginModal">
+        <n-button v-if="isCoreAdmin" secondary @click="goSettings">系统设置</n-button>
+        <n-button v-if="!currentUser" secondary type="primary" @click="openLoginModal">
           <template #icon>
             <n-icon><log-in-outline /></n-icon>
           </template>
@@ -30,10 +31,10 @@
 
     <section class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">全新社区插件市场</p>
+        <p class="eyebrow">{{ siteSubtitle }}</p>
         <h1>{{ siteName }}</h1>
         <p class="hero-subtitle">
-          发现、评价和提交 AstrBot 插件。发布与管理只通过 GitHub OAuth 识别身份。
+          {{ siteDescription }}
         </p>
         <div class="hero-actions">
           <n-button type="primary" size="large" class="source-copy-button" @click="copyPluginSource">
@@ -207,6 +208,9 @@ const loginForm = ref({ username: 'admin', password: '' })
 const pluginSourceUrl = computed(() => store.pluginSourceUrl)
 const siteName = computed(() => siteConfig.value.name)
 const siteIconUrl = computed(() => siteConfig.value.icon_url)
+const siteSubtitle = computed(() => siteConfig.value.subtitle)
+const siteDescription = computed(() => siteConfig.value.description)
+const isCoreAdmin = computed(() => currentUser.value?.role === 'core_admin')
 const displayUserName = computed(() => (
   currentUser.value?.github_login ||
   currentUser.value?.internal_username ||
@@ -239,7 +243,15 @@ const handleSortByChange = (value) => {
 }
 
 const goSubmit = () => {
+  if (!siteConfig.value.market?.submissions_enabled) {
+    message.warning('当前站点已暂停插件提交')
+    return
+  }
   router.push('/submit')
+}
+
+const goSettings = () => {
+  router.push('/settings')
 }
 
 const openLoginModal = () => {

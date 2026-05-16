@@ -40,6 +40,8 @@ npm run start:api
 
 首次启动时，若 PostgreSQL 或 Redis 缺失，前端会打开 `/setup` 页面。页面按主机名、端口、数据库名、账号、密码和 SSL 开关填写配置，并注册内部核心管理员账号；保存后写入 `apps/api/data/runtime.env`，随后需重启 API 进程使配置生效。GitHub OAuth 登录可在内部管理员登录后再开启。
 
+核心管理员登录后可进入 `/settings` 管理运行时设置。当前支持站点名称/图标/描述、GitHub OAuth、登录条款、服务条款、市场提交/评论/点赞开关、自动上架、最大标签数，以及 SMTP 或 Cloudflare Email Service。密钥字段保存后只返回遮蔽状态；保持遮蔽值不会覆盖已有密钥。
+
 PostgreSQL schema 会在后端启动时自动创建，包含用户、插件、提交记录、评论、公告和 API key 表；Redis 使用带过期时间的 session key 保存登录态。
 
 ### CI/CD
@@ -88,8 +90,14 @@ WEB_URL=https://your-market-domain
 GITHUB_CALLBACK_URL=https://your-market-domain/v1/auth/github/callback
 SITE_NAME=AstrBot Community Plugins
 SITE_ICON_URL=/logo.webp
+SITE_SUBTITLE=全新社区插件市场
+SITE_DESCRIPTION=发现、评价和提交 AstrBot 插件。
 GITHUB_LOGIN_ENABLED=false
 PUBLIC_LOGIN_ENABLED=true
+MARKET_SUBMISSIONS_ENABLED=true
+MARKET_COMMENTS_ENABLED=true
+MARKET_LIKES_ENABLED=true
+EMAIL_PROVIDER=disabled
 ```
 
 ## 身份与角色
@@ -102,6 +110,8 @@ PUBLIC_LOGIN_ENABLED=true
 ## 集成说明
 
 未来的 AstrBot WebUI 插件将通过 API key 调用公开 API。市场网站支持内部核心管理员登录和可配置的 GitHub OAuth 登录；插件通过网页表单提交，不走 GitHub Issues。
+
+邮件服务参考 Cloudflare Email Service 的 REST API：当 `EMAIL_PROVIDER=cloudflare` 时，后端使用 `POST /accounts/{account_id}/email/sending/send` 发送站点邮件；也可切换到 SMTP。
 
 AstrBot 本身可将此市场作为自定义插件源。在 AstrBot WebUI 中添加：
 
