@@ -39,29 +39,26 @@
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">{{ siteSubtitle }}</p>
-        <h1>{{ siteName }}</h1>
-        <p class="hero-subtitle">
-          {{ siteDescription }}
-        </p>
-        <div class="hero-actions">
-          <n-button type="primary" size="large" class="source-copy-button" @click="copyPluginSource">
-            <template #icon>
-              <n-icon><link-outline /></n-icon>
-            </template>
-            复制 AstrBot 插件源
-          </n-button>
-          <span class="source-url">{{ pluginSourceUrl }}</span>
-        </div>
+        <p class="hero-subtitle">{{ siteDescription }}</p>
       </div>
-      <search-toolbar
-        :search-query="searchQuery"
-        :current-page="currentPage"
-        :sort-by="sortBy"
-        :on-header="true"
-        @update:searchQuery="handleSearchQueryChange"
-        @update:currentPage="handleCurrentPageChange"
-        @update:sortBy="handleSortByChange"
-      />
+      <div class="hero-toolbar">
+        <n-button type="primary" size="large" class="source-copy-button" @click="copyPluginSource">
+          <template #icon>
+            <n-icon><link-outline /></n-icon>
+          </template>
+          复制 AstrBot 插件源
+        </n-button>
+        <search-toolbar
+          class="hero-search-toolbar"
+          :search-query="searchQuery"
+          :current-page="currentPage"
+          :sort-by="sortBy"
+          :on-header="true"
+          @update:searchQuery="handleSearchQueryChange"
+          @update:currentPage="handleCurrentPageChange"
+          @update:sortBy="handleSortByChange"
+        />
+      </div>
     </section>
   </header>
 
@@ -453,61 +450,47 @@ onUnmounted(() => {
 
 .hero {
   display: grid;
-  gap: 28px;
-  padding: 54px 0 34px;
+  gap: 18px;
+  padding: 28px 0 24px;
 }
 
 .hero-copy {
-  max-width: 780px;
+  max-width: 860px;
 }
 
 .eyebrow {
   color: var(--primary-color);
   font-weight: 700;
-  margin: 0 0 10px;
-}
-
-.hero h1 {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: clamp(2.2rem, 6vw, 4.8rem);
-  line-height: 0.98;
-  letter-spacing: 0;
-  font-weight: 800;
+  margin: 0 0 8px;
 }
 
 .hero-subtitle {
-  max-width: 680px;
-  margin: 18px 0 0;
+  max-width: 760px;
+  margin: 0;
   color: var(--text-secondary);
-  font-size: 18px;
-  line-height: 1.6;
+  font-size: 16px;
+  line-height: 1.55;
 }
 
-.hero-actions {
-  display: flex;
+.hero-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(360px, 1fr);
   align-items: center;
-  flex-wrap: wrap;
   gap: 12px;
-  margin-top: 24px;
 }
 
 .source-copy-button {
   min-height: 44px;
+  white-space: nowrap;
 }
 
-.source-url {
-  max-width: min(100%, 520px);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 8px 12px;
-  border: 1px solid var(--border-base);
-  border-radius: 8px;
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
+.hero-search-toolbar {
+  min-width: 0;
+}
+
+.hero-search-toolbar :deep(.search-container) {
+  max-width: none;
+  margin: 0;
 }
 
 .sticky-header {
@@ -599,6 +582,16 @@ onUnmounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+@media (max-width: 900px) {
+  .hero-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .source-copy-button {
+    justify-self: start;
+  }
 }
 
 @media (max-width: 768px) {

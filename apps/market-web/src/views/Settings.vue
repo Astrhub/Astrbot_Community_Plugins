@@ -550,9 +550,13 @@ onMounted(loadSettings)
 }
 
 .settings-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   background: var(--bg-header);
   border-bottom: 1px solid var(--border-base);
   backdrop-filter: blur(18px);
+  box-shadow: var(--shadow-sm);
 }
 
 .header-content {
@@ -698,6 +702,8 @@ h1 {
   .header-actions {
     width: 100%;
     justify-content: space-between;
+    overflow-x: auto;
+    padding-bottom: 2px;
   }
 
   .form-grid,
