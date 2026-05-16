@@ -400,6 +400,31 @@ def test_submission_listing_comments_and_moderation_flow() -> None:
     assert muted.json()["muted_until"] == "2099-01-01T00:00:00Z"
 
 
+def test_plugin_detail_returns_nested_comments_with_user_profile() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user_id = login.json()["user"]["id"]
+    client.patch("/v1/me/profile", json={"github_name": "Alice Dev"})
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(user_id),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", user_id)
+
+    root = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"})
+    reply = client.post(
+        f"/v1/plugins/{plugin['id']}/comments",
+        json={"body": "Agree", "parent_id": root.json()["id"]},
+    )
+    detail = client.get(f"/v1/plugins/{plugin['id']}").json()
+
+    assert root.status_code == 201
+    assert reply.status_code == 201
+    assert detail["comments_count"] == 2
+    assert detail["comments"][0]["github_name"] == "Alice Dev"
+    assert detail["comments"][1]["parent_id"] == root.json()["id"]
+
+
 def test_core_admin_can_review_plugin_submissions() -> None:
     client = make_client()
     store = client.app.state.store

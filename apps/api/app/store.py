@@ -375,11 +375,13 @@ class InMemoryMarketStore:
         return True
 
     def list_comments(self, plugin_id: str) -> list[dict[str, Any]]:
-        return [
-            deepcopy(comment)
-            for comment in self.state["comments"]
-            if comment["plugin_id"] == plugin_id and not comment.get("deleted")
-        ]
+        comments = []
+        for comment in self.state["comments"]:
+            if comment["plugin_id"] != plugin_id or comment.get("deleted"):
+                continue
+            user = self.get_user_by_id(comment["user_id"]) or {}
+            comments.append(self._comment_with_user(comment, user))
+        return comments
 
     def _next_id(self, prefix: str) -> str:
         next_id = f"{prefix}_{self.state['nextNumericId']}"
@@ -421,6 +423,14 @@ class InMemoryMarketStore:
             "likes": int(plugin.get("likes") or 0),
             "comments_count": int(plugin.get("comments_count") or 0),
             "status": plugin.get("status") or "pending",
+        }
+
+    def _comment_with_user(self, comment: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **deepcopy(comment),
+            "github_login": user.get("github_login") or "",
+            "github_name": user.get("github_name") or user.get("internal_username") or "",
+            "avatar_url": user.get("avatar_url") or "",
         }
 
 
@@ -1100,9 +1110,15 @@ class PgRedisMarketStore(InMemoryMarketStore):
     async def list_comments(self, plugin_id: str) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(
             """
-            SELECT * FROM market_comments
-             WHERE plugin_id = $1 AND deleted = false
-             ORDER BY created_at ASC
+            SELECT c.*,
+                   u.github_login,
+                   u.github_name,
+                   u.avatar_url,
+                   u.internal_username
+              FROM market_comments c
+         LEFT JOIN market_users u ON u.id = c.user_id
+             WHERE c.plugin_id = $1 AND c.deleted = false
+          ORDER BY c.created_at ASC
             """,
             plugin_id,
         )
