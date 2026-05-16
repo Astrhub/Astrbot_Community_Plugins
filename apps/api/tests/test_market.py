@@ -9,7 +9,6 @@ import pytest
 import app.main as main_module
 from app.auth import Role, can_edit_plugin, can_manage_admins, can_moderate_plugins
 from app.config import load_settings
-from app.main import create_app, create_store
 from app.store import InMemoryMarketStore, PgRedisMarketStore, SCHEMA_SQL
 
 
@@ -23,7 +22,7 @@ def make_client(enable_dev_auth: bool = True) -> TestClient:
             "REDIS_URL": "redis://127.0.0.1:6379/0",
         }
     )
-    return TestClient(create_app(settings=settings, store=InMemoryMarketStore()))
+    return TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
 
 
 def make_setup_client(tmp_path) -> TestClient:
@@ -34,7 +33,7 @@ def make_setup_client(tmp_path) -> TestClient:
             "RUNTIME_CONFIG_FILE": str(tmp_path / "runtime.env"),
         }
     )
-    return TestClient(create_app(settings=settings, store=InMemoryMarketStore()))
+    return TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
 
 
 def test_first_user_becomes_core_admin() -> None:
@@ -275,7 +274,7 @@ def test_market_web_serves_built_spa(tmp_path, monkeypatch) -> None:
 
 def test_store_selection_uses_pg_redis_only_when_both_urls_are_configured() -> None:
     memory_settings = load_settings({})
-    assert isinstance(create_store(memory_settings), InMemoryMarketStore)
+    assert isinstance(main_module.create_store(memory_settings), InMemoryMarketStore)
 
     production_settings = load_settings(
         {
@@ -283,7 +282,7 @@ def test_store_selection_uses_pg_redis_only_when_both_urls_are_configured() -> N
             "REDIS_URL": "redis://127.0.0.1:6379/0",
         }
     )
-    assert isinstance(create_store(production_settings), PgRedisMarketStore)
+    assert isinstance(main_module.create_store(production_settings), PgRedisMarketStore)
 
 
 def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:

@@ -103,7 +103,7 @@ def create_store(settings: Settings) -> InMemoryMarketStore | PgRedisMarketStore
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await maybe_call_store_lifecycle(app, "connect")
     try:
-        yield
+        yield None
     finally:
         await maybe_call_store_lifecycle(app, "close")
 
