@@ -358,7 +358,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get("/v1/auth/github/login")
     async def github_login(request: Request) -> Response:
-        settings = get_settings(request)
+        settings = get_runtime_settings(request)
         if not settings.public_login_enabled or not settings.github_login_enabled:
             return JSONResponse(status_code=403, content={"error": "GitHub login is disabled"})
         if not settings.github_client_id:
@@ -387,7 +387,7 @@ def register_routes(app: FastAPI) -> None:
     async def github_callback(
         request: Request, code: str | None = None, state: str | None = None
     ) -> Response:
-        settings = get_settings(request)
+        settings = get_runtime_settings(request)
         expected_state = request.cookies.get(settings.oauth_state_cookie_name)
         if not code or not state or not expected_state or state != expected_state:
             raise error(400, "Invalid OAuth callback")
@@ -733,6 +733,33 @@ def is_reserved_api_path(full_path: str) -> bool:
 
 def get_settings(request: Request) -> Settings:
     return request.app.state.settings
+
+
+def get_runtime_settings(request: Request) -> Settings:
+    settings = get_settings(request)
+    runtime_config = read_runtime_config(settings.runtime_config_path)
+    if not runtime_config:
+        return settings
+    return settings.with_updates(
+        github_client_id=runtime_config.get("GITHUB_CLIENT_ID", settings.github_client_id),
+        github_client_secret=runtime_config.get(
+            "GITHUB_CLIENT_SECRET",
+            settings.github_client_secret,
+        ),
+        github_callback_url=runtime_config.get(
+            "GITHUB_CALLBACK_URL",
+            settings.github_callback_url,
+        ),
+        github_scope=runtime_config.get("GITHUB_SCOPE", settings.github_scope),
+        github_login_enabled=parse_bool(
+            runtime_config.get("GITHUB_LOGIN_ENABLED"),
+            settings.github_login_enabled,
+        ),
+        public_login_enabled=parse_bool(
+            runtime_config.get("PUBLIC_LOGIN_ENABLED"),
+            settings.public_login_enabled,
+        ),
+    )
 
 
 def get_store(request: Request) -> InMemoryMarketStore | PgRedisMarketStore:

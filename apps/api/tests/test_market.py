@@ -304,6 +304,44 @@ def test_github_callback_binds_logged_in_internal_admin(monkeypatch) -> None:
     assert me.json()["github_login"] == "admin-gh"
 
 
+def test_github_login_uses_runtime_callback_url_over_initial_settings(tmp_path) -> None:
+    runtime_file = tmp_path / "runtime.env"
+    runtime_file.write_text(
+        "\n".join(
+            [
+                "GITHUB_LOGIN_ENABLED=true",
+                "GITHUB_CLIENT_ID=runtime-client",
+                "GITHUB_CLIENT_SECRET=runtime-secret",
+                "GITHUB_CALLBACK_URL=https://market.example.com/v1/auth/github/callback",
+                "",
+            ]
+        )
+    )
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "RUNTIME_CONFIG_FILE": str(runtime_file),
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "GITHUB_LOGIN_ENABLED": "false",
+            "GITHUB_CLIENT_ID": "env-client",
+            "GITHUB_CLIENT_SECRET": "env-secret",
+            "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+
+    response = client.get("/v1/auth/github/login", follow_redirects=False)
+    location = response.headers["location"]
+
+    assert response.status_code == 307
+    assert "client_id=runtime-client" in location
+    assert (
+        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
+    )
+    assert "127.0.0.1" not in location
+
+
 def test_core_admin_can_manage_admins_while_normal_admin_moderates_plugins() -> None:
     core = {"role": Role.CORE_ADMIN}
     admin = {"role": Role.ADMIN}
