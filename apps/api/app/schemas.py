@@ -58,6 +58,16 @@ class RoleUpdatePayload(BaseModel):
     role: str = "user"
 
 
+class InternalLoginPayload(BaseModel):
+    username: str
+    password: str
+
+    @field_validator("username", "password")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        return value.strip()
+
+
 class AnnouncementCreate(BaseModel):
     title: str
     body: str
@@ -78,11 +88,70 @@ class ApiKeyCreate(BaseModel):
         return value.strip() or "AstrBot WebUI"
 
 
-class SetupConfig(BaseModel):
-    database_url: str
-    redis_url: str
+class SiteSetupConfig(BaseModel):
+    name: str = "AstrBot Community Plugins"
+    icon_url: str = "/logo.webp"
 
-    @field_validator("database_url", "redis_url")
+    @field_validator("name", "icon_url")
     @classmethod
     def strip_required_text(cls, value: str) -> str:
         return value.strip()
+
+
+class PostgresSetupConfig(BaseModel):
+    host: str
+    port: int = Field(default=5432, ge=1, le=65535)
+    database: str
+    username: str
+    password: str
+    ssl: bool = False
+
+    @field_validator("host", "database", "username", "password")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class RedisSetupConfig(BaseModel):
+    host: str
+    port: int = Field(default=6379, ge=1, le=65535)
+    database: int = Field(default=0, ge=0)
+    password: str = ""
+    ssl: bool = False
+
+    @field_validator("host", "password")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class AdminSetupConfig(BaseModel):
+    username: str = "admin"
+    password: str
+
+    @field_validator("username", "password")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class AuthSetupConfig(BaseModel):
+    github_login_enabled: bool = False
+    public_login_enabled: bool = True
+    login_agreement_enabled: bool = False
+    login_agreement_text: str = ""
+    service_terms_enabled: bool = False
+    service_terms_text: str = ""
+
+    @field_validator("login_agreement_text", "service_terms_text")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class SetupConfig(BaseModel):
+    postgres: PostgresSetupConfig
+    redis: RedisSetupConfig
+    site: SiteSetupConfig = Field(default_factory=SiteSetupConfig)
+    admin: AdminSetupConfig
+    auth: AuthSetupConfig = Field(default_factory=AuthSetupConfig)

@@ -2,9 +2,9 @@
   <footer class="app-footer">
     <div class="footer-content">
       <div class="footer-section">
-        <img src="/logo.webp" alt="AstrBot Community Plugins" class="footer-logo" width="40" height="40" decoding="async" fetchpriority="low">
+        <img :src="siteIconUrl" :alt="siteName" class="footer-logo" width="40" height="40" decoding="async" fetchpriority="low">
         <p class="footer-description">
-          AstrBot Community Plugins 是 AstrBot 的社区插件市场与第三方源入口。
+          {{ siteName }} 是 AstrBot 的社区插件市场与第三方源入口。
         </p>
       </div>
       <div class="footer-links">
@@ -42,7 +42,7 @@
     </div>
     <div class="footer-bottom">
       <p class="copyright">
-        © {{ currentYear }} AstrBot Community Plugins
+        © {{ currentYear }} {{ siteName }}
         <span class="made-with">
           Built for AstrBot <n-icon class="heart-icon"><heart /></n-icon>
         </span>
@@ -54,6 +54,7 @@
 <script setup>
 import { computed } from 'vue'
 import { NIcon } from 'naive-ui'
+import { storeToRefs } from 'pinia'
 import { 
   LogoGithub, 
   GitBranch, 
@@ -63,8 +64,13 @@ import {
   StarOutline,
   DocumentOutline
 } from '@vicons/ionicons5'
+import { usePluginStore } from '../stores/plugins'
 
+const store = usePluginStore()
+const { siteConfig } = storeToRefs(store)
 const currentYear = computed(() => new Date().getFullYear())
+const siteName = computed(() => siteConfig.value.name)
+const siteIconUrl = computed(() => siteConfig.value.icon_url)
 </script>
 
 <style scoped>

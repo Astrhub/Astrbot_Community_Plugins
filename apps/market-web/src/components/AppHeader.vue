@@ -2,8 +2,8 @@
   <header ref="fullHeader" class="app-header">
     <nav class="top-nav" aria-label="主导航">
       <div class="brand">
-        <img src="/logo.webp" alt="AstrBot Community Plugins" class="brand-logo" width="40" height="40">
-        <span class="brand-name">AstrBot Community</span>
+        <img :src="siteIconUrl" :alt="siteName" class="brand-logo" width="40" height="40">
+        <span class="brand-name">{{ siteName }}</span>
       </div>
       <div class="nav-actions">
         <n-button quaternary class="theme-button" @click="toggleTheme">
@@ -16,13 +16,13 @@
           {{ isDarkMode ? '浅色' : '深色' }}
         </n-button>
         <n-button v-if="currentUser" secondary type="primary">
-          {{ currentUser.github_login || currentUser.login }}
+          {{ displayUserName }}
         </n-button>
-        <n-button v-else secondary type="primary" @click="loginWithGithub">
+        <n-button v-else secondary type="primary" @click="openLoginModal">
           <template #icon>
-            <n-icon><logo-github /></n-icon>
+            <n-icon><log-in-outline /></n-icon>
           </template>
-          GitHub 登录
+          登录
         </n-button>
         <n-button type="primary" @click="goSubmit">提交插件</n-button>
       </div>
@@ -31,7 +31,7 @@
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">全新社区插件市场</p>
-        <h1>AstrBot Community Plugins</h1>
+        <h1>{{ siteName }}</h1>
         <p class="hero-subtitle">
           发现、评价和提交 AstrBot 插件。发布与管理只通过 GitHub OAuth 识别身份。
         </p>
@@ -63,8 +63,8 @@
   >
     <div class="sticky-header-content">
       <div class="sticky-header-left">
-        <img src="/logo.webp" alt="AstrBot Community Plugins" class="sticky-logo" width="32" height="32">
-        <h2 class="sticky-title" :class="{ 'hidden-on-search': isMobileSearchOpen }">Community Plugins</h2>
+        <img :src="siteIconUrl" :alt="siteName" class="sticky-logo" width="32" height="32">
+        <h2 class="sticky-title" :class="{ 'hidden-on-search': isMobileSearchOpen }">{{ siteName }}</h2>
       </div>
       <div class="sticky-header-center">
         <search-toolbar
@@ -118,17 +118,55 @@
     </div>
   </header>
   <div class="sticky-header-spacer" aria-hidden="true"></div>
+
+  <n-modal v-model:show="isLoginModalOpen" preset="card" title="登录" class="login-modal">
+    <n-form :model="loginForm" label-placement="top">
+      <n-form-item label="内部账号">
+        <n-input v-model:value="loginForm.username" placeholder="admin" />
+      </n-form-item>
+      <n-form-item label="密码">
+        <n-input
+          v-model:value="loginForm.password"
+          type="password"
+          show-password-on="click"
+          placeholder="内部管理员密码"
+          @keyup.enter="submitInternalLogin"
+        />
+      </n-form-item>
+      <n-alert v-if="agreementText" type="info" :bordered="false" class="agreement-box">
+        <div class="agreement-text">{{ agreementText }}</div>
+        <n-checkbox v-model:checked="agreementAccepted">我已阅读并同意以上条款</n-checkbox>
+      </n-alert>
+      <div class="login-actions">
+        <n-button
+          v-if="siteConfig.auth.github_login_enabled"
+          tertiary
+          :disabled="!canSubmitLogin"
+          @click="loginWithGithub"
+        >
+          <template #icon>
+            <n-icon><logo-github /></n-icon>
+          </template>
+          GitHub 登录
+        </n-button>
+        <n-button type="primary" :loading="isLoggingIn" :disabled="!canSubmitLogin" @click="submitInternalLogin">
+          登录
+        </n-button>
+      </div>
+    </n-form>
+  </n-modal>
 </template>
 
 <script setup>
 import { computed, onMounted, ref, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
-import { NIcon, NButton, NInput, useMessage } from 'naive-ui'
+import { NAlert, NCheckbox, NForm, NFormItem, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
 import {
   AddCircleOutline,
   CloseOutline,
   LinkOutline,
+  LogInOutline,
   LogoGithub,
   Moon,
   SearchOutline,
@@ -156,13 +194,37 @@ const emit = defineEmits([
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { isDarkMode, currentUser } = storeToRefs(store)
-const { loginWithGithub, toggleTheme } = store
+const { isDarkMode, currentUser, siteConfig } = storeToRefs(store)
+const { loginWithGithub, loginWithPassword, toggleTheme } = store
 
 const fullHeader = ref(null)
 const showStickyHeader = ref(false)
 const isMobileSearchOpen = ref(false)
+const isLoginModalOpen = ref(false)
+const isLoggingIn = ref(false)
+const agreementAccepted = ref(false)
+const loginForm = ref({ username: 'admin', password: '' })
 const pluginSourceUrl = computed(() => store.pluginSourceUrl)
+const siteName = computed(() => siteConfig.value.name)
+const siteIconUrl = computed(() => siteConfig.value.icon_url)
+const displayUserName = computed(() => (
+  currentUser.value?.github_login ||
+  currentUser.value?.internal_username ||
+  currentUser.value?.login ||
+  '已登录'
+))
+const agreementText = computed(() => {
+  const auth = siteConfig.value.auth || {}
+  const parts = []
+  if (auth.login_agreement_enabled && auth.login_agreement_text) {
+    parts.push(auth.login_agreement_text)
+  }
+  if (auth.service_terms_enabled && auth.service_terms_text) {
+    parts.push(auth.service_terms_text)
+  }
+  return parts.join('\n\n')
+})
+const canSubmitLogin = computed(() => !agreementText.value || agreementAccepted.value)
 
 const handleSearchQueryChange = (value) => {
   emit('update:searchQuery', value)
@@ -178,6 +240,31 @@ const handleSortByChange = (value) => {
 
 const goSubmit = () => {
   router.push('/submit')
+}
+
+const openLoginModal = () => {
+  if (!siteConfig.value.auth?.public_login_enabled) {
+    message.warning('当前站点已关闭登录')
+    return
+  }
+  isLoginModalOpen.value = true
+}
+
+const submitInternalLogin = async () => {
+  if (!canSubmitLogin.value) {
+    message.warning('请先同意登录条款')
+    return
+  }
+  isLoggingIn.value = true
+  try {
+    await loginWithPassword(loginForm.value)
+    isLoginModalOpen.value = false
+    message.success('已登录')
+  } catch (error) {
+    message.error(error.message || '登录失败')
+  } finally {
+    isLoggingIn.value = false
+  }
 }
 
 const copyPluginSource = async () => {
@@ -268,6 +355,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  max-width: min(420px, 45vw);
 }
 
 .brand-logo,
@@ -281,6 +369,8 @@ onUnmounted(() => {
   font-weight: 700;
   color: var(--text-primary);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .nav-actions {
@@ -401,6 +491,8 @@ onUnmounted(() => {
   font-size: 16px;
   font-weight: 800;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sticky-header-center {
@@ -417,6 +509,28 @@ onUnmounted(() => {
 .mobile-only,
 .mobile-inline-search {
   display: none;
+}
+
+:global(.login-modal) {
+  width: min(420px, calc(100vw - 32px));
+  border-radius: 8px;
+}
+
+.agreement-box {
+  margin-bottom: 18px;
+}
+
+.agreement-text {
+  max-height: 160px;
+  overflow: auto;
+  margin-bottom: 12px;
+  white-space: pre-wrap;
+}
+
+.login-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 @media (max-width: 768px) {

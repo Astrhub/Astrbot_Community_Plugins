@@ -9,7 +9,7 @@
 
 ## 权限模型
 
-- 第一个认证用户自动成为核心管理员（core admin）
+- 首次启动向导注册内部核心管理员（core admin）
 - 核心管理员可以授予/撤销管理员，发布公告
 - 普通管理员可以上架/下架插件，删除评论，禁言用户，处理审核
 - 插件所有者通过仓库所有权验证后，可编辑自己的插件元数据
@@ -22,11 +22,11 @@
 `apps/api/app/store.py` 提供两种实现：
 
 - `InMemoryMarketStore` — 开发/首次启动用内存存储，不持久化。
-- `PgRedisMarketStore` — 生产存储，配置 `DATABASE_URL` 和 `REDIS_URL` 后自动启用。
+- `PgRedisMarketStore` — 生产存储，配置 PostgreSQL 和 Redis 连接后自动启用。
 
 PostgreSQL schema 在服务启动时自动创建。插件可变扩展字段使用 `jsonb`，标签字段建立 GIN 索引；用户、插件、评论等核心关系使用主键、唯一约束、外键和状态 CHECK 约束保护数据一致性。Redis session 使用 `SET key value EX seconds` 写入，并在读取 session 时刷新 TTL。
 
-首次启动可通过前端 `/v1/setup` 页面完成基础设施配置，配置写入 `apps/api/data/runtime.env`（此目录在 `.gitignore` 中），之后需要重启 API 进程。
+首次启动可通过前端 `/v1/setup` 页面完成基础设施配置。表单按主机名、端口、数据库名、账号、密码和 SSL 开关填写，并创建内部核心管理员。后端写入 `apps/api/data/runtime.env`、生成内部 `DATABASE_URL` / `REDIS_URL`，之后需要重启 API 进程。站点名称、图标、GitHub 登录开关、登录条款和服务条款同样可在此页面配置，并通过 `/v1/site` 提供给前端。
 
 ## 部署状态
 

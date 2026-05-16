@@ -60,9 +60,39 @@ class InMemoryMarketStore:
                 "id": str(profile.get("id") or self._next_id("user")),
                 "github_id": str(profile.get("id")) if profile.get("id") else None,
                 "github_login": login,
+                "internal_username": "",
+                "password_hash": "",
+                "auth_source": "github",
                 "github_name": profile.get("name") or login,
                 "avatar_url": profile.get("avatar_url") or "",
-                "role": Role.CORE_ADMIN if not self.state["users"] else Role.USER,
+                "role": Role.USER,
+                "muted_until": None,
+                "created_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+        )
+        self.state["users"].append(user)
+        return deepcopy(user)
+
+    def create_internal_admin(self, username: str, password_hash: str) -> dict[str, Any]:
+        existing = self.get_user_by_internal_username(username)
+        if existing:
+            existing["password_hash"] = password_hash
+            existing["role"] = Role.CORE_ADMIN.value
+            existing["updated_at"] = utc_now()
+            return deepcopy(existing)
+
+        user = self._normalize_user(
+            {
+                "id": self._next_id("user"),
+                "github_id": None,
+                "github_login": "",
+                "internal_username": username,
+                "password_hash": password_hash,
+                "auth_source": "internal",
+                "github_name": username,
+                "avatar_url": "",
+                "role": Role.CORE_ADMIN,
                 "muted_until": None,
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
@@ -80,6 +110,16 @@ class InMemoryMarketStore:
                 user
                 for user in self.state["users"]
                 if user["github_login"].lower() == str(login).lower()
+            ),
+            None,
+        )
+
+    def get_user_by_internal_username(self, username: str) -> dict[str, Any] | None:
+        return next(
+            (
+                user
+                for user in self.state["users"]
+                if user.get("internal_username", "").lower() == str(username).lower()
             ),
             None,
         )
@@ -314,9 +354,13 @@ class InMemoryMarketStore:
             **user,
             "role": normalize_role(user.get("role")).value,
             "github_login": user.get("github_login") or user.get("login") or "",
+            "internal_username": user.get("internal_username") or "",
+            "password_hash": user.get("password_hash") or "",
+            "auth_source": user.get("auth_source") or "github",
             "github_name": user.get("github_name")
             or user.get("name")
             or user.get("github_login")
+            or user.get("internal_username")
             or user.get("login")
             or "",
             "muted_until": user.get("muted_until") or None,
@@ -355,7 +399,10 @@ SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS market_users (
     id text PRIMARY KEY,
     github_id text UNIQUE,
-    github_login text NOT NULL,
+    github_login text NOT NULL DEFAULT '',
+    internal_username text NOT NULL DEFAULT '',
+    password_hash text NOT NULL DEFAULT '',
+    auth_source text NOT NULL DEFAULT 'github' CHECK (auth_source IN ('github', 'internal')),
     github_name text NOT NULL DEFAULT '',
     avatar_url text NOT NULL DEFAULT '',
     role text NOT NULL CHECK (role IN ('core_admin', 'admin', 'user')),
@@ -365,7 +412,9 @@ CREATE TABLE IF NOT EXISTS market_users (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS market_users_github_login_lower_idx
-    ON market_users (lower(github_login));
+    ON market_users (lower(github_login)) WHERE github_login <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS market_users_internal_username_lower_idx
+    ON market_users (lower(internal_username)) WHERE internal_username <> '';
 
 CREATE TABLE IF NOT EXISTS market_plugins (
     id text PRIMARY KEY,
@@ -477,6 +526,18 @@ class PgRedisMarketStore(InMemoryMarketStore):
     async def _ensure_schema(self) -> None:
         async with self._pool().acquire() as connection:
             await connection.execute(SCHEMA_SQL)
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS internal_username text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS password_hash text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS auth_source text "
+                "NOT NULL DEFAULT 'github'"
+            )
 
     async def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
         login = profile.get("login") or profile.get("github_login")
@@ -496,6 +557,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                         UPDATE market_users
                            SET github_id = COALESCE($2, github_id),
                                github_login = $3,
+                               auth_source = 'github',
                                github_name = $4,
                                avatar_url = $5,
                                updated_at = now()
@@ -510,13 +572,13 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     )
                     return self._user_from_record(row)
 
-                role = Role.CORE_ADMIN if await self._user_count(connection) == 0 else Role.USER
                 row = await connection.fetchrow(
                     """
                     INSERT INTO market_users (
-                        id, github_id, github_login, github_name, avatar_url, role
+                        id, github_id, github_login, internal_username, password_hash,
+                        auth_source, github_name, avatar_url, role
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    VALUES ($1, $2, $3, '', '', 'github', $4, $5, $6)
                     RETURNING *
                     """,
                     str(profile.get("id") or new_id("user")),
@@ -524,7 +586,47 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     str(login),
                     profile.get("name") or login,
                     profile.get("avatar_url") or "",
-                    role.value,
+                    Role.USER.value,
+                )
+                return self._user_from_record(row)
+
+    async def create_internal_admin(self, username: str, password_hash: str) -> dict[str, Any]:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("LOCK TABLE market_users IN EXCLUSIVE MODE")
+                existing = await connection.fetchrow(
+                    "SELECT * FROM market_users WHERE lower(internal_username) = lower($1)",
+                    username,
+                )
+                if existing:
+                    row = await connection.fetchrow(
+                        """
+                        UPDATE market_users
+                           SET password_hash = $2,
+                               role = $3,
+                               updated_at = now()
+                         WHERE id = $1
+                     RETURNING *
+                        """,
+                        existing["id"],
+                        password_hash,
+                        Role.CORE_ADMIN.value,
+                    )
+                    return self._user_from_record(row)
+
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO market_users (
+                        id, github_id, github_login, internal_username, password_hash,
+                        auth_source, github_name, avatar_url, role
+                    )
+                    VALUES ($1, NULL, '', $2, $3, 'internal', $2, '', $4)
+                    RETURNING *
+                    """,
+                    new_id("user"),
+                    username,
+                    password_hash,
+                    Role.CORE_ADMIN.value,
                 )
                 return self._user_from_record(row)
 
@@ -536,6 +638,13 @@ class PgRedisMarketStore(InMemoryMarketStore):
         row = await self._pool().fetchrow(
             "SELECT * FROM market_users WHERE lower(github_login) = lower($1)",
             login,
+        )
+        return self._user_from_record(row) if row else None
+
+    async def get_user_by_internal_username(self, username: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            "SELECT * FROM market_users WHERE lower(internal_username) = lower($1)",
+            username,
         )
         return self._user_from_record(row) if row else None
 

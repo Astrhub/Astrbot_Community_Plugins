@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from enum import StrEnum
 from typing import Mapping
 
@@ -94,3 +96,26 @@ def _key_value(key: ApiKey | Mapping) -> str:
 
 def _key_scopes(key: ApiKey | Mapping) -> tuple[str, ...]:
     return key.scopes if isinstance(key, ApiKey) else tuple(key.get("scopes", ()))
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    iterations = 260_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+    return f"pbkdf2_sha256${iterations}${salt}${digest.hex()}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected = password_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode(),
+            salt.encode(),
+            int(iterations),
+        ).hex()
+        return secrets.compare_digest(digest, expected)
+    except (ValueError, TypeError):
+        return False

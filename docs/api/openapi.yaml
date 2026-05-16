@@ -21,6 +21,11 @@ paths:
       responses:
         "200":
           description: Setup saved and restart required
+  /v1/site:
+    get:
+      responses:
+        "200":
+          description: Public site name and icon URL
   /v1/me:
     get:
       responses:

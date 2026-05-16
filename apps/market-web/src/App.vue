@@ -40,13 +40,10 @@ const isSubmitPage = computed(() => route.path === '/submit')
 
 onMounted(async () => {
   store.initTheme()
+  await store.loadSiteConfig()
   const status = await store.loadSetupStatus()
   if (status.required) {
     if (route.path !== '/setup') await router.replace('/setup')
-    return
-  }
-  if (route.path === '/setup') {
-    await router.replace('/')
     return
   }
   await Promise.all([store.loadPlugins(), store.loadCurrentUser()])

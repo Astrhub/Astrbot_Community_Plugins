@@ -3,6 +3,46 @@ import { defineStore } from 'pinia'
 
 const normalizeBaseUrl = (value) => String(value || '').trim().replace(/\/$/, '')
 const BASE_URL = normalizeBaseUrl(import.meta.env.VITE_BASE_URL) || window.location.origin
+const DEFAULT_SITE_CONFIG = Object.freeze({
+  name: 'AstrBot Community Plugins',
+  icon_url: '/logo.webp',
+  auth: {
+    github_login_enabled: false,
+    public_login_enabled: true,
+    login_agreement_enabled: false,
+    login_agreement_text: '',
+    service_terms_enabled: false,
+    service_terms_text: '',
+    terms_revision: ''
+  }
+})
+
+const createDefaultSetupConfig = () => ({
+  site: {
+    name: DEFAULT_SITE_CONFIG.name,
+    icon_url: DEFAULT_SITE_CONFIG.icon_url
+  },
+  admin: {
+    username: 'admin',
+    password: ''
+  },
+  auth: { ...DEFAULT_SITE_CONFIG.auth },
+  postgres: {
+    host: '127.0.0.1',
+    port: 5432,
+    database: '',
+    username: '',
+    password: '',
+    ssl: false
+  },
+  redis: {
+    host: '127.0.0.1',
+    port: 6379,
+    database: 0,
+    password: '',
+    ssl: false
+  }
+})
 
 export const usePluginStore = defineStore('plugins', () => {
   const plugins = ref([])
@@ -12,10 +52,10 @@ export const usePluginStore = defineStore('plugins', () => {
     missing: [],
     database_configured: true,
     redis_configured: true,
-    saved_database_url: '',
-    saved_redis_url: '',
+    saved_setup: createDefaultSetupConfig(),
     restart_required: false
   })
+  const siteConfig = ref({ ...DEFAULT_SITE_CONFIG })
   const searchQuery = ref('')
   const selectedTag = ref(null)
   const currentPage = ref(1)
@@ -68,6 +108,43 @@ export const usePluginStore = defineStore('plugins', () => {
     themeMode.value = 'system'
     localStorage.setItem('theme-mode', 'system')
     applyThemeFromSystem()
+  }
+
+  function normalizeSiteConfig(value = {}) {
+    return {
+      name: String(value.name || DEFAULT_SITE_CONFIG.name).trim() || DEFAULT_SITE_CONFIG.name,
+      icon_url: String(value.icon_url || DEFAULT_SITE_CONFIG.icon_url).trim() ||
+        DEFAULT_SITE_CONFIG.icon_url,
+      auth: { ...DEFAULT_SITE_CONFIG.auth, ...(value.auth || {}) }
+    }
+  }
+
+  function applySiteMetadata(config) {
+    if (typeof document === 'undefined') return
+    document.title = config.name
+    setMetaContent('application-name', config.name)
+    setMetaContent('og:title', config.name, 'property')
+    setMetaContent('og:image', config.icon_url, 'property')
+    updateLink('icon', config.icon_url)
+    updateLink('shortcut icon', config.icon_url)
+    updateLink('preload', config.icon_url)
+  }
+
+  function setMetaContent(name, content, attribute = 'name') {
+    const element = document.querySelector(`meta[${attribute}="${name}"]`)
+    if (element) element.setAttribute('content', content)
+  }
+
+  function updateLink(rel, href) {
+    const element = document.querySelector(`link[rel="${rel}"]`)
+    if (element) element.setAttribute('href', href)
+  }
+
+  function applySiteConfig(value) {
+    const config = normalizeSiteConfig(value)
+    siteConfig.value = config
+    applySiteMetadata(config)
+    return config
   }
 
   watch(sortBy, (value) => {
@@ -162,16 +239,37 @@ export const usePluginStore = defineStore('plugins', () => {
   async function loadSetupStatus() {
     const response = await fetch(`${apiBaseUrl}/v1/setup/status`, { cache: 'no-store' })
     const data = await response.json().catch(() => ({}))
+    const site = applySiteConfig(data.site || data.saved_setup?.site || siteConfig.value)
     setupStatus.value = {
       required: Boolean(data.required),
       missing: Array.isArray(data.missing) ? data.missing : [],
       database_configured: Boolean(data.database_configured),
       redis_configured: Boolean(data.redis_configured),
-      saved_database_url: data.saved_database_url || '',
-      saved_redis_url: data.saved_redis_url || '',
+      saved_setup: mergeSetupConfig(data.saved_setup, site),
       restart_required: Boolean(data.restart_required)
     }
     return setupStatus.value
+  }
+
+  async function loadSiteConfig() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/v1/site`, { cache: 'no-store' })
+      const data = await response.json().catch(() => ({}))
+      return applySiteConfig(response.ok ? data : siteConfig.value)
+    } catch {
+      return applySiteConfig(siteConfig.value)
+    }
+  }
+
+  function mergeSetupConfig(value = {}, site = siteConfig.value) {
+    const defaults = createDefaultSetupConfig()
+    return {
+      site: normalizeSiteConfig(value.site || site),
+      admin: { ...defaults.admin, ...(value.admin || {}) },
+      auth: { ...defaults.auth, ...(value.auth || {}) },
+      postgres: { ...defaults.postgres, ...(value.postgres || {}) },
+      redis: { ...defaults.redis, ...(value.redis || {}) }
+    }
   }
 
   async function saveSetupConfig(payload) {
@@ -201,6 +299,19 @@ export const usePluginStore = defineStore('plugins', () => {
 
   function loginWithGithub() {
     window.location.href = `${apiBaseUrl}/v1/auth/github/login`
+  }
+
+  async function loginWithPassword(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/auth/internal/login`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '登录失败')
+    currentUser.value = data.user
+    return data.user
   }
 
   async function submitPlugin(payload) {
@@ -252,6 +363,7 @@ export const usePluginStore = defineStore('plugins', () => {
     plugins,
     currentUser,
     setupStatus,
+    siteConfig,
     searchQuery,
     selectedTag,
     currentPage,
@@ -270,10 +382,12 @@ export const usePluginStore = defineStore('plugins', () => {
     totalPages,
     paginatedPlugins,
     initTheme,
+    loadSiteConfig,
     loadSetupStatus,
     loadPlugins,
     loadCurrentUser,
     loginWithGithub,
+    loginWithPassword,
     saveSetupConfig,
     submitPlugin,
     setSearchQuery,
