@@ -16,10 +16,15 @@
 
 ## 持久化与基础设施
 
-- **PostgreSQL** — 存储用户、插件、提交记录、评论、公告和审计数据。
-- **Redis** — 存储会话、OAuth 状态、缓存条目和限流计数。
+- **PostgreSQL** — 存储用户、插件、提交记录、评论、公告和 API key。
+- **Redis** — 存储登录会话 token，使用 TTL 自动过期。
 
-当前代码中的 `InMemoryMarketStore`（`apps/api/app/store.py`）为开发用内存存储实现，所有数据存储在进程中。生产级 PostgreSQL/Redis 存储适配器尚未实现。
+`apps/api/app/store.py` 提供两种实现：
+
+- `InMemoryMarketStore` — 开发/首次启动用内存存储，不持久化。
+- `PgRedisMarketStore` — 生产存储，配置 `DATABASE_URL` 和 `REDIS_URL` 后自动启用。
+
+PostgreSQL schema 在服务启动时自动创建。插件可变扩展字段使用 `jsonb`，标签字段建立 GIN 索引；用户、插件、评论等核心关系使用主键、唯一约束、外键和状态 CHECK 约束保护数据一致性。Redis session 使用 `SET key value EX seconds` 写入，并在读取 session 时刷新 TTL。
 
 首次启动可通过前端 `/v1/setup` 页面完成基础设施配置，配置写入 `apps/api/data/runtime.env`（此目录在 `.gitignore` 中），之后需要重启 API 进程。
 

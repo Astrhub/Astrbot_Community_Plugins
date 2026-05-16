@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import os
+
 from fastapi.testclient import TestClient
+import pytest
 
 import app.main as main_module
 from app.auth import Role, can_edit_plugin, can_manage_admins, can_moderate_plugins
 from app.config import load_settings
-from app.main import create_app
-from app.store import InMemoryMarketStore
+from app.main import create_app, create_store
+from app.store import InMemoryMarketStore, PgRedisMarketStore, SCHEMA_SQL
 
 
 def make_client(enable_dev_auth: bool = True) -> TestClient:
@@ -263,3 +267,79 @@ def test_market_web_serves_built_spa(tmp_path, monkeypatch) -> None:
     assert client.get("/").text == "<html>market</html>"
     assert client.get("/submit").text == "<html>market</html>"
     assert client.get("/logo.webp").text == "logo"
+
+
+def test_store_selection_uses_pg_redis_only_when_both_urls_are_configured() -> None:
+    memory_settings = load_settings({})
+    assert isinstance(create_store(memory_settings), InMemoryMarketStore)
+
+    production_settings = load_settings(
+        {
+            "DATABASE_URL": "postgresql://market:market@127.0.0.1:5432/market",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+        }
+    )
+    assert isinstance(create_store(production_settings), PgRedisMarketStore)
+
+
+def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
+    assert "CREATE TABLE IF NOT EXISTS market_users" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS market_plugins" in SCHEMA_SQL
+    assert "jsonb NOT NULL DEFAULT '[]'::jsonb" in SCHEMA_SQL
+    assert "CHECK (status IN ('pending', 'listed', 'unlisted'))" in SCHEMA_SQL
+    assert "REFERENCES market_users(id)" in SCHEMA_SQL
+    assert "USING GIN (tags)" in SCHEMA_SQL
+
+
+def test_pg_redis_store_round_trip_from_env() -> None:
+    database_url = os.getenv("ASTRBOT_TEST_DATABASE_URL", "")
+    redis_url = os.getenv("ASTRBOT_TEST_REDIS_URL", "")
+    if not database_url or not redis_url:
+        pytest.skip("Set ASTRBOT_TEST_DATABASE_URL and ASTRBOT_TEST_REDIS_URL to run integration storage test")
+
+    asyncio.run(run_pg_redis_store_round_trip(database_url, redis_url))
+
+
+async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> None:
+    store = PgRedisMarketStore(database_url, redis_url, session_ttl_seconds=60)
+    await store.connect()
+    try:
+        async with store._pool().acquire() as connection:
+            await connection.execute(
+                """
+                TRUNCATE market_api_keys, market_comments, market_submissions,
+                         market_plugins, market_announcements, market_users
+                RESTART IDENTITY CASCADE
+                """
+            )
+
+        alice = await store.upsert_github_user({"login": "alice", "name": "Alice"})
+        assert alice["role"] == Role.CORE_ADMIN
+
+        plugin = await store.submit_plugin(
+            alice,
+            {
+                "name": "astrbot_plugin_demo",
+                "display_name": "Demo",
+                "desc": "Demo plugin",
+                "author": "Alice",
+                "repo": "https://github.com/alice/astrbot_plugin_demo",
+                "tags": ["demo"],
+            },
+        )
+        assert plugin["status"] == "pending"
+        assert await store.list_public_plugins() == []
+
+        listed = await store.update_plugin_status(plugin["id"], "listed", alice["id"])
+        assert listed and listed["status"] == "listed"
+
+        comment = await store.add_comment(plugin["id"], alice["id"], "Nice")
+        assert comment["body"] == "Nice"
+        assert len(await store.list_comments(plugin["id"])) == 1
+
+        session = await store.create_session(alice["id"])
+        assert (await store.get_user_by_session(session["token"]))["github_login"] == "alice"
+        assert await store.revoke_session(session["token"]) is True
+        assert await store.get_user_by_session(session["token"]) is None
+    finally:
+        await store.close()

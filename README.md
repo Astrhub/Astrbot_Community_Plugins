@@ -27,7 +27,7 @@ npm run start:api
 - AstrBot 插件源：`http://your-host:8787/plugins.json`
 - API：`http://your-host:8787/v1/...`
 
-后端使用 **FastAPI + uvicorn**，依赖 **PostgreSQL**（持久化存储）和 **Redis**（会话/OAuth状态/缓存/限流）。当前仓库中的 `InMemoryMarketStore` 为开发用内存存储，生产级 PostgreSQL/Redis 存储适配器尚未实现。
+后端使用 **FastAPI + uvicorn**，依赖 **PostgreSQL**（持久化存储）和 **Redis**（会话存储）。配置 `DATABASE_URL` 与 `REDIS_URL` 后会启用 `PgRedisMarketStore`；未配置时回退到 `InMemoryMarketStore` 方便首次启动和本地开发。
 
 仓库目前尚未提供完整生产运维配置，包括：
 
@@ -39,6 +39,8 @@ npm run start:api
 - 数据库迁移脚本（无 Alembic 等）
 
 首次启动时，若 `DATABASE_URL` 或 `REDIS_URL` 缺失，前端会打开 `/setup` 页面，将基础设施配置写入 `apps/api/data/runtime.env`，随后需重启 API 进程使配置生效。
+
+PostgreSQL schema 会在后端启动时自动创建，包含用户、插件、提交记录、评论、公告和 API key 表；Redis 使用带过期时间的 session key 保存登录态。
 
 ### CI/CD
 
@@ -69,6 +71,15 @@ uv run pytest
 ```
 
 后端完整环境变量见 `apps/api/.env.example`。
+
+生产启用持久化存储至少需要：
+
+```env
+DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market
+REDIS_URL=redis://127.0.0.1:6379/0
+WEB_URL=https://your-market-domain
+GITHUB_CALLBACK_URL=https://your-market-domain/v1/auth/github/callback
+```
 
 ## 身份与角色
 
