@@ -2,12 +2,13 @@
 
 ## 身份认证
 
-GitHub OAuth 是唯一支持的登录方式。第一个认证用户自动成为核心管理员。后续用户仅能通过管理员显式提升或已验证的仓库所有权获得权限。
+首次启动向导会注册内部核心管理员账号，用于配置 GitHub OAuth、管理员权限和站点策略。GitHub OAuth 是普通用户和插件所有者的身份来源；GitHub 用户不会自动成为核心管理员，后续仅能通过核心管理员显式提升或受信任组织规则获得管理员权限。
 
 登录流程（`apps/api/app/main.py`）：
-1. 访问 `/v1/auth/github/login` 获取 GitHub OAuth 授权链接
-2. GitHub 回调 `/v1/auth/github/callback`，交换 access token 并获取用户信息
-3. 若配置了 `GITHUB_ADMIN_ORG`，自动提升组织成员为管理员
+1. 内部核心管理员通过 `/v1/auth/internal/login` 登录
+2. 若开启 GitHub 登录，访问 `/v1/auth/github/login` 获取 GitHub OAuth 授权链接
+3. GitHub 回调 `/v1/auth/github/callback`，交换 access token 并获取用户信息
+4. 若配置了 `GITHUB_ADMIN_ORG`，自动提升组织成员为管理员
 
 ## 权限
 
@@ -35,7 +36,7 @@ PostgreSQL 是市场数据的持久化存储。Redis 当前用于会话令牌短
 
 ## 首次启动设置
 
-若首次启动时缺少 `DATABASE_URL` 或 `REDIS_URL`，前端 UI 可通过 `/v1/setup` 页面收集并写入 `apps/api/data/runtime.env`。写入后，仅核心管理员可修改。
+若首次启动时缺少 PostgreSQL 或 Redis 配置，前端 UI 可通过 `/v1/setup` 页面按主机名、端口、数据库名、账号、密码和 SSL 开关收集配置，并注册内部核心管理员。配置写入 `apps/api/data/runtime.env`。写入后，仅核心管理员可修改。
 
 环境变量优先级：运行时配置文件（`runtime.env`）中的值会被同名系统环境变量覆盖（`apps/api/app/config.py` 第 61 行）。
 

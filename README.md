@@ -27,7 +27,7 @@ npm run start:api
 - AstrBot 插件源：`http://your-host:8787/plugins.json`
 - API：`http://your-host:8787/v1/...`
 
-后端使用 **FastAPI + uvicorn**，依赖 **PostgreSQL**（持久化存储）和 **Redis**（会话存储）。配置 `DATABASE_URL` 与 `REDIS_URL` 后会启用 `PgRedisMarketStore`；未配置时回退到 `InMemoryMarketStore` 方便首次启动和本地开发。
+后端使用 **FastAPI + uvicorn**，依赖 **PostgreSQL**（持久化存储）和 **Redis**（会话存储）。配置 PostgreSQL 与 Redis 后会启用 `PgRedisMarketStore`；未配置时回退到 `InMemoryMarketStore` 方便首次启动和本地开发。
 
 仓库目前尚未提供完整生产运维配置，包括：
 
@@ -38,7 +38,7 @@ npm run start:api
 - Terraform / 基础设施即代码配置
 - 数据库迁移脚本（无 Alembic 等）
 
-首次启动时，若 `DATABASE_URL` 或 `REDIS_URL` 缺失，前端会打开 `/setup` 页面，将基础设施配置写入 `apps/api/data/runtime.env`，随后需重启 API 进程使配置生效。
+首次启动时，若 PostgreSQL 或 Redis 缺失，前端会打开 `/setup` 页面。页面按主机名、端口、数据库名、账号、密码和 SSL 开关填写配置，并注册内部核心管理员账号；保存后写入 `apps/api/data/runtime.env`，随后需重启 API 进程使配置生效。GitHub OAuth 登录可在内部管理员登录后再开启。
 
 PostgreSQL schema 会在后端启动时自动创建，包含用户、插件、提交记录、评论、公告和 API key 表；Redis 使用带过期时间的 session key 保存登录态。
 
@@ -79,25 +79,29 @@ uv run pytest
 
 后端完整环境变量见 `apps/api/.env.example`。
 
-生产启用持久化存储至少需要：
+生产启用持久化存储可通过首次启动页面填写。若要直接用环境变量启动，至少需要：
 
 ```env
 DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market
 REDIS_URL=redis://127.0.0.1:6379/0
 WEB_URL=https://your-market-domain
 GITHUB_CALLBACK_URL=https://your-market-domain/v1/auth/github/callback
+SITE_NAME=AstrBot Community Plugins
+SITE_ICON_URL=/logo.webp
+GITHUB_LOGIN_ENABLED=false
+PUBLIC_LOGIN_ENABLED=true
 ```
 
 ## 身份与角色
 
-- 第一个 GitHub 用户自动成为核心管理员（core admin）。
+- 首次启动向导注册内部核心管理员（core admin），用于配置 GitHub OAuth 和高级管理项。
 - 核心管理员可以授予或撤销管理员，发布公告。
 - 普通管理员可以下架/上架插件，删除评论，禁言用户，处理插件审核。
 - 插件所有者经过 GitHub 仓库所有权验证后，可编辑自己的插件元数据。
 
 ## 集成说明
 
-未来的 AstrBot WebUI 插件将通过 API key 调用公开 API。市场网站仅支持 GitHub OAuth 登录和审核操作。插件通过网页表单提交，不走 GitHub Issues。
+未来的 AstrBot WebUI 插件将通过 API key 调用公开 API。市场网站支持内部核心管理员登录和可配置的 GitHub OAuth 登录；插件通过网页表单提交，不走 GitHub Issues。
 
 AstrBot 本身可将此市场作为自定义插件源。在 AstrBot WebUI 中添加：
 

@@ -36,13 +36,56 @@ def make_setup_client(tmp_path) -> TestClient:
     return TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
 
 
-def test_first_user_becomes_core_admin() -> None:
+def setup_payload(
+    postgres_database: str = "market",
+    postgres_port: int = 5432,
+    redis_port: int = 6379,
+    site_name: str = "AstrBot Community Plugins",
+) -> dict[str, object]:
+    return {
+        "site": {"name": site_name, "icon_url": "/custom-logo.webp"},
+        "admin": {"username": "admin", "password": "password123"},
+        "auth": {
+            "github_login_enabled": False,
+            "public_login_enabled": True,
+            "login_agreement_enabled": True,
+            "login_agreement_text": "登录即同意社区规则。",
+            "service_terms_enabled": True,
+            "service_terms_text": "请遵守插件市场服务条款。",
+        },
+        "postgres": {
+            "host": "127.0.0.1",
+            "port": postgres_port,
+            "database": postgres_database,
+            "username": "market",
+            "password": "market",
+            "ssl": False,
+        },
+        "redis": {
+            "host": "127.0.0.1",
+            "port": redis_port,
+            "database": 0,
+            "password": "",
+            "ssl": False,
+        },
+    }
+
+
+def test_github_users_do_not_become_core_admin_automatically() -> None:
     store = InMemoryMarketStore()
     first = store.upsert_github_user({"login": "alice", "name": "Alice"})
     second = store.upsert_github_user({"login": "bob", "name": "Bob"})
 
-    assert first["role"] == Role.CORE_ADMIN
+    assert first["role"] == Role.USER
     assert second["role"] == Role.USER
+
+
+def test_internal_admin_is_core_admin() -> None:
+    store = InMemoryMarketStore()
+    admin = store.create_internal_admin("admin", "hash")
+
+    assert admin["role"] == Role.CORE_ADMIN
+    assert admin["internal_username"] == "admin"
 
 
 def test_core_admin_can_manage_admins_while_normal_admin_moderates_plugins() -> None:
@@ -65,9 +108,11 @@ def test_plugin_owners_can_edit_their_own_metadata() -> None:
 
 def test_submission_listing_comments_and_moderation_flow() -> None:
     client = make_client()
+    store = client.app.state.store
+    admin = store.create_internal_admin("admin", "hash")
     login = client.get("/v1/auth/debug-login?login=alice")
     assert login.status_code == 200
-    assert login.json()["user"]["role"] == Role.CORE_ADMIN
+    store.update_user_role(login.json()["user"]["id"], Role.ADMIN.value)
 
     submission = client.post(
         "/v1/plugins/submissions",
@@ -94,7 +139,7 @@ def test_submission_listing_comments_and_moderation_flow() -> None:
     assert comment.json()["body"] == "Nice"
 
     muted = client.post(
-        f"/v1/admin/users/{login.json()['user']['id']}/mute",
+        f"/v1/admin/users/{admin['id']}/mute",
         json={"muted_until": "2099-01-01T00:00:00Z"},
     )
     assert muted.status_code == 200
@@ -133,7 +178,7 @@ def test_cors_allows_browser_session_cookies_and_dev_auth_header() -> None:
     assert "x-dev-github-login" in response.headers["access-control-allow-headers"].lower()
 
 
-def test_first_run_setup_can_save_database_and_redis_urls(tmp_path) -> None:
+def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     client = make_setup_client(tmp_path)
 
     status = client.get("/v1/setup/status")
@@ -141,61 +186,103 @@ def test_first_run_setup_can_save_database_and_redis_urls(tmp_path) -> None:
     assert status.json()["required"] is True
     assert status.json()["missing"] == ["database_url", "redis_url"]
     assert status.json()["restart_required"] is False
+    assert status.json()["saved_setup"]["postgres"]["host"] == "127.0.0.1"
+    assert status.json()["saved_setup"]["postgres"]["password"] == ""
+    assert status.json()["site"]["name"] == "AstrBot Community Plugins"
 
-    response = client.post(
-        "/v1/setup",
-        json={
-            "database_url": "postgresql://market:market@127.0.0.1:5432/market",
-            "redis_url": "redis://127.0.0.1:6379/0",
-        },
-    )
+    response = client.post("/v1/setup", json=setup_payload(site_name="AstrHub Plugins"))
 
     assert response.status_code == 200
     assert response.json()["restart_required"] is True
+    runtime_file = (tmp_path / "runtime.env").read_text()
     assert (
-        "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market"
-        in (tmp_path / "runtime.env").read_text()
+        "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market?sslmode=disable"
+        in runtime_file
     )
+    assert "REDIS_URL=redis://127.0.0.1:6379/0" in runtime_file
+    assert "POSTGRES_SSL=false" in runtime_file
+    assert 'SITE_NAME="AstrHub Plugins"' in runtime_file
+    assert "CORE_ADMIN_USERNAME=admin" in runtime_file
+    assert "CORE_ADMIN_PASSWORD_HASH=pbkdf2_sha256" in runtime_file
+    assert "GITHUB_LOGIN_ENABLED=false" in runtime_file
+    assert "LOGIN_AGREEMENT_TEXT=登录即同意社区规则。" in runtime_file
+    login = client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    assert login.status_code == 200
+    assert login.json()["user"]["role"] == Role.CORE_ADMIN
     assert client.get("/health").json()["setup"] == "required"
 
 
 def test_setup_after_first_run_requires_core_admin(tmp_path) -> None:
     client = make_setup_client(tmp_path)
-    client.get("/v1/auth/debug-login?login=alice")
+    client.post("/v1/setup", json=setup_payload())
     client.cookies.clear()
-
-    client.post(
-        "/v1/setup",
-        json={
-            "database_url": "postgresql://market:market@127.0.0.1:5432/market",
-            "redis_url": "redis://127.0.0.1:6379/0",
-        },
-    )
 
     forbidden = client.post(
         "/v1/setup",
         headers={"x-dev-github-login": "bob"},
-        json={
-            "database_url": "postgresql://other:other@127.0.0.1:5432/other",
-            "redis_url": "redis://127.0.0.1:6380/0",
-        },
+        json=setup_payload(postgres_database="other", redis_port=6380),
     )
     assert forbidden.status_code == 403
 
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
     allowed = client.post(
         "/v1/setup",
-        headers={"x-dev-github-login": "alice"},
-        json={
-            "database_url": "postgresql://other:other@127.0.0.1:5432/other",
-            "redis_url": "redis://127.0.0.1:6380/0",
-        },
+        json=setup_payload(postgres_database="other", redis_port=6380),
     )
     assert allowed.status_code == 200
 
 
+def test_public_site_config_uses_settings() -> None:
+    settings = load_settings(
+        {
+            "SITE_NAME": "AstrHub",
+            "SITE_ICON_URL": "https://example.com/icon.webp",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+
+    assert client.get("/v1/site").json() == {
+        "name": "AstrHub",
+        "icon_url": "https://example.com/icon.webp",
+        "auth": {
+            "github_login_enabled": False,
+            "public_login_enabled": True,
+            "login_agreement_enabled": False,
+            "login_agreement_text": "",
+            "service_terms_enabled": False,
+            "service_terms_text": "",
+            "terms_revision": main_module.digest_terms(settings),
+        },
+    }
+
+
+def test_setup_status_redacts_infrastructure_after_initial_setup(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+    client.post("/v1/setup", json=setup_payload())
+    client.cookies.clear()
+
+    public_status = client.get("/v1/setup/status").json()
+    assert public_status["saved_setup"]["postgres"]["database"] == ""
+    assert public_status["saved_setup"]["postgres"]["password"] == ""
+
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    core_status = client.get("/v1/setup/status").json()
+    assert core_status["saved_setup"]["postgres"]["password"] == "market"
+
+
 def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
     client = make_client()
-    client.get("/v1/auth/debug-login?login=alice")
+    login = client.get("/v1/auth/debug-login?login=alice")
+    client.app.state.store.update_user_role(login.json()["user"]["id"], Role.ADMIN.value)
     submitted = client.post(
         "/v1/plugins/submissions",
         json={
@@ -318,8 +405,11 @@ async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> No
                 """
             )
 
+        admin = await store.create_internal_admin("admin", "hash")
         alice = await store.upsert_github_user({"login": "alice", "name": "Alice"})
-        assert alice["role"] == Role.CORE_ADMIN
+        assert admin["role"] == Role.CORE_ADMIN
+        assert alice["role"] == Role.USER
+        await store.update_user_role(alice["id"], Role.ADMIN.value)
 
         plugin = await store.submit_plugin(
             alice,

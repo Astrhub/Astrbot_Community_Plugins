@@ -22,7 +22,11 @@
               </n-icon>
             </template>
           </n-button>
-          <n-button v-if="!currentUser" type="primary" @click="loginWithGithub">
+          <n-button
+            v-if="!currentUser && siteConfig.auth.github_login_enabled"
+            type="primary"
+            @click="loginWithGithub"
+          >
             <template #icon>
               <n-icon><logo-github /></n-icon>
             </template>
@@ -36,7 +40,7 @@
       <section class="submit-aside">
         <n-card :bordered="false" class="info-panel">
           <h2>上架规则</h2>
-          <p>目前唯一支持 GitHub OAuth。提交后后端会校验仓库归属或协作者权限。</p>
+          <p>提交插件需要使用 GitHub OAuth 登录，用于校验仓库归属。</p>
           <ul>
             <li>仓库必须是公开 GitHub 仓库。</li>
             <li>插件名建议使用 `astrbot_plugin_` 前缀。</li>
@@ -54,6 +58,7 @@
               <n-tag v-if="currentUser" type="success" :bordered="false">
                 已登录：{{ currentUser.github_login || currentUser.login }}
               </n-tag>
+              <n-tag v-else-if="!siteConfig.auth.github_login_enabled" type="warning" :bordered="false">GitHub 登录未开启</n-tag>
               <n-tag v-else type="warning" :bordered="false">需要 GitHub 登录</n-tag>
             </div>
           </template>
@@ -144,7 +149,7 @@ import { usePluginStore } from '@/stores/plugins'
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { isDarkMode, currentUser } = storeToRefs(store)
+const { isDarkMode, currentUser, siteConfig } = storeToRefs(store)
 const { loginWithGithub, toggleTheme } = store
 const formRef = ref(null)
 const submitting = ref(false)

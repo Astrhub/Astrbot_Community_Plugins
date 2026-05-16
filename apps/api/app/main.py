@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -24,9 +24,11 @@ from .auth import (
     can_moderate_community,
     can_moderate_plugins,
     can_publish_announcement,
+    hash_password,
     is_admin,
     is_core_admin,
     require_api_key,
+    verify_password,
 )
 from .config import ApiKey, Settings, load_settings
 from .runtime_config import read_runtime_config, write_runtime_config
@@ -34,6 +36,7 @@ from .schemas import (
     AnnouncementCreate,
     ApiKeyCreate,
     CommentCreate,
+    InternalLoginPayload,
     MuteUserPayload,
     PluginPatch,
     PluginSubmission,
@@ -46,6 +49,21 @@ from .store import PgRedisMarketStore
 GITHUB_REPO_PATTERN = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/?$")
 PLUGIN_NAME_PATTERN = re.compile(r"^astrbot_plugin_[a-z0-9_-]+$", re.IGNORECASE)
 MARKET_WEB_DIST = Path(__file__).resolve().parents[3] / "apps" / "market-web" / "dist"
+DEFAULT_POSTGRES_CONFIG = {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "database": "",
+    "username": "",
+    "password": "",
+    "ssl": False,
+}
+DEFAULT_REDIS_CONFIG = {
+    "host": "127.0.0.1",
+    "port": 6379,
+    "database": 0,
+    "password": "",
+    "ssl": False,
+}
 RESERVED_WEB_PATHS = {
     "v1",
     "health",
@@ -102,6 +120,7 @@ def create_store(settings: Settings) -> InMemoryMarketStore | PgRedisMarketStore
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await maybe_call_store_lifecycle(app, "connect")
+    await bootstrap_internal_core_admin(app)
     try:
         yield None
     finally:
@@ -112,9 +131,25 @@ async def maybe_call_store_lifecycle(app: FastAPI, method_name: str) -> None:
     method = getattr(app.state.store, method_name, None)
     if not method:
         return
-    result = method()
-    if inspect.isawaitable(result):
-        await result
+    await resolve_optional_awaitable(method())
+
+
+async def resolve_optional_awaitable(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def bootstrap_internal_core_admin(app: FastAPI) -> None:
+    settings = app.state.settings
+    if not settings.core_admin_username or not settings.core_admin_password_hash:
+        return
+    await resolve_optional_awaitable(
+        app.state.store.create_internal_admin(
+            settings.core_admin_username,
+            settings.core_admin_password_hash,
+        )
+    )
 
 
 def register_routes(app: FastAPI) -> None:
@@ -128,23 +163,36 @@ def register_routes(app: FastAPI) -> None:
             "redis": "configured" if settings.redis_url else "missing",
         }
 
+    @app.get("/v1/site")
+    async def site_config(request: Request) -> dict[str, Any]:
+        settings = get_settings(request)
+        return {
+            **get_site_config(settings),
+            "auth": get_public_auth_config(settings),
+        }
+
     @app.get("/v1/setup/status")
     async def setup_status(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
         runtime_config = read_runtime_config(settings.runtime_config_path)
         runtime_database_url = runtime_config.get("DATABASE_URL", "")
         runtime_redis_url = runtime_config.get("REDIS_URL", "")
+        saved_setup = build_saved_setup_config(settings, runtime_config)
+        user = await current_user(request)
+        can_view_secrets = bool(user) and is_core_admin(user)
+        public_setup = saved_setup if can_view_secrets else redact_setup_infrastructure(saved_setup)
         return {
             "required": settings.is_setup_required(),
             "missing": list(settings.missing_setup_fields()),
-            "database_configured": bool(runtime_database_url),
-            "redis_configured": bool(runtime_redis_url),
-            "saved_database_url": runtime_database_url,
-            "saved_redis_url": runtime_redis_url,
+            "database_configured": bool(settings.database_url or runtime_database_url),
+            "redis_configured": bool(settings.redis_url or runtime_redis_url),
+            "site": saved_setup["site"],
+            "saved_setup": public_setup,
             "restart_required": bool(runtime_database_url or runtime_redis_url)
             and (
                 runtime_database_url != settings.database_url
                 or runtime_redis_url != settings.redis_url
+                or saved_setup["site"] != get_site_config(settings)
             ),
         }
 
@@ -157,12 +205,42 @@ def register_routes(app: FastAPI) -> None:
             if not is_core_admin(user):
                 raise error(403, "Only core admin can update infrastructure settings")
         validate_setup_payload(payload)
+        database_url = build_postgres_url(payload.postgres.model_dump())
+        redis_url = build_redis_url(payload.redis.model_dump())
+        core_admin_password_hash = hash_password(payload.admin.password)
         write_runtime_config(
             settings.runtime_config_path,
             {
-                "DATABASE_URL": payload.database_url,
-                "REDIS_URL": payload.redis_url,
+                "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
+                "CORE_ADMIN_USERNAME": payload.admin.username,
+                "DATABASE_URL": database_url,
+                "POSTGRES_DATABASE": payload.postgres.database,
+                "POSTGRES_HOST": payload.postgres.host,
+                "POSTGRES_PASSWORD": payload.postgres.password,
+                "POSTGRES_PORT": str(payload.postgres.port),
+                "POSTGRES_SSL": serialize_bool(payload.postgres.ssl),
+                "POSTGRES_USER": payload.postgres.username,
+                "REDIS_DATABASE": str(payload.redis.database),
+                "REDIS_HOST": payload.redis.host,
+                "REDIS_PASSWORD": payload.redis.password,
+                "REDIS_PORT": str(payload.redis.port),
+                "REDIS_SSL": serialize_bool(payload.redis.ssl),
+                "REDIS_URL": redis_url,
+                "SITE_ICON_URL": payload.site.icon_url,
+                "SITE_NAME": payload.site.name,
+                "GITHUB_LOGIN_ENABLED": serialize_bool(payload.auth.github_login_enabled),
+                "LOGIN_AGREEMENT_ENABLED": serialize_bool(payload.auth.login_agreement_enabled),
+                "LOGIN_AGREEMENT_TEXT": payload.auth.login_agreement_text,
+                "PUBLIC_LOGIN_ENABLED": serialize_bool(payload.auth.public_login_enabled),
+                "SERVICE_TERMS_ENABLED": serialize_bool(payload.auth.service_terms_enabled),
+                "SERVICE_TERMS_TEXT": payload.auth.service_terms_text,
             },
+        )
+        await call_store(
+            request,
+            "create_internal_admin",
+            payload.admin.username,
+            core_admin_password_hash,
         )
         return {
             "saved": True,
@@ -172,11 +250,26 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get("/v1/me")
     async def me(request: Request) -> dict[str, Any]:
-        return await require_user(request)
+        return public_user(await require_user(request))
+
+    @app.post("/v1/auth/internal/login")
+    async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
+        settings = get_settings(request)
+        if not settings.public_login_enabled:
+            raise error(403, "Login is closed")
+        user = await call_store(request, "get_user_by_internal_username", payload.username)
+        if not user or not verify_password(payload.password, user.get("password_hash", "")):
+            raise error(401, "Invalid username or password")
+        session = await call_store(request, "create_session", user["id"])
+        response = JSONResponse({"user": public_user(user), "session": session})
+        set_cookie(response, settings.session_cookie_name, session["token"], settings)
+        return response
 
     @app.get("/v1/auth/github/login")
     async def github_login(request: Request) -> Response:
         settings = get_settings(request)
+        if not settings.public_login_enabled or not settings.github_login_enabled:
+            return JSONResponse(status_code=403, content={"error": "GitHub login is disabled"})
         if not settings.github_client_id:
             return JSONResponse(
                 status_code=501,
@@ -246,13 +339,13 @@ def register_routes(app: FastAPI) -> None:
             request, "upsert_github_user", {"login": login.strip(), "name": login.strip()}
         )
         session = await call_store(request, "create_session", user["id"])
-        response = JSONResponse({"user": user, "session": session})
+        response = JSONResponse({"user": public_user(user), "session": session})
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         return response
 
     @app.get("/v1/auth/session")
     async def auth_session(request: Request) -> dict[str, Any]:
-        return {"authenticated": True, "user": await require_user(request)}
+        return {"authenticated": True, "user": public_user(await require_user(request))}
 
     @app.get("/v1/admin/check")
     async def admin_check(request: Request) -> dict[str, bool]:
@@ -573,6 +666,10 @@ async def require_user(request: Request) -> dict[str, Any]:
     return user
 
 
+def public_user(user: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in user.items() if key not in {"password_hash"}}
+
+
 async def require_admin(request: Request) -> dict[str, Any]:
     user = await require_user(request)
     if not is_admin(user):
@@ -608,14 +705,221 @@ def validate_github_repo(repo: str) -> re.Match[str]:
 
 
 def validate_setup_payload(payload: SetupConfig) -> None:
-    if not payload.database_url:
-        raise error(400, "DATABASE_URL is required")
-    if not payload.redis_url:
-        raise error(400, "REDIS_URL is required")
-    if not payload.database_url.startswith(("postgresql://", "postgresql+asyncpg://")):
-        raise error(400, "DATABASE_URL must be a PostgreSQL connection URL")
-    if not payload.redis_url.startswith(("redis://", "rediss://")):
-        raise error(400, "REDIS_URL must be a Redis connection URL")
+    if not payload.admin.username:
+        raise error(400, "Core admin username is required")
+    if len(payload.admin.password) < 8:
+        raise error(400, "Core admin password must be at least 8 characters")
+    if not payload.postgres.host:
+        raise error(400, "PostgreSQL host is required")
+    if not payload.postgres.database:
+        raise error(400, "PostgreSQL database is required")
+    if not payload.postgres.username:
+        raise error(400, "PostgreSQL username is required")
+    if not payload.postgres.password:
+        raise error(400, "PostgreSQL password is required")
+    if not payload.redis.host:
+        raise error(400, "Redis host is required")
+    if not payload.site.name:
+        raise error(400, "Site name is required")
+    if not payload.site.icon_url:
+        raise error(400, "Site icon URL is required")
+    if not is_valid_site_icon_url(payload.site.icon_url):
+        raise error(400, "Site icon URL must be an absolute URL or root-relative path")
+    if payload.auth.login_agreement_enabled and not payload.auth.login_agreement_text:
+        raise error(400, "Login agreement text is required when enabled")
+    if payload.auth.service_terms_enabled and not payload.auth.service_terms_text:
+        raise error(400, "Service terms text is required when enabled")
+
+
+def get_site_config(settings: Settings) -> dict[str, str]:
+    return {
+        "name": settings.site_name,
+        "icon_url": settings.site_icon_url,
+    }
+
+
+def get_public_auth_config(settings: Settings) -> dict[str, Any]:
+    return {
+        "github_login_enabled": settings.github_login_enabled,
+        "public_login_enabled": settings.public_login_enabled,
+        "login_agreement_enabled": settings.login_agreement_enabled,
+        "login_agreement_text": settings.login_agreement_text,
+        "service_terms_enabled": settings.service_terms_enabled,
+        "service_terms_text": settings.service_terms_text,
+        "terms_revision": digest_terms(settings),
+    }
+
+
+def digest_terms(settings: Settings) -> str:
+    payload = json.dumps(
+        {
+            "login": settings.login_agreement_text if settings.login_agreement_enabled else "",
+            "service": settings.service_terms_text if settings.service_terms_enabled else "",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def build_saved_setup_config(
+    settings: Settings,
+    runtime_config: dict[str, str],
+) -> dict[str, Any]:
+    database_url = runtime_config.get("DATABASE_URL") or settings.database_url
+    redis_url = runtime_config.get("REDIS_URL") or settings.redis_url
+    return {
+        "postgres": build_saved_postgres_config(runtime_config, database_url),
+        "redis": build_saved_redis_config(runtime_config, redis_url),
+        "site": {
+            "name": runtime_config.get("SITE_NAME", settings.site_name),
+            "icon_url": runtime_config.get("SITE_ICON_URL", settings.site_icon_url),
+        },
+        "auth": {
+            "github_login_enabled": parse_bool(
+                runtime_config.get("GITHUB_LOGIN_ENABLED"), settings.github_login_enabled
+            ),
+            "public_login_enabled": parse_bool(
+                runtime_config.get("PUBLIC_LOGIN_ENABLED"), settings.public_login_enabled
+            ),
+            "login_agreement_enabled": parse_bool(
+                runtime_config.get("LOGIN_AGREEMENT_ENABLED"),
+                settings.login_agreement_enabled,
+            ),
+            "login_agreement_text": runtime_config.get(
+                "LOGIN_AGREEMENT_TEXT",
+                settings.login_agreement_text,
+            ),
+            "service_terms_enabled": parse_bool(
+                runtime_config.get("SERVICE_TERMS_ENABLED"),
+                settings.service_terms_enabled,
+            ),
+            "service_terms_text": runtime_config.get(
+                "SERVICE_TERMS_TEXT",
+                settings.service_terms_text,
+            ),
+        },
+    }
+
+
+def redact_setup_infrastructure(config: dict[str, Any]) -> dict[str, Any]:
+    redacted = {
+        "postgres": {**DEFAULT_POSTGRES_CONFIG},
+        "redis": {**DEFAULT_REDIS_CONFIG},
+        "site": {**config["site"]},
+        "auth": {**config["auth"]},
+    }
+    return redacted
+
+
+def build_saved_postgres_config(
+    runtime_config: dict[str, str], database_url: str
+) -> dict[str, Any]:
+    parsed = parse_postgres_url(database_url)
+    return {
+        "host": runtime_config.get("POSTGRES_HOST", parsed["host"]),
+        "port": parse_int(runtime_config.get("POSTGRES_PORT"), parsed["port"]),
+        "database": runtime_config.get("POSTGRES_DATABASE", parsed["database"]),
+        "username": runtime_config.get("POSTGRES_USER", parsed["username"]),
+        "password": runtime_config.get("POSTGRES_PASSWORD", parsed["password"]),
+        "ssl": parse_bool(runtime_config.get("POSTGRES_SSL"), parsed["ssl"]),
+    }
+
+
+def build_saved_redis_config(runtime_config: dict[str, str], redis_url: str) -> dict[str, Any]:
+    parsed = parse_redis_url(redis_url)
+    return {
+        "host": runtime_config.get("REDIS_HOST", parsed["host"]),
+        "port": parse_int(runtime_config.get("REDIS_PORT"), parsed["port"]),
+        "database": parse_int(runtime_config.get("REDIS_DATABASE"), parsed["database"]),
+        "password": runtime_config.get("REDIS_PASSWORD", parsed["password"]),
+        "ssl": parse_bool(runtime_config.get("REDIS_SSL"), parsed["ssl"]),
+    }
+
+
+def build_postgres_url(config: dict[str, Any]) -> str:
+    username = quote(config["username"], safe="")
+    password = quote(config["password"], safe="")
+    database = quote(config["database"], safe="")
+    host = format_url_host(config["host"])
+    query = urlencode({"sslmode": "require" if config["ssl"] else "disable"})
+    return f"postgresql://{username}:{password}@{host}:{config['port']}/{database}?{query}"
+
+
+def build_redis_url(config: dict[str, Any]) -> str:
+    scheme = "rediss" if config["ssl"] else "redis"
+    password = f":{quote(config['password'], safe='')}@" if config["password"] else ""
+    database = int(config["database"])
+    host = format_url_host(config["host"])
+    return f"{scheme}://{password}{host}:{config['port']}/{database}"
+
+
+def format_url_host(host: str) -> str:
+    value = host.strip()
+    if ":" in value and not value.startswith("["):
+        return f"[{value}]"
+    return value
+
+
+def parse_postgres_url(value: str) -> dict[str, Any]:
+    config = DEFAULT_POSTGRES_CONFIG.copy()
+    parsed = urlparse(value or "")
+    if not parsed.scheme.startswith("postgresql"):
+        return config
+    query = parse_qs(parsed.query)
+    sslmode = (query.get("sslmode") or [""])[0].lower()
+    config.update(
+        {
+            "host": parsed.hostname or config["host"],
+            "port": parsed.port or config["port"],
+            "database": unquote(parsed.path.lstrip("/")),
+            "username": unquote(parsed.username or ""),
+            "password": unquote(parsed.password or ""),
+            "ssl": sslmode not in {"", "disable", "prefer"},
+        }
+    )
+    return config
+
+
+def parse_redis_url(value: str) -> dict[str, Any]:
+    config = DEFAULT_REDIS_CONFIG.copy()
+    parsed = urlparse(value or "")
+    if parsed.scheme not in {"redis", "rediss"}:
+        return config
+    config.update(
+        {
+            "host": parsed.hostname or config["host"],
+            "port": parsed.port or config["port"],
+            "database": parse_int(parsed.path.lstrip("/"), config["database"]),
+            "password": unquote(parsed.password or ""),
+            "ssl": parsed.scheme == "rediss",
+        }
+    )
+    return config
+
+
+def is_valid_site_icon_url(value: str) -> bool:
+    if value.startswith("/"):
+        return True
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def serialize_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def parse_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_int(value: str | int | None, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def build_astrbot_plugin_source(plugins: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -665,6 +969,8 @@ def can_save_setup_without_auth(settings: Settings, runtime_config: dict[str, st
 
 def validate_repo_owner(repo: str, user: dict[str, Any]) -> None:
     owner = validate_github_repo(repo).group("owner")
+    if not user.get("github_login"):
+        raise error(403, "GitHub login is required to prove repository ownership")
     if owner.lower() == user["github_login"].lower():
         return
     raise error(403, "GitHub account must own the repository")

@@ -9,6 +9,10 @@ from typing import Mapping
 from .runtime_config import read_runtime_config
 
 DEFAULT_RUNTIME_CONFIG_PATH = Path(__file__).resolve().parents[1] / "data" / "runtime.env"
+DEFAULT_SITE_ICON_URL = "/logo.webp"
+DEFAULT_SITE_NAME = "AstrBot Community Plugins"
+DEFAULT_LOGIN_AGREEMENT_TEXT = ""
+DEFAULT_SERVICE_TERMS_TEXT = ""
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,16 @@ class Settings:
     github_callback_url: str
     github_scope: str
     github_admin_org: str
+    site_name: str
+    site_icon_url: str
+    github_login_enabled: bool
+    public_login_enabled: bool
+    login_agreement_enabled: bool
+    login_agreement_text: str
+    service_terms_enabled: bool
+    service_terms_text: str
+    core_admin_username: str
+    core_admin_password_hash: str
     database_url: str
     redis_url: str
     session_cookie_name: str
@@ -76,6 +90,16 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         ),
         github_scope=merged.get("GITHUB_SCOPE", "read:user user:email read:org"),
         github_admin_org=merged.get("GITHUB_ADMIN_ORG", ""),
+        site_name=merged.get("SITE_NAME", DEFAULT_SITE_NAME),
+        site_icon_url=merged.get("SITE_ICON_URL", DEFAULT_SITE_ICON_URL),
+        github_login_enabled=_bool(merged.get("GITHUB_LOGIN_ENABLED")),
+        public_login_enabled=_bool(merged.get("PUBLIC_LOGIN_ENABLED"), default=True),
+        login_agreement_enabled=_bool(merged.get("LOGIN_AGREEMENT_ENABLED")),
+        login_agreement_text=merged.get("LOGIN_AGREEMENT_TEXT", DEFAULT_LOGIN_AGREEMENT_TEXT),
+        service_terms_enabled=_bool(merged.get("SERVICE_TERMS_ENABLED")),
+        service_terms_text=merged.get("SERVICE_TERMS_TEXT", DEFAULT_SERVICE_TERMS_TEXT),
+        core_admin_username=merged.get("CORE_ADMIN_USERNAME", ""),
+        core_admin_password_hash=merged.get("CORE_ADMIN_PASSWORD_HASH", ""),
         database_url=merged.get("DATABASE_URL", ""),
         redis_url=merged.get("REDIS_URL", ""),
         session_cookie_name=merged.get("SESSION_COOKIE_NAME", "astrbot_market_session"),
@@ -116,7 +140,9 @@ def _list(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
-def _bool(value: str | None) -> bool:
+def _bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
