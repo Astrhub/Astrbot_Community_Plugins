@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/logo.webp" id="dynamic-favicon" />
+    <link rel="preload" as="image" href="/logo.webp" imagesrcset="/logo.webp 1x" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AstrBot Community Plugins</title>
+    <meta name="description" content="AstrBot 社区插件市场，提供插件发现、提交、讨论和第三方源接入。" />
+    <meta name="keywords" content="AstrBot,插件市场,社区插件,第三方源,插件仓库" />
+    <meta name="author" content="AstrBotDevs" />
+    <!-- Open Graph 标签，用于社交媒体分享 -->
+    <meta property="og:title" content="AstrBot Community Plugins" />
+    <meta property="og:description" content="AstrBot 的社区插件市场和第三方源入口" />
+    <meta property="og:image" content="/logo.webp" />
+    <meta property="og:type" content="website" />
+    <!-- 确保应用的可访问性 -->
+    <meta name="theme-color" content="#f59e0b" />
+    <meta name="application-name" content="AstrBot Community Plugins" />
+    <link rel="preload" href="/font/lexend.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/font/lexend-v25-latin-600.woff2" as="font" type="font/woff2" crossorigin>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+    <script>
+      (function() {
+        document.head = document.head || document.getElementsByTagName('head')[0];
+         
+        function changeFavicon(src) {
+         var link = document.createElement('link'),
+             oldLink = document.getElementById('dynamic-favicon');
+         link.id = 'dynamic-favicon';
+         link.rel = 'shortcut icon';
+         link.href = src;
+         if (oldLink) {
+          document.head.removeChild(oldLink);
+         }
+         document.head.appendChild(link);
+        }
+            changeFavicon('/logo.webp');
+         
+      })();
+    </script>
+  </body>
+</html>

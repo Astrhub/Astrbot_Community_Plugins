@@ -1,0 +1,169 @@
+openapi: 3.0.3
+info:
+  title: AstrBot Community Plugins API
+  version: 0.1.0
+  description: FastAPI contract for the Vue market, future AstrBot WebUI plugin, PostgreSQL storage, and Redis-backed session/cache infrastructure.
+servers:
+  - url: http://127.0.0.1:8787
+paths:
+  /health:
+    get:
+      responses:
+        "200":
+          description: ok
+  /v1/setup/status:
+    get:
+      responses:
+        "200":
+          description: Setup state
+  /v1/setup:
+    post:
+      responses:
+        "200":
+          description: Setup saved and restart required
+  /v1/me:
+    get:
+      responses:
+        "200":
+          description: Current user
+        "401":
+          description: Not authenticated
+  /v1/auth/github/login:
+    get:
+      responses:
+        "302":
+          description: Redirect to GitHub OAuth
+        "501":
+          description: OAuth not configured
+  /v1/auth/github/callback:
+    get:
+      responses:
+        "302":
+          description: GitHub OAuth callback accepted and browser redirected to the market site
+        "400":
+          description: Invalid OAuth state or missing code
+  /v1/plugins:
+    get:
+      responses:
+        "200":
+          description: Plugin list
+  /plugins.json:
+    get:
+      responses:
+        "200":
+          description: AstrBot custom plugin source feed keyed by plugin name
+  /plugins-md5.json:
+    get:
+      responses:
+        "200":
+          description: MD5 digest for /plugins.json used by AstrBot cache validation
+  /v1/astrbot/plugins.json:
+    get:
+      responses:
+        "200":
+          description: Versioned AstrBot custom plugin source feed
+  /v1/astrbot/plugins-md5.json:
+    get:
+      responses:
+        "200":
+          description: Versioned MD5 digest for the AstrBot custom plugin source feed
+  /v1/plugins/submissions:
+    post:
+      responses:
+        "201":
+          description: Plugin submission
+    get:
+      responses:
+        "200":
+          description: Submission queue
+  /v1/plugins/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Plugin detail
+        "404":
+          description: Not found
+    patch:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Plugin metadata updated
+  /v1/plugins/{id}/like:
+    post:
+      responses:
+        "200":
+          description: Like added
+  /v1/plugins/{id}/unlike:
+    post:
+      responses:
+        "200":
+          description: Like removed
+  /v1/plugins/{id}/comments:
+    post:
+      responses:
+        "201":
+          description: Comment created
+  /v1/admin/plugins/{id}/list:
+    post:
+      responses:
+        "200":
+          description: Plugin listed
+  /v1/admin/plugins/{id}/unlist:
+    post:
+      responses:
+        "200":
+          description: Plugin unlisted
+  /v1/admin/comments/{id}:
+    delete:
+      responses:
+        "200":
+          description: Comment deleted
+  /v1/admin/users/{id}/mute:
+    post:
+      responses:
+        "200":
+          description: User muted
+  /v1/core/admins/{id}:
+    post:
+      responses:
+        "200":
+          description: Admin role updated
+  /v1/core/announcements:
+    post:
+      responses:
+        "201":
+          description: Announcement created
+  /v1/announcements:
+    get:
+      responses:
+        "200":
+          description: Announcement list
+  /v1/api-keys:
+    post:
+      responses:
+        "201":
+          description: API key issued
+    get:
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: API key metadata list
+        "401":
+          description: Missing or invalid API key
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

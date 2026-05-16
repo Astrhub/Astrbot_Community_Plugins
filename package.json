@@ -1,0 +1,14 @@
+{
+  "name": "astrbot-community-plugins",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Server-backed community plugin market for AstrBot.",
+  "scripts": {
+    "dev:web": "npm --prefix apps/market-web run dev",
+    "build:web": "npm --prefix apps/market-web run build",
+    "build": "npm run build:web",
+    "dev:api": "uv run --project apps/api --directory apps/api uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload",
+    "test": "uv run --project apps/api --directory apps/api pytest",
+    "test:api": "uv run --project apps/api --directory apps/api pytest"
+  }
+}
