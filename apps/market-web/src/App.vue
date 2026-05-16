@@ -11,9 +11,7 @@
       </div>
     </n-message-provider>
   </n-config-provider>
-  <Analytics />
   <iris-mask :is-active="irisMaskActive" :position="irisMaskPosition" />
-  <SpeedInsights />
 </template>
 
 <script setup>
@@ -29,26 +27,16 @@ import BackToTop from './components/BackToTop.vue'
 import { darkThemeOverrides, lightThemeOverrides } from './config/darkTheme'
 import { usePluginStore } from './stores/plugins'
 
-import { Analytics } from '@vercel/analytics/vue'
-import { SpeedInsights } from "@vercel/speed-insights/vue"
-
 const store = usePluginStore()
 const {
   irisMaskActive,
   irisMaskPosition,
   isDarkMode,
-  searchQuery,
-  selectedTag,
-  currentPage,
-  sortBy,
 } = storeToRefs(store)
 
 const route = useRoute()
 const router = useRouter()
 const isSubmitPage = computed(() => route.path === '/submit')
-const filterKey = computed(() => {
-  return `${searchQuery.value}-${selectedTag.value}-${sortBy.value}-${currentPage.value}`
-})
 
 onMounted(async () => {
   store.initTheme()

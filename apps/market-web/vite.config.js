@@ -21,7 +21,7 @@ if (baseUrl) {
 
 export default defineConfig({
   plugins,
-  base: './',
+  base: '/',
   assetsInclude: ['**/*.md'],
   resolve: {
     alias: {

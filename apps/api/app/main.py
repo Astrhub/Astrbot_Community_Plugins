@@ -5,13 +5,14 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .auth import (
     can_edit_plugin,
@@ -40,6 +41,9 @@ from .store import InMemoryMarketStore
 
 GITHUB_REPO_PATTERN = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/?$")
 PLUGIN_NAME_PATTERN = re.compile(r"^astrbot_plugin_[a-z0-9_-]+$", re.IGNORECASE)
+MARKET_WEB_DIST = Path(__file__).resolve().parents[3] / "apps" / "market-web" / "dist"
+RESERVED_WEB_PATHS = {"v1", "health", "plugins.json", "plugins-md5.json", "openapi.json", "docs", "redoc"}
+RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
 
 
 def create_app(
@@ -59,6 +63,7 @@ def create_app(
     )
     app.add_exception_handler(HTTPException, http_exception_handler)
     register_routes(app)
+    register_market_web_routes(app)
     return app
 
 
@@ -415,6 +420,42 @@ def register_routes(app: FastAPI) -> None:
         if not ok:
             raise error(status, message)
         return {"items": [public_api_key(key) for key in keys]}
+
+
+def register_market_web_routes(app: FastAPI) -> None:
+    @app.get("/", include_in_schema=False)
+    async def market_web_index() -> Response:
+        return serve_market_web_file("")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def market_web_fallback(full_path: str) -> Response:
+        if is_reserved_api_path(full_path):
+            raise error(404, "Not found")
+        return serve_market_web_file(full_path)
+
+
+def serve_market_web_file(full_path: str) -> FileResponse:
+    index_file = MARKET_WEB_DIST / "index.html"
+    if not index_file.is_file():
+        raise error(404, "Market web build is missing. Run npm run build:web first.")
+
+    requested_file = resolve_market_web_file(full_path)
+    return FileResponse(requested_file or index_file)
+
+
+def resolve_market_web_file(full_path: str) -> Path | None:
+    dist_dir = MARKET_WEB_DIST.resolve()
+    candidate = (dist_dir / full_path).resolve()
+    try:
+        candidate.relative_to(dist_dir)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def is_reserved_api_path(full_path: str) -> bool:
+    path = full_path.strip("/")
+    return path in RESERVED_WEB_PATHS or path.startswith(RESERVED_WEB_PREFIXES)
 
 
 def get_settings(request: Request) -> Settings:

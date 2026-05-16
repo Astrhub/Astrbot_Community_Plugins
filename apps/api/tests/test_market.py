@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.auth import Role, can_edit_plugin, can_manage_admins, can_moderate_plugins
 from app.config import load_settings
 from app.main import create_app
@@ -234,3 +235,31 @@ def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
 
     assert client.get("/plugins-md5.json").json()["md5"]
     assert client.get("/v1/astrbot/plugins.json").json() == feed
+
+
+def test_market_web_fallback_does_not_mask_api_routes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "MARKET_WEB_DIST", tmp_path / "missing-dist")
+    client = make_client()
+
+    missing_api = client.get("/v1/does-not-exist")
+    assert missing_api.status_code == 404
+    assert missing_api.json()["error"] == "Not found"
+    assert client.get("/v1").status_code == 404
+
+    missing_web_build = client.get("/some-spa-route")
+    assert missing_web_build.status_code == 404
+    assert missing_web_build.json()["error"] == "Market web build is missing. Run npm run build:web first."
+
+
+def test_market_web_serves_built_spa(tmp_path, monkeypatch) -> None:
+    web_dist = tmp_path / "dist"
+    web_dist.mkdir()
+    (web_dist / "index.html").write_text("<html>market</html>", encoding="utf-8")
+    (web_dist / "logo.webp").write_text("logo", encoding="utf-8")
+    monkeypatch.setattr(main_module, "MARKET_WEB_DIST", web_dist)
+
+    client = make_client()
+
+    assert client.get("/").text == "<html>market</html>"
+    assert client.get("/submit").text == "<html>market</html>"
+    assert client.get("/logo.webp").text == "logo"
