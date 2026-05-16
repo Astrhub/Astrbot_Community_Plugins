@@ -57,6 +57,13 @@ npm run build:web  # 构建生产前端，供 FastAPI 托管
 npm run start:api  # 生产方式启动 API，监听 0.0.0.0:8787
 ```
 
+本地安装推送前 Ruff hook：
+
+```bash
+uv sync --project apps/api
+uv run --project apps/api --directory apps/api pre-commit install --hook-type pre-push
+```
+
 前端环境变量定义在 `apps/market-web/.env.example`：
 
 - `VITE_BASE_URL` — 可选的公开基础 URL。留空时前端使用当前网站域名；部署在同一 FastAPI 服务下通常不需要设置。
