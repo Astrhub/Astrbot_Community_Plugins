@@ -131,21 +131,25 @@ async def maybe_call_store_lifecycle(app: FastAPI, method_name: str) -> None:
     method = getattr(app.state.store, method_name, None)
     if not method:
         return
-    result = method()
-    if inspect.isawaitable(result):
-        await result
+    await resolve_optional_awaitable(method())
+
+
+async def resolve_optional_awaitable(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 async def bootstrap_internal_core_admin(app: FastAPI) -> None:
     settings = app.state.settings
     if not settings.core_admin_username or not settings.core_admin_password_hash:
         return
-    result = app.state.store.create_internal_admin(
-        settings.core_admin_username,
-        settings.core_admin_password_hash,
+    await resolve_optional_awaitable(
+        app.state.store.create_internal_admin(
+            settings.core_admin_username,
+            settings.core_admin_password_hash,
+        )
     )
-    if inspect.isawaitable(result):
-        await result
 
 
 def register_routes(app: FastAPI) -> None:
