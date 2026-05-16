@@ -288,7 +288,10 @@ export const usePluginStore = defineStore('plugins', () => {
   }
 
   async function loadSetupStatus() {
-    const response = await fetch(`${apiBaseUrl}/v1/setup/status`, { cache: 'no-store' })
+    const response = await fetch(`${apiBaseUrl}/v1/setup/status`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
     const data = await response.json().catch(() => ({}))
     const site = applySiteConfig(data.site || data.saved_setup?.site || siteConfig.value)
     setupStatus.value = {
@@ -334,12 +337,13 @@ export const usePluginStore = defineStore('plugins', () => {
   async function saveSetupConfig(payload) {
     const response = await fetch(`${apiBaseUrl}/v1/setup`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload)
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '保存失败')
-    await loadSetupStatus()
+    if (!data.restart_scheduled) await loadSetupStatus()
     return data
   }
 

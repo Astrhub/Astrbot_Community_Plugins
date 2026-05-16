@@ -5,7 +5,9 @@ import hashlib
 import html
 import inspect
 import json
+import os
 import re
+import signal
 import smtplib
 import uuid
 from collections.abc import AsyncIterator
@@ -17,7 +19,8 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+import asyncpg
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
@@ -85,6 +88,8 @@ RESERVED_WEB_PATHS = {
     "redoc",
 }
 RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
+SETUP_RESTART_DELAY_SECONDS = 0.5
+POSTGRES_MAINTENANCE_DATABASE = "postgres"
 
 
 def create_app(
@@ -99,6 +104,7 @@ def create_app(
     app.state.settings = settings or load_settings()
     app.state.store = store or create_store(app.state.settings)
     app.state.email_daily_counter = {"date": "", "count": 0}
+    app.state.restart_enabled = parse_bool(os.getenv("SETUP_AUTO_RESTART"), True)
 
     app.add_middleware(
         CORSMiddleware,
@@ -253,7 +259,11 @@ def register_routes(app: FastAPI) -> None:
         }
 
     @app.post("/v1/setup")
-    async def save_setup(request: Request, payload: SetupConfig) -> dict[str, Any]:
+    async def save_setup(
+        request: Request,
+        payload: SetupConfig,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
         settings = get_settings(request)
         runtime_config = read_runtime_config(settings.runtime_config_path)
         if not can_save_setup_without_auth(settings, runtime_config):
@@ -264,6 +274,12 @@ def register_routes(app: FastAPI) -> None:
         database_url = build_postgres_url(payload.postgres.model_dump())
         redis_url = build_redis_url(payload.redis.model_dump())
         core_admin_password_hash = hash_password(payload.admin.password)
+        initializer = getattr(
+            request.app.state, "setup_initializer", initialize_setup_infrastructure
+        )
+        await resolve_optional_awaitable(
+            initializer(payload, database_url, redis_url, core_admin_password_hash)
+        )
         write_runtime_config(
             settings.runtime_config_path,
             {
@@ -284,23 +300,6 @@ def register_routes(app: FastAPI) -> None:
                 "REDIS_URL": redis_url,
                 "SITE_ICON_URL": payload.site.icon_url,
                 "SITE_NAME": payload.site.name,
-                "SITE_SUBTITLE": payload.site.subtitle,
-                "SITE_DESCRIPTION": payload.site.description,
-                "SITE_CONTACT_EMAIL": payload.site.contact_email,
-                "SITE_DOCS_URL": payload.site.docs_url,
-                "GITHUB_ADMIN_ORG": payload.github.admin_org,
-                "GITHUB_CALLBACK_URL": payload.github.callback_url,
-                "GITHUB_CLIENT_ID": payload.github.client_id,
-                "GITHUB_CLIENT_SECRET": payload.github.client_secret,
-                "GITHUB_SCOPE": payload.github.scope,
-                "GITHUB_LOGIN_ENABLED": serialize_bool(payload.auth.github_login_enabled),
-                "LOGIN_AGREEMENT_ENABLED": serialize_bool(payload.auth.login_agreement_enabled),
-                "LOGIN_AGREEMENT_TEXT": payload.auth.login_agreement_text,
-                "PUBLIC_LOGIN_ENABLED": serialize_bool(payload.auth.public_login_enabled),
-                "SERVICE_TERMS_ENABLED": serialize_bool(payload.auth.service_terms_enabled),
-                "SERVICE_TERMS_TEXT": payload.auth.service_terms_text,
-                **runtime_values_from_market_settings(payload.market),
-                **runtime_values_from_email_settings(payload.email, {}),
             },
         )
         await call_store(
@@ -309,10 +308,16 @@ def register_routes(app: FastAPI) -> None:
             payload.admin.username,
             core_admin_password_hash,
         )
+        restart_scheduled = schedule_setup_restart(request.app, background_tasks)
         return {
             "saved": True,
             "restart_required": True,
-            "message": "Configuration saved. Restart the API process to use PostgreSQL and Redis.",
+            "restart_scheduled": restart_scheduled,
+            "message": (
+                "Configuration saved. The API process will restart automatically."
+                if restart_scheduled
+                else "Configuration saved. Restart the API process to use PostgreSQL and Redis."
+            ),
         }
 
     @app.get("/v1/me")
@@ -815,16 +820,135 @@ def validate_setup_payload(payload: SetupConfig) -> None:
         raise error(400, "Site icon URL is required")
     if not is_valid_site_icon_url(payload.site.icon_url):
         raise error(400, "Site icon URL must be an absolute URL or root-relative path")
-    validate_system_settings_payload(
-        SystemSettingsPayload(
-            site=payload.site,
-            auth=payload.auth,
-            github=payload.github,
-            market=payload.market,
-            email=payload.email,
-        ),
-        {},
+
+
+async def initialize_setup_infrastructure(
+    payload: SetupConfig,
+    database_url: str,
+    redis_url: str,
+    core_admin_password_hash: str,
+) -> None:
+    await ensure_postgres_database(payload.postgres.model_dump())
+    store = PgRedisMarketStore(database_url, redis_url, session_ttl_seconds=60)
+    try:
+        await store.connect()
+        await store.create_internal_admin(payload.admin.username, core_admin_password_hash)
+    except HTTPException:
+        raise
+    except asyncpg.PostgresError as exc:
+        raise error(
+            400,
+            f"PostgreSQL schema initialization failed: {safe_exception_message(exc)}",
+        ) from exc
+    except OSError as exc:
+        raise error(
+            400, f"Infrastructure connection failed: {safe_exception_message(exc)}"
+        ) from exc
+    except Exception as exc:
+        raise error(
+            400,
+            f"PostgreSQL or Redis initialization failed: {safe_exception_message(exc)}",
+        ) from exc
+    finally:
+        await store.close()
+
+
+async def ensure_postgres_database(config: dict[str, Any]) -> None:
+    target_database = config["database"]
+    try:
+        connection = await connect_postgres_database(config, target_database)
+    except asyncpg.InvalidCatalogNameError:
+        await create_postgres_database(config, target_database)
+        return
+    except asyncpg.PostgresError as exc:
+        raise error(
+            400,
+            f"PostgreSQL connection failed: {safe_exception_message(exc)}",
+        ) from exc
+    except OSError as exc:
+        raise error(
+            400,
+            f"PostgreSQL connection failed: {safe_exception_message(exc)}",
+        ) from exc
+    else:
+        await connection.close()
+
+
+async def create_postgres_database(config: dict[str, Any], target_database: str) -> None:
+    try:
+        connection = await connect_postgres_database(config, POSTGRES_MAINTENANCE_DATABASE)
+    except asyncpg.InvalidCatalogNameError as exc:
+        raise error(
+            400,
+            "PostgreSQL maintenance database 'postgres' is unavailable; "
+            "create the target database manually first.",
+        ) from exc
+    except asyncpg.PostgresError as exc:
+        raise error(
+            400,
+            f"PostgreSQL database creation failed: {safe_exception_message(exc)}",
+        ) from exc
+    except OSError as exc:
+        raise error(
+            400,
+            f"PostgreSQL database creation failed: {safe_exception_message(exc)}",
+        ) from exc
+
+    try:
+        exists = await connection.fetchval(
+            "SELECT 1 FROM pg_database WHERE datname = $1",
+            target_database,
+        )
+        if not exists:
+            await connection.execute(
+                f"CREATE DATABASE {quote_postgres_identifier(target_database)}"
+            )
+    except asyncpg.DuplicateDatabaseError:
+        return
+    except asyncpg.PostgresError as exc:
+        raise error(
+            400,
+            f"PostgreSQL database creation failed: {safe_exception_message(exc)}",
+        ) from exc
+    finally:
+        await connection.close()
+
+
+async def connect_postgres_database(
+    config: dict[str, Any],
+    database: str,
+) -> asyncpg.Connection:
+    return await asyncpg.connect(
+        host=config["host"],
+        port=config["port"],
+        user=config["username"],
+        password=config["password"],
+        database=database,
+        ssl=config["ssl"] or None,
     )
+
+
+def quote_postgres_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def safe_exception_message(exc: Exception) -> str:
+    return str(exc).strip() or exc.__class__.__name__
+
+
+def schedule_setup_restart(app: FastAPI, background_tasks: BackgroundTasks) -> bool:
+    if not bool(getattr(app.state, "restart_enabled", True)):
+        return False
+    background_tasks.add_task(restart_process_after_delay)
+    return True
+
+
+async def restart_process_after_delay(delay: float = SETUP_RESTART_DELAY_SECONDS) -> None:
+    await asyncio.sleep(delay)
+    if os.name == "posix":
+        os.kill(os.getpid(), signal.SIGTERM)
+    else:
+        os._exit(0)
 
 
 def validate_system_settings_payload(
