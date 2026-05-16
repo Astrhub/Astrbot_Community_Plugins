@@ -400,6 +400,27 @@ def test_submission_listing_comments_and_moderation_flow() -> None:
     assert muted.json()["muted_until"] == "2099-01-01T00:00:00Z"
 
 
+def test_core_admin_can_review_plugin_submissions() -> None:
+    client = make_client()
+    store = client.app.state.store
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    plugin = store.submit_plugin(owner, plugin_payload())
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    admin_plugins = client.get("/v1/admin/plugins")
+    listed = client.post(f"/v1/admin/plugins/{plugin['id']}/list")
+
+    assert admin_plugins.status_code == 200
+    assert admin_plugins.json()["items"][0]["id"] == plugin["id"]
+    assert listed.status_code == 200
+    assert listed.json()["status"] == "listed"
+
+
 def test_submission_requires_github_repo_owner() -> None:
     client = make_client()
     client.get("/v1/auth/debug-login?login=alice")

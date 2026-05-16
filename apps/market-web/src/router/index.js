@@ -5,6 +5,7 @@ const SubmitPlugin = () => import('../views/SubmitPlugin.vue')
 const Setup = () => import('../views/Setup.vue')
 const Settings = () => import('../views/Settings.vue')
 const PersonalSettings = () => import('../views/PersonalSettings.vue')
+const AdminPlugins = () => import('../views/AdminPlugins.vue')
 const routes = [
   {
     path: '/',
@@ -30,6 +31,11 @@ const routes = [
     path: '/settings/personal',
     name: 'PersonalSettings',
     component: PersonalSettings
+  },
+  {
+    path: '/admin/plugins',
+    name: 'AdminPlugins',
+    component: AdminPlugins
   }
 ]
 

@@ -357,6 +357,26 @@ export const usePluginStore = defineStore('plugins', () => {
     return mergeSetupConfig(data, data.site)
   }
 
+  async function loadAdminPlugins() {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载插件审核列表失败')
+    return data.items || []
+  }
+
+  async function updatePluginListing(pluginId, action) {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins/${pluginId}/${action}`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '更新插件状态失败')
+    return data
+  }
+
   async function saveSystemSettings(payload) {
     const response = await fetch(`${apiBaseUrl}/v1/admin/settings`, {
       method: 'PUT',
@@ -517,6 +537,8 @@ export const usePluginStore = defineStore('plugins', () => {
     updateProfile,
     saveSetupConfig,
     loadSystemSettings,
+    loadAdminPlugins,
+    updatePluginListing,
     saveSystemSettings,
     sendTestEmail,
     submitPlugin,

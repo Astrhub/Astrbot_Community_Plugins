@@ -25,7 +25,7 @@
             {{ displayUserName }}
           </n-button>
         </n-dropdown>
-        <n-button v-if="isCoreAdmin" secondary @click="goSettings">系统设置</n-button>
+        <n-button v-if="isAdminUser" secondary @click="goAdminPlugins">插件审核</n-button>
         <n-button v-if="!currentUser" secondary type="primary" @click="openLoginModal">
           <template #icon>
             <n-icon><log-in-outline /></n-icon>
@@ -96,6 +96,15 @@
       <div class="sticky-actions">
         <n-button quaternary circle @click="copyPluginSource" aria-label="复制 AstrBot 插件源">
           <n-icon><link-outline /></n-icon>
+        </n-button>
+        <n-button
+          v-if="isAdminUser"
+          quaternary
+          circle
+          @click="goAdminPlugins"
+          aria-label="插件审核"
+        >
+          <n-icon><settings-outline /></n-icon>
         </n-button>
         <n-button
           quaternary
@@ -218,6 +227,7 @@ const siteIconUrl = computed(() => siteConfig.value.icon_url)
 const siteSubtitle = computed(() => siteConfig.value.subtitle)
 const siteDescription = computed(() => siteConfig.value.description)
 const isCoreAdmin = computed(() => currentUser.value?.role === 'core_admin')
+const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
 const displayUserName = computed(() => (
   currentUser.value?.github_login ||
   currentUser.value?.internal_username ||
@@ -281,6 +291,10 @@ const goSubmit = () => {
 
 const goSettings = () => {
   router.push('/settings')
+}
+
+const goAdminPlugins = () => {
+  router.push('/admin/plugins')
 }
 
 function renderIcon(icon) {
