@@ -26,9 +26,9 @@
 
 PostgreSQL schema 在首次配置保存前和服务启动时都会自动创建。插件可变扩展字段使用 `jsonb`，标签字段建立 GIN 索引；用户、插件、评论等核心关系使用主键、唯一约束、外键和状态 CHECK 约束保护数据一致性。Redis session 使用 `SET key value EX seconds` 写入，并在读取 session 时刷新 TTL。
 
-首次启动可通过前端 `/setup` 页面完成基础设施配置。安装向导分步收集站点名称/图标、内部核心管理员、PostgreSQL 主机/端口/数据库/账号/密码/SSL 和 Redis 主机/端口/数据库/密码/SSL。保存时后端会先创建或确认 PostgreSQL 目标数据库、初始化 schema、验证 Redis，并把内部核心管理员写入目标数据库；全部成功后才写入 `apps/api/data/runtime.env`、生成内部 `DATABASE_URL` / `REDIS_URL`，随后在当前 FastAPI 进程内切换到 `PgRedisMarketStore`，无需重启服务。
+首次启动可通过前端 `/setup` 页面完成基础设施配置。安装向导分步收集站点名称/图标、内部核心管理员、PostgreSQL 主机/端口/数据库/账号/密码/SSL 和 Redis 主机/端口/数据库/密码/SSL。保存时后端会先创建或确认 PostgreSQL 目标数据库、初始化 schema、验证 Redis，并把内部核心管理员写入目标数据库；全部成功后只把 `DATABASE_URL` / `REDIS_URL`、PostgreSQL/Redis 拆分字段和核心管理员引导信息写入 `apps/api/.env`，站点展示写入数据库配置表，随后在当前 FastAPI 进程内切换到 `PgRedisMarketStore`，无需重启服务。初始化完成后 `/v1/setup` 不再可用，基础设施连接后续通过 `.env` 修改。
 
-核心管理员登录后可进入 `/settings` 修改运行时系统设置，范围借鉴 sub2api 的站点/OAuth/登录条款/服务条款/集成配置模型，并只保留本市场需要的字段：站点展示、GitHub OAuth、市场功能开关、自动上架、最大标签数，以及 SMTP / Cloudflare Email Service。除 PostgreSQL 和 Redis 连接变更需要重启外，其余设置保存后会热更新当前 API 进程。
+核心管理员登录后可进入 `/settings` 修改运行时系统设置，范围借鉴 sub2api 的站点/OAuth/登录条款/服务条款/集成配置模型，并只保留本市场需要的字段：站点展示、GitHub OAuth、市场功能开关、自动上架、最大标签数，以及 SMTP / Cloudflare Email Service。这些设置保存到数据库配置表并热更新当前 API 进程；PostgreSQL 和 Redis 连接不在 Web 后台修改。
 
 ## 部署状态
 

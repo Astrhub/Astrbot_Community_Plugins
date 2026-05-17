@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Mapping
 
 
-def read_runtime_config(path: str) -> dict[str, str]:
+def read_env_file(path: str) -> dict[str, str]:
     file_path = Path(path)
     if not file_path.exists():
         return {}
@@ -19,11 +19,11 @@ def read_runtime_config(path: str) -> dict[str, str]:
     return values
 
 
-def write_runtime_config(path: str, values: Mapping[str, str]) -> None:
+def write_env_file(path: str, values: Mapping[str, str]) -> None:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    merged = read_runtime_config(path)
+    merged = read_env_file(path)
     for key, value in values.items():
         merged[key] = value
 

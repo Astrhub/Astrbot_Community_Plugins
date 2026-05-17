@@ -39,7 +39,7 @@ from .auth import (
     verify_password,
 )
 from .config import ApiKey, Settings, load_settings
-from .runtime_config import read_runtime_config, write_runtime_config
+from .env_file import write_env_file
 from .schemas import (
     AnnouncementCreate,
     ApiKeyCreate,
@@ -329,12 +329,11 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/v1/setup/status")
     async def setup_status(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
-        runtime_config = read_runtime_config(settings.runtime_config_path)
         if not settings.is_setup_required():
             raise error(404, "Setup status is unavailable after initial setup")
         return build_setup_status_response(
             settings,
-            runtime_config,
+            settings_config_values(settings),
             include_saved_setup=True,
             redact_saved_setup=True,
         )
@@ -345,11 +344,8 @@ def register_routes(app: FastAPI) -> None:
         payload: SetupConfig,
     ) -> dict[str, Any]:
         settings = get_settings(request)
-        runtime_config = read_runtime_config(settings.runtime_config_path)
-        if not can_save_setup_without_auth(settings, runtime_config):
-            user = await require_user(request)
-            if not is_core_admin(user):
-                raise error(403, "Only core admin can update infrastructure settings")
+        if not settings.is_setup_required():
+            raise error(404, "Setup is unavailable after initial setup; update .env instead")
         validate_setup_payload(payload)
         database_url = build_postgres_url(payload.postgres.model_dump())
         redis_url = build_redis_url(payload.redis.model_dump())
@@ -363,28 +359,22 @@ def register_routes(app: FastAPI) -> None:
             initializer(payload, database_url, redis_url, core_admin_password_hash)
         )
         try:
-            write_runtime_config(
-                settings.runtime_config_path,
+            await save_system_options_to_store(
+                new_store,
                 {
-                    "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
-                    "CORE_ADMIN_USERNAME": payload.admin.username,
-                    "DATABASE_URL": database_url,
-                    "POSTGRES_DATABASE": payload.postgres.database,
-                    "POSTGRES_HOST": payload.postgres.host,
-                    "POSTGRES_PASSWORD": payload.postgres.password,
-                    "POSTGRES_PORT": str(payload.postgres.port),
-                    "POSTGRES_SSL": serialize_bool(payload.postgres.ssl),
-                    "POSTGRES_USER": payload.postgres.username,
-                    "REDIS_DATABASE": str(payload.redis.database),
-                    "REDIS_HOST": payload.redis.host,
-                    "REDIS_PASSWORD": payload.redis.password,
-                    "REDIS_PORT": str(payload.redis.port),
-                    "REDIS_SSL": serialize_bool(payload.redis.ssl),
-                    "REDIS_URL": redis_url,
                     "SITE_ICON_URL": payload.site.icon_url,
                     "SITE_NAME": payload.site.name,
                     "WEB_URL": payload.site.web_url,
                 },
+            )
+            write_env_file(
+                settings.env_file_path,
+                setup_env_values(
+                    payload,
+                    database_url,
+                    redis_url,
+                    core_admin_password_hash,
+                ),
             )
         except Exception:
             await close_setup_store(new_store)
@@ -950,11 +940,10 @@ async def load_system_options(store: Any) -> dict[str, str]:
 
 async def runtime_settings_for_app(app: FastAPI) -> Settings:
     settings = app.state.settings
-    runtime_config = read_runtime_config(settings.runtime_config_path)
-    system_options = await load_system_options(app.state.store)
-    if system_options:
-        runtime_config = {**runtime_config, **system_options}
-    return settings_with_runtime_config(settings, runtime_config)
+    return settings_with_runtime_config(
+        settings,
+        await load_system_options(app.state.store),
+    )
 
 
 def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, str]) -> Settings:
@@ -1080,18 +1069,21 @@ async def call_store(request: Request, method_name: str, *args: Any) -> Any:
 
 async def effective_runtime_config(request: Request) -> dict[str, str]:
     settings = get_settings(request)
-    runtime_config = read_runtime_config(settings.runtime_config_path)
     system_options = await load_system_options(get_store(request))
-    return {**runtime_config, **system_options}
+    return {**settings_config_values(settings), **system_options}
 
 
 async def save_system_options(request: Request, values: dict[str, str]) -> dict[str, str]:
+    return await save_system_options_to_store(get_store(request), values)
+
+
+async def save_system_options_to_store(store: Any, values: dict[str, str]) -> dict[str, str]:
     system_values = {
         key: str(value)
         for key, value in values.items()
         if key in SYSTEM_OPTION_KEYS
     }
-    method = getattr(get_store(request), "upsert_options", None)
+    method = getattr(store, "upsert_options", None)
     if not method:
         return {}
     return await resolve_optional_awaitable(method(system_values))
@@ -1964,6 +1956,106 @@ def digest_terms(settings: Settings) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def settings_config_values(settings: Settings) -> dict[str, str]:
+    values = {
+        "CLOUDFLARE_EMAIL_ACCOUNT_ID": settings.cloudflare_email_account_id,
+        "CLOUDFLARE_EMAIL_API_TOKEN": settings.cloudflare_email_api_token,
+        "CLOUDFLARE_EMAIL_FROM": settings.cloudflare_email_from,
+        "CORE_ADMIN_PASSWORD_HASH": settings.core_admin_password_hash,
+        "CORE_ADMIN_USERNAME": settings.core_admin_username,
+        "DATABASE_URL": settings.database_url,
+        "EMAIL_DAILY_LIMIT": str(settings.email_daily_limit),
+        "EMAIL_PROVIDER": settings.email_provider,
+        "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER": str(
+            settings.email_verification_daily_limit_per_user
+        ),
+        "GITHUB_ADMIN_ORG": settings.github_admin_org,
+        "GITHUB_API_TOKEN": settings.github_api_token,
+        "GITHUB_CALLBACK_URL": settings.github_callback_url,
+        "GITHUB_CLIENT_ID": settings.github_client_id,
+        "GITHUB_CLIENT_SECRET": settings.github_client_secret,
+        "GITHUB_LOGIN_ENABLED": serialize_bool(settings.github_login_enabled),
+        "GITHUB_METADATA_SYNC_ENABLED": serialize_bool(settings.github_metadata_sync_enabled),
+        "GITHUB_METADATA_SYNC_INTERVAL_SECONDS": str(
+            settings.github_metadata_sync_interval_seconds
+        ),
+        "GITHUB_SCOPE": settings.github_scope,
+        "LOGIN_AGREEMENT_ENABLED": serialize_bool(settings.login_agreement_enabled),
+        "LOGIN_AGREEMENT_TEXT": settings.login_agreement_text,
+        "MARKET_COMMENTS_ENABLED": serialize_bool(settings.market_comments_enabled),
+        "MARKET_LIKES_ENABLED": serialize_bool(settings.market_likes_enabled),
+        "MARKET_SUBMISSIONS_ENABLED": serialize_bool(settings.market_submissions_enabled),
+        "MAX_PLUGIN_TAGS": str(settings.max_plugin_tags),
+        "PLUGIN_AUTO_APPROVE_ENABLED": serialize_bool(settings.plugin_auto_approve_enabled),
+        "PUBLIC_LOGIN_ENABLED": serialize_bool(settings.public_login_enabled),
+        "REDIS_URL": settings.redis_url,
+        "SERVICE_TERMS_ENABLED": serialize_bool(settings.service_terms_enabled),
+        "SERVICE_TERMS_TEXT": settings.service_terms_text,
+        "SITE_CONTACT_EMAIL": settings.site_contact_email,
+        "SITE_DESCRIPTION": settings.site_description,
+        "SITE_DOCS_URL": settings.site_docs_url,
+        "SITE_ICON_URL": settings.site_icon_url,
+        "SITE_NAME": settings.site_name,
+        "SITE_SUBTITLE": settings.site_subtitle,
+        "SMTP_FROM": settings.smtp_from,
+        "SMTP_HOST": settings.smtp_host,
+        "SMTP_PASSWORD": settings.smtp_password,
+        "SMTP_PORT": str(settings.smtp_port),
+        "SMTP_SSL": serialize_bool(settings.smtp_ssl),
+        "SMTP_USERNAME": settings.smtp_username,
+        "WEB_URL": settings.web_url,
+    }
+    if settings.database_url:
+        postgres = parse_postgres_url(settings.database_url)
+        values.update(
+            {
+                "POSTGRES_DATABASE": str(postgres["database"]),
+                "POSTGRES_HOST": str(postgres["host"]),
+                "POSTGRES_PASSWORD": str(postgres["password"]),
+                "POSTGRES_PORT": str(postgres["port"]),
+                "POSTGRES_SSL": serialize_bool(bool(postgres["ssl"])),
+                "POSTGRES_USER": str(postgres["username"]),
+            }
+        )
+    if settings.redis_url:
+        redis = parse_redis_url(settings.redis_url)
+        values.update(
+            {
+                "REDIS_DATABASE": str(redis["database"]),
+                "REDIS_HOST": str(redis["host"]),
+                "REDIS_PASSWORD": str(redis["password"]),
+                "REDIS_PORT": str(redis["port"]),
+                "REDIS_SSL": serialize_bool(bool(redis["ssl"])),
+            }
+        )
+    return {key: value for key, value in values.items() if value != ""}
+
+
+def setup_env_values(
+    payload: SetupConfig,
+    database_url: str,
+    redis_url: str,
+    core_admin_password_hash: str,
+) -> dict[str, str]:
+    return {
+        "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
+        "CORE_ADMIN_USERNAME": payload.admin.username,
+        "DATABASE_URL": database_url,
+        "POSTGRES_DATABASE": payload.postgres.database,
+        "POSTGRES_HOST": payload.postgres.host,
+        "POSTGRES_PASSWORD": payload.postgres.password,
+        "POSTGRES_PORT": str(payload.postgres.port),
+        "POSTGRES_SSL": serialize_bool(payload.postgres.ssl),
+        "POSTGRES_USER": payload.postgres.username,
+        "REDIS_DATABASE": str(payload.redis.database),
+        "REDIS_HOST": payload.redis.host,
+        "REDIS_PASSWORD": payload.redis.password,
+        "REDIS_PORT": str(payload.redis.port),
+        "REDIS_SSL": serialize_bool(payload.redis.ssl),
+        "REDIS_URL": redis_url,
+    }
+
+
 def build_saved_setup_config(
     settings: Settings,
     runtime_config: dict[str, str],
@@ -2689,11 +2781,6 @@ def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
 def digest_plugin_source(feed: dict[str, dict[str, Any]]) -> str:
     payload = json.dumps(feed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
-
-
-def can_save_setup_without_auth(settings: Settings, runtime_config: dict[str, str]) -> bool:
-    has_saved_config = bool(runtime_config.get("DATABASE_URL") or runtime_config.get("REDIS_URL"))
-    return settings.is_setup_required() and not has_saved_config
 
 
 def validate_repo_owner(repo: str, user: dict[str, Any]) -> None:

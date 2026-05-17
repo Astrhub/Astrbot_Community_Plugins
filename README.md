@@ -42,7 +42,7 @@ npm run start:api
 
 核心管理员登录后可进入 `/settings` 管理运行时设置。当前支持站点名称/图标/描述、GitHub OAuth、登录条款、服务条款、市场提交/评论/点赞开关、自动上架、最大标签数，以及 SMTP 或 Cloudflare Email Service。密钥字段保存后只返回遮蔽状态；保持遮蔽值不会覆盖已有密钥。
 
-保存首次配置时，后端会先连接 PostgreSQL，目标数据库不存在时尝试创建，再初始化 schema、验证 Redis，并把内部核心管理员写入目标库；全部成功后才写入 `apps/api/data/runtime.env`，并在当前 FastAPI 进程内切换到 PostgreSQL/Redis 存储，无需依赖 systemd、Docker 或 supervisor 重启服务。PostgreSQL schema 在后续启动时也会自动补齐；Redis 使用带过期时间的 session key 保存登录态。
+保存首次配置时，后端会先连接 PostgreSQL，目标数据库不存在时尝试创建，再初始化 schema、验证 Redis，并把内部核心管理员写入目标库；全部成功后只把基础设施连接和核心管理员引导信息写入 `apps/api/.env`，站点展示和后续系统设置写入数据库配置表。当前 FastAPI 进程会立即切换到 PostgreSQL/Redis 存储，无需依赖 systemd、Docker 或 supervisor 重启服务。PostgreSQL schema 在后续启动时也会自动补齐；Redis 使用带过期时间的 session key 保存登录态。初始化完成后 `/v1/setup` 关闭，数据库或 Redis 连接后续只通过 `.env` 调整。
 
 ### CI/CD
 
