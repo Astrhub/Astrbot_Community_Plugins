@@ -56,7 +56,7 @@
                 type="warning"
                 :disabled="plugin.status === 'unlisted'"
                 :loading="busyId === plugin.id"
-                @click="setListing(plugin, 'unlist')"
+                @click="openUnlistModal(plugin)"
               >
                 下架
               </n-button>
@@ -65,6 +65,34 @@
         </div>
       </n-spin>
     </main>
+
+    <n-modal
+      v-model:show="showUnlistModal"
+      preset="card"
+      title="填写下架原因"
+      style="max-width: 480px"
+    >
+      <n-input
+        v-model:value="unlistReason"
+        type="textarea"
+        placeholder="请说明下架原因，作者会在个人消息中看到。"
+        :autosize="{ minRows: 3, maxRows: 6 }"
+        maxlength="500"
+        show-count
+      />
+      <template #footer>
+        <div class="modal-actions">
+          <n-button tertiary @click="showUnlistModal = false">取消</n-button>
+          <n-button
+            type="warning"
+            :loading="busyId === unlistTarget?.id"
+            @click="confirmUnlist"
+          >
+            确认下架
+          </n-button>
+        </div>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -77,7 +105,9 @@ import {
   NButton,
   NEmpty,
   NIcon,
+  NInput,
   NLayoutHeader,
+  NModal,
   NSpin,
   NTag,
   useMessage
@@ -100,6 +130,9 @@ const {
 const loading = ref(true)
 const busyId = ref('')
 const items = ref([])
+const showUnlistModal = ref(false)
+const unlistReason = ref('')
+const unlistTarget = ref(null)
 const isAdmin = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
 
 const statusLabel = (status) => {
@@ -127,10 +160,11 @@ async function loadItems() {
   }
 }
 
-async function setListing(plugin, action) {
+async function setListing(plugin, action, reason = '') {
   busyId.value = plugin.id
   try {
-    const updated = await updatePluginListing(plugin.id, action)
+    const payload = action === 'unlist' ? { reason } : null
+    const updated = await updatePluginListing(plugin.id, action, payload)
     items.value = items.value.map((item) => (item.id === updated.id ? updated : item))
     await loadPlugins()
     if (action === 'list') {
@@ -145,6 +179,23 @@ async function setListing(plugin, action) {
   } finally {
     busyId.value = ''
   }
+}
+
+function openUnlistModal(plugin) {
+  unlistTarget.value = plugin
+  unlistReason.value = ''
+  showUnlistModal.value = true
+}
+
+async function confirmUnlist() {
+  if (!unlistTarget.value) return
+  const reason = unlistReason.value.trim()
+  if (!reason) {
+    message.warning('请填写下架原因')
+    return
+  }
+  showUnlistModal.value = false
+  await setListing(unlistTarget.value, 'unlist', reason)
 }
 
 function goBack() {
@@ -188,10 +239,15 @@ onMounted(loadItems)
 .header-left,
 .header-actions,
 .plugin-title,
-.plugin-actions {
+.plugin-actions,
+.modal-actions {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.modal-actions {
+  justify-content: flex-end;
 }
 
 .eyebrow,

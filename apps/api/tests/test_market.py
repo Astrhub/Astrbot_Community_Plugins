@@ -446,6 +446,53 @@ def test_core_admin_can_review_plugin_submissions() -> None:
     assert listed.json()["status"] == "listed"
 
 
+def test_admin_unlist_requires_reason_and_notifies_owner() -> None:
+    client = make_client()
+    store = client.app.state.store
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    plugin = store.submit_plugin(owner, plugin_payload())
+    store.update_plugin_status(plugin["id"], "listed", owner["id"])
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    missing_reason = client.post(f"/v1/admin/plugins/{plugin['id']}/unlist", json={"reason": ""})
+    unlisted = client.post(
+        f"/v1/admin/plugins/{plugin['id']}/unlist",
+        json={"reason": "插件无法正常安装"},
+    )
+
+    assert missing_reason.status_code == 400
+    assert unlisted.status_code == 200
+    assert unlisted.json()["status"] == "unlisted"
+    assert unlisted.json()["unlist_reason"] == "插件无法正常安装"
+    client.get("/v1/auth/debug-login?login=alice")
+    notifications = client.get("/v1/me/notifications").json()["items"]
+    assert notifications[0]["type"] == "plugin_unlisted"
+    assert notifications[0]["metadata"]["plugin_id"] == plugin["id"]
+    assert "插件无法正常安装" in notifications[0]["body"]
+
+
+def test_listing_clears_previous_unlist_metadata() -> None:
+    client = make_client()
+    store = client.app.state.store
+    admin = store.create_internal_admin("admin", main_module.hash_password("password123"))
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    plugin = store.submit_plugin(owner, plugin_payload())
+    store.unlist_plugin(plugin["id"], admin["id"], "临时下架")
+
+    relisted = store.update_plugin_status(plugin["id"], "listed", admin["id"])
+
+    assert relisted["status"] == "listed"
+    assert "unlist_reason" not in relisted
+    assert "unlisted_at" not in relisted
+    assert "unlisted_by" not in relisted
+
+
 def test_submission_requires_github_repo_owner() -> None:
     client = make_client()
     client.get("/v1/auth/debug-login?login=alice")
@@ -1013,6 +1060,7 @@ def test_store_selection_uses_pg_redis_only_when_both_urls_are_configured() -> N
 def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "CREATE TABLE IF NOT EXISTS market_users" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_plugins" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS market_notifications" in SCHEMA_SQL
     assert "jsonb NOT NULL DEFAULT '[]'::jsonb" in SCHEMA_SQL
     assert "CHECK (status IN ('pending', 'listed', 'unlisted'))" in SCHEMA_SQL
     assert "REFERENCES market_users(id)" in SCHEMA_SQL
@@ -1037,8 +1085,8 @@ async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> No
         async with store._pool().acquire() as connection:
             await connection.execute(
                 """
-                TRUNCATE market_api_keys, market_comments, market_submissions,
-                         market_plugins, market_announcements, market_users
+                TRUNCATE market_api_keys, market_notifications, market_comments,
+                         market_submissions, market_plugins, market_announcements, market_users
                 RESTART IDENTITY CASCADE
                 """
             )
@@ -1069,6 +1117,19 @@ async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> No
         comment = await store.add_comment(plugin["id"], alice["id"], "Nice")
         assert comment["body"] == "Nice"
         assert len(await store.list_comments(plugin["id"])) == 1
+
+        unlisted = await store.unlist_plugin(plugin["id"], admin["id"], "Needs fixes")
+        assert unlisted and unlisted["unlist_reason"] == "Needs fixes"
+        notification = await store.create_notification(
+            alice["id"],
+            "插件已下架",
+            "Demo 已被管理员下架。原因：Needs fixes",
+            "plugin_unlisted",
+            {"plugin_id": plugin["id"], "reason": "Needs fixes"},
+        )
+        notifications = await store.list_notifications(alice["id"])
+        assert notifications[0]["id"] == notification["id"]
+        assert notifications[0]["metadata"]["reason"] == "Needs fixes"
 
         session = await store.create_session(alice["id"])
         assert (await store.get_user_by_session(session["token"]))["github_login"] == "alice"

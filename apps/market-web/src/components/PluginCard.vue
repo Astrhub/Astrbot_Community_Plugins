@@ -156,12 +156,7 @@
                   </template>
                   <span role="tooltip">访问作者主页</span>
                 </n-tooltip>
-                <n-popconfirm
-                  v-if="isAdminUser"
-                  positive-text="下架"
-                  negative-text="取消"
-                  @positive-click="unlistPlugin"
-                >
+                <n-tooltip v-if="isAdminUser" placement="top" trigger="hover">
                   <template #trigger>
                     <n-button
                       secondary
@@ -169,7 +164,7 @@
                       circle
                       type="warning"
                       :loading="isUnlisting"
-                      @click.stop
+                      @click.stop="openUnlistModal"
                       role="button"
                       :aria-label="`下架 ${plugin.name}`"
                     >
@@ -178,8 +173,8 @@
                       </n-icon>
                     </n-button>
                   </template>
-                  下架后插件将从市场首页隐藏。
-                </n-popconfirm>
+                  <span role="tooltip">下架插件</span>
+                </n-tooltip>
               </div>
             </div>
           </div>
@@ -193,6 +188,30 @@
     v-model:show="showPluginDetails"
     :plugin="plugin"
   />
+
+  <n-modal
+    v-model:show="showUnlistModal"
+    preset="card"
+    title="填写下架原因"
+    style="max-width: 420px"
+  >
+    <n-input
+      v-model:value="unlistReason"
+      type="textarea"
+      placeholder="请说明下架原因，作者会在个人消息中看到。"
+      :autosize="{ minRows: 3, maxRows: 6 }"
+      maxlength="500"
+      show-count
+    />
+    <template #footer>
+      <div class="unlist-modal-actions">
+        <n-button tertiary @click="showUnlistModal = false">取消</n-button>
+        <n-button type="warning" :loading="isUnlisting" @click="unlistPlugin">
+          确认下架
+        </n-button>
+      </div>
+    </template>
+  </n-modal>
 </template>
 
 <script setup>
@@ -203,7 +222,8 @@ import {
   NTag,
   NButton,
   NIcon,
-  NPopconfirm,
+  NInput,
+  NModal,
   useMessage,
   NTooltip
 } from 'naive-ui'
@@ -242,6 +262,8 @@ const pluginNameEl = ref(null)
 const cardRef = ref(null)
 const resizeObserver = ref(null)
 const isUnlisting = ref(false)
+const showUnlistModal = ref(false)
+const unlistReason = ref('')
 const store = usePluginStore()
 const { currentUser } = storeToRefs(store)
 const { loadPlugins, updatePluginListing } = store
@@ -334,11 +356,22 @@ const showDetails = () => {
   showPluginDetails.value = true
 }
 
+function openUnlistModal() {
+  unlistReason.value = ''
+  showUnlistModal.value = true
+}
+
 async function unlistPlugin() {
+  const reason = unlistReason.value.trim()
+  if (!reason) {
+    message.warning('请填写下架原因')
+    return
+  }
   isUnlisting.value = true
   try {
-    await updatePluginListing(props.plugin.id, 'unlist')
+    await updatePluginListing(props.plugin.id, 'unlist', { reason })
     await loadPlugins()
+    showUnlistModal.value = false
     message.success('插件已下架')
   } catch (error) {
     message.error(error.message || '下架失败')
@@ -410,6 +443,12 @@ const handleLogoError = (event) => {
   transform: translateY(-4px);
   border-color: var(--primary-color);
   box-shadow: var(--shadow-md);
+}
+
+.unlist-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
 }
 
 .card-header {

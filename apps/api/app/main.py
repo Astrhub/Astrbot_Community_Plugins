@@ -47,6 +47,7 @@ from .schemas import (
     MuteUserPayload,
     PluginPatch,
     PluginSubmission,
+    PluginUnlistPayload,
     RoleUpdatePayload,
     SetupConfig,
     SystemSettingsPayload,
@@ -343,6 +344,11 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "User not found")
         return public_user(updated)
 
+    @app.get("/v1/me/notifications")
+    async def my_notifications(request: Request) -> dict[str, list[dict[str, Any]]]:
+        user = await require_user(request)
+        return {"items": await call_store(request, "list_notifications", user["id"])}
+
     @app.post("/v1/auth/internal/login")
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
         settings = get_settings(request)
@@ -615,15 +621,36 @@ def register_routes(app: FastAPI) -> None:
         return updated
 
     @app.post("/v1/admin/plugins/{plugin_id}/unlist")
-    async def unlist_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
+    async def unlist_plugin(
+        request: Request,
+        plugin_id: str,
+        payload: PluginUnlistPayload,
+    ) -> dict[str, Any]:
         user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
-        updated = await call_store(
-            request, "update_plugin_status", plugin_id, "unlisted", user["id"]
-        )
+        if not payload.reason:
+            raise error(400, "Unlist reason is required")
+        plugin = await get_plugin_or_404(request, plugin_id)
+        updated = await call_store(request, "unlist_plugin", plugin_id, user["id"], payload.reason)
         if not updated:
             raise error(404, "Plugin not found")
+        if plugin.get("owner_user_id"):
+            plugin_name = plugin.get("display_name") or plugin.get("name") or plugin_id
+            await call_store(
+                request,
+                "create_notification",
+                plugin["owner_user_id"],
+                "插件已下架",
+                f"{plugin_name} 已被管理员下架。原因：{payload.reason}",
+                "plugin_unlisted",
+                {
+                    "plugin_id": plugin_id,
+                    "plugin_name": plugin.get("name") or plugin_id,
+                    "reason": payload.reason,
+                    "moderator_user_id": user["id"],
+                },
+            )
         return updated
 
     @app.delete("/v1/admin/comments/{comment_id}")
