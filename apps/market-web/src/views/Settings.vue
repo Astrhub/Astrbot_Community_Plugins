@@ -125,11 +125,11 @@
           <section class="settings-section">
             <div class="section-title">
               <h2>登录与条款</h2>
-              <p>控制是否开放登录，以及登录前必须确认的条款。</p>
+              <p>控制内部账号、GitHub OAuth，以及登录前必须确认的条款。</p>
             </div>
             <div class="switch-grid">
-              <setting-switch v-model="formData.auth.public_login_enabled" label="开放登录" enabled="允许 GitHub 登录 / 注册" disabled="关闭公开登录，核心管理员内部登录保留" />
-              <setting-switch v-model="formData.auth.github_login_enabled" label="GitHub OAuth" enabled="允许 GitHub 登录 / 注册" disabled="仅核心管理员内部登录" />
+              <setting-switch v-model="formData.auth.public_login_enabled" label="内部账号登录" enabled="允许内部账号登录" disabled="仅核心管理员可登录后台" />
+              <setting-switch v-model="formData.auth.github_login_enabled" label="GitHub OAuth" enabled="允许 GitHub 登录 / 注册" disabled="关闭 GitHub 登录 / 注册" />
               <setting-switch v-model="formData.auth.login_agreement_enabled" label="登录条款" enabled="登录前确认" disabled="不显示" />
               <setting-switch v-model="formData.auth.service_terms_enabled" label="服务条款" enabled="显示服务条款" disabled="不显示" />
             </div>
@@ -538,7 +538,10 @@ async function loadSettings() {
   loading.value = true
   try {
     await loadCurrentUser()
-    if (!isCoreAdmin.value) return
+    if (!isCoreAdmin.value) {
+      router.replace('/admin')
+      return
+    }
     await loadSetupStatus()
     applySettings(await loadSystemSettings())
   } catch (error) {
@@ -616,7 +619,7 @@ async function sendEmailTest() {
 }
 
 function goBack() {
-  router.back()
+  router.push('/')
 }
 
 function goSetup() {

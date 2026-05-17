@@ -365,7 +365,7 @@ def test_core_admin_internal_login_works_when_public_login_closed() -> None:
     assert response.json()["user"]["role"] == Role.CORE_ADMIN
 
 
-def test_github_login_is_disabled_when_public_login_closed() -> None:
+def test_github_login_works_when_public_login_closed() -> None:
     settings = load_settings(
         {
             "ENABLE_DEV_AUTH": "true",
@@ -374,6 +374,27 @@ def test_github_login_is_disabled_when_public_login_closed() -> None:
             "GITHUB_CLIENT_ID": "client-id",
             "GITHUB_CLIENT_SECRET": "client-secret",
             "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+
+    response = client.get("/v1/auth/github/login", follow_redirects=False)
+    location = response.headers["location"]
+
+    assert response.status_code == 307
+    assert "https://github.com/login/oauth/authorize" in location
+    assert "client_id=client-id" in location
+
+
+def test_github_login_is_disabled_when_oauth_closed() -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "PUBLIC_LOGIN_ENABLED": "true",
+            "GITHUB_LOGIN_ENABLED": "false",
+            "GITHUB_CLIENT_ID": "client-id",
+            "GITHUB_CLIENT_SECRET": "client-secret",
+            "GITHUB_CALLBACK_URL": "https://market.example.com/v1/auth/github/callback",
         }
     )
     client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
@@ -454,10 +475,67 @@ def test_github_login_falls_back_to_forwarded_host_for_loopback_callback(tmp_pat
 
     assert response.status_code == 307
     assert (
-        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback"
-        in location
+        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
     )
     assert "127.0.0.1" not in location
+
+
+def test_github_callback_uses_forwarded_origin_for_loopback_settings(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runtime_file = tmp_path / "runtime.env"
+    runtime_file.write_text(
+        "\n".join(
+            [
+                "GITHUB_LOGIN_ENABLED=true",
+                "GITHUB_CLIENT_ID=runtime-client",
+                "GITHUB_CLIENT_SECRET=runtime-secret",
+                "GITHUB_CALLBACK_URL=http://127.0.0.1:8787/v1/auth/github/callback",
+                "WEB_URL=http://127.0.0.1:8787",
+                "",
+            ]
+        )
+    )
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "RUNTIME_CONFIG_FILE": str(runtime_file),
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+    headers = {
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": "market.example.com",
+    }
+    client.get("/v1/auth/github/login", headers=headers, follow_redirects=False)
+    state = client.cookies.get(settings.oauth_state_cookie_name)
+    captured = {}
+
+    async def fake_exchange_github_code(settings, code):
+        captured["callback_url"] = settings.github_callback_url
+        return "github-token"
+
+    async def fake_fetch_github_profile(access_token):
+        return {
+            "id": 123,
+            "login": "alice",
+            "name": "Alice",
+            "avatar_url": "https://example.com/alice.webp",
+        }
+
+    monkeypatch.setattr(main_module, "exchange_github_code", fake_exchange_github_code)
+    monkeypatch.setattr(main_module, "fetch_github_profile", fake_fetch_github_profile)
+
+    response = client.get(
+        f"/v1/auth/github/callback?code=ok&state={state}",
+        headers=headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://market.example.com"
+    assert captured["callback_url"] == "https://market.example.com/v1/auth/github/callback"
 
 
 def test_public_site_config_uses_runtime_oauth_settings(tmp_path) -> None:

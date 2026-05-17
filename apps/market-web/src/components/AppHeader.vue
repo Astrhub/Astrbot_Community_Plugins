@@ -178,7 +178,7 @@
         v-if="siteConfig.auth.github_login_enabled"
         type="primary"
         block
-        :disabled="!canSubmitPublicLogin"
+        :disabled="!canSubmitLogin"
         @click="loginWithGithub"
       >
         <template #icon>
@@ -189,36 +189,11 @@
       <n-alert v-else type="warning" :bordered="false">
         GitHub OAuth 未开启，普通用户暂时无法登录或注册。
       </n-alert>
-      <n-alert v-if="!siteConfig.auth.public_login_enabled" type="warning" :bordered="false">
-        当前已关闭公开登录，只有核心管理员可以使用内部账号登录。
-      </n-alert>
       <n-alert v-if="agreementText" type="info" :bordered="false" class="agreement-box">
         <div class="agreement-text">{{ agreementText }}</div>
         <n-checkbox v-model:checked="agreementAccepted">我已阅读并同意以上条款</n-checkbox>
       </n-alert>
     </div>
-
-    <n-divider>核心管理员内部登录</n-divider>
-
-    <n-form :model="loginForm" label-placement="top">
-      <n-form-item label="内部账号">
-        <n-input v-model:value="loginForm.username" placeholder="admin" />
-      </n-form-item>
-      <n-form-item label="密码">
-        <n-input
-          v-model:value="loginForm.password"
-          type="password"
-          show-password-on="click"
-          placeholder="核心管理员密码"
-          @keyup.enter="submitInternalLogin"
-        />
-      </n-form-item>
-      <div class="login-actions">
-        <n-button type="primary" :loading="isLoggingIn" :disabled="!canSubmitLogin" @click="submitInternalLogin">
-          内部登录
-        </n-button>
-      </div>
-    </n-form>
   </n-modal>
 </template>
 
@@ -226,7 +201,7 @@
 import { computed, h, onMounted, ref, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
-import { NAlert, NCheckbox, NDivider, NDropdown, NForm, NFormItem, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
+import { NAlert, NCheckbox, NDropdown, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
 import {
   CloseOutline,
   LinkOutline,
@@ -267,15 +242,13 @@ const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
 const { currentUser, siteConfig } = storeToRefs(store)
-const { loginWithGithub, loginWithPassword, logout } = store
+const { loginWithGithub, logout } = store
 
 const fullHeader = ref(null)
 const showStickyHeader = ref(false)
 const isMobileSearchOpen = ref(false)
 const isLoginModalOpen = ref(false)
-const isLoggingIn = ref(false)
 const agreementAccepted = ref(false)
-const loginForm = ref({ username: 'admin', password: '' })
 const pluginSourceUrl = computed(() => store.pluginSourceUrl)
 const siteName = computed(() => siteConfig.value.name)
 const siteIconUrl = computed(() => siteConfig.value.icon_url)
@@ -323,7 +296,6 @@ const agreementText = computed(() => {
   return parts.join('\n\n')
 })
 const canSubmitLogin = computed(() => !agreementText.value || agreementAccepted.value)
-const canSubmitPublicLogin = computed(() => siteConfig.value.auth?.public_login_enabled && canSubmitLogin.value)
 
 const handleSearchQueryChange = (value) => {
   emit('update:searchQuery', value)
@@ -346,7 +318,7 @@ const handleFuzzySearchEnabledChange = (value) => {
 }
 
 const goSettings = () => {
-  router.push('/settings')
+  router.push('/admin/settings')
 }
 
 const goAdminPlugins = () => {
@@ -383,23 +355,6 @@ async function handleUserMenuSelect(key) {
 
 const openLoginModal = () => {
   isLoginModalOpen.value = true
-}
-
-const submitInternalLogin = async () => {
-  if (!canSubmitLogin.value) {
-    message.warning('请先同意登录条款')
-    return
-  }
-  isLoggingIn.value = true
-  try {
-    await loginWithPassword(loginForm.value)
-    isLoginModalOpen.value = false
-    message.success('已登录')
-  } catch (error) {
-    message.error(error.message || '登录失败')
-  } finally {
-    isLoggingIn.value = false
-  }
 }
 
 const copyPluginSource = async () => {

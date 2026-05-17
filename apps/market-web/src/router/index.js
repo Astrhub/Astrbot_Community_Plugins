@@ -6,6 +6,7 @@ const Setup = () => import('../views/Setup.vue')
 const Settings = () => import('../views/Settings.vue')
 const PersonalSettings = () => import('../views/PersonalSettings.vue')
 const AdminPlugins = () => import('../views/AdminPlugins.vue')
+const AdminLogin = () => import('../views/AdminLogin.vue')
 const routes = [
   {
     path: '/',
@@ -24,13 +25,22 @@ const routes = [
   },
   {
     path: '/settings',
-    name: 'Settings',
-    component: Settings
+    redirect: '/admin/settings'
   },
   {
     path: '/settings/personal',
     name: 'PersonalSettings',
     component: PersonalSettings
+  },
+  {
+    path: '/admin',
+    name: 'AdminLogin',
+    component: AdminLogin
+  },
+  {
+    path: '/admin/settings',
+    name: 'AdminSettings',
+    component: Settings
   },
   {
     path: '/admin/plugins',

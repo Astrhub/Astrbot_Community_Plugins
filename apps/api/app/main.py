@@ -399,7 +399,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/v1/auth/github/login")
     async def github_login(request: Request) -> Response:
         settings = get_runtime_settings(request)
-        if not settings.public_login_enabled or not settings.github_login_enabled:
+        if not settings.github_login_enabled:
             return JSONResponse(status_code=403, content={"error": "GitHub login is disabled"})
         if not settings.github_client_id:
             return JSONResponse(
@@ -432,7 +432,10 @@ def register_routes(app: FastAPI) -> None:
         if not code or not state or not expected_state or state != expected_state:
             raise error(400, "Invalid OAuth callback")
 
-        access_token = await exchange_github_code(settings, code)
+        oauth_settings = settings.with_updates(
+            github_callback_url=github_callback_url_for_request(request, settings)
+        )
+        access_token = await exchange_github_code(oauth_settings, code)
         profile = await fetch_github_profile(access_token)
         current = await current_user(request)
         profile_payload = github_profile_payload(profile)
@@ -442,7 +445,7 @@ def register_routes(app: FastAPI) -> None:
             user = await call_store(request, "upsert_github_user", profile_payload)
         await promote_org_admin_if_needed(request, user, access_token)
         session = await call_store(request, "create_session", user["id"])
-        response = RedirectResponse(settings.web_url)
+        response = RedirectResponse(web_url_for_request(request, settings))
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         response.delete_cookie(settings.oauth_state_cookie_name, path="/")
         return response
@@ -883,6 +886,7 @@ def get_runtime_settings(request: Request) -> Settings:
     if not runtime_config:
         return settings
     return settings.with_updates(
+        web_url=runtime_config.get("WEB_URL", settings.web_url),
         github_client_id=runtime_config.get("GITHUB_CLIENT_ID", settings.github_client_id),
         github_client_secret=runtime_config.get(
             "GITHUB_CLIENT_SECRET",
@@ -921,6 +925,12 @@ def github_callback_url_for_request(request: Request, settings: Settings) -> str
     return f"{public_request_origin(request)}/v1/auth/github/callback"
 
 
+def web_url_for_request(request: Request, settings: Settings) -> str:
+    if not is_loopback_url(settings.web_url):
+        return settings.web_url.rstrip("/")
+    return public_request_origin(request)
+
+
 def public_request_origin(request: Request) -> str:
     forwarded_proto = first_forwarded_header(request, "x-forwarded-proto")
     forwarded_host = first_forwarded_header(request, "x-forwarded-host")
@@ -937,8 +947,8 @@ def first_forwarded_header(request: Request, name: str) -> str:
 
 
 def is_loopback_url(value: str) -> bool:
-    hostname = urlparse(value).hostname or ""
-    return hostname == "localhost" or hostname == "::1" or hostname.startswith("127.")
+    hostname = (urlparse(value).hostname or "").lower()
+    return hostname in {"localhost", "::1", "0.0.0.0"} or hostname.startswith("127.")
 
 
 def get_store(request: Request) -> InMemoryMarketStore | PgRedisMarketStore:

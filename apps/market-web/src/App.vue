@@ -38,7 +38,7 @@ const {
 
 const route = useRoute()
 const router = useRouter()
-const isFormPage = computed(() => ['/submit', '/settings'].includes(route.path))
+const isFormPage = computed(() => ['/submit', '/settings', '/admin', '/admin/settings'].includes(route.path))
 
 onMounted(async () => {
   store.initTheme()
