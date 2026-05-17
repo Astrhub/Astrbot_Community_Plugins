@@ -435,7 +435,7 @@ const openPanelUrl = () => {
   color: var(--n-text-color-2) !important;
 }
 
-.markdown-content :deep(code) {
+.markdown-content :deep(:not(pre) > code) {
   background: var(--n-code-color, rgba(128, 128, 128, 0.12)) !important;
   color: var(--n-text-color) !important;
   padding: 2px 6px;
@@ -456,6 +456,12 @@ const openPanelUrl = () => {
 .markdown-content :deep(pre code) {
   background: none !important;
   color: inherit !important;
+  padding: 0;
+  border-radius: 0;
+}
+
+.markdown-content :deep(pre code *) {
+  background: transparent !important;
   padding: 0;
   border-radius: 0;
 }
