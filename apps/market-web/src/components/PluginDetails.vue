@@ -38,7 +38,15 @@
             </template>
             {{ liked ? '取消点赞' : '点赞' }} {{ detail?.likes ?? plugin?.likes ?? 0 }}
           </n-button>
-          <span v-else class="muted-text">点赞已关闭</span>
+          <n-button
+            v-if="canManagePlugin"
+            secondary
+            :loading="refreshing"
+            @click="openRefreshModal"
+          >
+            刷新 GitHub
+          </n-button>
+          <span v-if="!likesEnabled" class="muted-text">点赞已关闭</span>
         </div>
 
         <div v-if="loading" class="readme-loading">
@@ -90,6 +98,48 @@
       </div>
     </template>
   </n-modal>
+
+  <n-modal
+    v-model:show="showRefreshModal"
+    preset="card"
+    title="刷新 GitHub 元数据"
+    style="max-width: 520px"
+  >
+    <n-space vertical size="medium">
+      <n-alert type="info" :bordered="false">
+        Token 只需要公开仓库读取权限。留空会使用已保存的个人 Token 或站点兜底 Token。
+      </n-alert>
+      <n-form label-placement="top">
+        <n-form-item label="临时 GitHub Token" path="github_token">
+          <n-input
+            v-model:value="refreshForm.github_token"
+            type="password"
+            show-password-on="click"
+            placeholder="可选，ghp_... 或 fine-grained token"
+          />
+        </n-form-item>
+        <n-checkbox v-model:checked="refreshForm.save_token">
+          保存到个人设置，后续自动同步优先使用
+        </n-checkbox>
+        <n-form-item label="刷新间隔（秒）" path="refresh_interval_seconds">
+          <n-input-number
+            v-model:value="refreshForm.refresh_interval_seconds"
+            :min="300"
+            :max="86400"
+            :step="300"
+          />
+        </n-form-item>
+      </n-form>
+    </n-space>
+    <template #footer>
+      <div class="refresh-actions">
+        <n-button tertiary @click="showRefreshModal = false">取消</n-button>
+        <n-button type="primary" :loading="refreshing" @click="confirmRefreshGithub">
+          刷新
+        </n-button>
+      </div>
+    </template>
+  </n-modal>
 </template>
 
 <script setup>
@@ -102,6 +152,12 @@ import {
   NIcon,
   NTag,
   NButton,
+  NAlert,
+  NCheckbox,
+  NForm,
+  NFormItem,
+  NInput,
+  NInputNumber,
   NSpin,
   NEmpty,
   useMessage
@@ -129,21 +185,40 @@ const readmeHtml = ref('')
 const detail = ref(null)
 const liking = ref(false)
 const liked = ref(false)
+const refreshing = ref(false)
+const showRefreshModal = ref(false)
+const refreshForm = ref({
+  github_token: '',
+  save_token: false,
+  refresh_interval_seconds: 3600
+})
 const comments = computed(() => detail.value?.comments || [])
 
-// 获取全局主题状态
 const store = usePluginStore()
 const message = useMessage()
-const { isDarkMode, siteConfig } = storeToRefs(store)
+const { siteConfig, currentUser } = storeToRefs(store)
 const {
   addPluginComment,
   likePlugin,
   loadPluginDetail,
   loadPlugins,
+  loadCurrentUser,
+  refreshPluginGithubMetadata,
   unlikePlugin
 } = store
 const commentsEnabled = computed(() => Boolean(siteConfig.value.market?.comments_enabled))
 const likesEnabled = computed(() => Boolean(siteConfig.value.market?.likes_enabled))
+const activePlugin = computed(() => detail.value || props.plugin || {})
+const canManagePlugin = computed(() => {
+  const user = currentUser.value
+  const plugin = activePlugin.value
+  if (!user || !plugin?.id) return false
+  if (['core_admin', 'admin'].includes(user.role)) return true
+  return Boolean(
+    plugin.owner_user_id === user.id ||
+    (plugin.owner_github_login && plugin.owner_github_login === user.github_login)
+  )
+})
 
 watch(() => props.show, (newVal) => {
   show.value = newVal
@@ -152,6 +227,7 @@ watch(() => props.show, (newVal) => {
 watch(show, (newVal) => {
   emit('update:show', newVal)
   if (newVal) {
+    loadCurrentUser()
     fetchDetail()
     fetchReadme()
   }
@@ -258,6 +334,36 @@ async function toggleLike() {
   }
 }
 
+function openRefreshModal() {
+  refreshForm.value = {
+    github_token: '',
+    save_token: false,
+    refresh_interval_seconds: currentUser.value?.github_refresh_interval_seconds || 3600
+  }
+  showRefreshModal.value = true
+}
+
+async function confirmRefreshGithub() {
+  if (!props.plugin?.id) return
+  refreshing.value = true
+  try {
+    const payload = {
+      github_token: refreshForm.value.github_token.trim(),
+      save_token: refreshForm.value.save_token,
+      refresh_interval_seconds: Number(refreshForm.value.refresh_interval_seconds || 3600)
+    }
+    detail.value = await refreshPluginGithubMetadata(props.plugin.id, payload)
+    await loadCurrentUser()
+    await loadPlugins()
+    showRefreshModal.value = false
+    message.success('GitHub 数据已刷新')
+  } catch (err) {
+    message.error(err.message || '刷新失败，请填写只读 GitHub Token 后重试')
+  } finally {
+    refreshing.value = false
+  }
+}
+
 async function submitComment(payload) {
   if (!props.plugin?.id) return
   try {
@@ -309,6 +415,8 @@ async function submitComment(payload) {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .muted-text {
@@ -410,6 +518,12 @@ async function submitComment(payload) {
   justify-content: center;
   align-items: center;
   min-height: 200px;
+}
+
+.refresh-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 /* 响应式设计 */

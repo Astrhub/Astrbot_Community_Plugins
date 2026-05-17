@@ -65,10 +65,10 @@
             </n-button>
           </section>
 
-          <section v-if="isAdminUser" class="profile-section">
+          <section class="profile-section">
             <div class="section-title">
               <h2>GitHub API Token</h2>
-              <p>仅需要只读权限，用于读取公开仓库信息、metadata.yaml 和 logo.png，避免服务器 IP 限流。</p>
+              <p>仅需要只读权限，用于读取公开仓库信息、metadata.yaml 和 logo.png；插件作者会优先使用自己的 Token 刷新元数据。</p>
             </div>
             <n-form-item label="Token" path="github_token">
               <n-input
@@ -81,6 +81,14 @@
             <div class="token-state">
               {{ currentUser?.has_github_token ? '当前已配置 Token' : '当前未配置 Token' }}
             </div>
+            <n-form-item label="自动刷新间隔（秒）" path="github_refresh_interval_seconds">
+              <n-input-number
+                v-model:value="formData.github_refresh_interval_seconds"
+                :min="300"
+                :max="86400"
+                :step="300"
+              />
+            </n-form-item>
           </section>
 
           <section class="profile-section">
@@ -121,6 +129,7 @@ import {
   NFormItem,
   NIcon,
   NInput,
+  NInputNumber,
   NLayoutHeader,
   NSpin,
   useMessage
@@ -145,10 +154,9 @@ const notifications = ref([])
 const formData = reactive({
   avatar_url: '',
   github_name: '',
-  github_token: ''
+  github_token: '',
+  github_refresh_interval_seconds: 3600
 })
-
-const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
 
 const avatarFallback = computed(() => {
   const value = currentUser.value?.github_login || currentUser.value?.internal_username || '?'
@@ -159,6 +167,7 @@ function applyCurrentUser() {
   formData.avatar_url = currentUser.value?.avatar_url || ''
   formData.github_name = currentUser.value?.github_name || ''
   formData.github_token = ''
+  formData.github_refresh_interval_seconds = currentUser.value?.github_refresh_interval_seconds || 3600
 }
 
 async function saveProfile() {
@@ -166,9 +175,10 @@ async function saveProfile() {
   try {
     const payload = {
       avatar_url: formData.avatar_url.trim(),
-      github_name: formData.github_name.trim()
+      github_name: formData.github_name.trim(),
+      github_refresh_interval_seconds: Number(formData.github_refresh_interval_seconds || 3600)
     }
-    if (isAdminUser.value && formData.github_token.trim()) {
+    if (formData.github_token.trim()) {
       payload.github_token = formData.github_token.trim()
     }
     await updateProfile(payload)

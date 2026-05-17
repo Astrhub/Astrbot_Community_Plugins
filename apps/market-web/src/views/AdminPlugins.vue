@@ -192,7 +192,7 @@ async function setListing(plugin, action, reason = '') {
 async function refreshGithub(plugin) {
   busyId.value = plugin.id
   try {
-    const updated = await refreshPluginGithubMetadata(plugin.id)
+    const updated = await refreshPluginGithubMetadata(plugin.id, {})
     items.value = items.value.map((item) => (item.id === updated.id ? updated : item))
     await loadPlugins()
     message.success('GitHub 数据已刷新')

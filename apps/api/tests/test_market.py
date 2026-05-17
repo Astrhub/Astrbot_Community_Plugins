@@ -133,6 +133,9 @@ def system_settings_payload() -> dict[str, object]:
             "callback_url": "https://market.example.com/v1/auth/github/callback",
             "scope": "read:user user:email read:org",
             "admin_org": "Astrhub",
+            "api_token": "system-github-token",
+            "metadata_sync_enabled": True,
+            "metadata_sync_interval_seconds": 1800,
         },
         "market": {
             "submissions_enabled": True,
@@ -212,13 +215,22 @@ def test_admin_can_store_github_token_without_public_echo() -> None:
     )
 
 
-def test_normal_user_cannot_store_github_token() -> None:
+def test_normal_user_can_store_github_token_and_refresh_interval() -> None:
     client = make_client()
-    client.get("/v1/auth/debug-login?login=alice")
+    login = client.get("/v1/auth/debug-login?login=alice")
 
-    response = client.patch("/v1/me/profile", json={"github_token": "github_pat_readonly"})
+    response = client.patch(
+        "/v1/me/profile",
+        json={"github_token": "github_pat_readonly", "github_refresh_interval_seconds": 300},
+    )
 
-    assert response.status_code == 403
+    assert response.status_code == 200
+    assert response.json()["has_github_token"] is True
+    assert response.json()["github_refresh_interval_seconds"] == 300
+    assert "github_token" not in response.json()
+    stored = client.app.state.store.get_user_by_id(login.json()["user"]["id"])
+    assert stored["github_token"] == "github_pat_readonly"
+    assert stored["github_refresh_interval_seconds"] == 300
 
 
 def test_internal_admin_can_link_existing_github_identity() -> None:
@@ -856,18 +868,24 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert settings["site"]["name"] == "AstrHub"
     assert settings["github"]["client_secret"] == main_module.MASKED_SECRET
     assert settings["github"]["client_secret_configured"] is True
+    assert settings["github"]["api_token"] == main_module.MASKED_SECRET
+    assert settings["github"]["api_token_configured"] is True
+    assert settings["github"]["metadata_sync_interval_seconds"] == 1800
     assert settings["email"]["cloudflare"]["api_token"] == main_module.MASKED_SECRET
     assert settings["email"]["cloudflare"]["api_token_configured"] is True
     assert client.get("/v1/site").json()["market"]["max_plugin_tags"] == 4
 
     masked_payload = system_settings_payload()
     masked_payload["github"]["client_secret"] = main_module.MASKED_SECRET
+    masked_payload["github"]["api_token"] = main_module.MASKED_SECRET
     masked_payload["email"]["cloudflare"]["api_token"] = main_module.MASKED_SECRET
     masked_payload["site"]["name"] = "AstrHub Updated"
     preserved = client.put("/v1/admin/settings", json=masked_payload)
     assert preserved.status_code == 200
     runtime_file = (tmp_path / "runtime.env").read_text()
     assert "GITHUB_CLIENT_SECRET=github-secret" in runtime_file
+    assert "GITHUB_API_TOKEN=system-github-token" in runtime_file
+    assert "GITHUB_METADATA_SYNC_INTERVAL_SECONDS=1800" in runtime_file
     assert "CLOUDFLARE_EMAIL_API_TOKEN=cf-token" in runtime_file
     assert 'SITE_NAME="AstrHub Updated"' in runtime_file
 
@@ -939,7 +957,11 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
     metadata_text = "\n".join(
         [
             "name: astrbot_plugin_demo",
+            "display_name: Repo Demo",
+            "desc: Repo metadata description",
+            "author: Repo Author",
             "version: v2.1.0",
+            "tags: [repo, metadata]",
             "astrbot_version: '>=4.5.0'",
             "support_platforms:",
             "  - aiocqhttp",
@@ -951,6 +973,7 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
         def __init__(self, status_code: int, data: dict[str, object]) -> None:
             self.status_code = status_code
             self._data = data
+            self.headers = {}
 
         def json(self) -> dict[str, object]:
             return self._data
@@ -993,15 +1016,183 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
     source_plugin = client.get("/plugins.json").json()["astrbot_plugin_demo"]
 
     assert public_plugin["stars"] == 42
+    assert public_plugin["display_name"] == "Repo Demo"
+    assert public_plugin["desc"] == "Repo metadata description"
+    assert public_plugin["author"] == "Repo Author"
+    assert public_plugin["tags"] == ["repo", "metadata"]
     assert public_plugin["version"] == "v2.1.0"
     assert public_plugin["logo"] == (
         "https://raw.githubusercontent.com/alice/astrbot_plugin_demo/main/logo.png"
     )
     assert source_plugin["stars"] == 42
+    assert source_plugin["display_name"] == "Repo Demo"
+    assert source_plugin["desc"] == "Repo metadata description"
+    assert source_plugin["author"] == "Repo Author"
+    assert source_plugin["tags"] == ["repo", "metadata"]
     assert source_plugin["version"] == "v2.1.0"
     assert source_plugin["astrbot_version"] == ">=4.5.0"
     assert source_plugin["support_platforms"] == ["aiocqhttp", "telegram"]
     assert "Bearer github_pat_readonly" in seen_authorizations
+
+
+def test_github_metadata_uses_system_fallback_token(monkeypatch) -> None:
+    seen_authorizations = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, data: dict[str, object]) -> None:
+            self.status_code = status_code
+            self._data = data
+            self.headers = {}
+
+        def json(self) -> dict[str, object]:
+            return self._data
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            seen_authorizations.append((kwargs.get("headers") or {}).get("authorization"))
+            if url == "https://api.github.com/repos/alice/astrbot_plugin_demo":
+                return FakeResponse(
+                    200,
+                    {
+                        "stargazers_count": 7,
+                        "updated_at": "2026-05-17T00:00:00Z",
+                        "default_branch": "main",
+                    },
+                )
+            return FakeResponse(404, {})
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "GITHUB_API_TOKEN": "system-readonly-token",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+    login = client.get("/v1/auth/debug-login?login=alice")
+    client.app.state.store.update_user_role(login.json()["user"]["id"], Role.ADMIN.value)
+
+    submission = client.post("/v1/plugins/submissions", json=plugin_payload())
+    client.post(f"/v1/admin/plugins/{submission.json()['id']}/list")
+
+    assert "Bearer system-readonly-token" in seen_authorizations
+    assert client.get("/v1/plugins").json()["items"][0]["stars"] == 7
+
+
+def test_plugin_owner_can_force_refresh_with_temporary_token(monkeypatch) -> None:
+    seen_authorizations = []
+    metadata_text = "version: v3.0.0"
+
+    class FakeResponse:
+        def __init__(self, status_code: int, data: dict[str, object]) -> None:
+            self.status_code = status_code
+            self._data = data
+            self.headers = {}
+
+        def json(self) -> dict[str, object]:
+            return self._data
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            seen_authorizations.append((kwargs.get("headers") or {}).get("authorization"))
+            if url == "https://api.github.com/repos/alice/astrbot_plugin_demo":
+                return FakeResponse(
+                    200,
+                    {
+                        "stargazers_count": 11,
+                        "updated_at": "2026-05-17T00:00:00Z",
+                        "default_branch": "main",
+                    },
+                )
+            if url.endswith("/contents/metadata.yml"):
+                return FakeResponse(
+                    200,
+                    {"content": base64.b64encode(metadata_text.encode()).decode()},
+                )
+            return FakeResponse(404, {})
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(login.json()["user"]["id"]),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", login.json()["user"]["id"])
+
+    refreshed = client.post(
+        f"/v1/plugins/{plugin['id']}/refresh-github",
+        json={
+            "github_token": "temporary-token",
+            "save_token": True,
+            "refresh_interval_seconds": 300,
+        },
+    )
+
+    assert refreshed.status_code == 200
+    assert refreshed.json()["stars"] == 11
+    assert refreshed.json()["version"] == "v3.0.0"
+    assert refreshed.json()["github_refresh_interval_seconds"] == 300
+    assert "Bearer temporary-token" in seen_authorizations
+    stored_user = client.app.state.store.get_user_by_id(login.json()["user"]["id"])
+    assert stored_user["github_token"] == "temporary-token"
+    assert stored_user["github_refresh_interval_seconds"] == 300
+
+
+def test_plugin_refresh_reports_github_rate_limit(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 403
+        headers = {"x-ratelimit-remaining": "0"}
+
+        def json(self) -> dict[str, object]:
+            return {"message": "API rate limit exceeded"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(login.json()["user"]["id"]),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", login.json()["user"]["id"])
+
+    response = client.post(f"/v1/plugins/{plugin['id']}/refresh-github", json={})
+
+    assert response.status_code == 429
+    assert "GitHub API rate limit" in response.json()["error"]
 
 
 def test_cloudflare_email_test_uses_official_sending_endpoint(monkeypatch) -> None:
@@ -1165,6 +1356,7 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "CREATE TABLE IF NOT EXISTS market_plugins" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_notifications" in SCHEMA_SQL
     assert "github_token text NOT NULL DEFAULT ''" in SCHEMA_SQL
+    assert "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600" in SCHEMA_SQL
     assert "jsonb NOT NULL DEFAULT '[]'::jsonb" in SCHEMA_SQL
     assert "CHECK (status IN ('pending', 'listed', 'unlisted'))" in SCHEMA_SQL
     assert "REFERENCES market_users(id)" in SCHEMA_SQL
