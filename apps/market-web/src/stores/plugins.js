@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 
 const normalizeBaseUrl = (value) => String(value || '').trim().replace(/\/$/, '')
 const BASE_URL = normalizeBaseUrl(import.meta.env.VITE_BASE_URL) || window.location.origin
+const COMMUNITY_REPO_URL = String(import.meta.env.VITE_COMMUNITY_REPO_URL || '')
 const DEFAULT_SITE_CONFIG = Object.freeze({
   name: 'AstrBot Community Plugins',
   icon_url: '/logo.webp',
@@ -122,6 +123,7 @@ export const usePluginStore = defineStore('plugins', () => {
 
   const apiBaseUrl = BASE_URL
   const pluginSourceUrl = `${BASE_URL}/plugins.json`
+  const communityRepoUrl = COMMUNITY_REPO_URL
   let mediaQuery = null
 
   function prefersDark() {
@@ -715,6 +717,7 @@ export const usePluginStore = defineStore('plugins', () => {
     randomSeed,
     apiBaseUrl,
     pluginSourceUrl,
+    communityRepoUrl,
     irisMaskActive,
     irisMaskPosition,
     allTags,
