@@ -173,6 +173,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await sync_task
         except asyncio.CancelledError:
+            # Expected during application shutdown after cancelling the sync worker.
             pass
         await maybe_call_store_lifecycle(app, "close")
 
