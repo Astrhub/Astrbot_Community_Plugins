@@ -501,8 +501,7 @@ def test_github_login_uses_database_options_over_env_file(tmp_path) -> None:
     assert response.status_code == 307
     assert "client_id=database-client" in location
     assert (
-        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback"
-        in location
+        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
     )
     assert "file-client" not in location
     assert "127.0.0.1" not in location
@@ -540,9 +539,7 @@ def test_github_login_ignores_forwarded_host_for_callback_url(tmp_path) -> None:
     location = response.headers["location"]
 
     assert response.status_code == 307
-    assert (
-        "redirect_uri=http%3A%2F%2F127.0.0.1%3A8787%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
-    )
+    assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A8787%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
     assert "market.example.com" not in location
 
 
@@ -1080,8 +1077,7 @@ def test_first_run_setup_can_save_structured_env_file(tmp_path) -> None:
     assert setup_call["core_admin_password_hash"].startswith("pbkdf2_sha256")
     env_file = (tmp_path / ".env").read_text()
     assert (
-        "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market?sslmode=disable"
-        in env_file
+        "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market?sslmode=disable" in env_file
     )
     assert "REDIS_URL=redis://127.0.0.1:6379/0" in env_file
     assert "POSTGRES_SSL=false" in env_file

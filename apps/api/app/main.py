@@ -931,11 +931,7 @@ async def load_system_options(store: Any) -> dict[str, str]:
     values = await resolve_optional_awaitable(method())
     if not isinstance(values, dict):
         return {}
-    return {
-        str(key): str(value)
-        for key, value in values.items()
-        if key in SYSTEM_OPTION_KEYS
-    }
+    return {str(key): str(value) for key, value in values.items() if key in SYSTEM_OPTION_KEYS}
 
 
 async def runtime_settings_for_app(app: FastAPI) -> Settings:
@@ -1078,11 +1074,7 @@ async def save_system_options(request: Request, values: dict[str, str]) -> dict[
 
 
 async def save_system_options_to_store(store: Any, values: dict[str, str]) -> dict[str, str]:
-    system_values = {
-        key: str(value)
-        for key, value in values.items()
-        if key in SYSTEM_OPTION_KEYS
-    }
+    system_values = {key: str(value) for key, value in values.items() if key in SYSTEM_OPTION_KEYS}
     method = getattr(store, "upsert_options", None)
     if not method:
         return {}
