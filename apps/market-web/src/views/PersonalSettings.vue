@@ -83,26 +83,6 @@
             </n-form-item>
           </section>
 
-          <section id="notifications" ref="notificationsSection" class="profile-section">
-            <div class="section-title">
-              <h2>消息</h2>
-              <p>插件审核、下架等站内通知会显示在这里。</p>
-            </div>
-            <n-empty v-if="notifications.length === 0" description="暂无消息" />
-            <div v-else class="notification-list">
-              <article
-                v-for="notification in notifications"
-                :key="notification.id"
-                class="notification-item"
-              >
-                <div class="notification-title">
-                  <strong>{{ notification.title }}</strong>
-                  <time>{{ formatTime(notification.created_at) }}</time>
-                </div>
-                <p>{{ notification.body }}</p>
-              </article>
-            </div>
-          </section>
         </n-form>
       </n-spin>
     </main>
@@ -110,12 +90,11 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import {
   NButton,
-  NEmpty,
   NForm,
   NFormItem,
   NIcon,
@@ -134,16 +113,13 @@ import {
 import { usePluginStore } from '@/stores/plugins'
 
 const router = useRouter()
-const route = useRoute()
 const message = useMessage()
 const store = usePluginStore()
 const { currentUser } = storeToRefs(store)
-const { loadCurrentUser, loadNotifications, loginWithGithub, updateProfile } = store
+const { loadCurrentUser, loginWithGithub, updateProfile } = store
 
 const loading = ref(true)
 const saving = ref(false)
-const notifications = ref([])
-const notificationsSection = ref(null)
 const formData = reactive({
   github_name: '',
   github_token: '',
@@ -188,17 +164,6 @@ function goBack() {
   router.back()
 }
 
-function formatTime(value) {
-  if (!value) return ''
-  return new Date(value).toLocaleString()
-}
-
-async function scrollToNotifications() {
-  if (route.hash !== '#notifications') return
-  await nextTick()
-  notificationsSection.value?.scrollIntoView({ block: 'start' })
-}
-
 onMounted(async () => {
   await loadCurrentUser()
   if (!currentUser.value) {
@@ -207,13 +172,7 @@ onMounted(async () => {
     return
   }
   applyCurrentUser()
-  try {
-    notifications.value = await loadNotifications()
-  } catch (error) {
-    message.error(error.message || '消息加载失败')
-  }
   loading.value = false
-  await scrollToNotifications()
 })
 </script>
 
@@ -237,8 +196,7 @@ onMounted(async () => {
 
 .header-left,
 .actions,
-.github-state,
-.notification-title {
+.github-state {
   display: flex;
   align-items: center;
   gap: 14px;
@@ -305,30 +263,8 @@ h2 {
   color: #18a058;
 }
 
-.notification-list {
-  display: grid;
-  gap: 12px;
-}
-
-.notification-item {
-  padding: 14px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--body-color);
-}
-
-.notification-title {
-  justify-content: space-between;
-}
-
-.notification-title time,
-.notification-item p,
 .token-state {
   color: var(--text-color-2);
-}
-
-.notification-item p {
-  margin: 8px 0 0;
 }
 
 @media (max-width: 640px) {

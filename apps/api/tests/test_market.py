@@ -114,6 +114,7 @@ def system_settings_payload() -> dict[str, object]:
         "site": {
             "name": "AstrHub",
             "icon_url": "/hub.webp",
+            "web_url": "https://market.example.com",
             "subtitle": "社区插件中心",
             "description": "发现和管理插件。",
             "contact_email": "ops@example.com",
@@ -1126,6 +1127,7 @@ def test_public_site_config_uses_settings() -> None:
         {
             "SITE_NAME": "AstrHub",
             "SITE_ICON_URL": "https://example.com/icon.webp",
+            "WEB_URL": "https://plugins.example.com",
             "SITE_SUBTITLE": "社区插件中心",
             "SITE_DESCRIPTION": "浏览 AstrBot 插件。",
             "SITE_CONTACT_EMAIL": "ops@example.com",
@@ -1141,6 +1143,7 @@ def test_public_site_config_uses_settings() -> None:
     assert client.get("/v1/site").json() == {
         "name": "AstrHub",
         "icon_url": "https://example.com/icon.webp",
+        "web_url": "https://plugins.example.com",
         "subtitle": "社区插件中心",
         "description": "浏览 AstrBot 插件。",
         "contact_email": "ops@example.com",
@@ -1216,6 +1219,7 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert "GITHUB_METADATA_SYNC_INTERVAL_SECONDS=1800" in runtime_file
     assert "CLOUDFLARE_EMAIL_API_TOKEN=cf-token" in runtime_file
     assert 'SITE_NAME="AstrHub Updated"' in runtime_file
+    assert "WEB_URL=https://market.example.com" in runtime_file
 
 
 def test_system_settings_reject_local_oauth_callback_when_enabled(tmp_path) -> None:
@@ -1232,6 +1236,22 @@ def test_system_settings_reject_local_oauth_callback_when_enabled(tmp_path) -> N
 
     assert response.status_code == 400
     assert response.json()["error"] == "GitHub callback URL must use a public host"
+
+
+def test_system_settings_reject_local_web_url_when_oauth_enabled(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+    client.post("/v1/setup", json=setup_payload())
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    payload = system_settings_payload()
+    payload["site"]["web_url"] = "http://127.0.0.1:8787"
+
+    response = client.put("/v1/admin/settings", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Web URL must use a public host when GitHub login is enabled"
 
 
 def test_system_settings_require_core_admin(tmp_path) -> None:

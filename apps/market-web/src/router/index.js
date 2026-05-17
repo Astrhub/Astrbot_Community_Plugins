@@ -5,6 +5,7 @@ const SubmitPlugin = () => import('../views/SubmitPlugin.vue')
 const Setup = () => import('../views/Setup.vue')
 const Settings = () => import('../views/Settings.vue')
 const PersonalSettings = () => import('../views/PersonalSettings.vue')
+const Notifications = () => import('../views/Notifications.vue')
 const AdminPlugins = () => import('../views/AdminPlugins.vue')
 const AdminLogin = () => import('../views/AdminLogin.vue')
 const NotFound = () => import('../views/NotFound.vue')
@@ -32,6 +33,11 @@ const routes = [
     path: '/settings/personal',
     name: 'PersonalSettings',
     component: PersonalSettings
+  },
+  {
+    path: '/notifications',
+    name: 'Notifications',
+    component: Notifications
   },
   {
     path: '/admin',

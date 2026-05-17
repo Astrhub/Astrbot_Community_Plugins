@@ -343,6 +343,7 @@ def register_routes(app: FastAPI) -> None:
                     "REDIS_URL": redis_url,
                     "SITE_ICON_URL": payload.site.icon_url,
                     "SITE_NAME": payload.site.name,
+                    "WEB_URL": payload.site.web_url,
                 },
             )
         except Exception:
@@ -355,6 +356,7 @@ def register_routes(app: FastAPI) -> None:
             redis_url=redis_url,
             site_icon_url=payload.site.icon_url,
             site_name=payload.site.name,
+            web_url=payload.site.web_url,
         )
         await activate_setup_store(request.app, new_store)
         return {
@@ -1683,6 +1685,8 @@ def validate_system_settings_payload(
         raise error(400, "Site name is required")
     if not payload.site.icon_url or not is_valid_site_icon_url(payload.site.icon_url):
         raise error(400, "Site icon URL must be an absolute URL or root-relative path")
+    if not payload.site.web_url or not is_valid_public_url(payload.site.web_url):
+        raise error(400, "Web URL must be http(s)")
     if payload.site.docs_url and not is_valid_public_url(payload.site.docs_url):
         raise error(400, "Documentation URL must be http(s)")
     if payload.site.contact_email and not is_valid_email(payload.site.contact_email):
@@ -1703,6 +1707,8 @@ def validate_system_settings_payload(
             raise error(400, "GitHub callback URL must be http(s)")
         if is_local_url(payload.github.callback_url):
             raise error(400, "GitHub callback URL must use a public host")
+        if is_local_url(payload.site.web_url):
+            raise error(400, "Web URL must use a public host when GitHub login is enabled")
     if payload.email.provider == "smtp":
         if not payload.email.smtp.host:
             raise error(400, "SMTP host is required when SMTP email is enabled")
@@ -1733,6 +1739,7 @@ def get_site_config(
     return {
         "name": settings.site_name,
         "icon_url": settings.site_icon_url,
+        "web_url": settings.web_url,
         "subtitle": settings.site_subtitle,
         "description": settings.site_description,
         "contact_email": settings.site_contact_email,
@@ -1873,6 +1880,7 @@ def build_site_settings(settings: Settings, runtime_config: dict[str, str]) -> d
     return {
         "name": runtime_config.get("SITE_NAME", settings.site_name),
         "icon_url": runtime_config.get("SITE_ICON_URL", settings.site_icon_url),
+        "web_url": runtime_config.get("WEB_URL", settings.web_url),
         "subtitle": runtime_config.get("SITE_SUBTITLE", settings.site_subtitle),
         "description": runtime_config.get("SITE_DESCRIPTION", settings.site_description),
         "contact_email": runtime_config.get("SITE_CONTACT_EMAIL", settings.site_contact_email),
@@ -2018,6 +2026,7 @@ def runtime_values_from_system_settings(
         "SITE_ICON_URL": payload.site.icon_url,
         "SITE_NAME": payload.site.name,
         "SITE_SUBTITLE": payload.site.subtitle,
+        "WEB_URL": payload.site.web_url,
         "GITHUB_LOGIN_ENABLED": serialize_bool(payload.auth.github_login_enabled),
         "LOGIN_AGREEMENT_ENABLED": serialize_bool(payload.auth.login_agreement_enabled),
         "LOGIN_AGREEMENT_TEXT": payload.auth.login_agreement_text,
@@ -2089,6 +2098,7 @@ def settings_from_system_settings(
     return current.with_updates(
         site_name=payload.site.name,
         site_icon_url=payload.site.icon_url,
+        web_url=payload.site.web_url,
         site_subtitle=payload.site.subtitle,
         site_description=payload.site.description,
         site_contact_email=payload.site.contact_email,

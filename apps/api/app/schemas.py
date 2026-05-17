@@ -114,12 +114,21 @@ class ApiKeyCreate(BaseModel):
 class SiteSetupConfig(BaseModel):
     name: str = "AstrBot Community Plugins"
     icon_url: str = "/logo.webp"
+    web_url: str = "http://127.0.0.1:8787"
     subtitle: str = "全新社区插件市场"
     description: str = "发现、评价和提交 AstrBot 插件。"
     contact_email: str = ""
     docs_url: str = "https://docs.astrbot.app/dev/star/plugin-new.html"
 
-    @field_validator("name", "icon_url", "subtitle", "description", "contact_email", "docs_url")
+    @field_validator(
+        "name",
+        "icon_url",
+        "web_url",
+        "subtitle",
+        "description",
+        "contact_email",
+        "docs_url",
+    )
     @classmethod
     def strip_required_text(cls, value: str) -> str:
         return value.strip()

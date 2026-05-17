@@ -35,243 +35,268 @@
           label-placement="top"
           class="settings-form"
         >
-          <section class="settings-section">
-            <div class="section-title">
-              <h2>站点展示</h2>
-              <p>首页、标题、图标和公共联系信息。</p>
-            </div>
-            <div class="form-grid">
-              <n-form-item label="站点名称" path="site.name">
-                <n-input v-model:value="formData.site.name" />
-              </n-form-item>
-              <n-form-item label="站点图标 URL" path="site.icon_url">
-                <n-input v-model:value="formData.site.icon_url" placeholder="/logo.webp 或 https://..." />
-              </n-form-item>
-              <n-form-item label="副标题" path="site.subtitle">
-                <n-input v-model:value="formData.site.subtitle" />
-              </n-form-item>
-              <n-form-item label="站点描述" path="site.description">
-                <n-input v-model:value="formData.site.description" />
-              </n-form-item>
-              <n-form-item label="联系邮箱" path="site.contact_email">
-                <n-input v-model:value="formData.site.contact_email" placeholder="可选" />
-              </n-form-item>
-              <n-form-item label="文档地址" path="site.docs_url">
-                <n-input v-model:value="formData.site.docs_url" placeholder="https://docs.astrbot.app/..." />
-              </n-form-item>
-            </div>
-          </section>
+          <n-tabs type="line" animated class="settings-tabs">
+            <n-tab-pane name="site" tab="站点与公告" display-directive="show">
+              <div class="settings-tab-content">
+                <section class="settings-section">
+                  <div class="section-title">
+                    <h2>站点展示</h2>
+                    <p>首页、标题、访问地址和公共联系信息。</p>
+                  </div>
+                  <div class="form-grid">
+                    <n-form-item label="站点名称" path="site.name">
+                      <n-input v-model:value="formData.site.name" />
+                    </n-form-item>
+                    <n-form-item label="站点图标 URL" path="site.icon_url">
+                      <n-input v-model:value="formData.site.icon_url" placeholder="/logo.webp 或 https://..." />
+                    </n-form-item>
+                    <n-form-item label="站点访问地址" path="site.web_url">
+                      <n-input v-model:value="formData.site.web_url" placeholder="https://plugins.example.com" />
+                    </n-form-item>
+                    <n-form-item label="副标题" path="site.subtitle">
+                      <n-input v-model:value="formData.site.subtitle" />
+                    </n-form-item>
+                    <n-form-item label="站点描述" path="site.description">
+                      <n-input v-model:value="formData.site.description" />
+                    </n-form-item>
+                    <n-form-item label="联系邮箱" path="site.contact_email">
+                      <n-input v-model:value="formData.site.contact_email" placeholder="可选" />
+                    </n-form-item>
+                    <n-form-item label="文档地址" path="site.docs_url">
+                      <n-input v-model:value="formData.site.docs_url" placeholder="https://docs.astrbot.app/..." />
+                    </n-form-item>
+                  </div>
+                </section>
 
-          <section class="settings-section">
-            <div class="section-title">
-              <h2>站点公告</h2>
-              <p>发布后会显示在市场首页。</p>
-            </div>
-            <div class="form-grid">
-              <n-form-item label="公告标题">
-                <n-input
-                  v-model:value="announcementForm.title"
-                  :maxlength="80"
-                  show-count
-                  placeholder="例如：维护通知"
-                />
-              </n-form-item>
-              <n-form-item label="公告内容" class="form-row-full">
-                <n-input
-                  v-model:value="announcementForm.body"
-                  type="textarea"
-                  :maxlength="1000"
-                  show-count
-                  :autosize="{ minRows: 3, maxRows: 6 }"
-                  placeholder="输入需要展示给用户的公告内容"
-                />
-              </n-form-item>
-            </div>
-            <div class="announcement-actions">
-              <n-button type="primary" :loading="publishingAnnouncement" @click="publishSiteAnnouncement">
-                发布公告
-              </n-button>
-            </div>
-          </section>
-
-          <section class="settings-section">
-            <div class="section-title">
-              <h2>基础设施</h2>
-              <p>PostgreSQL 和 Redis 连接变更需要写入运行时配置并重启 API。</p>
-            </div>
-            <div class="infra-grid">
-              <div class="infra-item">
-                <span>PostgreSQL</span>
-                <n-tag :type="setupStatus.database_configured ? 'success' : 'warning'" :bordered="false">
-                  {{ setupStatus.database_configured ? '已配置' : '未配置' }}
-                </n-tag>
+                <section class="settings-section">
+                  <div class="section-title">
+                    <h2>站点公告</h2>
+                    <p>发布后会显示在市场首页。</p>
+                  </div>
+                  <div class="form-grid">
+                    <n-form-item label="公告标题">
+                      <n-input
+                        v-model:value="announcementForm.title"
+                        :maxlength="80"
+                        show-count
+                        placeholder="例如：维护通知"
+                      />
+                    </n-form-item>
+                    <n-form-item label="公告内容" class="form-row-full">
+                      <n-input
+                        v-model:value="announcementForm.body"
+                        type="textarea"
+                        :maxlength="1000"
+                        show-count
+                        :autosize="{ minRows: 3, maxRows: 6 }"
+                        placeholder="输入需要展示给用户的公告内容"
+                      />
+                    </n-form-item>
+                  </div>
+                  <div class="announcement-actions">
+                    <n-button type="primary" :loading="publishingAnnouncement" @click="publishSiteAnnouncement">
+                      发布公告
+                    </n-button>
+                  </div>
+                </section>
               </div>
-              <div class="infra-item">
-                <span>Redis</span>
-                <n-tag :type="setupStatus.redis_configured ? 'success' : 'warning'" :bordered="false">
-                  {{ setupStatus.redis_configured ? '已配置' : '未配置' }}
-                </n-tag>
+            </n-tab-pane>
+
+            <n-tab-pane name="auth" tab="登录与 OAuth" display-directive="show">
+              <div class="settings-tab-content">
+                <section class="settings-section">
+                  <div class="section-title">
+                    <h2>登录与条款</h2>
+                    <p>控制后台内部登录、GitHub OAuth，以及登录前必须确认的条款。</p>
+                  </div>
+                  <div class="switch-grid">
+                    <setting-switch v-model="formData.auth.public_login_enabled" label="内部账号登录" enabled="允许 /admin 内部账号登录" disabled="仅保留已登录会话" />
+                    <setting-switch v-model="formData.auth.github_login_enabled" label="GitHub OAuth" enabled="允许 GitHub 登录 / 注册" disabled="关闭 GitHub 登录 / 注册" />
+                    <setting-switch v-model="formData.auth.login_agreement_enabled" label="登录条款" enabled="登录前确认" disabled="不显示" />
+                    <setting-switch v-model="formData.auth.service_terms_enabled" label="服务条款" enabled="显示服务条款" disabled="不显示" />
+                  </div>
+                  <n-form-item v-if="formData.auth.login_agreement_enabled" label="登录条款内容" path="auth.login_agreement_text">
+                    <n-input v-model:value="formData.auth.login_agreement_text" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
+                  </n-form-item>
+                  <n-form-item v-if="formData.auth.service_terms_enabled" label="服务条款内容" path="auth.service_terms_text">
+                    <n-input v-model:value="formData.auth.service_terms_text" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
+                  </n-form-item>
+                </section>
+
+                <section class="settings-section">
+                  <div class="section-title">
+                    <h2>GitHub OAuth</h2>
+                    <p>用于第三方登录、插件仓库归属识别和指定组织管理员。</p>
+                  </div>
+                  <div class="form-grid">
+                    <n-form-item label="Client ID" path="github.client_id">
+                      <n-input v-model:value="formData.github.client_id" />
+                    </n-form-item>
+                    <n-form-item label="Client Secret" path="github.client_secret">
+                      <n-input
+                        v-model:value="formData.github.client_secret"
+                        type="password"
+                        show-password-on="click"
+                        :placeholder="formData.github.client_secret_configured ? '留空或保持遮蔽值表示不更新' : 'GitHub OAuth App Secret'"
+                      />
+                    </n-form-item>
+                    <n-form-item label="回调地址" path="github.callback_url">
+                      <n-input v-model:value="formData.github.callback_url" placeholder="https://your-domain/v1/auth/github/callback" />
+                    </n-form-item>
+                    <n-form-item label="管理员组织" path="github.admin_org">
+                      <n-input v-model:value="formData.github.admin_org" placeholder="可选，GitHub 组织名" />
+                    </n-form-item>
+                    <n-form-item label="授权范围" path="github.scope">
+                      <n-input v-model:value="formData.github.scope" placeholder="read:user user:email read:org" />
+                    </n-form-item>
+                    <n-form-item label="GitHub API Token（兜底）" path="github.api_token">
+                      <n-input
+                        v-model:value="formData.github.api_token"
+                        type="password"
+                        show-password-on="click"
+                        :placeholder="formData.github.api_token_configured ? '留空或保持遮蔽值表示不更新' : '只读 Token，用于服务端同步兜底'"
+                      />
+                    </n-form-item>
+                  </div>
+                  <div class="switch-grid">
+                    <setting-switch
+                      v-model="formData.github.metadata_sync_enabled"
+                      label="元数据自动同步"
+                      enabled="按间隔同步"
+                      disabled="暂停同步"
+                    />
+                  </div>
+                  <div class="form-grid compact-grid">
+                    <n-form-item label="默认同步间隔（秒）" path="github.metadata_sync_interval_seconds">
+                      <n-input-number
+                        v-model:value="formData.github.metadata_sync_interval_seconds"
+                        :min="300"
+                        :max="86400"
+                        :step="300"
+                      />
+                    </n-form-item>
+                  </div>
+                </section>
               </div>
-              <div class="infra-item">
-                <span>重启状态</span>
-                <n-tag :type="setupStatus.restart_required ? 'warning' : 'success'" :bordered="false">
-                  {{ setupStatus.restart_required ? '需要重启' : '当前生效' }}
-                </n-tag>
+            </n-tab-pane>
+
+            <n-tab-pane name="market" tab="市场策略" display-directive="show">
+              <div class="settings-tab-content">
+                <section class="settings-section">
+                  <div class="section-title">
+                    <h2>市场策略</h2>
+                    <p>控制插件提交、互动功能和审核策略。</p>
+                  </div>
+                  <div class="switch-grid">
+                    <setting-switch v-model="formData.market.submissions_enabled" label="插件提交" enabled="允许提交" disabled="暂停提交" />
+                    <setting-switch v-model="formData.market.comments_enabled" label="评论" enabled="允许评论" disabled="关闭评论" />
+                    <setting-switch v-model="formData.market.likes_enabled" label="点赞" enabled="允许点赞" disabled="关闭点赞" />
+                    <setting-switch v-model="formData.market.plugin_auto_approve_enabled" label="自动上架" enabled="提交后上架" disabled="管理员审核" />
+                  </div>
+                  <div class="form-grid compact-grid">
+                    <n-form-item label="最多标签数" path="market.max_plugin_tags">
+                      <n-input-number v-model:value="formData.market.max_plugin_tags" :min="0" :max="50" />
+                    </n-form-item>
+                  </div>
+                </section>
               </div>
-            </div>
-            <n-button secondary @click="goSetup">打开基础设施配置</n-button>
-          </section>
+            </n-tab-pane>
 
-          <section class="settings-section">
-            <div class="section-title">
-              <h2>登录与条款</h2>
-              <p>控制内部账号、GitHub OAuth，以及登录前必须确认的条款。</p>
-            </div>
-            <div class="switch-grid">
-              <setting-switch v-model="formData.auth.public_login_enabled" label="内部账号登录" enabled="允许内部账号登录" disabled="仅核心管理员可登录后台" />
-              <setting-switch v-model="formData.auth.github_login_enabled" label="GitHub OAuth" enabled="允许 GitHub 登录 / 注册" disabled="关闭 GitHub 登录 / 注册" />
-              <setting-switch v-model="formData.auth.login_agreement_enabled" label="登录条款" enabled="登录前确认" disabled="不显示" />
-              <setting-switch v-model="formData.auth.service_terms_enabled" label="服务条款" enabled="显示服务条款" disabled="不显示" />
-            </div>
-            <n-form-item v-if="formData.auth.login_agreement_enabled" label="登录条款内容" path="auth.login_agreement_text">
-              <n-input v-model:value="formData.auth.login_agreement_text" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
-            </n-form-item>
-            <n-form-item v-if="formData.auth.service_terms_enabled" label="服务条款内容" path="auth.service_terms_text">
-              <n-input v-model:value="formData.auth.service_terms_text" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
-            </n-form-item>
-          </section>
+            <n-tab-pane name="email" tab="邮件服务" display-directive="show">
+              <div class="settings-tab-content">
+                <section class="settings-section">
+                  <div class="section-title">
+                    <h2>邮件服务</h2>
+                    <p>支持 SMTP 或 Cloudflare Email Service，密钥保存后只显示遮蔽状态。</p>
+                  </div>
+                  <div class="form-grid compact-grid">
+                    <n-form-item label="邮件服务" path="email.provider">
+                      <n-select v-model:value="formData.email.provider" :options="emailProviderOptions" />
+                    </n-form-item>
+                    <n-form-item label="每日发送上限" path="email.daily_limit">
+                      <n-input-number v-model:value="formData.email.daily_limit" :min="0" />
+                    </n-form-item>
+                    <n-form-item label="单邮箱每日验证码上限" path="email.verification_daily_limit_per_user">
+                      <n-input-number v-model:value="formData.email.verification_daily_limit_per_user" :min="0" />
+                    </n-form-item>
+                  </div>
+                  <div v-if="formData.email.provider === 'smtp'" class="form-grid">
+                    <n-form-item label="SMTP 主机" path="email.smtp.host">
+                      <n-input v-model:value="formData.email.smtp.host" placeholder="smtp.example.com" />
+                    </n-form-item>
+                    <n-form-item label="SMTP 端口" path="email.smtp.port">
+                      <n-input-number v-model:value="formData.email.smtp.port" :min="1" :max="65535" />
+                    </n-form-item>
+                    <n-form-item label="SMTP 账号" path="email.smtp.username">
+                      <n-input v-model:value="formData.email.smtp.username" />
+                    </n-form-item>
+                    <n-form-item label="SMTP 密码" path="email.smtp.password">
+                      <n-input v-model:value="formData.email.smtp.password" type="password" show-password-on="click" placeholder="留空或保持遮蔽值表示不更新" />
+                    </n-form-item>
+                    <n-form-item label="发件邮箱" path="email.smtp.from_address">
+                      <n-input v-model:value="formData.email.smtp.from_address" placeholder="noreply@example.com" />
+                    </n-form-item>
+                    <n-form-item label="SMTP SSL" path="email.smtp.ssl">
+                      <div class="switch-row">
+                        <n-switch v-model:value="formData.email.smtp.ssl" />
+                        <span>{{ formData.email.smtp.ssl ? '启用 SSL' : '不启用 SSL' }}</span>
+                      </div>
+                    </n-form-item>
+                  </div>
+                  <div v-if="formData.email.provider === 'cloudflare'" class="form-grid">
+                    <n-form-item label="Cloudflare Account ID" path="email.cloudflare.account_id">
+                      <n-input v-model:value="formData.email.cloudflare.account_id" />
+                    </n-form-item>
+                    <n-form-item label="Cloudflare API Token" path="email.cloudflare.api_token">
+                      <n-input v-model:value="formData.email.cloudflare.api_token" type="password" show-password-on="click" placeholder="留空或保持遮蔽值表示不更新" />
+                    </n-form-item>
+                    <n-form-item label="发件邮箱" path="email.cloudflare.from_address">
+                      <n-input v-model:value="formData.email.cloudflare.from_address" placeholder="noreply@mail.example.com" />
+                    </n-form-item>
+                  </div>
 
-          <section class="settings-section">
-            <div class="section-title">
-              <h2>GitHub OAuth</h2>
-              <p>用于识别插件仓库归属和指定组织管理员。</p>
-            </div>
-            <div class="form-grid">
-              <n-form-item label="Client ID" path="github.client_id">
-                <n-input v-model:value="formData.github.client_id" />
-              </n-form-item>
-              <n-form-item label="Client Secret" path="github.client_secret">
-                <n-input
-                  v-model:value="formData.github.client_secret"
-                  type="password"
-                  show-password-on="click"
-                  :placeholder="formData.github.client_secret_configured ? '留空或保持遮蔽值表示不更新' : 'GitHub OAuth App Secret'"
-                />
-              </n-form-item>
-              <n-form-item label="回调地址" path="github.callback_url">
-                <n-input v-model:value="formData.github.callback_url" placeholder="https://your-domain/v1/auth/github/callback" />
-              </n-form-item>
-              <n-form-item label="管理员组织" path="github.admin_org">
-                <n-input v-model:value="formData.github.admin_org" placeholder="可选，GitHub 组织名" />
-              </n-form-item>
-              <n-form-item label="授权范围" path="github.scope">
-                <n-input v-model:value="formData.github.scope" placeholder="read:user user:email read:org" />
-              </n-form-item>
-              <n-form-item label="GitHub API Token（兜底）" path="github.api_token">
-                <n-input
-                  v-model:value="formData.github.api_token"
-                  type="password"
-                  show-password-on="click"
-                  :placeholder="formData.github.api_token_configured ? '留空或保持遮蔽值表示不更新' : '只读 Token，用于服务端同步兜底'"
-                />
-              </n-form-item>
-            </div>
-            <div class="switch-grid">
-              <setting-switch
-                v-model="formData.github.metadata_sync_enabled"
-                label="元数据自动同步"
-                enabled="按间隔同步"
-                disabled="暂停同步"
-              />
-            </div>
-            <div class="form-grid compact-grid">
-              <n-form-item label="默认同步间隔（秒）" path="github.metadata_sync_interval_seconds">
-                <n-input-number
-                  v-model:value="formData.github.metadata_sync_interval_seconds"
-                  :min="300"
-                  :max="86400"
-                  :step="300"
-                />
-              </n-form-item>
-            </div>
-          </section>
+                  <div class="test-email-row">
+                    <n-input v-model:value="testEmail.to" placeholder="测试收件邮箱" />
+                    <n-button :loading="testingEmail" :disabled="formData.email.provider === 'disabled'" @click="sendEmailTest">
+                      发送测试邮件
+                    </n-button>
+                  </div>
+                </section>
+              </div>
+            </n-tab-pane>
 
-          <section class="settings-section">
-            <div class="section-title">
-              <h2>市场策略</h2>
-              <p>控制插件提交、互动功能和审核策略。</p>
-            </div>
-            <div class="switch-grid">
-              <setting-switch v-model="formData.market.submissions_enabled" label="插件提交" enabled="允许提交" disabled="暂停提交" />
-              <setting-switch v-model="formData.market.comments_enabled" label="评论" enabled="允许评论" disabled="关闭评论" />
-              <setting-switch v-model="formData.market.likes_enabled" label="点赞" enabled="允许点赞" disabled="关闭点赞" />
-              <setting-switch v-model="formData.market.plugin_auto_approve_enabled" label="自动上架" enabled="提交后上架" disabled="管理员审核" />
-            </div>
-            <div class="form-grid compact-grid">
-              <n-form-item label="最多标签数" path="market.max_plugin_tags">
-                <n-input-number v-model:value="formData.market.max_plugin_tags" :min="0" :max="50" />
-              </n-form-item>
-            </div>
-          </section>
-
-          <section class="settings-section">
-            <div class="section-title">
-              <h2>邮件服务</h2>
-              <p>支持 SMTP 或 Cloudflare Email Service，密钥保存后只显示遮蔽状态。</p>
-            </div>
-            <div class="form-grid compact-grid">
-              <n-form-item label="邮件服务" path="email.provider">
-                <n-select v-model:value="formData.email.provider" :options="emailProviderOptions" />
-              </n-form-item>
-              <n-form-item label="每日发送上限" path="email.daily_limit">
-                <n-input-number v-model:value="formData.email.daily_limit" :min="0" />
-              </n-form-item>
-              <n-form-item label="单邮箱每日验证码上限" path="email.verification_daily_limit_per_user">
-                <n-input-number v-model:value="formData.email.verification_daily_limit_per_user" :min="0" />
-              </n-form-item>
-            </div>
-            <div v-if="formData.email.provider === 'smtp'" class="form-grid">
-              <n-form-item label="SMTP 主机" path="email.smtp.host">
-                <n-input v-model:value="formData.email.smtp.host" placeholder="smtp.example.com" />
-              </n-form-item>
-              <n-form-item label="SMTP 端口" path="email.smtp.port">
-                <n-input-number v-model:value="formData.email.smtp.port" :min="1" :max="65535" />
-              </n-form-item>
-              <n-form-item label="SMTP 账号" path="email.smtp.username">
-                <n-input v-model:value="formData.email.smtp.username" />
-              </n-form-item>
-              <n-form-item label="SMTP 密码" path="email.smtp.password">
-                <n-input v-model:value="formData.email.smtp.password" type="password" show-password-on="click" placeholder="留空或保持遮蔽值表示不更新" />
-              </n-form-item>
-              <n-form-item label="发件邮箱" path="email.smtp.from_address">
-                <n-input v-model:value="formData.email.smtp.from_address" placeholder="noreply@example.com" />
-              </n-form-item>
-              <n-form-item label="SMTP SSL" path="email.smtp.ssl">
-                <div class="switch-row">
-                  <n-switch v-model:value="formData.email.smtp.ssl" />
-                  <span>{{ formData.email.smtp.ssl ? '启用 SSL' : '不启用 SSL' }}</span>
-                </div>
-              </n-form-item>
-            </div>
-            <div v-if="formData.email.provider === 'cloudflare'" class="form-grid">
-              <n-form-item label="Cloudflare Account ID" path="email.cloudflare.account_id">
-                <n-input v-model:value="formData.email.cloudflare.account_id" />
-              </n-form-item>
-              <n-form-item label="Cloudflare API Token" path="email.cloudflare.api_token">
-                <n-input v-model:value="formData.email.cloudflare.api_token" type="password" show-password-on="click" placeholder="留空或保持遮蔽值表示不更新" />
-              </n-form-item>
-              <n-form-item label="发件邮箱" path="email.cloudflare.from_address">
-                <n-input v-model:value="formData.email.cloudflare.from_address" placeholder="noreply@mail.example.com" />
-              </n-form-item>
-            </div>
-
-            <div class="test-email-row">
-              <n-input v-model:value="testEmail.to" placeholder="测试收件邮箱" />
-              <n-button :loading="testingEmail" :disabled="formData.email.provider === 'disabled'" @click="sendEmailTest">
-                发送测试邮件
-              </n-button>
-            </div>
-          </section>
+            <n-tab-pane name="infra" tab="基础设施" display-directive="show">
+              <div class="settings-tab-content">
+                <section class="settings-section">
+                  <div class="section-title">
+                    <h2>基础设施</h2>
+                    <p>PostgreSQL 和 Redis 只在首次初始化向导中通过 Web 配置，后续变更请修改 .env 并重启 API。</p>
+                  </div>
+                  <div class="infra-grid">
+                    <div class="infra-item">
+                      <span>PostgreSQL</span>
+                      <n-tag :type="setupStatus.database_configured ? 'success' : 'warning'" :bordered="false">
+                        {{ setupStatus.database_configured ? '已配置' : '未配置' }}
+                      </n-tag>
+                    </div>
+                    <div class="infra-item">
+                      <span>Redis</span>
+                      <n-tag :type="setupStatus.redis_configured ? 'success' : 'warning'" :bordered="false">
+                        {{ setupStatus.redis_configured ? '已配置' : '未配置' }}
+                      </n-tag>
+                    </div>
+                    <div class="infra-item">
+                      <span>重启状态</span>
+                      <n-tag :type="setupStatus.restart_required ? 'warning' : 'success'" :bordered="false">
+                        {{ setupStatus.restart_required ? '需要重启' : '当前生效' }}
+                      </n-tag>
+                    </div>
+                  </div>
+                  <p class="infra-note">初始化完成后 `/setup` 会关闭；数据库或 Redis 地址、账号、密码和 SSL 配置请在部署环境的 .env 中调整。</p>
+                </section>
+              </div>
+            </n-tab-pane>
+          </n-tabs>
         </n-form>
       </n-spin>
     </main>
@@ -294,6 +319,8 @@ import {
   NSelect,
   NSpin,
   NSwitch,
+  NTabPane,
+  NTabs,
   NTag,
   useMessage
 } from 'naive-ui'
@@ -355,6 +382,17 @@ const emailProviderOptions = [
 
 const requiredText = (text) => ({ required: true, message: text, trigger: 'blur' })
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+function isPublicHttpUrl(value) {
+  try {
+    const url = new URL(value)
+    const hostname = url.hostname.toLowerCase()
+    return ['http:', 'https:'].includes(url.protocol) &&
+      !['localhost', '0.0.0.0', '::1'].includes(hostname) &&
+      !hostname.startsWith('127.')
+  } catch {
+    return false
+  }
+}
 const rules = {
   'site.name': [requiredText('请输入站点名称')],
   'site.icon_url': [
@@ -362,6 +400,18 @@ const rules = {
     {
       validator: (_, value) => String(value || '').startsWith('/') || /^https?:\/\//.test(value),
       message: '请输入 / 开头路径或 http(s) URL',
+      trigger: 'blur'
+    }
+  ],
+  'site.web_url': [
+    {
+      validator: (_, value) => /^https?:\/\//.test(value || ''),
+      message: '请输入 http(s) 站点访问地址',
+      trigger: 'blur'
+    },
+    {
+      validator: (_, value) => !formData.auth.github_login_enabled || isPublicHttpUrl(value),
+      message: '启用 GitHub 登录后必须填写公网站点访问地址',
       trigger: 'blur'
     }
   ],
@@ -411,12 +461,7 @@ const rules = {
     {
       validator: (_, value) => {
         if (!formData.auth.github_login_enabled) return true
-        try {
-          const hostname = new URL(value).hostname.toLowerCase()
-          return !['localhost', '0.0.0.0', '::1'].includes(hostname) && !hostname.startsWith('127.')
-        } catch {
-          return false
-        }
+        return isPublicHttpUrl(value)
       },
       message: '启用 GitHub 登录后必须填写公网 http(s) 回调地址',
       trigger: 'blur'
@@ -464,6 +509,7 @@ function createSettingsForm() {
     site: {
       name: '',
       icon_url: '',
+      web_url: window.location.origin,
       subtitle: '',
       description: '',
       contact_email: '',
@@ -630,10 +676,6 @@ function goBack() {
   router.push('/')
 }
 
-function goSetup() {
-  router.push('/setup')
-}
-
 onMounted(loadSettings)
 </script>
 
@@ -695,6 +737,23 @@ h1 {
 }
 
 .settings-form {
+  display: block;
+}
+
+.settings-tabs :deep(.n-tabs-nav) {
+  margin-bottom: 18px;
+  padding: 0 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+}
+
+.settings-tabs :deep(.n-tabs-tab) {
+  min-height: 46px;
+}
+
+.settings-tab-content {
   display: grid;
   gap: 18px;
 }
@@ -749,6 +808,13 @@ h1 {
   background: var(--bg-hover);
   border: 1px solid var(--border-base);
   border-radius: 8px;
+}
+
+.infra-note {
+  margin-top: 14px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1.7;
 }
 
 .compact-grid {
