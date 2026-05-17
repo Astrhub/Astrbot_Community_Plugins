@@ -65,12 +65,20 @@
             </template>
           </n-empty>
         </div>
-        <div v-else class="markdown-content" v-html="readmeHtml"></div>
+        <div
+          v-else
+          class="markdown-content"
+          @click="handleMarkdownClick"
+          v-html="readmeHtml"
+        ></div>
 
         <plugin-comment
           :comments="comments"
           :comments-enabled="commentsEnabled"
+          :likes-enabled="likesEnabled"
           @submit="submitComment"
+          @delete="deleteComment"
+          @like="toggleCommentLike"
         />
       </n-space>
     </div>
@@ -160,6 +168,7 @@ import {
   NInputNumber,
   NSpin,
   NEmpty,
+  useDialog,
   useMessage
 } from 'naive-ui'
 import { storeToRefs } from 'pinia'
@@ -196,14 +205,17 @@ const comments = computed(() => detail.value?.comments || [])
 
 const store = usePluginStore()
 const message = useMessage()
+const dialog = useDialog()
 const { siteConfig, currentUser } = storeToRefs(store)
 const {
   addPluginComment,
+  deletePluginComment,
   likePlugin,
   loadPluginDetail,
-  loadPlugins,
   loadCurrentUser,
+  likePluginComment,
   refreshPluginGithubMetadata,
+  unlikePluginComment,
   unlikePlugin
 } = store
 const commentsEnabled = computed(() => Boolean(siteConfig.value.market?.comments_enabled))
@@ -235,7 +247,7 @@ watch(show, (newVal) => {
 
 const openUrl = (url) => {
   if (url) {
-    window.open(url, '_blank')
+    confirmExternalOpen(url)
   }
 }
 
@@ -246,21 +258,36 @@ async function fetchReadme() {
   error.value = false
   
   try {
-    const [owner, repo] = props.plugin.repo.split('/').slice(-2)
+    const repoInfo = parseGithubRepo(props.plugin.repo)
+    if (!repoInfo) throw new Error('Invalid GitHub repo URL')
+    const { owner, repo } = repoInfo
 
     let readmeText = ''
+    let readmeContext = {
+      owner,
+      repo,
+      branch: 'main',
+      path: 'README.md'
+    }
 
     try {
       const apiResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme`, {
         method: 'GET',
         headers: {
-          'Accept': 'application/vnd.github.v3.raw'
+          'Accept': 'application/vnd.github+json'
         },
         timeout: 10000
       })
 
       if (apiResp.ok) {
-        readmeText = await apiResp.text()
+        const data = await apiResp.json()
+        readmeText = decodeBase64Content(data.content || '')
+        readmeContext = {
+          owner,
+          repo,
+          branch: data.download_url?.split('/')[5] || data.html_url?.split('/blob/')[1]?.split('/')[0] || 'main',
+          path: data.path || 'README.md'
+        }
       } else {
         throw new Error(`GitHub API /readme returned ${apiResp.status}`)
       }
@@ -281,6 +308,7 @@ async function fetchReadme() {
             })
             if (resp.ok) {
               readmeText = await resp.text()
+              readmeContext = { owner, repo, branch, path: filename }
               found = true
               break
             }
@@ -300,7 +328,7 @@ async function fetchReadme() {
       throw new Error('README 内容为空')
     }
 
-    readmeHtml.value = marked(readmeText)
+    readmeHtml.value = renderReadmeHtml(readmeText, readmeContext)
   } catch (err) {
     console.error('Error fetching README:', err)
     error.value = true
@@ -313,6 +341,7 @@ async function fetchDetail() {
   if (!props.plugin?.id) return
   try {
     detail.value = await loadPluginDetail(props.plugin.id)
+    liked.value = Boolean(detail.value?.liked)
   } catch (err) {
     message.error(err.message || '加载互动信息失败')
   }
@@ -325,8 +354,7 @@ async function toggleLike() {
     detail.value = liked.value
       ? await unlikePlugin(props.plugin.id)
       : await likePlugin(props.plugin.id)
-    liked.value = !liked.value
-    await loadPlugins()
+    liked.value = Boolean(detail.value?.liked)
   } catch (err) {
     message.error(err.message || '操作失败')
   } finally {
@@ -354,7 +382,7 @@ async function confirmRefreshGithub() {
     }
     detail.value = await refreshPluginGithubMetadata(props.plugin.id, payload)
     await loadCurrentUser()
-    await loadPlugins()
+    await fetchDetail()
     showRefreshModal.value = false
     message.success('GitHub 数据已刷新')
   } catch (err) {
@@ -369,13 +397,145 @@ async function submitComment(payload) {
   try {
     await addPluginComment(props.plugin.id, payload)
     await fetchDetail()
-    await loadPlugins()
     message.success(payload.parent_id ? '回复已发布' : '评价已发布')
     payload.done?.()
   } catch (err) {
     message.error(err.message || '发布失败')
     payload.fail?.()
   }
+}
+
+async function deleteComment(comment) {
+  dialog.warning({
+    title: '删除评论',
+    content: '确认删除这条评论？',
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await deletePluginComment(comment.id)
+        await fetchDetail()
+        message.success('评论已删除')
+      } catch (err) {
+        message.error(err.message || '删除失败')
+      }
+    }
+  })
+}
+
+async function toggleCommentLike(payload) {
+  try {
+    const updated = await (payload.liked
+      ? likePluginComment(payload.comment.id)
+      : unlikePluginComment(payload.comment.id))
+    updateCommentInDetail(updated)
+  } catch (err) {
+    message.error(err.message || '操作失败')
+  }
+}
+
+function parseGithubRepo(repoUrl) {
+  try {
+    const url = new URL(repoUrl)
+    if (url.hostname !== 'github.com') return null
+    const [owner, repo] = url.pathname.split('/').filter(Boolean)
+    if (!owner || !repo) return null
+    return { owner, repo: repo.replace(/\.git$/, '') }
+  } catch (_) {
+    return null
+  }
+}
+
+function decodeBase64Content(value) {
+  const normalized = String(value || '').replace(/\s/g, '')
+  if (!normalized) return ''
+  return decodeURIComponent(escape(atob(normalized)))
+}
+
+function renderReadmeHtml(markdown, context) {
+  const container = document.createElement('div')
+  container.innerHTML = marked(markdown)
+  const basePath = context.path.split('/').slice(0, -1).join('/')
+
+  container.querySelectorAll('img[src]').forEach((image) => {
+    image.src = resolveReadmeUrl(image.getAttribute('src'), context, basePath, true)
+    image.loading = 'lazy'
+  })
+
+  container.querySelectorAll('a[href]').forEach((link) => {
+    const href = resolveReadmeUrl(link.getAttribute('href'), context, basePath, false)
+    link.href = href
+    if (!href.startsWith('#')) {
+      link.target = '_blank'
+      link.rel = 'noopener noreferrer'
+    }
+  })
+
+  return container.innerHTML
+}
+
+function resolveReadmeUrl(url, context, basePath, raw) {
+  if (!url || /^(https?:|mailto:|#)/i.test(url)) return url
+  if (url.startsWith('//')) return `https:${url}`
+  const [path, suffix = ''] = splitReadmeUrl(url)
+  if (!path) return suffix || url
+  const cleanPath = normalizeReadmePath(path.startsWith('/') ? '' : basePath, path)
+  const encodedPath = cleanPath.split('/').map(encodeURIComponent).join('/')
+  const host = raw ? 'raw.githubusercontent.com' : 'github.com'
+  const mode = raw ? '' : '/blob'
+  return `https://${host}/${context.owner}/${context.repo}${mode}/${context.branch}/${encodedPath}${suffix}`
+}
+
+function splitReadmeUrl(url) {
+  const match = String(url).match(/^([^?#]*)([?#].*)?$/)
+  return [match?.[1] || '', match?.[2] || '']
+}
+
+function normalizeReadmePath(basePath, url) {
+  const cleanUrl = String(url || '').replace(/^\/+/, '')
+  const parts = `${basePath ? `${basePath}/` : ''}${cleanUrl}`.split('/')
+  const normalized = []
+  for (const part of parts) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      normalized.pop()
+    } else {
+      normalized.push(part)
+    }
+  }
+  return normalized.join('/')
+}
+
+function handleMarkdownClick(event) {
+  const link = event.target.closest('a[href]')
+  if (!link) return
+  const href = link.getAttribute('href')
+  if (!href || href.startsWith('#')) return
+  event.preventDefault()
+  confirmExternalOpen(link.href)
+}
+
+function updateCommentInDetail(updated) {
+  if (!detail.value?.comments || !updated?.id) return
+  detail.value = {
+    ...detail.value,
+    comments: detail.value.comments.map((comment) =>
+      comment.id === updated.id ? { ...comment, ...updated } : comment
+    )
+  }
+}
+
+function confirmExternalOpen(url) {
+  if (!url) return
+  dialog.info({
+    title: '即将打开外链',
+    content: `将跳转到：${url}`,
+    positiveText: '继续打开',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  })
 }
 </script>
 

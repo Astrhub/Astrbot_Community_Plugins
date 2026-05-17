@@ -32,9 +32,17 @@
             <time>{{ formatTime(comment.created_at) }}</time>
           </div>
           <p>{{ comment.body }}</p>
-          <n-button text size="small" :disabled="!commentsEnabled" @click="toggleReply(comment.id)">
-            回复
-          </n-button>
+          <div class="comment-actions">
+            <n-button v-if="likesEnabled" text size="small" @click="toggleLike(comment)">
+              {{ comment.liked ? '取消点赞' : '点赞' }} {{ comment.likes || 0 }}
+            </n-button>
+            <n-button text size="small" :disabled="!commentsEnabled" @click="toggleReply(comment.id)">
+              回复
+            </n-button>
+            <n-button v-if="comment.can_delete" text size="small" type="error" @click="deleteComment(comment)">
+              删除
+            </n-button>
+          </div>
         </div>
 
         <div v-if="replyingTo === comment.id" class="reply-editor">
@@ -59,6 +67,14 @@
               <time>{{ formatTime(reply.created_at) }}</time>
             </div>
             <p>{{ reply.body }}</p>
+            <div class="comment-actions">
+              <n-button v-if="likesEnabled" text size="small" @click="toggleLike(reply)">
+                {{ reply.liked ? '取消点赞' : '点赞' }} {{ reply.likes || 0 }}
+              </n-button>
+              <n-button v-if="reply.can_delete" text size="small" type="error" @click="deleteComment(reply)">
+                删除
+              </n-button>
+            </div>
           </article>
         </div>
       </article>
@@ -78,10 +94,14 @@ const props = defineProps({
   commentsEnabled: {
     type: Boolean,
     default: true
+  },
+  likesEnabled: {
+    type: Boolean,
+    default: true
   }
 })
 
-const emit = defineEmits(['submit'])
+const emit = defineEmits(['submit', 'delete', 'like'])
 const message = useMessage()
 const draft = ref('')
 const replyDraft = ref('')
@@ -114,6 +134,17 @@ function toggleReply(commentId) {
 function cancelReply() {
   replyingTo.value = ''
   replyDraft.value = ''
+}
+
+function toggleLike(comment) {
+  emit('like', {
+    comment,
+    liked: !comment.liked
+  })
+}
+
+function deleteComment(comment) {
+  emit('delete', comment)
 }
 
 async function submitComment(parentId) {
@@ -155,6 +186,7 @@ async function submitComment(parentId) {
 
 .comments-header,
 .comment-meta,
+.comment-actions,
 .editor-actions {
   display: flex;
   align-items: center;
@@ -199,6 +231,11 @@ async function submitComment(parentId) {
 .comment-body {
   display: grid;
   gap: 8px;
+}
+
+.comment-actions {
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .comment-meta {

@@ -415,6 +415,36 @@ export const usePluginStore = defineStore('plugins', () => {
     return data
   }
 
+  async function deletePluginComment(commentId) {
+    const response = await fetch(`${apiBaseUrl}/v1/comments/${commentId}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '删除评论失败')
+    return data
+  }
+
+  async function likePluginComment(commentId) {
+    const response = await fetch(`${apiBaseUrl}/v1/comments/${commentId}/like`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '点赞评论失败')
+    return data
+  }
+
+  async function unlikePluginComment(commentId) {
+    const response = await fetch(`${apiBaseUrl}/v1/comments/${commentId}/unlike`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '取消评论点赞失败')
+    return data
+  }
+
   async function updatePluginListing(pluginId, action, payload = null) {
     const options = {
       method: 'POST',
@@ -627,6 +657,9 @@ export const usePluginStore = defineStore('plugins', () => {
     likePlugin,
     unlikePlugin,
     addPluginComment,
+    deletePluginComment,
+    likePluginComment,
+    unlikePluginComment,
     updatePluginListing,
     refreshPluginGithubMetadata,
     loadNotifications,

@@ -224,6 +224,7 @@ import {
   NIcon,
   NInput,
   NModal,
+  useDialog,
   useMessage,
   NTooltip
 } from 'naive-ui'
@@ -332,6 +333,7 @@ onUnmounted(() => {
 })
 
 const message = useMessage()
+const dialog = useDialog()
 const isCopied = ref(false)
 
 const copyRepoUrl = async (e) => {
@@ -352,7 +354,15 @@ const copyRepoUrl = async (e) => {
 const openUrl = (url, e) => {
   e?.stopPropagation() 
   if (url) {
-    window.open(url, '_blank')
+    dialog.info({
+      title: '即将打开外链',
+      content: `将跳转到：${url}`,
+      positiveText: '继续打开',
+      negativeText: '取消',
+      onPositiveClick: () => {
+        window.open(url, '_blank', 'noopener,noreferrer')
+      }
+    })
   }
 }
 
