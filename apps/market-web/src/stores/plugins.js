@@ -152,16 +152,14 @@ export const usePluginStore = defineStore('plugins', () => {
     }
   }
 
-  const toggleTheme = () => {
-    themeMode.value = isDarkMode.value ? 'light' : 'dark'
+  function setThemeMode(value) {
+    themeMode.value = ['system', 'light', 'dark'].includes(value) ? value : 'system'
     localStorage.setItem('theme-mode', themeMode.value)
+    if (themeMode.value === 'system') {
+      applyThemeFromSystem()
+      return
+    }
     isDarkMode.value = themeMode.value === 'dark'
-  }
-
-  function useSystemTheme() {
-    themeMode.value = 'system'
-    localStorage.setItem('theme-mode', 'system')
-    applyThemeFromSystem()
   }
 
   function normalizeSiteConfig(value = {}) {
@@ -758,8 +756,7 @@ export const usePluginStore = defineStore('plugins', () => {
     setFuzzySearchEnabled,
     updatePluginInList,
     resetPluginFilters,
-    toggleTheme,
-    useSystemTheme,
+    setThemeMode,
     refreshRandomOrder,
     triggerIrisAnimation
   }

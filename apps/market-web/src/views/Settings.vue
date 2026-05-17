@@ -14,14 +14,7 @@
           </div>
         </div>
         <div class="header-actions">
-          <n-button quaternary circle @click="toggleTheme" :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'">
-            <template #icon>
-              <n-icon>
-                <sunny v-if="isDarkMode" />
-                <moon v-else />
-              </n-icon>
-            </template>
-          </n-button>
+          <theme-mode-button circle />
           <n-button tertiary @click="loadSettings">刷新</n-button>
           <n-button type="primary" :loading="saving" @click="save">保存</n-button>
         </div>
@@ -272,8 +265,9 @@ import {
   NTag,
   useMessage
 } from 'naive-ui'
-import { ArrowBack, Moon, Sunny } from '@vicons/ionicons5'
+import { ArrowBack } from '@vicons/ionicons5'
 import { usePluginStore } from '@/stores/plugins'
+import ThemeModeButton from '@/components/ThemeModeButton.vue'
 
 const SettingSwitch = {
   props: {
@@ -300,14 +294,13 @@ const SettingSwitch = {
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { isDarkMode, currentUser, setupStatus } = storeToRefs(store)
+const { currentUser, setupStatus } = storeToRefs(store)
 const {
   loadCurrentUser,
   loadSetupStatus,
   loadSystemSettings,
   saveSystemSettings,
-  sendTestEmail,
-  toggleTheme
+  sendTestEmail
 } = store
 
 const formRef = ref(null)

@@ -6,15 +6,7 @@
         <span class="brand-name">{{ siteName }}</span>
       </div>
       <div class="nav-actions">
-        <n-button quaternary class="theme-button" @click="toggleTheme">
-          <template #icon>
-            <n-icon>
-              <moon v-if="!isDarkMode" />
-              <sunny v-else />
-            </n-icon>
-          </template>
-          {{ isDarkMode ? '浅色' : '深色' }}
-        </n-button>
+        <theme-mode-button class="theme-button" />
         <n-dropdown
           v-if="currentUser"
           :options="userMenuOptions"
@@ -158,18 +150,7 @@
             <search-outline v-else />
           </n-icon>
         </n-button>
-        <n-button
-          quaternary
-          circle
-          class="hide-on-mobile-search"
-          @click="toggleTheme"
-          :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'"
-        >
-          <n-icon>
-            <sunny v-if="isDarkMode" />
-            <moon v-else />
-          </n-icon>
-        </n-button>
+        <theme-mode-button circle class="hide-on-mobile-search" />
       </div>
     </div>
   </header>
@@ -224,14 +205,13 @@ import {
   LogInOutline,
   LogOutOutline,
   LogoGithub,
-  Moon,
   PersonOutline,
   SearchOutline,
   SettingsOutline,
   ShieldCheckmarkOutline,
-  Sunny
 } from '@vicons/ionicons5'
 import SearchToolbar from './SearchToolbar.vue'
+import ThemeModeButton from './ThemeModeButton.vue'
 import { usePluginStore } from '../stores/plugins'
 
 defineProps({
@@ -257,8 +237,8 @@ const emit = defineEmits([
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { isDarkMode, currentUser, siteConfig } = storeToRefs(store)
-const { loginWithGithub, loginWithPassword, logout, toggleTheme } = store
+const { currentUser, siteConfig } = storeToRefs(store)
+const { loginWithGithub, loginWithPassword, logout } = store
 
 const fullHeader = ref(null)
 const showStickyHeader = ref(false)

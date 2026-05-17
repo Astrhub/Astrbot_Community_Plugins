@@ -14,14 +14,7 @@
           </div>
         </div>
         <div class="header-right">
-          <n-button quaternary circle @click="toggleTheme" :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'">
-            <template #icon>
-              <n-icon>
-                <sunny v-if="isDarkMode" />
-                <moon v-else />
-              </n-icon>
-            </template>
-          </n-button>
+          <theme-mode-button circle />
           <n-button
             v-if="!currentUser && siteConfig.auth.github_login_enabled"
             type="primary"
@@ -149,14 +142,15 @@ import {
   NTag,
   useMessage
 } from 'naive-ui'
-import { ArrowBack, LogoGithub, Moon, Sunny } from '@vicons/ionicons5'
+import { ArrowBack, LogoGithub } from '@vicons/ionicons5'
 import { usePluginStore } from '@/stores/plugins'
+import ThemeModeButton from '@/components/ThemeModeButton.vue'
 
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { isDarkMode, currentUser, siteConfig } = storeToRefs(store)
-const { loginWithGithub, toggleTheme } = store
+const { currentUser, siteConfig } = storeToRefs(store)
+const { loginWithGithub } = store
 const formRef = ref(null)
 const submitting = ref(false)
 const maxPluginTags = computed(() => siteConfig.value.market?.max_plugin_tags || 8)
