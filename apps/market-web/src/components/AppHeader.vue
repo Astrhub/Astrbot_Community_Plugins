@@ -118,7 +118,7 @@
           @click="goAdminPlugins"
           aria-label="插件审核"
         >
-          <n-icon><settings-outline /></n-icon>
+          <n-icon><shield-checkmark-outline /></n-icon>
         </n-button>
         <n-dropdown
           v-if="currentUser"
@@ -228,6 +228,7 @@ import {
   PersonOutline,
   SearchOutline,
   SettingsOutline,
+  ShieldCheckmarkOutline,
   Sunny
 } from '@vicons/ionicons5'
 import SearchToolbar from './SearchToolbar.vue'
