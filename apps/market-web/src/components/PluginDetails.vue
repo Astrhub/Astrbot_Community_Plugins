@@ -3,7 +3,7 @@
     v-model:show="show"
     :mask-closable="true"
     preset="card"
-    class="plugin-details"
+    :class="['plugin-details', { 'plugin-details--dark': isDarkMode }]"
     style="max-width: 900px; width: 90%"
     :bordered="false"
   >
@@ -206,7 +206,7 @@ const comments = computed(() => detail.value?.comments || [])
 const store = usePluginStore()
 const message = useMessage()
 const dialog = useDialog()
-const { siteConfig, currentUser } = storeToRefs(store)
+const { siteConfig, currentUser, isDarkMode } = storeToRefs(store)
 const {
   addPluginComment,
   deletePluginComment,
@@ -463,7 +463,8 @@ function renderReadmeHtml(markdown, context) {
   })
 
   container.querySelectorAll('a[href]').forEach((link) => {
-    const href = resolveReadmeUrl(link.getAttribute('href'), context, basePath, false)
+    const cleanHref = normalizeRenderedHref(link)
+    const href = resolveReadmeUrl(cleanHref, context, basePath, false)
     link.href = href
     if (!href.startsWith('#')) {
       link.target = '_blank'
@@ -471,7 +472,79 @@ function renderReadmeHtml(markdown, context) {
     }
   })
 
+  container.querySelectorAll('pre').forEach((pre) => {
+    if (!pre.querySelector('code') || pre.parentElement?.classList.contains('markdown-code-block')) {
+      return
+    }
+    const wrapper = document.createElement('div')
+    wrapper.className = 'markdown-code-block'
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'markdown-copy-code'
+    button.dataset.copyCode = 'true'
+    button.textContent = '复制'
+    pre.replaceWith(wrapper)
+    wrapper.append(button, pre)
+  })
+
   return container.innerHTML
+}
+
+function normalizeRenderedHref(link) {
+  const href = link.getAttribute('href') || ''
+  if (!isPlainUrlLink(link, href)) return href
+  const { cleanHref, suffix } = trimTrailingLinkSuffix(href)
+  if (!suffix) return href
+  if (link.textContent.endsWith(suffix)) {
+    link.textContent = link.textContent.slice(0, -suffix.length)
+  }
+  link.after(document.createTextNode(suffix))
+  return cleanHref
+}
+
+function isPlainUrlLink(link, href) {
+  const text = link.textContent || ''
+  return /^(https?:)?\/\//i.test(href) && (text === href || text === decodeUrlText(href))
+}
+
+function decodeUrlText(value) {
+  try {
+    return decodeURI(value)
+  } catch (_) {
+    return value
+  }
+}
+
+function trimTrailingLinkSuffix(href) {
+  let cleanHref = href
+  let suffix = ''
+  while (cleanHref) {
+    const char = cleanHref.at(-1)
+    if (!shouldTrimLinkSuffix(cleanHref, char)) break
+    suffix = char + suffix
+    cleanHref = cleanHref.slice(0, -1)
+  }
+  return { cleanHref, suffix }
+}
+
+function shouldTrimLinkSuffix(value, char) {
+  const closers = {
+    ')': '(',
+    ']': '[',
+    '}': '{',
+    '）': '（',
+    '】': '【',
+    '》': '《',
+    '」': '「',
+    '』': '『'
+  }
+  if ('。，、；：！？!?;,'.includes(char) || char === '.') return true
+  if (!closers[char]) return false
+  return countChars(value, char) > countChars(value, closers[char])
+}
+
+function countChars(value, char) {
+  return [...value].filter((item) => item === char).length
 }
 
 function resolveReadmeUrl(url, context, basePath, raw) {
@@ -507,12 +580,48 @@ function normalizeReadmePath(basePath, url) {
 }
 
 function handleMarkdownClick(event) {
+  const copyButton = event.target.closest('[data-copy-code]')
+  if (copyButton) {
+    event.preventDefault()
+    copyMarkdownCode(copyButton)
+    return
+  }
   const link = event.target.closest('a[href]')
   if (!link) return
   const href = link.getAttribute('href')
   if (!href || href.startsWith('#')) return
   event.preventDefault()
   confirmExternalOpen(link.href)
+}
+
+async function copyMarkdownCode(button) {
+  const code = button.closest('.markdown-code-block')?.querySelector('code')?.textContent
+  if (!code) return
+  try {
+    await copyText(code)
+    button.textContent = '已复制'
+    setTimeout(() => {
+      button.textContent = '复制'
+    }, 1600)
+  } catch (_) {
+    message.error('复制失败，请手动复制')
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const input = document.createElement('textarea')
+  input.value = text
+  input.setAttribute('readonly', '')
+  input.style.position = 'fixed'
+  input.style.opacity = '0'
+  document.body.appendChild(input)
+  input.select()
+  document.execCommand('copy')
+  input.remove()
 }
 
 function updateCommentInDetail(updated) {
@@ -587,6 +696,23 @@ function confirmExternalOpen(url) {
 .markdown-content {
   color: var(--n-text-color-2);
   line-height: 1.6;
+  --markdown-link-color: #1d4ed8;
+  --markdown-link-hover: #1e40af;
+  --markdown-code-bg: #f1f5f9;
+  --markdown-code-border: #cbd5e1;
+  --markdown-table-border: #94a3b8;
+  --markdown-table-header: #eaf2ff;
+  --markdown-table-row: rgba(37, 99, 235, 0.04);
+}
+
+.plugin-details--dark .markdown-content {
+  --markdown-link-color: #93c5fd;
+  --markdown-link-hover: #bfdbfe;
+  --markdown-code-bg: #020617;
+  --markdown-code-border: #334155;
+  --markdown-table-border: #475569;
+  --markdown-table-header: #1e293b;
+  --markdown-table-row: rgba(96, 165, 250, 0.08);
 }
 
 .markdown-content :deep(h1),
@@ -609,23 +735,63 @@ function confirmExternalOpen(url) {
   margin: 1em 0;
 }
 
+.markdown-content :deep(a) {
+  color: var(--markdown-link-color);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.markdown-content :deep(a:hover) {
+  color: var(--markdown-link-hover);
+}
+
 .markdown-content :deep(img) {
   max-width: 100%;
   border-radius: 8px;
 }
 
 .markdown-content :deep(code) {
-  background: var(--n-code-color);
+  background: var(--markdown-code-bg);
+  border: 1px solid var(--markdown-code-border);
   padding: 0.2em 0.4em;
   border-radius: 3px;
   font-size: 0.9em;
   font-family: monospace;
 }
 
-.markdown-content :deep(pre) {
-  background: var(--n-code-color);
-  padding: 16px;
+.markdown-content :deep(.markdown-code-block) {
+  position: relative;
+  margin: 1em 0;
+  border: 1px solid var(--markdown-code-border);
   border-radius: 8px;
+  background: var(--markdown-code-bg);
+}
+
+.markdown-content :deep(.markdown-copy-code) {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  border: 1px solid var(--markdown-code-border);
+  border-radius: 5px;
+  padding: 4px 8px;
+  color: var(--n-text-color);
+  background: var(--n-color);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.markdown-content :deep(.markdown-copy-code:hover) {
+  border-color: var(--markdown-link-color);
+  color: var(--markdown-link-color);
+}
+
+.markdown-content :deep(pre) {
+  margin: 0;
+  padding: 42px 16px 16px;
+  background: transparent;
   overflow-x: auto;
 }
 
@@ -650,19 +816,26 @@ function confirmExternalOpen(url) {
 
 .markdown-content :deep(table) {
   border-collapse: collapse;
-  width: 100%;
+  min-width: 100%;
   margin: 1em 0;
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
 }
 
 .markdown-content :deep(th),
 .markdown-content :deep(td) {
-  border: 1px solid var(--n-border-color);
+  border: 1px solid var(--markdown-table-border);
   padding: 8px;
   text-align: left;
 }
 
 .markdown-content :deep(th) {
-  background: var(--n-color-hover);
+  background: var(--markdown-table-header);
+}
+
+.markdown-content :deep(tr:nth-child(even) td) {
+  background: var(--markdown-table-row);
 }
 
 .plugin-details__footer {
