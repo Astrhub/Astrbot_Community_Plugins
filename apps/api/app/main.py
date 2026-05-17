@@ -217,10 +217,11 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/v1/site")
     async def site_config(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
+        runtime_config = read_runtime_config(settings.runtime_config_path)
         return {
-            **get_site_config(settings),
-            "auth": get_public_auth_config(settings),
-            "market": get_public_market_config(settings),
+            **get_site_config(settings, runtime_config),
+            "auth": get_public_auth_config(settings, runtime_config),
+            "market": get_public_market_config(settings, runtime_config),
         }
 
     @app.get("/v1/admin/settings")
@@ -1696,7 +1697,12 @@ def validate_system_settings_payload(
             raise error(400, "Cloudflare from address is invalid")
 
 
-def get_site_config(settings: Settings) -> dict[str, str]:
+def get_site_config(
+    settings: Settings,
+    runtime_config: dict[str, str] | None = None,
+) -> dict[str, str]:
+    if runtime_config is not None:
+        return build_site_settings(settings, runtime_config)
     return {
         "name": settings.site_name,
         "icon_url": settings.site_icon_url,
@@ -1707,19 +1713,43 @@ def get_site_config(settings: Settings) -> dict[str, str]:
     }
 
 
-def get_public_auth_config(settings: Settings) -> dict[str, Any]:
-    return {
-        "github_login_enabled": settings.github_login_enabled,
-        "public_login_enabled": settings.public_login_enabled,
-        "login_agreement_enabled": settings.login_agreement_enabled,
-        "login_agreement_text": settings.login_agreement_text,
-        "service_terms_enabled": settings.service_terms_enabled,
-        "service_terms_text": settings.service_terms_text,
-        "terms_revision": digest_terms(settings),
-    }
+def get_public_auth_config(
+    settings: Settings,
+    runtime_config: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    auth = (
+        build_auth_settings(settings, runtime_config)
+        if runtime_config is not None
+        else {
+            "github_login_enabled": settings.github_login_enabled,
+            "public_login_enabled": settings.public_login_enabled,
+            "login_agreement_enabled": settings.login_agreement_enabled,
+            "login_agreement_text": settings.login_agreement_text,
+            "service_terms_enabled": settings.service_terms_enabled,
+            "service_terms_text": settings.service_terms_text,
+        }
+    )
+    effective_settings = settings.with_updates(
+        login_agreement_enabled=auth["login_agreement_enabled"],
+        login_agreement_text=auth["login_agreement_text"],
+        service_terms_enabled=auth["service_terms_enabled"],
+        service_terms_text=auth["service_terms_text"],
+    )
+    return {**auth, "terms_revision": digest_terms(effective_settings)}
 
 
-def get_public_market_config(settings: Settings) -> dict[str, Any]:
+def get_public_market_config(
+    settings: Settings,
+    runtime_config: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if runtime_config is not None:
+        market = build_market_settings(settings, runtime_config)
+        return {
+            "submissions_enabled": market["submissions_enabled"],
+            "comments_enabled": market["comments_enabled"],
+            "likes_enabled": market["likes_enabled"],
+            "max_plugin_tags": market["max_plugin_tags"],
+        }
     return {
         "submissions_enabled": settings.market_submissions_enabled,
         "comments_enabled": settings.market_comments_enabled,

@@ -383,6 +383,51 @@ def test_github_login_uses_runtime_callback_url_over_initial_settings(tmp_path) 
     assert "127.0.0.1" not in location
 
 
+def test_public_site_config_uses_runtime_oauth_settings(tmp_path) -> None:
+    runtime_file = tmp_path / "runtime.env"
+    runtime_file.write_text(
+        "\n".join(
+            [
+                "GITHUB_LOGIN_ENABLED=true",
+                "LOGIN_AGREEMENT_ENABLED=true",
+                "LOGIN_AGREEMENT_TEXT=Runtime login agreement",
+                "SERVICE_TERMS_ENABLED=true",
+                "SERVICE_TERMS_TEXT=Runtime service terms",
+                "MARKET_SUBMISSIONS_ENABLED=false",
+                "MAX_PLUGIN_TAGS=5",
+                "",
+            ]
+        )
+    )
+    settings = load_settings(
+        {
+            "RUNTIME_CONFIG_FILE": str(runtime_file),
+            "GITHUB_LOGIN_ENABLED": "false",
+            "MARKET_SUBMISSIONS_ENABLED": "true",
+            "MAX_PLUGIN_TAGS": "8",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+
+    site_config = client.get("/v1/site").json()
+
+    assert site_config["auth"]["github_login_enabled"] is True
+    assert site_config["auth"]["login_agreement_enabled"] is True
+    assert site_config["auth"]["login_agreement_text"] == "Runtime login agreement"
+    assert site_config["auth"]["service_terms_enabled"] is True
+    assert site_config["auth"]["service_terms_text"] == "Runtime service terms"
+    assert site_config["auth"]["terms_revision"] == main_module.digest_terms(
+        settings.with_updates(
+            login_agreement_enabled=True,
+            login_agreement_text="Runtime login agreement",
+            service_terms_enabled=True,
+            service_terms_text="Runtime service terms",
+        )
+    )
+    assert site_config["market"]["submissions_enabled"] is False
+    assert site_config["market"]["max_plugin_tags"] == 5
+
+
 def test_core_admin_can_manage_admins_while_normal_admin_moderates_plugins() -> None:
     core = {"role": Role.CORE_ADMIN}
     admin = {"role": Role.ADMIN}
