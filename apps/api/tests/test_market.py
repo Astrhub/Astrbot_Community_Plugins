@@ -193,6 +193,34 @@ def test_user_can_update_own_profile() -> None:
     assert response.json()["avatar_url"] == "https://example.com/avatar.webp"
 
 
+def test_admin_can_store_github_token_without_public_echo() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    client.app.state.store.update_user_role(login.json()["user"]["id"], Role.ADMIN.value)
+
+    response = client.patch("/v1/me/profile", json={"github_token": "github_pat_readonly"})
+    me = client.get("/v1/me").json()
+
+    assert response.status_code == 200
+    assert response.json()["has_github_token"] is True
+    assert "github_token" not in response.json()
+    assert me["has_github_token"] is True
+    assert "github_token" not in me
+    assert (
+        client.app.state.store.get_user_by_id(login.json()["user"]["id"])["github_token"]
+        == "github_pat_readonly"
+    )
+
+
+def test_normal_user_cannot_store_github_token() -> None:
+    client = make_client()
+    client.get("/v1/auth/debug-login?login=alice")
+
+    response = client.patch("/v1/me/profile", json={"github_token": "github_pat_readonly"})
+
+    assert response.status_code == 403
+
+
 def test_internal_admin_can_link_existing_github_identity() -> None:
     client = make_client()
     store = client.app.state.store
@@ -906,6 +934,8 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
     client = make_client()
     login = client.get("/v1/auth/debug-login?login=alice")
     client.app.state.store.update_user_role(login.json()["user"]["id"], Role.ADMIN.value)
+    client.patch("/v1/me/profile", json={"github_token": "github_pat_readonly"})
+    seen_authorizations = []
     metadata_text = "\n".join(
         [
             "name: astrbot_plugin_demo",
@@ -936,6 +966,7 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
             return None
 
         async def get(self, url: str, **kwargs) -> FakeResponse:
+            seen_authorizations.append((kwargs.get("headers") or {}).get("authorization"))
             if url == "https://api.github.com/repos/alice/astrbot_plugin_demo":
                 return FakeResponse(
                     200,
@@ -970,6 +1001,7 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
     assert source_plugin["version"] == "v2.1.0"
     assert source_plugin["astrbot_version"] == ">=4.5.0"
     assert source_plugin["support_platforms"] == ["aiocqhttp", "telegram"]
+    assert "Bearer github_pat_readonly" in seen_authorizations
 
 
 def test_cloudflare_email_test_uses_official_sending_endpoint(monkeypatch) -> None:
@@ -1132,6 +1164,7 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "CREATE TABLE IF NOT EXISTS market_users" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_plugins" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_notifications" in SCHEMA_SQL
+    assert "github_token text NOT NULL DEFAULT ''" in SCHEMA_SQL
     assert "jsonb NOT NULL DEFAULT '[]'::jsonb" in SCHEMA_SQL
     assert "CHECK (status IN ('pending', 'listed', 'unlisted'))" in SCHEMA_SQL
     assert "REFERENCES market_users(id)" in SCHEMA_SQL

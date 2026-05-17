@@ -295,7 +295,14 @@ class InMemoryMarketStore:
         user = self.get_user_by_id(user_id)
         if not user:
             return None
-        for key in ("github_id", "github_login", "github_name", "avatar_url", "auth_source"):
+        for key in (
+            "github_id",
+            "github_login",
+            "github_name",
+            "avatar_url",
+            "auth_source",
+            "github_token",
+        ):
             if key in profile:
                 user[key] = profile[key]
         user["updated_at"] = utc_now()
@@ -458,6 +465,7 @@ class InMemoryMarketStore:
             "internal_username": user.get("internal_username") or "",
             "password_hash": user.get("password_hash") or "",
             "auth_source": user.get("auth_source") or "github",
+            "github_token": user.get("github_token") or "",
             "github_name": user.get("github_name")
             or user.get("name")
             or user.get("github_login")
@@ -514,6 +522,7 @@ CREATE TABLE IF NOT EXISTS market_users (
     auth_source text NOT NULL DEFAULT 'github' CHECK (auth_source IN ('github', 'internal')),
     github_name text NOT NULL DEFAULT '',
     avatar_url text NOT NULL DEFAULT '',
+    github_token text NOT NULL DEFAULT '',
     role text NOT NULL CHECK (role IN ('core_admin', 'admin', 'user')),
     muted_until timestamptz,
     muted_by text REFERENCES market_users(id) ON DELETE SET NULL,
@@ -659,6 +668,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS auth_source text "
                 "NOT NULL DEFAULT 'github'"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS github_token text "
+                "NOT NULL DEFAULT ''"
             )
 
     async def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
@@ -1031,7 +1044,14 @@ class PgRedisMarketStore(InMemoryMarketStore):
     ) -> dict[str, Any] | None:
         values = {
             key: profile[key]
-            for key in ("github_id", "github_login", "github_name", "avatar_url", "auth_source")
+            for key in (
+                "github_id",
+                "github_login",
+                "github_name",
+                "avatar_url",
+                "auth_source",
+                "github_token",
+            )
             if key in profile
         }
         if not values:
@@ -1044,6 +1064,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    github_name = CASE WHEN $6 THEN $7 ELSE github_name END,
                    avatar_url = CASE WHEN $8 THEN $9 ELSE avatar_url END,
                    auth_source = CASE WHEN $10 THEN $11 ELSE auth_source END,
+                   github_token = CASE WHEN $12 THEN $13 ELSE github_token END,
                    updated_at = now()
              WHERE id = $1
          RETURNING *
@@ -1059,6 +1080,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
             profile.get("avatar_url"),
             "auth_source" in profile,
             profile.get("auth_source"),
+            "github_token" in profile,
+            profile.get("github_token"),
         )
         return self._user_from_record(row) if row else None
 

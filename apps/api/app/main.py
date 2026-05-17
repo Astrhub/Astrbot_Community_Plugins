@@ -339,6 +339,8 @@ def register_routes(app: FastAPI) -> None:
         profile = {key: value for key, value in payload.model_dump().items() if value is not None}
         if not profile:
             raise error(400, "No fields to update")
+        if "github_token" in profile and not is_admin(user):
+            raise error(403, "Only admins can configure GitHub API tokens")
         if (
             "avatar_url" in profile
             and profile["avatar_url"]
@@ -507,7 +509,7 @@ def register_routes(app: FastAPI) -> None:
         data = payload.model_dump()
         validate_plugin_submission(data, settings)
         validate_repo_owner(data["repo"], user)
-        data.update(await fetch_plugin_github_metadata(data["repo"], settings))
+        data.update(await fetch_plugin_github_metadata(data["repo"], settings, user))
         plugin = await call_store(request, "submit_plugin", user, data)
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
@@ -535,7 +537,9 @@ def register_routes(app: FastAPI) -> None:
         if "repo" in patch:
             validate_github_repo(patch["repo"])
             validate_repo_owner(patch["repo"], user)
-            patch.update(await fetch_plugin_github_metadata(patch["repo"], get_settings(request)))
+            patch.update(
+                await fetch_plugin_github_metadata(patch["repo"], get_settings(request), user)
+            )
         if "tags" in patch:
             validate_plugin_tag_count(patch.get("tags") or [], get_settings(request))
         updated = await call_store(
@@ -623,7 +627,7 @@ def register_routes(app: FastAPI) -> None:
         user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
-        await refresh_plugin_github_metadata(request, plugin_id)
+        await refresh_plugin_github_metadata(request, plugin_id, user)
         updated = await call_store(request, "update_plugin_status", plugin_id, "listed", user["id"])
         if not updated:
             raise error(404, "Plugin not found")
@@ -637,7 +641,7 @@ def register_routes(app: FastAPI) -> None:
         user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
-        updated = await refresh_plugin_github_metadata(request, plugin_id)
+        updated = await refresh_plugin_github_metadata(request, plugin_id, user)
         if not updated:
             raise error(404, "Plugin not found")
         return updated
@@ -847,7 +851,11 @@ async def require_user(request: Request) -> dict[str, Any]:
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in user.items() if key not in {"password_hash"}}
+    return {
+        key: value
+        for key, value in {**user, "has_github_token": bool(user.get("github_token"))}.items()
+        if key not in {"password_hash", "github_token"}
+    }
 
 
 async def require_admin(request: Request) -> dict[str, Any]:
@@ -893,32 +901,41 @@ def validate_github_repo(repo: str) -> re.Match[str]:
 async def refresh_plugin_github_metadata(
     request: Request,
     plugin_id: str,
+    user: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     plugin = await call_store(request, "get_plugin", plugin_id)
     if not plugin:
         return None
-    metadata = await fetch_plugin_github_metadata(plugin.get("repo") or "", get_settings(request))
+    metadata = await fetch_plugin_github_metadata(
+        plugin.get("repo") or "", get_settings(request), user
+    )
     if not metadata:
         return plugin
     return await call_store(request, "update_plugin_metadata", plugin_id, metadata)
 
 
-async def fetch_plugin_github_metadata(repo: str, settings: Settings) -> dict[str, Any]:
+async def fetch_plugin_github_metadata(
+    repo: str,
+    settings: Settings,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not settings.github_metadata_sync_enabled:
         return {}
     match = validate_github_repo(repo)
     owner = match.group("owner")
     repo_name = match.group("repo")
+    headers = github_api_headers(user)
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-        repository = await fetch_github_repository(client, owner, repo_name)
+        repository = await fetch_github_repository(client, owner, repo_name, headers)
         if not repository:
             return {}
-        metadata = await fetch_github_plugin_metadata_files(client, owner, repo_name)
+        metadata = await fetch_github_plugin_metadata_files(client, owner, repo_name, headers)
         logo = await fetch_github_plugin_logo_url(
             client,
             owner,
             repo_name,
             repository.get("default_branch") or "main",
+            headers,
         )
     payload: dict[str, Any] = {
         "stars": int(repository.get("stargazers_count") or 0),
@@ -938,10 +955,11 @@ async def fetch_github_repository(
     client: httpx.AsyncClient,
     owner: str,
     repo: str,
+    headers: dict[str, str],
 ) -> dict[str, Any]:
     response = await client.get(
         f"https://api.github.com/repos/{owner}/{repo}",
-        headers=github_public_headers(),
+        headers=headers,
     )
     if response.status_code != 200:
         return {}
@@ -953,11 +971,12 @@ async def fetch_github_plugin_metadata_files(
     client: httpx.AsyncClient,
     owner: str,
     repo: str,
+    headers: dict[str, str],
 ) -> dict[str, Any]:
     for filename in ("metadata.yml", "metadata.yaml"):
         response = await client.get(
             f"https://api.github.com/repos/{owner}/{repo}/contents/{filename}",
-            headers=github_public_headers(),
+            headers=headers,
         )
         if response.status_code != 200:
             continue
@@ -980,10 +999,11 @@ async def fetch_github_plugin_logo_url(
     owner: str,
     repo: str,
     default_branch: str,
+    headers: dict[str, str],
 ) -> str:
     response = await client.get(
         f"https://api.github.com/repos/{owner}/{repo}/contents/logo.png",
-        headers=github_public_headers(),
+        headers=headers,
     )
     if response.status_code == 200:
         return f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/logo.png"
@@ -2101,6 +2121,16 @@ def github_public_headers() -> dict[str, str]:
     return {
         "accept": "application/vnd.github+json",
         "user-agent": "astrbot-community-plugins",
+    }
+
+
+def github_api_headers(user: dict[str, Any] | None = None) -> dict[str, str]:
+    token = str((user or {}).get("github_token") or "").strip()
+    if not token:
+        return github_public_headers()
+    return {
+        **github_public_headers(),
+        "authorization": f"Bearer {token}",
     }
 
 

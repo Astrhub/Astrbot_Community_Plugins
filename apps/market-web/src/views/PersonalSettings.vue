@@ -65,6 +65,24 @@
             </n-button>
           </section>
 
+          <section v-if="isAdminUser" class="profile-section">
+            <div class="section-title">
+              <h2>GitHub API Token</h2>
+              <p>仅需要只读权限，用于读取公开仓库信息、metadata.yaml 和 logo.png，避免服务器 IP 限流。</p>
+            </div>
+            <n-form-item label="Token" path="github_token">
+              <n-input
+                v-model:value="formData.github_token"
+                type="password"
+                show-password-on="click"
+                :placeholder="currentUser?.has_github_token ? '已配置，留空保持不变' : 'ghp_... 或 fine-grained token'"
+              />
+            </n-form-item>
+            <div class="token-state">
+              {{ currentUser?.has_github_token ? '当前已配置 Token' : '当前未配置 Token' }}
+            </div>
+          </section>
+
           <section class="profile-section">
             <div class="section-title">
               <h2>消息</h2>
@@ -126,8 +144,11 @@ const saving = ref(false)
 const notifications = ref([])
 const formData = reactive({
   avatar_url: '',
-  github_name: ''
+  github_name: '',
+  github_token: ''
 })
+
+const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
 
 const avatarFallback = computed(() => {
   const value = currentUser.value?.github_login || currentUser.value?.internal_username || '?'
@@ -137,15 +158,20 @@ const avatarFallback = computed(() => {
 function applyCurrentUser() {
   formData.avatar_url = currentUser.value?.avatar_url || ''
   formData.github_name = currentUser.value?.github_name || ''
+  formData.github_token = ''
 }
 
 async function saveProfile() {
   saving.value = true
   try {
-    await updateProfile({
+    const payload = {
       avatar_url: formData.avatar_url.trim(),
       github_name: formData.github_name.trim()
-    })
+    }
+    if (isAdminUser.value && formData.github_token.trim()) {
+      payload.github_token = formData.github_token.trim()
+    }
+    await updateProfile(payload)
     applyCurrentUser()
     message.success('个人资料已保存')
   } catch (error) {
@@ -303,7 +329,8 @@ h2 {
 }
 
 .notification-title time,
-.notification-item p {
+.notification-item p,
+.token-state {
   color: var(--text-color-2);
 }
 
