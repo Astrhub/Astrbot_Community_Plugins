@@ -409,14 +409,29 @@ export const usePluginStore = defineStore('plugins', () => {
     return data
   }
 
-  async function updatePluginListing(pluginId, action) {
-    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins/${pluginId}/${action}`, {
+  async function updatePluginListing(pluginId, action, payload = null) {
+    const options = {
       method: 'POST',
       credentials: 'include'
-    })
+    }
+    if (payload && Object.keys(payload).length > 0) {
+      options.headers = { 'content-type': 'application/json' }
+      options.body = JSON.stringify(payload)
+    }
+    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins/${pluginId}/${action}`, options)
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '更新插件状态失败')
     return data
+  }
+
+  async function loadNotifications() {
+    const response = await fetch(`${apiBaseUrl}/v1/me/notifications`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载消息失败')
+    return data.items || []
   }
 
   async function saveSystemSettings(payload) {
@@ -531,6 +546,13 @@ export const usePluginStore = defineStore('plugins', () => {
     currentPage.value = 1
   }
 
+  function resetPluginFilters() {
+    searchQuery.value = ''
+    selectedTag.value = null
+    currentPage.value = 1
+    sortBy.value = 'updated'
+  }
+
   function refreshRandomOrder() {
     if (sortBy.value === 'random') randomSeed.value = Math.random()
   }
@@ -585,6 +607,7 @@ export const usePluginStore = defineStore('plugins', () => {
     unlikePlugin,
     addPluginComment,
     updatePluginListing,
+    loadNotifications,
     saveSystemSettings,
     sendTestEmail,
     submitPlugin,
@@ -592,6 +615,7 @@ export const usePluginStore = defineStore('plugins', () => {
     setSelectedTag,
     setCurrentPage,
     setSortBy,
+    resetPluginFilters,
     toggleTheme,
     useSystemTheme,
     refreshRandomOrder,

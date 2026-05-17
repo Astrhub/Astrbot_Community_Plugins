@@ -37,6 +37,7 @@ class InMemoryMarketStore:
             "submissions": state.get("submissions", []),
             "comments": state.get("comments", []),
             "announcements": state.get("announcements", []),
+            "notifications": state.get("notifications", []),
             "apiKeys": state.get("apiKeys", []),
             "sessions": state.get("sessions", []),
             "nextNumericId": state.get("nextNumericId", 1),
@@ -197,6 +198,26 @@ class InMemoryMarketStore:
             return None
         plugin["status"] = status
         plugin["moderated_by"] = by_user_id
+        if status == "listed":
+            for key in ("unlist_reason", "unlisted_at", "unlisted_by"):
+                plugin.pop(key, None)
+        plugin["updated_at"] = utc_now()
+        return deepcopy(plugin)
+
+    def unlist_plugin(
+        self,
+        plugin_id: str,
+        by_user_id: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        plugin = self.get_plugin(plugin_id)
+        if not plugin:
+            return None
+        plugin["status"] = "unlisted"
+        plugin["moderated_by"] = by_user_id
+        plugin["unlist_reason"] = reason
+        plugin["unlisted_at"] = utc_now()
+        plugin["unlisted_by"] = by_user_id
         plugin["updated_at"] = utc_now()
         return deepcopy(plugin)
 
@@ -304,6 +325,9 @@ class InMemoryMarketStore:
         for announcement in self.state["announcements"]:
             if announcement.get("author_user_id") == from_user_id:
                 announcement["author_user_id"] = to_user_id
+        for notification in self.state["notifications"]:
+            if notification.get("user_id") == from_user_id:
+                notification["user_id"] = to_user_id
         for api_key in self.state["apiKeys"]:
             if api_key.get("user_id") == from_user_id:
                 api_key["user_id"] = to_user_id
@@ -331,6 +355,34 @@ class InMemoryMarketStore:
 
     def list_announcements(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["announcements"])
+
+    def create_notification(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        notification_type: str = "system",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        notification = {
+            "id": self._next_id("notification"),
+            "user_id": user_id,
+            "type": notification_type,
+            "title": title,
+            "body": body,
+            "metadata": metadata or {},
+            "read": False,
+            "created_at": utc_now(),
+        }
+        self.state["notifications"].insert(0, notification)
+        return deepcopy(notification)
+
+    def list_notifications(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            deepcopy(notification)
+            for notification in self.state["notifications"]
+            if notification["user_id"] == user_id
+        ]
 
     def issue_api_key(
         self,
@@ -531,6 +583,19 @@ CREATE TABLE IF NOT EXISTS market_announcements (
 );
 CREATE INDEX IF NOT EXISTS market_announcements_created_idx
     ON market_announcements(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_notifications (
+    id text PRIMARY KEY,
+    user_id text NOT NULL REFERENCES market_users(id) ON DELETE CASCADE,
+    type text NOT NULL DEFAULT 'system',
+    title text NOT NULL,
+    body text NOT NULL,
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    read boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS market_notifications_user_idx
+    ON market_notifications(user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS market_api_keys (
     id text PRIMARY KEY,
@@ -785,13 +850,46 @@ class PgRedisMarketStore(InMemoryMarketStore):
         row = await self._pool().fetchrow(
             """
             UPDATE market_plugins
-               SET status = $2, moderated_by = $3, updated_at = now()
+               SET status = $2,
+                   moderated_by = $3,
+                   metadata = CASE
+                       WHEN $2 = 'listed'
+                       THEN metadata - 'unlist_reason' - 'unlisted_at' - 'unlisted_by'
+                       ELSE metadata
+                   END,
+                   updated_at = now()
              WHERE id = $1
          RETURNING *
             """,
             plugin_id,
             status,
             by_user_id,
+        )
+        return self._plugin_from_record(row) if row else None
+
+    async def unlist_plugin(
+        self,
+        plugin_id: str,
+        by_user_id: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_plugins
+               SET status = 'unlisted',
+                   moderated_by = $2,
+                   metadata = metadata || $3::jsonb,
+                   updated_at = now()
+             WHERE id = $1
+         RETURNING *
+            """,
+            plugin_id,
+            by_user_id,
+            {
+                "unlist_reason": reason,
+                "unlisted_at": utc_now(),
+                "unlisted_by": by_user_id,
+            },
         )
         return self._plugin_from_record(row) if row else None
 
@@ -1021,6 +1119,11 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     to_user_id,
                 )
                 await connection.execute(
+                    "UPDATE market_notifications SET user_id = $2 WHERE user_id = $1",
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
                     "UPDATE market_api_keys SET user_id = $2 WHERE user_id = $1",
                     from_user_id,
                     to_user_id,
@@ -1052,6 +1155,40 @@ class PgRedisMarketStore(InMemoryMarketStore):
             "SELECT * FROM market_announcements ORDER BY created_at DESC"
         )
         return [self._announcement_from_record(row) for row in rows]
+
+    async def create_notification(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        notification_type: str = "system",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO market_notifications (id, user_id, type, title, body, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            RETURNING *
+            """,
+            new_id("notification"),
+            user_id,
+            notification_type,
+            title,
+            body,
+            metadata or {},
+        )
+        return self._notification_from_record(row)
+
+    async def list_notifications(self, user_id: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            SELECT * FROM market_notifications
+             WHERE user_id = $1
+          ORDER BY created_at DESC
+            """,
+            user_id,
+        )
+        return [self._notification_from_record(row) for row in rows]
 
     async def issue_api_key(
         self,
@@ -1183,6 +1320,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
         return serialize_value(dict(row))
 
     def _announcement_from_record(self, row: asyncpg.Record) -> dict[str, Any]:
+        return serialize_value(dict(row))
+
+    def _notification_from_record(self, row: asyncpg.Record) -> dict[str, Any]:
         return serialize_value(dict(row))
 
     def _api_key_from_record(self, row: asyncpg.Record) -> dict[str, Any]:

@@ -64,6 +64,27 @@
               {{ currentUser?.github_login ? '重新绑定 GitHub' : '绑定 GitHub' }}
             </n-button>
           </section>
+
+          <section class="profile-section">
+            <div class="section-title">
+              <h2>消息</h2>
+              <p>插件审核、下架等站内通知会显示在这里。</p>
+            </div>
+            <n-empty v-if="notifications.length === 0" description="暂无消息" />
+            <div v-else class="notification-list">
+              <article
+                v-for="notification in notifications"
+                :key="notification.id"
+                class="notification-item"
+              >
+                <div class="notification-title">
+                  <strong>{{ notification.title }}</strong>
+                  <time>{{ formatTime(notification.created_at) }}</time>
+                </div>
+                <p>{{ notification.body }}</p>
+              </article>
+            </div>
+          </section>
         </n-form>
       </n-spin>
     </main>
@@ -77,6 +98,7 @@ import { storeToRefs } from 'pinia'
 import {
   NAvatar,
   NButton,
+  NEmpty,
   NForm,
   NFormItem,
   NIcon,
@@ -97,10 +119,11 @@ const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
 const { currentUser } = storeToRefs(store)
-const { loadCurrentUser, loginWithGithub, updateProfile } = store
+const { loadCurrentUser, loadNotifications, loginWithGithub, updateProfile } = store
 
 const loading = ref(true)
 const saving = ref(false)
+const notifications = ref([])
 const formData = reactive({
   avatar_url: '',
   github_name: ''
@@ -144,6 +167,11 @@ function goBack() {
   router.back()
 }
 
+function formatTime(value) {
+  if (!value) return ''
+  return new Date(value).toLocaleString()
+}
+
 onMounted(async () => {
   await loadCurrentUser()
   if (!currentUser.value) {
@@ -152,6 +180,11 @@ onMounted(async () => {
     return
   }
   applyCurrentUser()
+  try {
+    notifications.value = await loadNotifications()
+  } catch (error) {
+    message.error(error.message || '消息加载失败')
+  }
   loading.value = false
 })
 </script>
@@ -177,7 +210,8 @@ onMounted(async () => {
 .header-left,
 .avatar-row,
 .actions,
-.github-state {
+.github-state,
+.notification-title {
   display: flex;
   align-items: center;
   gap: 14px;
@@ -250,6 +284,31 @@ h2 {
 
 .github-state.linked {
   color: #18a058;
+}
+
+.notification-list {
+  display: grid;
+  gap: 12px;
+}
+
+.notification-item {
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--body-color);
+}
+
+.notification-title {
+  justify-content: space-between;
+}
+
+.notification-title time,
+.notification-item p {
+  color: var(--text-color-2);
+}
+
+.notification-item p {
+  margin: 8px 0 0;
 }
 
 @media (max-width: 640px) {

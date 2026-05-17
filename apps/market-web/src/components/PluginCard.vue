@@ -156,6 +156,25 @@
                   </template>
                   <span role="tooltip">访问作者主页</span>
                 </n-tooltip>
+                <n-tooltip v-if="isAdminUser" placement="top" trigger="hover">
+                  <template #trigger>
+                    <n-button
+                      secondary
+                      size="small"
+                      circle
+                      type="warning"
+                      :loading="isUnlisting"
+                      @click.stop="openUnlistModal"
+                      role="button"
+                      :aria-label="`下架 ${plugin.name}`"
+                    >
+                      <n-icon size="18" aria-hidden="true">
+                        <cloud-offline-outline />
+                      </n-icon>
+                    </n-button>
+                  </template>
+                  <span role="tooltip">下架插件</span>
+                </n-tooltip>
               </div>
             </div>
           </div>
@@ -169,21 +188,55 @@
     v-model:show="showPluginDetails"
     :plugin="plugin"
   />
+
+  <n-modal
+    v-model:show="showUnlistModal"
+    preset="card"
+    title="填写下架原因"
+    style="max-width: 420px"
+  >
+    <n-input
+      v-model:value="unlistReason"
+      type="textarea"
+      placeholder="请说明下架原因，作者会在个人消息中看到。"
+      :autosize="{ minRows: 3, maxRows: 6 }"
+      maxlength="500"
+      show-count
+    />
+    <template #footer>
+      <div class="unlist-modal-actions">
+        <n-button tertiary @click="showUnlistModal = false">取消</n-button>
+        <n-button type="warning" :loading="isUnlisting" @click="unlistPlugin">
+          确认下架
+        </n-button>
+      </div>
+    </template>
+  </n-modal>
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, onUnmounted, watch } from 'vue'
+import { computed, ref, onMounted, nextTick, onUnmounted, watch } from 'vue'
 import {
   NCard,
   NSpace,
   NTag,
   NButton,
   NIcon,
+  NInput,
+  NModal,
   useMessage,
   NTooltip
 } from 'naive-ui'
-import { StarSharp, LinkOutline, PersonOutline, CheckmarkOutline } from '@vicons/ionicons5'
+import {
+  CloudOfflineOutline,
+  StarSharp,
+  LinkOutline,
+  PersonOutline,
+  CheckmarkOutline
+} from '@vicons/ionicons5'
 import { defineAsyncComponent } from 'vue'
+import { storeToRefs } from 'pinia'
+import { usePluginStore } from '@/stores/plugins'
 const PluginDetails = defineAsyncComponent(() => import('./PluginDetails.vue'))
 
 const showPluginDetails = ref(false)
@@ -208,6 +261,13 @@ const nameTextEl = ref(null)
 const pluginNameEl = ref(null)
 const cardRef = ref(null)
 const resizeObserver = ref(null)
+const isUnlisting = ref(false)
+const showUnlistModal = ref(false)
+const unlistReason = ref('')
+const store = usePluginStore()
+const { currentUser } = storeToRefs(store)
+const { loadPlugins, updatePluginListing } = store
+const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
 
 const checkTextOverflow = () => {
   nextTick(() => {
@@ -296,6 +356,30 @@ const showDetails = () => {
   showPluginDetails.value = true
 }
 
+function openUnlistModal() {
+  unlistReason.value = ''
+  showUnlistModal.value = true
+}
+
+async function unlistPlugin() {
+  const reason = unlistReason.value.trim()
+  if (!reason) {
+    message.warning('请填写下架原因')
+    return
+  }
+  isUnlisting.value = true
+  try {
+    await updatePluginListing(props.plugin.id, 'unlist', { reason })
+    await loadPlugins()
+    showUnlistModal.value = false
+    message.success('插件已下架')
+  } catch (error) {
+    message.error(error.message || '下架失败')
+  } finally {
+    isUnlisting.value = false
+  }
+}
+
 // 获取logo URL的逻辑
 const getLogoUrl = () => {
   // 如果插件有logo字段，直接使用
@@ -359,6 +443,12 @@ const handleLogoError = (event) => {
   transform: translateY(-4px);
   border-color: var(--primary-color);
   box-shadow: var(--shadow-md);
+}
+
+.unlist-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
 }
 
 .card-header {

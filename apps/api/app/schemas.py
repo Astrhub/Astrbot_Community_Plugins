@@ -40,6 +40,15 @@ class PluginPatch(BaseModel):
         return str(value).strip()
 
 
+class PluginUnlistPayload(BaseModel):
+    reason: str = Field(max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        return value.strip()
+
+
 class CommentCreate(BaseModel):
     body: str
     parent_id: str | None = None
