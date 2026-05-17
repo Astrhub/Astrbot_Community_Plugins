@@ -378,12 +378,24 @@ export const usePluginStore = defineStore('plugins', () => {
     }
   }
 
-  async function loadSetupStatus() {
-    const response = await fetch(`${apiBaseUrl}/v1/setup/status`, {
+  async function loadSetupStatus(path = '/v1/setup/status') {
+    const response = await fetch(`${apiBaseUrl}${path}`, {
       credentials: 'include',
       cache: 'no-store'
     })
     const data = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      if (response.status === 404) {
+        setupStatus.value = {
+          ...setupStatus.value,
+          required: false,
+          missing: [],
+          saved_setup: createDefaultSetupConfig()
+        }
+        return setupStatus.value
+      }
+      throw new Error(data.error || '加载安装状态失败')
+    }
     const setupConfig = mergeSetupConfig(data.saved_setup, data.saved_setup?.site || data.site || {})
     setupStatus.value = {
       required: Boolean(data.required),
@@ -394,6 +406,10 @@ export const usePluginStore = defineStore('plugins', () => {
       restart_required: Boolean(data.restart_required)
     }
     return setupStatus.value
+  }
+
+  function loadAdminSetupStatus() {
+    return loadSetupStatus('/v1/admin/setup/status')
   }
 
   async function loadSiteConfig() {
@@ -767,6 +783,7 @@ export const usePluginStore = defineStore('plugins', () => {
     loadAnnouncements,
     loadSiteConfig,
     loadSetupStatus,
+    loadAdminSetupStatus,
     loadPlugins,
     loadCurrentUser,
     loginWithGithub,

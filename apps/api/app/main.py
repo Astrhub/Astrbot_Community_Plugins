@@ -272,25 +272,32 @@ def register_routes(app: FastAPI) -> None:
         await send_email(request.app, settings, payload.to, payload.subject, payload.body)
         return {"sent": True}
 
+    @app.get("/v1/admin/setup/status")
+    async def admin_setup_status(request: Request) -> dict[str, Any]:
+        user = await require_user(request)
+        if not is_core_admin(user):
+            raise error(403, "Only core admin can view setup status")
+        settings = get_settings(request)
+        runtime_config = read_runtime_config(settings.runtime_config_path)
+        return build_setup_status_response(
+            settings,
+            runtime_config,
+            include_saved_setup=True,
+            redact_saved_setup=False,
+        )
+
     @app.get("/v1/setup/status")
     async def setup_status(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
         runtime_config = read_runtime_config(settings.runtime_config_path)
-        runtime_database_url = runtime_config.get("DATABASE_URL", "")
-        runtime_redis_url = runtime_config.get("REDIS_URL", "")
-        saved_setup = build_saved_setup_config(settings, runtime_config)
-        user = await current_user(request)
-        can_view_secrets = bool(user) and is_core_admin(user)
-        public_setup = saved_setup if can_view_secrets else redact_setup_infrastructure(saved_setup)
-        return {
-            "required": settings.is_setup_required(),
-            "missing": list(settings.missing_setup_fields()),
-            "database_configured": bool(settings.database_url or runtime_database_url),
-            "redis_configured": bool(settings.redis_url or runtime_redis_url),
-            "site": saved_setup["site"],
-            "saved_setup": public_setup,
-            "restart_required": settings_restart_required(settings, runtime_config),
-        }
+        if not settings.is_setup_required():
+            raise error(404, "Setup status is unavailable after initial setup")
+        return build_setup_status_response(
+            settings,
+            runtime_config,
+            include_saved_setup=True,
+            redact_saved_setup=True,
+        )
 
     @app.post("/v1/setup")
     async def save_setup(
@@ -1835,6 +1842,31 @@ def build_saved_setup_config(
         "redis": build_saved_redis_config(runtime_config, redis_url),
         **system_settings,
     }
+
+
+def build_setup_status_response(
+    settings: Settings,
+    runtime_config: dict[str, str],
+    *,
+    include_saved_setup: bool,
+    redact_saved_setup: bool,
+) -> dict[str, Any]:
+    runtime_database_url = runtime_config.get("DATABASE_URL", "")
+    runtime_redis_url = runtime_config.get("REDIS_URL", "")
+    status = {
+        "required": settings.is_setup_required(),
+        "missing": list(settings.missing_setup_fields()),
+        "database_configured": bool(settings.database_url or runtime_database_url),
+        "redis_configured": bool(settings.redis_url or runtime_redis_url),
+        "restart_required": settings_restart_required(settings, runtime_config),
+    }
+    if include_saved_setup:
+        saved_setup = build_saved_setup_config(settings, runtime_config)
+        if redact_saved_setup:
+            saved_setup = redact_setup_infrastructure(saved_setup)
+        status["site"] = saved_setup["site"]
+        status["saved_setup"] = saved_setup
+    return status
 
 
 def redact_setup_infrastructure(config: dict[str, Any]) -> dict[str, Any]:

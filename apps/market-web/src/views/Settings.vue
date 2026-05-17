@@ -329,7 +329,7 @@ const store = usePluginStore()
 const { currentUser, setupStatus } = storeToRefs(store)
 const {
   loadCurrentUser,
-  loadSetupStatus,
+  loadAdminSetupStatus,
   loadSystemSettings,
   saveSystemSettings,
   sendTestEmail,
@@ -542,7 +542,7 @@ async function loadSettings() {
       router.replace('/admin')
       return
     }
-    await loadSetupStatus()
+    await loadAdminSetupStatus()
     applySettings(await loadSystemSettings())
   } catch (error) {
     message.error(error.message || '加载设置失败')

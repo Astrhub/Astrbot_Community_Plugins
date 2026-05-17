@@ -995,7 +995,11 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     assert login.status_code == 200
     assert login.json()["user"]["role"] == Role.CORE_ADMIN
     assert client.get("/health").json()["setup"] == "complete"
-    assert client.get("/v1/setup/status").json()["required"] is False
+    assert client.get("/v1/setup/status").status_code == 404
+    assert client.get("/v1/admin/setup/status").json()["required"] is False
+    client.cookies.clear()
+    repeat_setup = client.post("/v1/setup", json=setup_payload(site_name="Again"))
+    assert repeat_setup.status_code == 401
 
 
 def test_setup_initialization_failure_does_not_write_runtime_config(tmp_path) -> None:
@@ -1159,20 +1163,19 @@ def test_public_site_config_uses_settings() -> None:
     }
 
 
-def test_setup_status_redacts_infrastructure_after_initial_setup(tmp_path) -> None:
+def test_setup_status_closes_after_initial_setup(tmp_path) -> None:
     client = make_setup_client(tmp_path)
     client.post("/v1/setup", json=setup_payload())
     client.cookies.clear()
 
-    public_status = client.get("/v1/setup/status").json()
-    assert public_status["saved_setup"]["postgres"]["database"] == ""
-    assert public_status["saved_setup"]["postgres"]["password"] == ""
+    public_status = client.get("/v1/setup/status")
+    assert public_status.status_code == 404
 
     client.post(
         "/v1/auth/internal/login",
         json={"username": "admin", "password": "password123"},
     )
-    core_status = client.get("/v1/setup/status").json()
+    core_status = client.get("/v1/admin/setup/status").json()
     assert core_status["saved_setup"]["postgres"]["password"] == "market"
     assert core_status["saved_setup"]["github"]["client_secret"] == ""
     assert core_status["saved_setup"]["email"]["cloudflare"]["api_token"] == ""

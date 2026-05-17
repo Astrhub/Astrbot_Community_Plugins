@@ -177,6 +177,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
+import { useRouter } from 'vue-router'
 import {
   NAlert,
   NButton,
@@ -196,6 +197,7 @@ import { usePluginStore } from '@/stores/plugins'
 import ThemeModeButton from '@/components/ThemeModeButton.vue'
 
 const message = useMessage()
+const router = useRouter()
 const store = usePluginStore()
 const { setupStatus, siteConfig } = storeToRefs(store)
 const { loadSetupStatus, saveSetupConfig } = store
@@ -257,6 +259,10 @@ function applySetupConfig(config = {}) {
 
 async function reloadStatus() {
   const status = await loadSetupStatus()
+  if (!status.required) {
+    router.replace('/')
+    return
+  }
   applySetupConfig(status.saved_setup)
 }
 
