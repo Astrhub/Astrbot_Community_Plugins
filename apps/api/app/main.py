@@ -414,7 +414,7 @@ def register_routes(app: FastAPI) -> None:
         params = urlencode(
             {
                 "client_id": settings.github_client_id,
-                "redirect_uri": settings.github_callback_url,
+                "redirect_uri": github_callback_url_for_request(request, settings),
                 "scope": settings.github_scope,
                 "state": state,
             }
@@ -913,6 +913,32 @@ def get_runtime_settings(request: Request) -> Settings:
             settings.public_login_enabled,
         ),
     )
+
+
+def github_callback_url_for_request(request: Request, settings: Settings) -> str:
+    if not is_loopback_url(settings.github_callback_url):
+        return settings.github_callback_url
+    return f"{public_request_origin(request)}/v1/auth/github/callback"
+
+
+def public_request_origin(request: Request) -> str:
+    forwarded_proto = first_forwarded_header(request, "x-forwarded-proto")
+    forwarded_host = first_forwarded_header(request, "x-forwarded-host")
+    forwarded_port = first_forwarded_header(request, "x-forwarded-port")
+    proto = forwarded_proto or request.url.scheme
+    host = forwarded_host or request.headers.get("host") or request.url.netloc
+    if forwarded_port and ":" not in host:
+        host = f"{host}:{forwarded_port}"
+    return f"{proto}://{host}".rstrip("/")
+
+
+def first_forwarded_header(request: Request, name: str) -> str:
+    return request.headers.get(name, "").split(",", 1)[0].strip()
+
+
+def is_loopback_url(value: str) -> bool:
+    hostname = urlparse(value).hostname or ""
+    return hostname == "localhost" or hostname == "::1" or hostname.startswith("127.")
 
 
 def get_store(request: Request) -> InMemoryMarketStore | PgRedisMarketStore:

@@ -2,7 +2,24 @@ import { ref, computed, watch } from 'vue'
 import { defineStore } from 'pinia'
 
 const normalizeBaseUrl = (value) => String(value || '').trim().replace(/\/$/, '')
-const BASE_URL = normalizeBaseUrl(import.meta.env.VITE_BASE_URL) || window.location.origin
+const isLoopbackBaseUrl = (value) => {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase()
+    return hostname === 'localhost' || hostname === '0.0.0.0' || hostname === '::1' ||
+      hostname.startsWith('127.')
+  } catch {
+    return false
+  }
+}
+const WINDOW_ORIGIN = window.location.origin
+const CONFIGURED_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_BASE_URL)
+const CONFIGURED_API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL)
+const canUseConfiguredBaseUrl = !CONFIGURED_BASE_URL ||
+  !isLoopbackBaseUrl(CONFIGURED_BASE_URL) ||
+  isLoopbackBaseUrl(WINDOW_ORIGIN)
+const BASE_URL = canUseConfiguredBaseUrl && CONFIGURED_BASE_URL ? CONFIGURED_BASE_URL : WINDOW_ORIGIN
+const API_BASE_URL = CONFIGURED_API_BASE_URL ||
+  (canUseConfiguredBaseUrl ? CONFIGURED_BASE_URL : '')
 const COMMUNITY_REPO_URL = String(import.meta.env.VITE_COMMUNITY_REPO_URL || '')
 const DEFAULT_SITE_CONFIG = Object.freeze({
   name: 'AstrBot Community Plugins',
@@ -122,7 +139,7 @@ export const usePluginStore = defineStore('plugins', () => {
   const irisMaskActive = ref(false)
   const irisMaskPosition = ref({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
 
-  const apiBaseUrl = BASE_URL
+  const apiBaseUrl = API_BASE_URL
   const pluginSourceUrl = `${BASE_URL}/plugins.json`
   const communityRepoUrl = COMMUNITY_REPO_URL
   let mediaQuery = null
