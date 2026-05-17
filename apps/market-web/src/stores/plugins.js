@@ -97,6 +97,7 @@ const createDefaultSetupConfig = () => ({
 
 export const usePluginStore = defineStore('plugins', () => {
   const plugins = ref([])
+  const announcements = ref([])
   const currentUser = ref(null)
   const setupStatus = ref({
     required: false,
@@ -333,6 +334,14 @@ export const usePluginStore = defineStore('plugins', () => {
     } finally {
       isLoading.value = false
     }
+  }
+
+  async function loadAnnouncements() {
+    const response = await fetch(`${apiBaseUrl}/v1/announcements`, { cache: 'no-store' })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载公告失败')
+    announcements.value = Array.isArray(data.items) ? data.items : []
+    return announcements.value
   }
 
   function normalizePluginItem(plugin, index) {
@@ -575,6 +584,19 @@ export const usePluginStore = defineStore('plugins', () => {
     return data
   }
 
+  async function publishAnnouncement(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/core/announcements`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '发布公告失败')
+    announcements.value = [data, ...announcements.value]
+    return data
+  }
+
   async function loadCurrentUser() {
     try {
       const response = await fetch(`${apiBaseUrl}/v1/me`, { credentials: 'include' })
@@ -700,6 +722,7 @@ export const usePluginStore = defineStore('plugins', () => {
 
   return {
     plugins,
+    announcements,
     currentUser,
     setupStatus,
     siteConfig,
@@ -724,6 +747,7 @@ export const usePluginStore = defineStore('plugins', () => {
     totalPages,
     paginatedPlugins,
     initTheme,
+    loadAnnouncements,
     loadSiteConfig,
     loadSetupStatus,
     loadPlugins,
@@ -747,6 +771,7 @@ export const usePluginStore = defineStore('plugins', () => {
     loadNotifications,
     saveSystemSettings,
     sendTestEmail,
+    publishAnnouncement,
     submitPlugin,
     setSearchQuery,
     setSelectedTag,

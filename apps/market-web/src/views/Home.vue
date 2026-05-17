@@ -10,6 +10,20 @@
       :tag-options="tagOptions"
       :total-pages="totalPages"
     />
+    <section v-if="announcements.length" class="announcements" aria-label="站点公告">
+      <article
+        v-for="announcement in visibleAnnouncements"
+        :key="announcement.id"
+        class="announcement-item"
+      >
+        <div class="announcement-heading">
+          <n-icon size="18"><megaphone-outline /></n-icon>
+          <strong>{{ announcement.title }}</strong>
+          <time v-if="announcement.created_at">{{ formatTime(announcement.created_at) }}</time>
+        </div>
+        <p>{{ announcement.body }}</p>
+      </article>
+    </section>
     <div class="top-pagination-wrapper">
       <app-pagination
         v-if="totalPages > 1"
@@ -87,8 +101,8 @@
 import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { NLayout, NSpin, NIcon, NButton } from 'naive-ui'
-import { SearchOutline, SyncOutline } from '@vicons/ionicons5'
+import { NLayout, NIcon, NButton } from 'naive-ui'
+import { MegaphoneOutline, SearchOutline, SyncOutline } from '@vicons/ionicons5'
 import AppHeader from '../components/AppHeader.vue'
 import PluginCard from '../components/PluginCard.vue'
 import AppPagination from '../components/AppPagination.vue'
@@ -109,8 +123,11 @@ const {
   paginatedPlugins,
   isLoading,
   filteredPlugins,
-  randomSeed
+  randomSeed,
+  announcements
 } = storeToRefs(store)
+
+const visibleAnnouncements = computed(() => announcements.value.slice(0, 2))
 
 const filterKey = computed(() => {
   return [
@@ -126,11 +143,29 @@ const filterKey = computed(() => {
 const { refreshRandomOrder } = store
 onMounted(() => {
   store.loadPlugins()
+  store.loadAnnouncements().catch((error) => {
+    console.error('Error loading announcements:', error)
+  })
 })
 
 watch(() => route.fullPath, () => {
-  if (route.path === '/') store.loadPlugins()
+  if (route.path === '/') {
+    store.loadPlugins()
+    store.loadAnnouncements().catch((error) => {
+      console.error('Error loading announcements:', error)
+    })
+  }
 })
+
+function formatTime(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  })
+}
 </script>
 
 <style scoped>
@@ -146,6 +181,53 @@ watch(() => route.fullPath, () => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.announcements {
+  width: min(1400px, calc(100% - 40px));
+  margin: 16px auto 0;
+  display: grid;
+  gap: 10px;
+}
+
+.announcement-item {
+  padding: 14px 16px;
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+}
+
+.announcement-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+}
+
+.announcement-heading .n-icon {
+  color: var(--primary-color);
+  flex: 0 0 auto;
+}
+
+.announcement-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.announcement-heading time {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.announcement-item p {
+  margin: 8px 0 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .grid-toolbar {
@@ -208,6 +290,21 @@ watch(() => route.fullPath, () => {
 
 /* 手机屏幕 */
 @media (max-width: 480px) {
+  .announcements {
+    width: calc(100% - 28px);
+    margin-top: 12px;
+  }
+
+  .announcement-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .announcement-heading time {
+    width: 100%;
+    margin-left: 26px;
+  }
+
   .plugins-grid {
     grid-template-columns: 1fr;
     gap: 16px;

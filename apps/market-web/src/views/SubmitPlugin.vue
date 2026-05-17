@@ -37,9 +37,7 @@
           <p v-else>当前站点已暂停插件提交。</p>
           <ul>
             <li>仓库必须是公开 GitHub 仓库。</li>
-            <li>插件名建议使用 `astrbot_plugin_` 前缀。</li>
-            <li>核心管理员拥有公告和管理员任免权限。</li>
-            <li>普通管理员只处理插件审核、上下架、评论治理和用户禁言。</li>
+            <li>插件名必须使用 `astrbot_plugin_` 前缀。</li>
           </ul>
         </n-card>
       </section>
@@ -168,7 +166,7 @@ const formData = reactive({
 const rules = {
   name: [
     { required: true, message: '请输入插件名', trigger: 'blur' },
-    { pattern: /^astrbot_plugin_[a-z0-9_-]+$/i, message: '建议以 astrbot_plugin_ 开头，仅含字母、数字、下划线、短横线', trigger: 'blur' }
+    { pattern: /^astrbot_plugin_[a-z0-9_-]+$/i, message: '插件名必须以 astrbot_plugin_ 开头，仅含字母、数字、下划线、短横线', trigger: 'blur' }
   ],
   display_name: {
     required: true,
