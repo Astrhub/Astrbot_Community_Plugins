@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 
 const normalizeBaseUrl = (value) => String(value || '').trim().replace(/\/$/, '')
 const BASE_URL = normalizeBaseUrl(import.meta.env.VITE_BASE_URL) || window.location.origin
+const COMMUNITY_REPO_URL = String(import.meta.env.VITE_COMMUNITY_REPO_URL || '')
 const DEFAULT_SITE_CONFIG = Object.freeze({
   name: 'AstrBot Community Plugins',
   icon_url: '/logo.webp',
@@ -96,6 +97,7 @@ const createDefaultSetupConfig = () => ({
 
 export const usePluginStore = defineStore('plugins', () => {
   const plugins = ref([])
+  const announcements = ref([])
   const currentUser = ref(null)
   const setupStatus = ref({
     required: false,
@@ -122,6 +124,7 @@ export const usePluginStore = defineStore('plugins', () => {
 
   const apiBaseUrl = BASE_URL
   const pluginSourceUrl = `${BASE_URL}/plugins.json`
+  const communityRepoUrl = COMMUNITY_REPO_URL
   let mediaQuery = null
 
   function prefersDark() {
@@ -150,16 +153,14 @@ export const usePluginStore = defineStore('plugins', () => {
     }
   }
 
-  const toggleTheme = () => {
-    themeMode.value = isDarkMode.value ? 'light' : 'dark'
+  function setThemeMode(value) {
+    themeMode.value = ['system', 'light', 'dark'].includes(value) ? value : 'system'
     localStorage.setItem('theme-mode', themeMode.value)
+    if (themeMode.value === 'system') {
+      applyThemeFromSystem()
+      return
+    }
     isDarkMode.value = themeMode.value === 'dark'
-  }
-
-  function useSystemTheme() {
-    themeMode.value = 'system'
-    localStorage.setItem('theme-mode', 'system')
-    applyThemeFromSystem()
   }
 
   function normalizeSiteConfig(value = {}) {
@@ -333,6 +334,14 @@ export const usePluginStore = defineStore('plugins', () => {
     } finally {
       isLoading.value = false
     }
+  }
+
+  async function loadAnnouncements() {
+    const response = await fetch(`${apiBaseUrl}/v1/announcements`, { cache: 'no-store' })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载公告失败')
+    announcements.value = Array.isArray(data.items) ? data.items : []
+    return announcements.value
   }
 
   function normalizePluginItem(plugin, index) {
@@ -575,6 +584,19 @@ export const usePluginStore = defineStore('plugins', () => {
     return data
   }
 
+  async function publishAnnouncement(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/core/announcements`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '发布公告失败')
+    announcements.value = [data, ...announcements.value]
+    return data
+  }
+
   async function loadCurrentUser() {
     try {
       const response = await fetch(`${apiBaseUrl}/v1/me`, { credentials: 'include' })
@@ -700,6 +722,7 @@ export const usePluginStore = defineStore('plugins', () => {
 
   return {
     plugins,
+    announcements,
     currentUser,
     setupStatus,
     siteConfig,
@@ -715,6 +738,7 @@ export const usePluginStore = defineStore('plugins', () => {
     randomSeed,
     apiBaseUrl,
     pluginSourceUrl,
+    communityRepoUrl,
     irisMaskActive,
     irisMaskPosition,
     allTags,
@@ -723,6 +747,7 @@ export const usePluginStore = defineStore('plugins', () => {
     totalPages,
     paginatedPlugins,
     initTheme,
+    loadAnnouncements,
     loadSiteConfig,
     loadSetupStatus,
     loadPlugins,
@@ -746,6 +771,7 @@ export const usePluginStore = defineStore('plugins', () => {
     loadNotifications,
     saveSystemSettings,
     sendTestEmail,
+    publishAnnouncement,
     submitPlugin,
     setSearchQuery,
     setSelectedTag,
@@ -755,8 +781,7 @@ export const usePluginStore = defineStore('plugins', () => {
     setFuzzySearchEnabled,
     updatePluginInList,
     resetPluginFilters,
-    toggleTheme,
-    useSystemTheme,
+    setThemeMode,
     refreshRandomOrder,
     triggerIrisAnimation
   }

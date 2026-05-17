@@ -14,14 +14,7 @@
           </div>
         </div>
         <div class="header-actions">
-          <n-button quaternary circle @click="toggleTheme" :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'">
-            <template #icon>
-              <n-icon>
-                <sunny v-if="isDarkMode" />
-                <moon v-else />
-              </n-icon>
-            </template>
-          </n-button>
+          <theme-mode-button circle />
           <n-button tertiary @click="loadSettings">刷新</n-button>
           <n-button type="primary" :loading="saving" @click="save">保存</n-button>
         </div>
@@ -66,6 +59,38 @@
               <n-form-item label="文档地址" path="site.docs_url">
                 <n-input v-model:value="formData.site.docs_url" placeholder="https://docs.astrbot.app/..." />
               </n-form-item>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <div class="section-title">
+              <h2>站点公告</h2>
+              <p>发布后会显示在市场首页。</p>
+            </div>
+            <div class="form-grid">
+              <n-form-item label="公告标题">
+                <n-input
+                  v-model:value="announcementForm.title"
+                  :maxlength="80"
+                  show-count
+                  placeholder="例如：维护通知"
+                />
+              </n-form-item>
+              <n-form-item label="公告内容" class="form-row-full">
+                <n-input
+                  v-model:value="announcementForm.body"
+                  type="textarea"
+                  :maxlength="1000"
+                  show-count
+                  :autosize="{ minRows: 3, maxRows: 6 }"
+                  placeholder="输入需要展示给用户的公告内容"
+                />
+              </n-form-item>
+            </div>
+            <div class="announcement-actions">
+              <n-button type="primary" :loading="publishingAnnouncement" @click="publishSiteAnnouncement">
+                发布公告
+              </n-button>
             </div>
           </section>
 
@@ -272,8 +297,9 @@ import {
   NTag,
   useMessage
 } from 'naive-ui'
-import { ArrowBack, Moon, Sunny } from '@vicons/ionicons5'
+import { ArrowBack } from '@vicons/ionicons5'
 import { usePluginStore } from '@/stores/plugins'
+import ThemeModeButton from '@/components/ThemeModeButton.vue'
 
 const SettingSwitch = {
   props: {
@@ -300,22 +326,24 @@ const SettingSwitch = {
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { isDarkMode, currentUser, setupStatus } = storeToRefs(store)
+const { currentUser, setupStatus } = storeToRefs(store)
 const {
   loadCurrentUser,
   loadSetupStatus,
   loadSystemSettings,
   saveSystemSettings,
   sendTestEmail,
-  toggleTheme
+  publishAnnouncement
 } = store
 
 const formRef = ref(null)
 const loading = ref(true)
 const saving = ref(false)
 const testingEmail = ref(false)
+const publishingAnnouncement = ref(false)
 const isCoreAdmin = computed(() => currentUser.value?.role === 'core_admin')
 const testEmail = reactive({ to: '' })
+const announcementForm = reactive({ title: '', body: '' })
 
 const formData = reactive(createSettingsForm())
 
@@ -543,6 +571,30 @@ function save() {
   })
 }
 
+async function publishSiteAnnouncement() {
+  if (!isCoreAdmin.value) {
+    message.warning('只有核心管理员可以发布公告')
+    return
+  }
+  const title = announcementForm.title.trim()
+  const body = announcementForm.body.trim()
+  if (!title || !body) {
+    message.warning('请填写公告标题和内容')
+    return
+  }
+  publishingAnnouncement.value = true
+  try {
+    await publishAnnouncement({ title, body })
+    announcementForm.title = ''
+    announcementForm.body = ''
+    message.success('公告已发布')
+  } catch (error) {
+    message.error(error.message || '发布公告失败')
+  } finally {
+    publishingAnnouncement.value = false
+  }
+}
+
 async function sendEmailTest() {
   if (!emailPattern.test(testEmail.to)) {
     message.warning('请输入有效的测试收件邮箱')
@@ -665,6 +717,10 @@ h1 {
   gap: 4px 16px;
 }
 
+.form-row-full {
+  grid-column: 1 / -1;
+}
+
 .infra-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -724,6 +780,12 @@ h1 {
   margin-top: 10px;
 }
 
+.announcement-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
 @media (max-width: 760px) {
   .header-content {
     align-items: flex-start;
@@ -747,6 +809,14 @@ h1 {
 
   .settings-content {
     padding: 20px 14px 34px;
+  }
+
+  .announcement-actions {
+    justify-content: stretch;
+  }
+
+  .announcement-actions :deep(.n-button) {
+    width: 100%;
   }
 }
 </style>

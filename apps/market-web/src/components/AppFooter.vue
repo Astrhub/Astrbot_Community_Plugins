@@ -1,12 +1,6 @@
 <template>
   <footer class="app-footer">
     <div class="footer-content">
-      <div class="footer-section">
-        <img :src="siteIconUrl" :alt="siteName" class="footer-logo" width="40" height="40" decoding="async" fetchpriority="low">
-        <p class="footer-description">
-          {{ siteName }} 是 AstrBot 的社区插件市场与第三方源入口。
-        </p>
-      </div>
       <div class="footer-links">
         <div class="links-group">
           <h4>相关链接</h4>
@@ -25,7 +19,7 @@
             <n-icon><document-text /></n-icon>
             插件开发文档
           </a>
-          <a href="https://github.com/Astrhub/Astrbot_Community_Plugins" target="_blank" class="footer-link">
+          <a :href="communityRepoUrl" target="_blank" class="footer-link">
             <n-icon><code-slash /></n-icon>
             市场仓库
           </a>
@@ -60,7 +54,7 @@ const store = usePluginStore()
 const { siteConfig } = storeToRefs(store)
 const currentYear = computed(() => new Date().getFullYear())
 const siteName = computed(() => siteConfig.value.name)
-const siteIconUrl = computed(() => siteConfig.value.icon_url)
+const communityRepoUrl = computed(() => store.communityRepoUrl)
 </script>
 
 <style scoped>
@@ -75,34 +69,14 @@ const siteIconUrl = computed(() => siteConfig.value.icon_url)
   max-width: 1200px;
   margin: 0 auto;
   padding: 0 24px;
-  display: grid;
-  grid-template-columns: 1.5fr 1fr;
-  gap: 48px;
-}
-
-.footer-section {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.footer-logo {
-  width: 40px;
-  height: 40px;
-  object-fit: contain;
-}
-
-.footer-description {
-  color: var(--text-secondary);
-  line-height: 1.6;
-  font-size: 0.95em;
-  margin: 0;
 }
 
 .footer-links {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 32px;
+  max-width: 620px;
+  margin: 0 auto;
 }
 
 .links-group h4 {
@@ -188,44 +162,37 @@ const siteIconUrl = computed(() => siteConfig.value.icon_url)
 /* 移动端适配 */
 @media (max-width: 768px) {
   .app-footer {
-    padding: 32px 0 20px;
-    margin-top: 40px;
+    padding: 18px 0 14px;
+    margin-top: 24px;
   }
 
   .footer-content {
     grid-template-columns: 1fr;
-    gap: 32px;
+    gap: 12px;
     padding: 0 16px;
   }
 
-  .footer-section {
-    text-align: left;
-    gap: 12px;
-  }
-
-  .footer-description {
-    font-size: 0.9em;
-    line-height: 1.5;
-  }
-
   .footer-links {
-    grid-template-columns: 1fr;
-    gap: 24px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px 10px;
   }
 
   .links-group {
-    text-align: left;
+    display: contents;
   }
 
   .links-group h4 {
-    margin-bottom: 12px;
-    font-size: 0.95em;
+    display: none;
   }
 
   .footer-link {
-    justify-content: flex-start;
-    margin-bottom: 10px;
-    padding: 8px 0;
+    justify-content: center;
+    margin-bottom: 0;
+    padding: 6px 8px;
+    font-size: 0.85em;
+    line-height: 1.2;
   }
 
   .footer-link:hover {
@@ -234,52 +201,41 @@ const siteIconUrl = computed(() => siteConfig.value.icon_url)
   }
 
   .footer-bottom {
-    margin-top: 28px;
-    padding-top: 20px;
+    margin-top: 12px;
+    padding-top: 12px;
   }
 
   .copyright {
-    font-size: 0.85em;
+    font-size: 0.78em;
     line-height: 1.4;
-    flex-direction: column;
-    gap: 8px;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+
+  .made-with {
+    display: none;
   }
 }
 
 /* 小屏手机适配 */
 @media (max-width: 480px) {
   .app-footer {
-    padding: 24px 0 16px;
-    margin-top: 32px;
+    padding: 14px 0 12px;
+    margin-top: 18px;
   }
 
   .footer-content {
-    padding: 0 12px;
-    gap: 24px;
-  }
-
-  .footer-logo {
-    width: 36px;
-    height: 36px;
-  }
-
-  .footer-description {
-    font-size: 0.85em;
+    padding: 0 10px;
+    gap: 10px;
   }
 
   .footer-links {
-    gap: 20px;
-  }
-
-  .links-group h4 {
-    font-size: 0.9em;
-    margin-bottom: 10px;
+    gap: 6px;
   }
 
   .footer-link {
-    font-size: 0.9em;
-    margin-bottom: 8px;
-    padding: 6px 0;
+    font-size: 0.82em;
+    padding: 5px 7px;
   }
 
   .footer-link .n-icon {
@@ -287,16 +243,12 @@ const siteIconUrl = computed(() => siteConfig.value.icon_url)
   }
 
   .footer-bottom {
-    margin-top: 20px;
-    padding-top: 16px;
+    margin-top: 10px;
+    padding-top: 10px;
   }
 
   .copyright {
-    font-size: 0.8em;
-  }
-
-  .heart-icon {
-    font-size: 14px;
+    font-size: 0.76em;
   }
 }
 </style>

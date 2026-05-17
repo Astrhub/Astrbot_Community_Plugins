@@ -7,14 +7,7 @@
           <h1>{{ formData.site.name || siteConfig.name }}</h1>
           <p class="subtitle">完成必要连接后，GitHub OAuth、条款、邮件和市场策略可在后台继续配置。</p>
         </div>
-        <n-button quaternary circle @click="toggleTheme" :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'">
-          <template #icon>
-            <n-icon>
-              <sunny v-if="isDarkMode" />
-              <moon v-else />
-            </n-icon>
-          </template>
-        </n-button>
+        <theme-mode-button circle />
       </header>
 
       <main class="setup-main">
@@ -190,7 +183,6 @@ import {
   NCard,
   NForm,
   NFormItem,
-  NIcon,
   NInput,
   NInputNumber,
   NLayout,
@@ -200,13 +192,13 @@ import {
   NTag,
   useMessage
 } from 'naive-ui'
-import { Moon, Sunny } from '@vicons/ionicons5'
 import { usePluginStore } from '@/stores/plugins'
+import ThemeModeButton from '@/components/ThemeModeButton.vue'
 
 const message = useMessage()
 const store = usePluginStore()
-const { isDarkMode, setupStatus, siteConfig } = storeToRefs(store)
-const { toggleTheme, loadSetupStatus, saveSetupConfig } = store
+const { setupStatus, siteConfig } = storeToRefs(store)
+const { loadSetupStatus, saveSetupConfig } = store
 
 const steps = [
   { id: 'site', title: '站点' },

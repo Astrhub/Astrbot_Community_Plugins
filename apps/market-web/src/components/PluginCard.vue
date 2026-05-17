@@ -90,7 +90,14 @@
             </n-space>
           </div>
           <div class="plugin-meta" role="group" aria-label="插件元数据">
-            <span class="author" role="text" :aria-label="`作者: ${plugin.author}`">作者: {{ plugin.author }}</span>
+            <button
+              type="button"
+              class="author"
+              :aria-label="`搜索作者：${plugin.author}`"
+              @click="searchAuthor"
+            >
+              作者: {{ plugin.author }}
+            </button>
             <div class="metric-list" role="group" aria-label="插件互动数据">
               <span class="metric-item" role="text" :aria-label="`星标数：${plugin.stars || 0}`">
                 <n-icon aria-hidden="true"><star-sharp /></n-icon>
@@ -279,7 +286,7 @@ const showUnlistModal = ref(false)
 const unlistReason = ref('')
 const store = usePluginStore()
 const { currentUser } = storeToRefs(store)
-const { loadPlugins, updatePluginListing } = store
+const { loadPlugins, setCurrentPage, setSearchQuery, updatePluginListing } = store
 const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
 const pluginVersion = computed(() => String(props.plugin.version || '1.0.0'))
 const formattedVersion = computed(() => {
@@ -380,6 +387,14 @@ const openUrl = (url, e) => {
 
 const showDetails = () => {
   showPluginDetails.value = true
+}
+
+function searchAuthor(event) {
+  event.stopPropagation()
+  const author = String(props.plugin.author || '').trim()
+  if (!author) return
+  setSearchQuery(author)
+  setCurrentPage(1)
 }
 
 function openUnlistModal() {
@@ -715,11 +730,25 @@ const handleLogoError = (event) => {
 }
 
 .author {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 10px;
   font-weight: 600;
   color: var(--primary-color);
+  appearance: none;
+  border: 0;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  padding: 2px 4px;
+  text-align: left;
+}
+
+.author:hover,
+.author:focus-visible {
+  background: rgba(37, 99, 235, 0.1);
+  outline: none;
 }
 
 .metric-list {

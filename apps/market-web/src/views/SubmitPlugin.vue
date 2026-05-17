@@ -14,14 +14,7 @@
           </div>
         </div>
         <div class="header-right">
-          <n-button quaternary circle @click="toggleTheme" :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'">
-            <template #icon>
-              <n-icon>
-                <sunny v-if="isDarkMode" />
-                <moon v-else />
-              </n-icon>
-            </template>
-          </n-button>
+          <theme-mode-button circle />
           <n-button
             v-if="!currentUser && siteConfig.auth.github_login_enabled"
             type="primary"
@@ -44,9 +37,7 @@
           <p v-else>当前站点已暂停插件提交。</p>
           <ul>
             <li>仓库必须是公开 GitHub 仓库。</li>
-            <li>插件名建议使用 `astrbot_plugin_` 前缀。</li>
-            <li>核心管理员拥有公告和管理员任免权限。</li>
-            <li>普通管理员只处理插件审核、上下架、评论治理和用户禁言。</li>
+            <li>插件名必须使用 `astrbot_plugin_` 前缀。</li>
           </ul>
         </n-card>
       </section>
@@ -149,14 +140,15 @@ import {
   NTag,
   useMessage
 } from 'naive-ui'
-import { ArrowBack, LogoGithub, Moon, Sunny } from '@vicons/ionicons5'
+import { ArrowBack, LogoGithub } from '@vicons/ionicons5'
 import { usePluginStore } from '@/stores/plugins'
+import ThemeModeButton from '@/components/ThemeModeButton.vue'
 
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { isDarkMode, currentUser, siteConfig } = storeToRefs(store)
-const { loginWithGithub, toggleTheme } = store
+const { currentUser, siteConfig } = storeToRefs(store)
+const { loginWithGithub } = store
 const formRef = ref(null)
 const submitting = ref(false)
 const maxPluginTags = computed(() => siteConfig.value.market?.max_plugin_tags || 8)
@@ -174,7 +166,7 @@ const formData = reactive({
 const rules = {
   name: [
     { required: true, message: '请输入插件名', trigger: 'blur' },
-    { pattern: /^astrbot_plugin_[a-z0-9_-]+$/i, message: '建议以 astrbot_plugin_ 开头，仅含字母、数字、下划线、短横线', trigger: 'blur' }
+    { pattern: /^astrbot_plugin_[a-z0-9_-]+$/i, message: '插件名必须以 astrbot_plugin_ 开头，仅含字母、数字、下划线、短横线', trigger: 'blur' }
   ],
   display_name: {
     required: true,
