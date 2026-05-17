@@ -24,14 +24,6 @@
               <h2>基本资料</h2>
               <p>资料会显示在评论、插件提交和管理记录中。</p>
             </div>
-            <div class="avatar-row">
-              <n-avatar :size="72" :src="formData.avatar_url || undefined">
-                {{ avatarFallback }}
-              </n-avatar>
-              <n-form-item label="头像 URL" path="avatar_url">
-                <n-input v-model:value="formData.avatar_url" placeholder="https://..." />
-              </n-form-item>
-            </div>
             <n-form-item label="显示名称" path="github_name">
               <n-input v-model:value="formData.github_name" placeholder="你的显示名称" />
             </n-form-item>
@@ -67,6 +59,32 @@
 
           <section class="profile-section">
             <div class="section-title">
+              <h2>GitHub API Token</h2>
+              <p>仅需要只读权限，用于读取公开仓库信息、metadata.yaml 和 logo.png；插件作者会优先使用自己的 Token 刷新元数据。</p>
+            </div>
+            <n-form-item label="Token" path="github_token">
+              <n-input
+                v-model:value="formData.github_token"
+                type="password"
+                show-password-on="click"
+                :placeholder="currentUser?.has_github_token ? '已配置，留空保持不变' : 'ghp_... 或 fine-grained token'"
+              />
+            </n-form-item>
+            <div class="token-state">
+              {{ currentUser?.has_github_token ? '当前已配置 Token' : '当前未配置 Token' }}
+            </div>
+            <n-form-item label="自动刷新间隔（秒）" path="github_refresh_interval_seconds">
+              <n-input-number
+                v-model:value="formData.github_refresh_interval_seconds"
+                :min="300"
+                :max="86400"
+                :step="300"
+              />
+            </n-form-item>
+          </section>
+
+          <section class="profile-section">
+            <div class="section-title">
               <h2>消息</h2>
               <p>插件审核、下架等站内通知会显示在这里。</p>
             </div>
@@ -92,17 +110,17 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import {
-  NAvatar,
   NButton,
   NEmpty,
   NForm,
   NFormItem,
   NIcon,
   NInput,
+  NInputNumber,
   NLayoutHeader,
   NSpin,
   useMessage
@@ -125,27 +143,28 @@ const loading = ref(true)
 const saving = ref(false)
 const notifications = ref([])
 const formData = reactive({
-  avatar_url: '',
-  github_name: ''
-})
-
-const avatarFallback = computed(() => {
-  const value = currentUser.value?.github_login || currentUser.value?.internal_username || '?'
-  return value.slice(0, 1).toUpperCase()
+  github_name: '',
+  github_token: '',
+  github_refresh_interval_seconds: 3600
 })
 
 function applyCurrentUser() {
-  formData.avatar_url = currentUser.value?.avatar_url || ''
   formData.github_name = currentUser.value?.github_name || ''
+  formData.github_token = ''
+  formData.github_refresh_interval_seconds = currentUser.value?.github_refresh_interval_seconds || 3600
 }
 
 async function saveProfile() {
   saving.value = true
   try {
-    await updateProfile({
-      avatar_url: formData.avatar_url.trim(),
-      github_name: formData.github_name.trim()
-    })
+    const payload = {
+      github_name: formData.github_name.trim(),
+      github_refresh_interval_seconds: Number(formData.github_refresh_interval_seconds || 3600)
+    }
+    if (formData.github_token.trim()) {
+      payload.github_token = formData.github_token.trim()
+    }
+    await updateProfile(payload)
     applyCurrentUser()
     message.success('个人资料已保存')
   } catch (error) {
@@ -208,7 +227,6 @@ onMounted(async () => {
 }
 
 .header-left,
-.avatar-row,
 .actions,
 .github-state,
 .notification-title {
@@ -265,14 +283,6 @@ h2 {
   color: var(--text-color-2);
 }
 
-.avatar-row {
-  align-items: flex-end;
-}
-
-.avatar-row :deep(.n-form-item) {
-  flex: 1;
-}
-
 .actions {
   justify-content: flex-end;
 }
@@ -303,7 +313,8 @@ h2 {
 }
 
 .notification-title time,
-.notification-item p {
+.notification-item p,
+.token-state {
   color: var(--text-color-2);
 }
 
@@ -312,11 +323,6 @@ h2 {
 }
 
 @media (max-width: 640px) {
-  .avatar-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
   .actions {
     justify-content: stretch;
   }

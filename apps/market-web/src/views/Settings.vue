@@ -142,6 +142,32 @@
               <n-form-item label="授权范围" path="github.scope">
                 <n-input v-model:value="formData.github.scope" placeholder="read:user user:email read:org" />
               </n-form-item>
+              <n-form-item label="GitHub API Token（兜底）" path="github.api_token">
+                <n-input
+                  v-model:value="formData.github.api_token"
+                  type="password"
+                  show-password-on="click"
+                  :placeholder="formData.github.api_token_configured ? '留空或保持遮蔽值表示不更新' : '只读 Token，用于服务端同步兜底'"
+                />
+              </n-form-item>
+            </div>
+            <div class="switch-grid">
+              <setting-switch
+                v-model="formData.github.metadata_sync_enabled"
+                label="元数据自动同步"
+                enabled="按间隔同步"
+                disabled="暂停同步"
+              />
+            </div>
+            <div class="form-grid compact-grid">
+              <n-form-item label="默认同步间隔（秒）" path="github.metadata_sync_interval_seconds">
+                <n-input-number
+                  v-model:value="formData.github.metadata_sync_interval_seconds"
+                  :min="300"
+                  :max="86400"
+                  :step="300"
+                />
+              </n-form-item>
             </div>
           </section>
 
@@ -421,7 +447,11 @@ function createSettingsForm() {
       client_secret_configured: false,
       callback_url: '',
       scope: 'read:user user:email read:org',
-      admin_org: ''
+      admin_org: '',
+      api_token: '',
+      api_token_configured: false,
+      metadata_sync_enabled: true,
+      metadata_sync_interval_seconds: 3600
     },
     market: {
       submissions_enabled: true,
@@ -465,6 +495,7 @@ function applySettings(config = {}) {
 
 function normalizeNumberFields() {
   formData.market.max_plugin_tags = Number(formData.market.max_plugin_tags || 0)
+  formData.github.metadata_sync_interval_seconds = Number(formData.github.metadata_sync_interval_seconds || 3600)
   formData.email.smtp.port = Number(formData.email.smtp.port || 587)
   formData.email.daily_limit = Number(formData.email.daily_limit || 0)
   formData.email.verification_daily_limit_per_user = Number(formData.email.verification_daily_limit_per_user || 0)

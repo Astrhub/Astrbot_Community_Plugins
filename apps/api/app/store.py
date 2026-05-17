@@ -130,6 +130,16 @@ class InMemoryMarketStore:
             deepcopy(plugin) for plugin in self.state["plugins"] if plugin["status"] == "listed"
         ]
 
+    def list_due_github_sync_plugins(self, limit: int) -> list[dict[str, Any]]:
+        now = utc_now()
+        due = [
+            plugin
+            for plugin in self.state["plugins"]
+            if plugin["status"] == "listed" and str(plugin.get("github_next_sync_at") or "") <= now
+        ]
+        due.sort(key=lambda plugin: str(plugin.get("github_next_sync_at") or ""))
+        return deepcopy(due[:limit])
+
     def list_users(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["users"])
 
@@ -295,7 +305,15 @@ class InMemoryMarketStore:
         user = self.get_user_by_id(user_id)
         if not user:
             return None
-        for key in ("github_id", "github_login", "github_name", "avatar_url", "auth_source"):
+        for key in (
+            "github_id",
+            "github_login",
+            "github_name",
+            "avatar_url",
+            "auth_source",
+            "github_token",
+            "github_refresh_interval_seconds",
+        ):
             if key in profile:
                 user[key] = profile[key]
         user["updated_at"] = utc_now()
@@ -458,6 +476,10 @@ class InMemoryMarketStore:
             "internal_username": user.get("internal_username") or "",
             "password_hash": user.get("password_hash") or "",
             "auth_source": user.get("auth_source") or "github",
+            "github_token": user.get("github_token") or "",
+            "github_refresh_interval_seconds": int(
+                user.get("github_refresh_interval_seconds") or 3600
+            ),
             "github_name": user.get("github_name")
             or user.get("name")
             or user.get("github_login")
@@ -514,6 +536,8 @@ CREATE TABLE IF NOT EXISTS market_users (
     auth_source text NOT NULL DEFAULT 'github' CHECK (auth_source IN ('github', 'internal')),
     github_name text NOT NULL DEFAULT '',
     avatar_url text NOT NULL DEFAULT '',
+    github_token text NOT NULL DEFAULT '',
+    github_refresh_interval_seconds integer NOT NULL DEFAULT 3600,
     role text NOT NULL CHECK (role IN ('core_admin', 'admin', 'user')),
     muted_until timestamptz,
     muted_by text REFERENCES market_users(id) ON DELETE SET NULL,
@@ -660,6 +684,14 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS auth_source text "
                 "NOT NULL DEFAULT 'github'"
             )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS github_token text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600"
+            )
 
     async def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
         login = profile.get("login") or profile.get("github_login")
@@ -777,6 +809,27 @@ class PgRedisMarketStore(InMemoryMarketStore):
     async def list_public_plugins(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(
             "SELECT * FROM market_plugins WHERE status = 'listed' ORDER BY updated_at DESC"
+        )
+        return [self._plugin_from_record(row) for row in rows]
+
+    async def list_due_github_sync_plugins(self, limit: int) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            SELECT *
+              FROM market_plugins
+             WHERE status = 'listed'
+               AND COALESCE(
+                       (metadata->>'github_next_sync_at')::timestamptz,
+                       'epoch'::timestamptz
+                   ) <= now()
+          ORDER BY COALESCE(
+                       (metadata->>'github_next_sync_at')::timestamptz,
+                       'epoch'::timestamptz
+                   ) ASC,
+                   updated_at ASC
+             LIMIT $1
+            """,
+            limit,
         )
         return [self._plugin_from_record(row) for row in rows]
 
@@ -1031,7 +1084,15 @@ class PgRedisMarketStore(InMemoryMarketStore):
     ) -> dict[str, Any] | None:
         values = {
             key: profile[key]
-            for key in ("github_id", "github_login", "github_name", "avatar_url", "auth_source")
+            for key in (
+                "github_id",
+                "github_login",
+                "github_name",
+                "avatar_url",
+                "auth_source",
+                "github_token",
+                "github_refresh_interval_seconds",
+            )
             if key in profile
         }
         if not values:
@@ -1044,6 +1105,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    github_name = CASE WHEN $6 THEN $7 ELSE github_name END,
                    avatar_url = CASE WHEN $8 THEN $9 ELSE avatar_url END,
                    auth_source = CASE WHEN $10 THEN $11 ELSE auth_source END,
+                   github_token = CASE WHEN $12 THEN $13 ELSE github_token END,
+                   github_refresh_interval_seconds =
+                       CASE WHEN $14 THEN $15 ELSE github_refresh_interval_seconds END,
                    updated_at = now()
              WHERE id = $1
          RETURNING *
@@ -1059,6 +1123,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
             profile.get("avatar_url"),
             "auth_source" in profile,
             profile.get("auth_source"),
+            "github_token" in profile,
+            profile.get("github_token"),
+            "github_refresh_interval_seconds" in profile,
+            profile.get("github_refresh_interval_seconds"),
         )
         return self._user_from_record(row) if row else None
 

@@ -66,8 +66,10 @@ class MuteUserPayload(BaseModel):
 class UserProfileUpdate(BaseModel):
     github_name: str | None = None
     avatar_url: str | None = None
+    github_token: str | None = None
+    github_refresh_interval_seconds: int | None = Field(default=None, ge=300, le=86400)
 
-    @field_validator("github_name", "avatar_url")
+    @field_validator("github_name", "avatar_url", "github_token")
     @classmethod
     def strip_optional_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -180,10 +182,26 @@ class GithubSetupConfig(BaseModel):
     callback_url: str = ""
     scope: str = "read:user user:email read:org"
     admin_org: str = ""
+    api_token: str = ""
+    metadata_sync_enabled: bool = True
+    metadata_sync_interval_seconds: int = Field(default=3600, ge=300, le=86400)
 
-    @field_validator("client_id", "client_secret", "callback_url", "scope", "admin_org")
+    @field_validator(
+        "client_id", "client_secret", "callback_url", "scope", "admin_org", "api_token"
+    )
     @classmethod
     def strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class PluginGithubRefreshPayload(BaseModel):
+    github_token: str = ""
+    save_token: bool = False
+    refresh_interval_seconds: int | None = Field(default=None, ge=300, le=86400)
+
+    @field_validator("github_token")
+    @classmethod
+    def strip_token(cls, value: str) -> str:
         return value.strip()
 
 

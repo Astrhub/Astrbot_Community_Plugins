@@ -17,6 +17,9 @@ DEFAULT_SITE_DOCS_URL = "https://docs.astrbot.app/dev/star/plugin-new.html"
 DEFAULT_LOGIN_AGREEMENT_TEXT = ""
 DEFAULT_SERVICE_TERMS_TEXT = ""
 DEFAULT_EMAIL_PROVIDER = "disabled"
+DEFAULT_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 60 * 60
+MIN_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 5 * 60
+MAX_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,9 @@ class Settings:
     github_callback_url: str
     github_scope: str
     github_admin_org: str
+    github_api_token: str
+    github_metadata_sync_enabled: bool
+    github_metadata_sync_interval_seconds: int
     site_name: str
     site_icon_url: str
     site_subtitle: str
@@ -115,6 +121,17 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         ),
         github_scope=merged.get("GITHUB_SCOPE", "read:user user:email read:org"),
         github_admin_org=merged.get("GITHUB_ADMIN_ORG", ""),
+        github_api_token=merged.get("GITHUB_API_TOKEN", ""),
+        github_metadata_sync_enabled=_bool(
+            merged.get("GITHUB_METADATA_SYNC_ENABLED"),
+            default=True,
+        ),
+        github_metadata_sync_interval_seconds=_bounded_int(
+            merged.get("GITHUB_METADATA_SYNC_INTERVAL_SECONDS"),
+            DEFAULT_GITHUB_METADATA_SYNC_INTERVAL_SECONDS,
+            MIN_GITHUB_METADATA_SYNC_INTERVAL_SECONDS,
+            MAX_GITHUB_METADATA_SYNC_INTERVAL_SECONDS,
+        ),
         site_name=merged.get("SITE_NAME", DEFAULT_SITE_NAME),
         site_icon_url=merged.get("SITE_ICON_URL", DEFAULT_SITE_ICON_URL),
         site_subtitle=merged.get("SITE_SUBTITLE", DEFAULT_SITE_SUBTITLE),
@@ -199,6 +216,10 @@ def _int(value: str | None, default: int) -> int:
         return int(value or default)
     except ValueError:
         return default
+
+
+def _bounded_int(value: str | None, default: int, minimum: int, maximum: int) -> int:
+    return min(max(_int(value, default), minimum), maximum)
 
 
 def _email_provider(value: str) -> str:

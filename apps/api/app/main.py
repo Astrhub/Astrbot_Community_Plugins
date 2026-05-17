@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import html
 import inspect
@@ -45,6 +46,7 @@ from .schemas import (
     CommentCreate,
     InternalLoginPayload,
     MuteUserPayload,
+    PluginGithubRefreshPayload,
     PluginPatch,
     PluginSubmission,
     PluginUnlistPayload,
@@ -57,9 +59,14 @@ from .schemas import (
 from .store import InMemoryMarketStore
 from .store import PgRedisMarketStore
 
-GITHUB_REPO_PATTERN = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/?$")
+GITHUB_REPO_PATTERN = re.compile(
+    r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$"
+)
 PLUGIN_NAME_PATTERN = re.compile(r"^astrbot_plugin_[a-z0-9_-]+$", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+METADATA_FIELD_PATTERN = re.compile(
+    r"^(\s*)(name|display_name|desc|short_desc|author|social_link|tags|version|astrbot_version|category|download_url|support_platforms)\s*:\s*(.*)$"
+)
 MASKED_SECRET = "********"
 CLOUDFLARE_EMAIL_SEND_ENDPOINT = (
     "https://api.cloudflare.com/client/v4/accounts/{account_id}/email/sending/send"
@@ -91,6 +98,25 @@ RESERVED_WEB_PATHS = {
 }
 RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
 POSTGRES_MAINTENANCE_DATABASE = "postgres"
+GITHUB_METADATA_SYNC_BATCH_SIZE = 10
+GITHUB_METADATA_SYNC_WORKER_SLEEP_SECONDS = 60
+GITHUB_RATE_LIMIT_MESSAGE = (
+    "GitHub API rate limit reached. Provide a read-only GitHub token and try again."
+)
+PLUGIN_METADATA_SYNC_FIELDS = (
+    "name",
+    "display_name",
+    "desc",
+    "short_desc",
+    "author",
+    "social_link",
+    "tags",
+    "version",
+    "astrbot_version",
+    "category",
+    "download_url",
+    "support_platforms",
+)
 
 
 def create_app(
@@ -139,9 +165,16 @@ def create_store(settings: Settings) -> InMemoryMarketStore | PgRedisMarketStore
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await maybe_call_store_lifecycle(app, "connect")
     await bootstrap_internal_core_admin(app)
+    sync_task = asyncio.create_task(github_metadata_sync_worker(app))
     try:
         yield None
     finally:
+        sync_task.cancel()
+        try:
+            await sync_task
+        except asyncio.CancelledError:
+            # Expected during application shutdown after cancelling the sync worker.
+            pass
         await maybe_call_store_lifecycle(app, "close")
 
 
@@ -501,6 +534,7 @@ def register_routes(app: FastAPI) -> None:
         data = payload.model_dump()
         validate_plugin_submission(data, settings)
         validate_repo_owner(data["repo"], user)
+        data.update(await safe_fetch_plugin_github_metadata(data["repo"], settings, user))
         plugin = await call_store(request, "submit_plugin", user, data)
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
@@ -528,6 +562,9 @@ def register_routes(app: FastAPI) -> None:
         if "repo" in patch:
             validate_github_repo(patch["repo"])
             validate_repo_owner(patch["repo"], user)
+            patch.update(
+                await safe_fetch_plugin_github_metadata(patch["repo"], get_settings(request), user)
+            )
         if "tags" in patch:
             validate_plugin_tag_count(patch.get("tags") or [], get_settings(request))
         updated = await call_store(
@@ -541,6 +578,28 @@ def register_routes(app: FastAPI) -> None:
             },
         )
         return updated or {}
+
+    @app.post("/v1/plugins/{plugin_id}/refresh-github")
+    async def refresh_own_plugin_github_metadata(
+        request: Request,
+        plugin_id: str,
+        payload: PluginGithubRefreshPayload | None = None,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        plugin = await get_plugin_or_404(request, plugin_id)
+        if not can_edit_plugin(user, plugin):
+            raise error(403, "Forbidden")
+        refresh_payload = payload or PluginGithubRefreshPayload()
+        updated = await refresh_plugin_github_metadata(
+            request,
+            plugin_id,
+            user,
+            token=refresh_payload.github_token,
+            save_token=refresh_payload.save_token,
+            refresh_interval_seconds=refresh_payload.refresh_interval_seconds,
+            raise_errors=True,
+        )
+        return updated or plugin
 
     @app.post("/v1/plugins/{plugin_id}/like")
     async def like_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
@@ -615,7 +674,31 @@ def register_routes(app: FastAPI) -> None:
         user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
+        await refresh_plugin_github_metadata(request, plugin_id, user)
         updated = await call_store(request, "update_plugin_status", plugin_id, "listed", user["id"])
+        if not updated:
+            raise error(404, "Plugin not found")
+        return updated
+
+    @app.post("/v1/admin/plugins/{plugin_id}/refresh-github")
+    async def refresh_admin_plugin_github_metadata(
+        request: Request,
+        plugin_id: str,
+        payload: PluginGithubRefreshPayload | None = None,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        if not can_moderate_plugins(user):
+            raise error(403, "Forbidden")
+        refresh_payload = payload or PluginGithubRefreshPayload()
+        updated = await refresh_plugin_github_metadata(
+            request,
+            plugin_id,
+            user,
+            token=refresh_payload.github_token,
+            save_token=refresh_payload.save_token,
+            refresh_interval_seconds=refresh_payload.refresh_interval_seconds,
+            raise_errors=True,
+        )
         if not updated:
             raise error(404, "Plugin not found")
         return updated
@@ -778,6 +861,17 @@ def get_runtime_settings(request: Request) -> Settings:
             settings.github_callback_url,
         ),
         github_scope=runtime_config.get("GITHUB_SCOPE", settings.github_scope),
+        github_api_token=runtime_config.get("GITHUB_API_TOKEN", settings.github_api_token),
+        github_metadata_sync_enabled=parse_bool(
+            runtime_config.get("GITHUB_METADATA_SYNC_ENABLED"),
+            settings.github_metadata_sync_enabled,
+        ),
+        github_metadata_sync_interval_seconds=clamp_sync_interval(
+            runtime_config.get(
+                "GITHUB_METADATA_SYNC_INTERVAL_SECONDS",
+                str(settings.github_metadata_sync_interval_seconds),
+            )
+        ),
         github_login_enabled=parse_bool(
             runtime_config.get("GITHUB_LOGIN_ENABLED"),
             settings.github_login_enabled,
@@ -825,7 +919,11 @@ async def require_user(request: Request) -> dict[str, Any]:
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in user.items() if key not in {"password_hash"}}
+    return {
+        key: value
+        for key, value in {**user, "has_github_token": bool(user.get("github_token"))}.items()
+        if key not in {"password_hash", "github_token"}
+    }
 
 
 async def require_admin(request: Request) -> dict[str, Any]:
@@ -866,6 +964,434 @@ def validate_github_repo(repo: str) -> re.Match[str]:
     if not match:
         raise error(400, "Plugin repo must be a GitHub URL")
     return match
+
+
+class GithubMetadataError(Exception):
+    def __init__(self, message: str, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+async def github_metadata_sync_worker(app: FastAPI) -> None:
+    while True:
+        await asyncio.sleep(GITHUB_METADATA_SYNC_WORKER_SLEEP_SECONDS)
+        await sync_due_github_plugin_metadata_once(app, GITHUB_METADATA_SYNC_BATCH_SIZE)
+
+
+async def sync_due_github_plugin_metadata_once(app: FastAPI, limit: int) -> int:
+    settings = app.state.settings
+    if not settings.github_metadata_sync_enabled:
+        return 0
+    plugins = await list_due_github_sync_plugins(app.state.store, limit)
+    for plugin in plugins:
+        try:
+            owner = await get_plugin_owner_for_sync(app.state.store, plugin)
+            await refresh_plugin_github_metadata_for_plugin(app, plugin, owner)
+        except Exception as exc:
+            await update_plugin_github_sync_failure(
+                app.state.store,
+                plugin,
+                settings,
+                safe_exception_message(exc),
+            )
+    return len(plugins)
+
+
+async def list_due_github_sync_plugins(store: Any, limit: int) -> list[dict[str, Any]]:
+    method = getattr(store, "list_due_github_sync_plugins", None)
+    if method:
+        return await resolve_optional_awaitable(method(limit))
+    plugins = await resolve_optional_awaitable(store.list_public_plugins())
+    due = [plugin for plugin in plugins if is_plugin_due_for_github_sync(plugin)]
+    return due[:limit]
+
+
+def is_plugin_due_for_github_sync(plugin: dict[str, Any]) -> bool:
+    if plugin.get("status") != "listed":
+        return False
+    next_sync = parse_iso_datetime(plugin.get("github_next_sync_at"))
+    return next_sync is None or next_sync <= datetime.now(UTC)
+
+
+async def get_plugin_owner_for_sync(
+    store: Any,
+    plugin: dict[str, Any],
+) -> dict[str, Any] | None:
+    owner_id = plugin.get("owner_user_id")
+    if not owner_id:
+        return None
+    method = getattr(store, "get_user_by_id", None)
+    if not method:
+        return None
+    return await resolve_optional_awaitable(method(owner_id))
+
+
+async def refresh_plugin_github_metadata(
+    request: Request,
+    plugin_id: str,
+    user: dict[str, Any] | None = None,
+    *,
+    token: str = "",
+    save_token: bool = False,
+    refresh_interval_seconds: int | None = None,
+    raise_errors: bool = False,
+) -> dict[str, Any] | None:
+    plugin = await call_store(request, "get_plugin", plugin_id)
+    if not plugin:
+        return None
+    if user:
+        user = await update_user_github_sync_preferences(
+            request,
+            user,
+            token,
+            save_token,
+            refresh_interval_seconds,
+        )
+    return await refresh_plugin_github_metadata_for_plugin(
+        request.app,
+        plugin,
+        user,
+        token=token,
+        raise_errors=raise_errors,
+    )
+
+
+async def update_user_github_sync_preferences(
+    request: Request,
+    user: dict[str, Any],
+    token: str,
+    save_token: bool,
+    refresh_interval_seconds: int | None,
+) -> dict[str, Any]:
+    profile: dict[str, Any] = {}
+    if save_token and token:
+        profile["github_token"] = token
+    if refresh_interval_seconds is not None and (
+        user.get("github_token") or profile.get("github_token")
+    ):
+        profile["github_refresh_interval_seconds"] = refresh_interval_seconds
+    if not profile:
+        return user
+    return await call_store(request, "update_user_profile", user["id"], profile) or user
+
+
+async def refresh_plugin_github_metadata_for_plugin(
+    app: FastAPI,
+    plugin: dict[str, Any],
+    user: dict[str, Any] | None = None,
+    *,
+    token: str = "",
+    raise_errors: bool = False,
+) -> dict[str, Any] | None:
+    settings = app.state.settings
+    try:
+        metadata = await fetch_plugin_github_metadata(
+            plugin.get("repo") or "",
+            settings,
+            user,
+            token=token,
+        )
+    except GithubMetadataError as exc:
+        await update_plugin_github_sync_failure(app.state.store, plugin, settings, exc.message)
+        if raise_errors:
+            raise error(exc.status_code, exc.message) from exc
+        return plugin
+    if not metadata:
+        return plugin
+    metadata.update(github_sync_success_metadata(settings, user))
+    return await resolve_optional_awaitable(
+        app.state.store.update_plugin_metadata(plugin["id"], metadata)
+    )
+
+
+async def safe_fetch_plugin_github_metadata(
+    repo: str,
+    settings: Settings,
+    user: dict[str, Any] | None = None,
+    *,
+    token: str = "",
+) -> dict[str, Any]:
+    try:
+        return await fetch_plugin_github_metadata(repo, settings, user, token=token)
+    except GithubMetadataError:
+        return {}
+
+
+async def fetch_plugin_github_metadata(
+    repo: str,
+    settings: Settings,
+    user: dict[str, Any] | None = None,
+    *,
+    token: str = "",
+) -> dict[str, Any]:
+    if not settings.github_metadata_sync_enabled:
+        return {}
+    match = validate_github_repo(repo)
+    owner = match.group("owner")
+    repo_name = match.group("repo")
+    headers = github_api_headers(user, settings, token)
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            repository = await fetch_github_repository(client, owner, repo_name, headers)
+            if not repository:
+                return {}
+            metadata = await fetch_github_plugin_metadata_files(client, owner, repo_name, headers)
+            logo = await fetch_github_plugin_logo_url(
+                client,
+                owner,
+                repo_name,
+                repository.get("default_branch") or "main",
+                headers,
+            )
+    except httpx.HTTPError as exc:
+        raise GithubMetadataError("GitHub metadata fetch failed", 502) from exc
+    payload: dict[str, Any] = {
+        "stars": int(repository.get("stargazers_count") or 0),
+        "updated_at": repository.get("updated_at") or "",
+    }
+    for field in PLUGIN_METADATA_SYNC_FIELDS:
+        value = normalize_plugin_metadata_field(field, metadata.get(field))
+        if has_metadata_value(value):
+            payload[field] = value
+    if logo:
+        payload["logo"] = logo
+    return payload
+
+
+async def fetch_github_repository(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    response = await client.get(
+        f"https://api.github.com/repos/{owner}/{repo}",
+        headers=headers,
+    )
+    raise_for_github_rate_limit(response)
+    if response.status_code != 200:
+        return {}
+    data = response.json()
+    return data if isinstance(data, dict) else {}
+
+
+async def fetch_github_plugin_metadata_files(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    for filename in ("metadata.yml", "metadata.yaml"):
+        response = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{filename}",
+            headers=headers,
+        )
+        raise_for_github_rate_limit(response)
+        if response.status_code != 200:
+            continue
+        data = response.json()
+        content = data.get("content") if isinstance(data, dict) else ""
+        if not isinstance(content, str) or not content:
+            continue
+        try:
+            text = base64.b64decode(content).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            continue
+        metadata = parse_plugin_metadata_yaml(text)
+        if metadata:
+            return metadata
+    return {}
+
+
+async def fetch_github_plugin_logo_url(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    default_branch: str,
+    headers: dict[str, str],
+) -> str:
+    response = await client.get(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/logo.png",
+        headers=headers,
+    )
+    raise_for_github_rate_limit(response)
+    if response.status_code == 200:
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/logo.png"
+    return ""
+
+
+def raise_for_github_rate_limit(response: Any) -> None:
+    if response.status_code not in {403, 429}:
+        return
+    headers = getattr(response, "headers", {}) or {}
+    message = github_response_message(response).lower()
+    if headers.get("x-ratelimit-remaining") == "0" or "rate limit" in message:
+        raise GithubMetadataError(GITHUB_RATE_LIMIT_MESSAGE, 429)
+
+
+def github_response_message(response: Any) -> str:
+    try:
+        data = response.json()
+    except Exception:
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("message") or "")
+    return ""
+
+
+def normalize_plugin_metadata_field(field: str, value: Any) -> Any:
+    if field == "name" and value and not PLUGIN_NAME_PATTERN.match(str(value)):
+        return ""
+    if field in {"tags", "support_platforms"}:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+    return value
+
+
+def github_sync_success_metadata(
+    settings: Settings,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    interval = github_sync_interval_seconds(settings, user)
+    return {
+        "github_synced_at": isoformat_utc(now),
+        "github_next_sync_at": isoformat_utc(now + timedelta(seconds=interval)),
+        "github_refresh_interval_seconds": interval,
+        "github_sync_status": "success",
+        "github_sync_error": "",
+    }
+
+
+async def update_plugin_github_sync_failure(
+    store: Any,
+    plugin: dict[str, Any],
+    settings: Settings,
+    message: str,
+) -> None:
+    now = datetime.now(UTC)
+    interval = github_sync_interval_seconds(settings)
+    await resolve_optional_awaitable(
+        store.update_plugin_metadata(
+            plugin["id"],
+            {
+                "github_synced_at": isoformat_utc(now),
+                "github_next_sync_at": isoformat_utc(now + timedelta(seconds=interval)),
+                "github_sync_status": "error",
+                "github_sync_error": message,
+            },
+        )
+    )
+
+
+def github_sync_interval_seconds(
+    settings: Settings,
+    user: dict[str, Any] | None = None,
+) -> int:
+    if user and user.get("github_token"):
+        return clamp_sync_interval(user.get("github_refresh_interval_seconds"))
+    return clamp_sync_interval(settings.github_metadata_sync_interval_seconds)
+
+
+def clamp_sync_interval(value: Any) -> int:
+    try:
+        seconds = int(value or 3600)
+    except (TypeError, ValueError):
+        seconds = 3600
+    return min(max(seconds, 300), 86400)
+
+
+def isoformat_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def parse_plugin_metadata_yaml(text: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = METADATA_FIELD_PATTERN.match(line)
+        if not match:
+            index += 1
+            continue
+        indent, key, raw_value = match.groups()
+        value = parse_metadata_scalar(raw_value)
+        if value == "" and key in {"support_platforms", "tags"}:
+            value, index = parse_metadata_list(lines, index, len(indent))
+        if has_metadata_value(value):
+            metadata[key] = value
+        index += 1
+    return metadata
+
+
+def parse_metadata_list(
+    lines: list[str],
+    start_index: int,
+    parent_indent: int,
+) -> tuple[list[str] | str, int]:
+    items: list[str] = []
+    index = start_index + 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= parent_indent:
+            return items or "", index - 1
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            return items or "", index - 1
+        item = parse_metadata_scalar(stripped[2:])
+        if item:
+            items.append(str(item))
+        index += 1
+    return items or "", index - 1
+
+
+def parse_metadata_scalar(value: str) -> Any:
+    value = strip_yaml_comment(value).strip()
+    if not value:
+        return ""
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        return value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        items = [parse_metadata_scalar(item) for item in value[1:-1].split(",")]
+        return [item for item in items if item]
+    return value
+
+
+def strip_yaml_comment(value: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_double:
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "#" and not in_single and not in_double:
+            return value[:index].rstrip()
+    return value.strip()
+
+
+def has_metadata_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value)
+    return value is not None
 
 
 def validate_setup_payload(payload: SetupConfig) -> None:
@@ -1205,13 +1731,24 @@ def build_auth_settings(settings: Settings, runtime_config: dict[str, str]) -> d
     }
 
 
-def build_github_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, str]:
+def build_github_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, Any]:
     return {
         "client_id": runtime_config.get("GITHUB_CLIENT_ID", settings.github_client_id),
         "client_secret": runtime_config.get("GITHUB_CLIENT_SECRET", settings.github_client_secret),
         "callback_url": runtime_config.get("GITHUB_CALLBACK_URL", settings.github_callback_url),
         "scope": runtime_config.get("GITHUB_SCOPE", settings.github_scope),
         "admin_org": runtime_config.get("GITHUB_ADMIN_ORG", settings.github_admin_org),
+        "api_token": runtime_config.get("GITHUB_API_TOKEN", settings.github_api_token),
+        "metadata_sync_enabled": parse_bool(
+            runtime_config.get("GITHUB_METADATA_SYNC_ENABLED"),
+            settings.github_metadata_sync_enabled,
+        ),
+        "metadata_sync_interval_seconds": clamp_sync_interval(
+            runtime_config.get(
+                "GITHUB_METADATA_SYNC_INTERVAL_SECONDS",
+                str(settings.github_metadata_sync_interval_seconds),
+            )
+        ),
     }
 
 
@@ -1279,6 +1816,8 @@ def redact_github_settings(config: dict[str, Any]) -> dict[str, Any]:
         **config,
         "client_secret": MASKED_SECRET if config.get("client_secret") else "",
         "client_secret_configured": bool(config.get("client_secret")),
+        "api_token": MASKED_SECRET if config.get("api_token") else "",
+        "api_token_configured": bool(config.get("api_token")),
     }
 
 
@@ -1313,6 +1852,8 @@ def runtime_values_from_system_settings(
         "GITHUB_CALLBACK_URL": payload.github.callback_url,
         "GITHUB_CLIENT_ID": payload.github.client_id,
         "GITHUB_SCOPE": payload.github.scope,
+        "GITHUB_METADATA_SYNC_ENABLED": serialize_bool(payload.github.metadata_sync_enabled),
+        "GITHUB_METADATA_SYNC_INTERVAL_SECONDS": str(payload.github.metadata_sync_interval_seconds),
         **runtime_values_from_market_settings(payload.market),
         **runtime_values_from_email_settings(payload.email, runtime_config),
     }
@@ -1320,6 +1861,10 @@ def runtime_values_from_system_settings(
         values["GITHUB_CLIENT_SECRET"] = payload.github.client_secret
     elif "GITHUB_CLIENT_SECRET" in runtime_config:
         values["GITHUB_CLIENT_SECRET"] = runtime_config["GITHUB_CLIENT_SECRET"]
+    if should_write_secret(payload.github.api_token):
+        values["GITHUB_API_TOKEN"] = payload.github.api_token
+    elif "GITHUB_API_TOKEN" in runtime_config:
+        values["GITHUB_API_TOKEN"] = runtime_config["GITHUB_API_TOKEN"]
     return values
 
 
@@ -1386,6 +1931,12 @@ def settings_from_system_settings(
         github_callback_url=payload.github.callback_url,
         github_scope=payload.github.scope,
         github_admin_org=payload.github.admin_org,
+        github_api_token=preserve_secret(
+            payload.github.api_token,
+            runtime_config.get("GITHUB_API_TOKEN") or current.github_api_token,
+        ),
+        github_metadata_sync_enabled=payload.github.metadata_sync_enabled,
+        github_metadata_sync_interval_seconds=payload.github.metadata_sync_interval_seconds,
         market_submissions_enabled=payload.market.submissions_enabled,
         market_comments_enabled=payload.market.comments_enabled,
         market_likes_enabled=payload.market.likes_enabled,
@@ -1885,6 +2436,29 @@ def github_headers(access_token: str) -> dict[str, str]:
         "accept": "application/vnd.github+json",
         "authorization": f"Bearer {access_token}",
         "user-agent": "astrbot-community-plugins",
+    }
+
+
+def github_public_headers() -> dict[str, str]:
+    return {
+        "accept": "application/vnd.github+json",
+        "user-agent": "astrbot-community-plugins",
+    }
+
+
+def github_api_headers(
+    user: dict[str, Any] | None = None,
+    settings: Settings | None = None,
+    token: str = "",
+) -> dict[str, str]:
+    token = str(token or (user or {}).get("github_token") or "").strip()
+    if not token and settings:
+        token = settings.github_api_token.strip()
+    if not token:
+        return github_public_headers()
+    return {
+        **github_public_headers(),
+        "authorization": f"Bearer {token}",
     }
 
 

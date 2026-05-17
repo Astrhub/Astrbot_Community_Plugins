@@ -46,7 +46,11 @@ const createDefaultSetupConfig = () => ({
     client_secret: '',
     callback_url: `${BASE_URL}/v1/auth/github/callback`,
     scope: 'read:user user:email read:org',
-    admin_org: ''
+    admin_org: '',
+    api_token: '',
+    api_token_configured: false,
+    metadata_sync_enabled: true,
+    metadata_sync_interval_seconds: 3600
   },
   market: {
     submissions_enabled: true,
@@ -275,6 +279,8 @@ export const usePluginStore = defineStore('plugins', () => {
           id,
           name: plugin.name || id,
           display_name: plugin.display_name || plugin.name || id,
+          version: plugin.version || '1.0.0',
+          logo: plugin.logo || '',
           tags: Array.isArray(plugin.tags) ? plugin.tags : [],
           stars: plugin.stars || 0
         }
@@ -421,6 +427,21 @@ export const usePluginStore = defineStore('plugins', () => {
     const response = await fetch(`${apiBaseUrl}/v1/admin/plugins/${pluginId}/${action}`, options)
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '更新插件状态失败')
+    return data
+  }
+
+  async function refreshPluginGithubMetadata(pluginId, payload = null) {
+    const options = {
+      method: 'POST',
+      credentials: 'include'
+    }
+    if (payload && Object.keys(payload).length > 0) {
+      options.headers = { 'content-type': 'application/json' }
+      options.body = JSON.stringify(payload)
+    }
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/refresh-github`, options)
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '刷新 GitHub 数据失败')
     return data
   }
 
@@ -607,6 +628,7 @@ export const usePluginStore = defineStore('plugins', () => {
     unlikePlugin,
     addPluginComment,
     updatePluginListing,
+    refreshPluginGithubMetadata,
     loadNotifications,
     saveSystemSettings,
     sendTestEmail,
