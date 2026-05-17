@@ -7,6 +7,7 @@ const Settings = () => import('../views/Settings.vue')
 const PersonalSettings = () => import('../views/PersonalSettings.vue')
 const AdminPlugins = () => import('../views/AdminPlugins.vue')
 const AdminLogin = () => import('../views/AdminLogin.vue')
+const NotFound = () => import('../views/NotFound.vue')
 const routes = [
   {
     path: '/',
@@ -46,6 +47,11 @@ const routes = [
     path: '/admin/plugins',
     name: 'AdminPlugins',
     component: AdminPlugins
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'NotFound',
+    component: NotFound
   }
 ]
 
