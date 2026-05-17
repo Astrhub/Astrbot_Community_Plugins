@@ -25,10 +25,6 @@
             <n-icon><document-text /></n-icon>
             插件开发文档
           </a>
-          <a href="/submit" class="footer-link">
-            <n-icon><git-branch /></n-icon>
-            站内提交
-          </a>
           <a href="https://github.com/Astrhub/Astrbot_Community_Plugins" target="_blank" class="footer-link">
             <n-icon><code-slash /></n-icon>
             市场仓库
@@ -53,7 +49,6 @@ import { NIcon } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { 
   LogoGithub, 
-  GitBranch, 
   DocumentText, 
   CodeSlash,
   Heart,

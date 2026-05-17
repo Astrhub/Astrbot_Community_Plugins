@@ -32,7 +32,6 @@
           </template>
           登录
         </n-button>
-        <n-button type="primary" @click="goSubmit">提交插件</n-button>
       </div>
     </nav>
 
@@ -125,9 +124,6 @@
             <moon v-else />
           </n-icon>
         </n-button>
-        <n-button circle type="primary" class="mobile-only" @click="goSubmit" aria-label="提交插件">
-          <n-icon><add-circle-outline /></n-icon>
-        </n-button>
       </div>
     </div>
   </header>
@@ -177,7 +173,6 @@ import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { NAlert, NCheckbox, NDropdown, NForm, NFormItem, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
 import {
-  AddCircleOutline,
   CloseOutline,
   LinkOutline,
   LogInOutline,
@@ -279,14 +274,6 @@ const handleCurrentPageChange = (value) => {
 
 const handleSortByChange = (value) => {
   emit('update:sortBy', value)
-}
-
-const goSubmit = () => {
-  if (!siteConfig.value.market?.submissions_enabled) {
-    message.warning('当前站点已暂停插件提交')
-    return
-  }
-  router.push('/submit')
 }
 
 const goSettings = () => {
