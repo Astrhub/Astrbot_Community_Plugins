@@ -973,8 +973,14 @@ async def plugin_with_interaction_state(
         **plugin,
         "liked": plugin_liked,
         "comments": [
-            with_comment_permissions(comment, user, comment["id"] in liked_comment_ids)
-            for comment in comments
+            with_comment_permissions(
+                comment,
+                user,
+                comment["id"] in liked_comment_ids,
+                plugin,
+                index + 1,
+            )
+            for index, comment in enumerate(comments)
         ],
     }
 
@@ -999,13 +1005,33 @@ def with_comment_permissions(
     comment: dict[str, Any],
     user: dict[str, Any] | None,
     liked: bool,
+    plugin: dict[str, Any] | None = None,
+    floor: int | None = None,
 ) -> dict[str, Any]:
     return {
         **comment,
         "liked": liked,
+        "floor": floor,
+        "is_admin": normalize_role(comment.get("role")) in {Role.CORE_ADMIN, Role.ADMIN},
+        "is_plugin_author": is_plugin_author_comment(comment, plugin),
         "can_delete": bool(user)
         and (comment.get("user_id") == user.get("id") or can_moderate_community(user)),
     }
+
+
+def is_plugin_author_comment(
+    comment: dict[str, Any],
+    plugin: dict[str, Any] | None,
+) -> bool:
+    if not plugin:
+        return False
+    if plugin.get("owner_user_id") and comment.get("user_id") == plugin.get("owner_user_id"):
+        return True
+    return bool(
+        plugin.get("owner_github_login")
+        and comment.get("github_login")
+        and plugin["owner_github_login"] == comment["github_login"]
+    )
 
 
 def validate_plugin_submission(payload: dict[str, Any], settings: Settings | None = None) -> None:

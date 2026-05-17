@@ -627,6 +627,7 @@ class InMemoryMarketStore:
             "github_login": user.get("github_login") or "",
             "github_name": user.get("github_name") or user.get("internal_username") or "",
             "avatar_url": user.get("avatar_url") or "",
+            "role": normalize_role(user.get("role")).value,
         }
 
 
@@ -1659,7 +1660,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    u.github_login,
                    u.github_name,
                    u.avatar_url,
-                   u.internal_username
+                   u.internal_username,
+                   u.role
             FROM market_comments c
          LEFT JOIN market_users u ON u.id = c.user_id
              WHERE c.plugin_id = $1 AND c.deleted = false

@@ -28,7 +28,12 @@
       <article v-for="comment in rootComments" :key="comment.id" class="comment-item">
         <div class="comment-body">
           <div class="comment-meta">
-            <span>{{ displayUser(comment) }}</span>
+            <div class="comment-user">
+              <span class="comment-floor">#{{ comment.floor || '-' }}</span>
+              <span>{{ displayUser(comment) }}</span>
+              <span v-if="comment.is_admin" class="comment-badge comment-badge--admin">管理</span>
+              <span v-if="comment.is_plugin_author" class="comment-badge comment-badge--author">作者</span>
+            </div>
             <time>{{ formatTime(comment.created_at) }}</time>
           </div>
           <p>{{ comment.body }}</p>
@@ -63,7 +68,12 @@
         <div v-if="repliesByParent[comment.id]?.length" class="reply-list">
           <article v-for="reply in repliesByParent[comment.id]" :key="reply.id" class="reply-item">
             <div class="comment-meta">
-              <span>{{ displayUser(reply) }}</span>
+              <div class="comment-user">
+                <span class="comment-floor">#{{ reply.floor || '-' }}</span>
+                <span>{{ displayUser(reply) }}</span>
+                <span v-if="reply.is_admin" class="comment-badge comment-badge--admin">管理</span>
+                <span v-if="reply.is_plugin_author" class="comment-badge comment-badge--author">作者</span>
+              </div>
               <time>{{ formatTime(reply.created_at) }}</time>
             </div>
             <p>{{ reply.body }}</p>
@@ -186,6 +196,7 @@ async function submitComment(parentId) {
 
 .comments-header,
 .comment-meta,
+.comment-user,
 .comment-actions,
 .editor-actions {
   display: flex;
@@ -243,6 +254,36 @@ async function submitComment(parentId) {
   gap: 12px;
   color: var(--n-text-color);
   font-weight: 600;
+}
+
+.comment-user {
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.comment-floor {
+  color: var(--n-text-color-3);
+  font-weight: 500;
+}
+
+.comment-badge {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.comment-badge--admin {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.comment-badge--author {
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.08);
 }
 
 .reply-list {

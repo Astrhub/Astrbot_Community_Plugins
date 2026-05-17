@@ -463,7 +463,30 @@ def test_plugin_detail_returns_nested_comments_with_user_profile() -> None:
     assert reply.status_code == 201
     assert detail["comments_count"] == 2
     assert detail["comments"][0]["github_name"] == "Alice Dev"
+    assert detail["comments"][0]["floor"] == 1
+    assert detail["comments"][0]["is_plugin_author"] is True
+    assert detail["comments"][0]["is_admin"] is False
     assert detail["comments"][1]["parent_id"] == root.json()["id"]
+    assert detail["comments"][1]["floor"] == 2
+
+
+def test_plugin_detail_marks_admin_author_comments() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user_id = login.json()["user"]["id"]
+    client.app.state.store.update_user_role(user_id, Role.ADMIN.value)
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(user_id),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", user_id)
+
+    client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Maintainer note"})
+    detail = client.get(f"/v1/plugins/{plugin['id']}").json()
+
+    assert detail["comments"][0]["floor"] == 1
+    assert detail["comments"][0]["is_admin"] is True
+    assert detail["comments"][0]["is_plugin_author"] is True
 
 
 def test_plugin_likes_are_unique_per_user() -> None:
