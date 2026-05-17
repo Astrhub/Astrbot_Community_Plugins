@@ -215,6 +215,7 @@ const {
   loadCurrentUser,
   likePluginComment,
   refreshPluginGithubMetadata,
+  updatePluginInList,
   unlikePluginComment,
   unlikePlugin
 } = store
@@ -341,6 +342,7 @@ async function fetchDetail() {
   if (!props.plugin?.id) return
   try {
     detail.value = await loadPluginDetail(props.plugin.id)
+    updatePluginInList(detail.value)
     liked.value = Boolean(detail.value?.liked)
   } catch (err) {
     message.error(err.message || '加载互动信息失败')
@@ -354,6 +356,7 @@ async function toggleLike() {
     detail.value = liked.value
       ? await unlikePlugin(props.plugin.id)
       : await likePlugin(props.plugin.id)
+    updatePluginInList(detail.value)
     liked.value = Boolean(detail.value?.liked)
   } catch (err) {
     message.error(err.message || '操作失败')
@@ -381,6 +384,7 @@ async function confirmRefreshGithub() {
       refresh_interval_seconds: Number(refreshForm.value.refresh_interval_seconds || 3600)
     }
     detail.value = await refreshPluginGithubMetadata(props.plugin.id, payload)
+    updatePluginInList(detail.value)
     await loadCurrentUser()
     await fetchDetail()
     showRefreshModal.value = false

@@ -5,6 +5,8 @@
       v-model:selected-tag="selectedTag"
       v-model:current-page="currentPage"
       v-model:sort-by="sortBy"
+      v-model:sort-direction="sortDirection"
+      v-model:fuzzy-search-enabled="fuzzySearchEnabled"
       :tag-options="tagOptions"
       :total-pages="totalPages"
     />
@@ -100,6 +102,8 @@ const {
   selectedTag,
   currentPage,
   sortBy,
+  sortDirection,
+  fuzzySearchEnabled,
   tagOptions,
   totalPages,
   paginatedPlugins,
@@ -109,7 +113,14 @@ const {
 } = storeToRefs(store)
 
 const filterKey = computed(() => {
-  return `${searchQuery.value}-${selectedTag.value}-${sortBy.value}-${currentPage.value}`
+  return [
+    searchQuery.value,
+    selectedTag.value,
+    sortBy.value,
+    sortDirection.value,
+    fuzzySearchEnabled.value,
+    currentPage.value
+  ].join('-')
 })
 
 const { refreshRandomOrder } = store
