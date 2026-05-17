@@ -101,17 +101,49 @@
         </div>
       </div>
       <div class="sticky-actions">
-        <n-button quaternary circle @click="copyPluginSource" aria-label="复制 AstrBot 插件源">
+        <n-button
+          quaternary
+          circle
+          class="hide-on-mobile-search"
+          @click="copyPluginSource"
+          aria-label="复制 AstrBot 插件源"
+        >
           <n-icon><link-outline /></n-icon>
         </n-button>
         <n-button
           v-if="isAdminUser"
           quaternary
           circle
+          class="hide-on-mobile-search"
           @click="goAdminPlugins"
           aria-label="插件审核"
         >
           <n-icon><settings-outline /></n-icon>
+        </n-button>
+        <n-dropdown
+          v-if="currentUser"
+          :options="userMenuOptions"
+          trigger="click"
+          @select="handleUserMenuSelect"
+        >
+          <n-button
+            quaternary
+            circle
+            class="hide-on-mobile-search"
+            :aria-label="`当前用户：${displayUserName}`"
+          >
+            <n-icon><person-outline /></n-icon>
+          </n-button>
+        </n-dropdown>
+        <n-button
+          v-else
+          quaternary
+          circle
+          class="hide-on-mobile-search"
+          @click="openLoginModal"
+          aria-label="登录"
+        >
+          <n-icon><log-in-outline /></n-icon>
         </n-button>
         <n-button
           quaternary
@@ -126,7 +158,13 @@
             <search-outline v-else />
           </n-icon>
         </n-button>
-        <n-button quaternary circle @click="toggleTheme" :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'">
+        <n-button
+          quaternary
+          circle
+          class="hide-on-mobile-search"
+          @click="toggleTheme"
+          :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'"
+        >
           <n-icon>
             <sunny v-if="isDarkMode" />
             <moon v-else />
@@ -657,7 +695,7 @@ onUnmounted(() => {
     display: block;
     position: absolute;
     left: 96px;
-    right: 128px;
+    right: 176px;
     top: 50%;
     transform: translateY(-50%) scaleY(0.96);
     opacity: 0;
@@ -675,6 +713,14 @@ onUnmounted(() => {
     display: none;
   }
 
+  .is-search-open .hide-on-mobile-search {
+    display: none;
+  }
+
+  .is-search-open .mobile-inline-search {
+    right: 56px;
+  }
+
   .nav-actions {
     display: none;
   }
@@ -687,7 +733,7 @@ onUnmounted(() => {
 
   .mobile-inline-search {
     left: 58px;
-    right: 118px;
+    right: 56px;
   }
 }
 </style>
