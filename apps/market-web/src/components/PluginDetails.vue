@@ -552,8 +552,9 @@ function countChars(value, char) {
 }
 
 function resolveReadmeUrl(url, context, basePath, raw) {
-  if (!url || /^(https?:|mailto:|#)/i.test(url)) return url
-  if (url.startsWith('//')) return `https:${url}`
+  if (!url || /^(mailto:|#)/i.test(url)) return url
+  const absoluteUrl = normalizeAbsoluteReadmeUrl(url, raw)
+  if (absoluteUrl) return absoluteUrl
   const [path, suffix = ''] = splitReadmeUrl(url)
   if (!path) return suffix || url
   const cleanPath = normalizeReadmePath(path.startsWith('/') ? '' : basePath, path)
@@ -561,6 +562,27 @@ function resolveReadmeUrl(url, context, basePath, raw) {
   const host = raw ? 'raw.githubusercontent.com' : 'github.com'
   const mode = raw ? '' : '/blob'
   return `https://${host}/${context.owner}/${context.repo}${mode}/${context.branch}/${encodedPath}${suffix}`
+}
+
+function normalizeAbsoluteReadmeUrl(url, raw) {
+  if (url.startsWith('//')) return `https:${url}`
+  if (!/^https?:/i.test(url)) return ''
+  return raw ? githubBlobUrlToRaw(url) || url : url
+}
+
+function githubBlobUrlToRaw(url) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname !== 'github.com') return ''
+    const parts = parsed.pathname.split('/').filter(Boolean)
+    if (parts.length < 5 || parts[2] !== 'blob') return ''
+    const [owner, repo, , branch, ...pathParts] = parts
+    if (!owner || !repo || !branch || !pathParts.length) return ''
+    const path = pathParts.map(encodeURIComponent).join('/')
+    return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}${parsed.search}${parsed.hash}`
+  } catch (_) {
+    return ''
+  }
 }
 
 function splitReadmeUrl(url) {
