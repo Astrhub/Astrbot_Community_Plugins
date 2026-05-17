@@ -5,10 +5,12 @@
     :hljs="highlightConfig.hljs"
   >
     <n-message-provider>
-      <div class="app-container" :class="{ dark: isDarkMode }">
-        <back-to-top v-if="!isFormPage" />
-        <router-view />
-      </div>
+      <n-dialog-provider>
+        <div class="app-container" :class="{ dark: isDarkMode }">
+          <back-to-top v-if="!isFormPage" />
+          <router-view />
+        </div>
+      </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>
   <iris-mask :is-active="irisMaskActive" :position="irisMaskPosition" />
@@ -18,7 +20,7 @@
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { darkTheme, NConfigProvider, NMessageProvider } from 'naive-ui'
+import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
 import { highlightConfig } from './plugins/highlight'
 
 import IrisMask from './components/IrisMask.vue'

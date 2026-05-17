@@ -17,6 +17,15 @@
           <close-circle />
         </n-icon>
       </div>
+      <n-switch
+        :value="fuzzySearchEnabled"
+        :size="compact ? 'small' : 'medium'"
+        class="fuzzy-switch"
+        @update:value="handleFuzzySearchChange"
+      >
+        <template #checked>模糊</template>
+        <template #unchecked>精确</template>
+      </n-switch>
       <n-select
         :value="props.sortBy"
         :options="compact ? compactSortOptions : sortOptions"
@@ -25,18 +34,35 @@
         class="sort-select"
         :class="{ 'sort-select--compact': compact }"
       />
+      <n-button
+        secondary
+        :size="compact ? 'small' : 'medium'"
+        class="sort-direction-button"
+        :aria-label="sortDirection === 'asc' ? '当前正序，点击切换倒序' : '当前倒序，点击切换正序'"
+        @click="toggleSortDirection"
+      >
+        {{ sortDirection === 'asc' ? '正序' : '倒序' }}
+      </n-button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { NSelect, NIcon } from 'naive-ui'
+import { NButton, NSelect, NIcon, NSwitch } from 'naive-ui'
 import { Search, CloseCircle } from '@vicons/ionicons5'
 
 const props = defineProps({
   searchQuery: String,
   currentPage: Number,
   sortBy: String,
+  sortDirection: {
+    type: String,
+    default: 'desc'
+  },
+  fuzzySearchEnabled: {
+    type: Boolean,
+    default: false
+  },
   compact: {
     type: Boolean,
     default: false
@@ -47,24 +73,51 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:searchQuery', 'update:currentPage', 'update:sortBy'])
+const emit = defineEmits([
+  'update:searchQuery',
+  'update:currentPage',
+  'update:sortBy',
+  'update:sortDirection',
+  'update:fuzzySearchEnabled'
+])
 
 const sortOptions = [
   { label: '默认排序', value: 'default' },
   { label: '随机推荐', value: 'random' },
   { label: '按更新时间', value: 'updated' },
-  { label: '按 Star 数量', value: 'stars' }
+  { label: '按 Star 数量', value: 'stars' },
+  { label: '按点赞数量', value: 'likes' },
+  { label: '按评论数量', value: 'comments' }
 ]
 
 const compactSortOptions = [
   { label: '默认', value: 'default' },
   { label: '随机', value: 'random' },
   { label: '时间', value: 'updated' },
-  { label: 'Star', value: 'stars' }
+  { label: 'Star', value: 'stars' },
+  { label: '点赞', value: 'likes' },
+  { label: '评论', value: 'comments' }
 ]
 
 const handleSortChange = (value) => {
   emit('update:sortBy', value)
+  if (props.currentPage > 1) {
+    emit('update:currentPage', 1)
+  }
+}
+
+const toggleSortDirection = () => {
+  emit('update:sortDirection', props.sortDirection === 'asc' ? 'desc' : 'asc')
+  if (props.currentPage > 1) {
+    emit('update:currentPage', 1)
+  }
+}
+
+const handleFuzzySearchChange = (value) => {
+  emit('update:fuzzySearchEnabled', value)
+  if (props.currentPage > 1) {
+    emit('update:currentPage', 1)
+  }
 }
 
 const handleSearchInput = (e) => {
@@ -103,8 +156,17 @@ const handleClearSearch = () => {
 
 /* 排序选择器样式 */
 .sort-select {
-  width: 140px;
+  width: 150px;
   flex-shrink: 0;
+}
+
+.fuzzy-switch,
+.sort-direction-button {
+  flex-shrink: 0;
+}
+
+.sort-direction-button {
+  min-width: 64px;
 }
 
 :deep(.sort-select .n-base-selection) {
@@ -292,6 +354,12 @@ const handleClearSearch = () => {
     width: 100%;
   }
 
+  .fuzzy-switch,
+  .sort-direction-button {
+    width: 100%;
+    justify-content: center;
+  }
+
   :deep(.sort-select .n-base-selection) {
     height: 40px !important;
     max-width: 120px;
@@ -393,6 +461,15 @@ const handleClearSearch = () => {
 
 .sort-select--compact {
   width: 80px;
+}
+
+.search-wrapper--compact .fuzzy-switch {
+  max-width: 74px;
+}
+
+.search-wrapper--compact .sort-direction-button {
+  min-width: 52px;
+  padding: 0 8px;
 }
 
 :deep(.sort-select--compact .n-base-selection) {

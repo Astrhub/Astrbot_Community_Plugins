@@ -28,13 +28,26 @@
       <article v-for="comment in rootComments" :key="comment.id" class="comment-item">
         <div class="comment-body">
           <div class="comment-meta">
-            <span>{{ displayUser(comment) }}</span>
+            <div class="comment-user">
+              <span class="comment-floor">#{{ comment.floor || '-' }}</span>
+              <span>{{ displayUser(comment) }}</span>
+              <span v-if="comment.is_admin" class="comment-badge comment-badge--admin">管理</span>
+              <span v-if="comment.is_plugin_author" class="comment-badge comment-badge--author">作者</span>
+            </div>
             <time>{{ formatTime(comment.created_at) }}</time>
           </div>
           <p>{{ comment.body }}</p>
-          <n-button text size="small" :disabled="!commentsEnabled" @click="toggleReply(comment.id)">
-            回复
-          </n-button>
+          <div class="comment-actions">
+            <n-button v-if="likesEnabled" text size="small" @click="toggleLike(comment)">
+              {{ comment.liked ? '取消点赞' : '点赞' }} {{ comment.likes || 0 }}
+            </n-button>
+            <n-button text size="small" :disabled="!commentsEnabled" @click="toggleReply(comment.id)">
+              回复
+            </n-button>
+            <n-button v-if="comment.can_delete" text size="small" type="error" @click="deleteComment(comment)">
+              删除
+            </n-button>
+          </div>
         </div>
 
         <div v-if="replyingTo === comment.id" class="reply-editor">
@@ -55,10 +68,23 @@
         <div v-if="repliesByParent[comment.id]?.length" class="reply-list">
           <article v-for="reply in repliesByParent[comment.id]" :key="reply.id" class="reply-item">
             <div class="comment-meta">
-              <span>{{ displayUser(reply) }}</span>
+              <div class="comment-user">
+                <span class="comment-floor">#{{ reply.floor || '-' }}</span>
+                <span>{{ displayUser(reply) }}</span>
+                <span v-if="reply.is_admin" class="comment-badge comment-badge--admin">管理</span>
+                <span v-if="reply.is_plugin_author" class="comment-badge comment-badge--author">作者</span>
+              </div>
               <time>{{ formatTime(reply.created_at) }}</time>
             </div>
             <p>{{ reply.body }}</p>
+            <div class="comment-actions">
+              <n-button v-if="likesEnabled" text size="small" @click="toggleLike(reply)">
+                {{ reply.liked ? '取消点赞' : '点赞' }} {{ reply.likes || 0 }}
+              </n-button>
+              <n-button v-if="reply.can_delete" text size="small" type="error" @click="deleteComment(reply)">
+                删除
+              </n-button>
+            </div>
           </article>
         </div>
       </article>
@@ -78,10 +104,14 @@ const props = defineProps({
   commentsEnabled: {
     type: Boolean,
     default: true
+  },
+  likesEnabled: {
+    type: Boolean,
+    default: true
   }
 })
 
-const emit = defineEmits(['submit'])
+const emit = defineEmits(['submit', 'delete', 'like'])
 const message = useMessage()
 const draft = ref('')
 const replyDraft = ref('')
@@ -114,6 +144,17 @@ function toggleReply(commentId) {
 function cancelReply() {
   replyingTo.value = ''
   replyDraft.value = ''
+}
+
+function toggleLike(comment) {
+  emit('like', {
+    comment,
+    liked: !comment.liked
+  })
+}
+
+function deleteComment(comment) {
+  emit('delete', comment)
 }
 
 async function submitComment(parentId) {
@@ -155,6 +196,8 @@ async function submitComment(parentId) {
 
 .comments-header,
 .comment-meta,
+.comment-user,
+.comment-actions,
 .editor-actions {
   display: flex;
   align-items: center;
@@ -201,11 +244,46 @@ async function submitComment(parentId) {
   gap: 8px;
 }
 
+.comment-actions {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .comment-meta {
   justify-content: space-between;
   gap: 12px;
   color: var(--n-text-color);
   font-weight: 600;
+}
+
+.comment-user {
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.comment-floor {
+  color: var(--n-text-color-3);
+  font-weight: 500;
+}
+
+.comment-badge {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.comment-badge--admin {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.comment-badge--author {
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.08);
 }
 
 .reply-list {

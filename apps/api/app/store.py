@@ -36,6 +36,8 @@ class InMemoryMarketStore:
             "plugins": state.get("plugins", []),
             "submissions": state.get("submissions", []),
             "comments": state.get("comments", []),
+            "pluginLikes": state.get("pluginLikes", []),
+            "commentLikes": state.get("commentLikes", []),
             "announcements": state.get("announcements", []),
             "notifications": state.get("notifications", []),
             "apiKeys": state.get("apiKeys", []),
@@ -163,6 +165,9 @@ class InMemoryMarketStore:
     def get_plugin(self, plugin_id: str) -> dict[str, Any] | None:
         return self._find("plugins", "id", plugin_id)
 
+    def get_comment(self, comment_id: str) -> dict[str, Any] | None:
+        return self._find("comments", "id", comment_id)
+
     def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         plugin = self._normalize_plugin(
             {
@@ -258,6 +263,7 @@ class InMemoryMarketStore:
             "body": body,
             "muted": False,
             "deleted": False,
+            "likes": 0,
             "created_at": utc_now(),
         }
         self.state["comments"].append(comment)
@@ -266,6 +272,54 @@ class InMemoryMarketStore:
             plugin["comments_count"] = len(self.list_comments(plugin_id))
         return deepcopy(comment)
 
+    def like_plugin(self, plugin_id: str, user_id: str) -> dict[str, Any] | None:
+        plugin = self.get_plugin(plugin_id)
+        if not plugin:
+            return None
+        if not self._has_like("pluginLikes", plugin_id, user_id):
+            self.state["pluginLikes"].append({"plugin_id": plugin_id, "user_id": user_id})
+            plugin["likes"] = int(plugin.get("likes") or 0) + 1
+            plugin["updated_at"] = utc_now()
+        return deepcopy({**plugin, "liked": True})
+
+    def unlike_plugin(self, plugin_id: str, user_id: str) -> dict[str, Any] | None:
+        plugin = self.get_plugin(plugin_id)
+        if not plugin:
+            return None
+        before = len(self.state["pluginLikes"])
+        self.state["pluginLikes"] = [
+            like
+            for like in self.state["pluginLikes"]
+            if not (like["plugin_id"] == plugin_id and like["user_id"] == user_id)
+        ]
+        if len(self.state["pluginLikes"]) != before:
+            plugin["likes"] = max(0, int(plugin.get("likes") or 0) - 1)
+            plugin["updated_at"] = utc_now()
+        return deepcopy({**plugin, "liked": False})
+
+    def like_comment(self, comment_id: str, user_id: str) -> dict[str, Any] | None:
+        comment = self.get_comment(comment_id)
+        if not comment or comment.get("deleted"):
+            return None
+        if not self._has_like("commentLikes", comment_id, user_id):
+            self.state["commentLikes"].append({"comment_id": comment_id, "user_id": user_id})
+            comment["likes"] = int(comment.get("likes") or 0) + 1
+        return deepcopy({**comment, "liked": True})
+
+    def unlike_comment(self, comment_id: str, user_id: str) -> dict[str, Any] | None:
+        comment = self.get_comment(comment_id)
+        if not comment or comment.get("deleted"):
+            return None
+        before = len(self.state["commentLikes"])
+        self.state["commentLikes"] = [
+            like
+            for like in self.state["commentLikes"]
+            if not (like["comment_id"] == comment_id and like["user_id"] == user_id)
+        ]
+        if len(self.state["commentLikes"]) != before:
+            comment["likes"] = max(0, int(comment.get("likes") or 0) - 1)
+        return deepcopy({**comment, "liked": False})
+
     def delete_comment(self, comment_id: str, by_user_id: str) -> dict[str, Any] | None:
         comment = self._find("comments", "id", comment_id)
         if not comment:
@@ -273,6 +327,14 @@ class InMemoryMarketStore:
         comment["deleted"] = True
         comment["deleted_by"] = by_user_id
         comment["deleted_at"] = utc_now()
+        for reply in self.state["comments"]:
+            if reply.get("parent_id") == comment_id and not reply.get("deleted"):
+                reply["deleted"] = True
+                reply["deleted_by"] = by_user_id
+                reply["deleted_at"] = utc_now()
+        plugin = self.get_plugin(comment["plugin_id"])
+        if plugin:
+            plugin["comments_count"] = len(self.list_comments(comment["plugin_id"]))
         return deepcopy(comment)
 
     def mute_user(
@@ -349,6 +411,9 @@ class InMemoryMarketStore:
         for api_key in self.state["apiKeys"]:
             if api_key.get("user_id") == from_user_id:
                 api_key["user_id"] = to_user_id
+        self._merge_likes("pluginLikes", "plugin_id", from_user_id, to_user_id)
+        self._merge_likes("commentLikes", "comment_id", from_user_id, to_user_id)
+        self._refresh_like_counts()
         for user in self.state["users"]:
             if user.get("muted_by") == from_user_id:
                 user["muted_by"] = to_user_id
@@ -453,6 +518,21 @@ class InMemoryMarketStore:
             comments.append(self._comment_with_user(comment, user))
         return comments
 
+    def has_plugin_like(self, plugin_id: str, user_id: str) -> bool:
+        return self._has_like("pluginLikes", plugin_id, user_id)
+
+    def list_liked_comment_ids(self, plugin_id: str, user_id: str) -> list[str]:
+        comment_ids = {
+            comment["id"]
+            for comment in self.state["comments"]
+            if comment["plugin_id"] == plugin_id and not comment.get("deleted")
+        }
+        return [
+            like["comment_id"]
+            for like in self.state["commentLikes"]
+            if like["user_id"] == user_id and like["comment_id"] in comment_ids
+        ]
+
     def _next_id(self, prefix: str) -> str:
         next_id = f"{prefix}_{self.state['nextNumericId']}"
         self.state["nextNumericId"] += 1
@@ -460,6 +540,47 @@ class InMemoryMarketStore:
 
     def _find(self, collection: str, key: str, value: str) -> dict[str, Any] | None:
         return next((item for item in self.state[collection] if item.get(key) == value), None)
+
+    def _has_like(self, collection: str, target_id: str, user_id: str) -> bool:
+        target_key = "plugin_id" if collection == "pluginLikes" else "comment_id"
+        return any(
+            like[target_key] == target_id and like["user_id"] == user_id
+            for like in self.state[collection]
+        )
+
+    def _merge_likes(
+        self,
+        collection: str,
+        target_key: str,
+        from_user_id: str,
+        to_user_id: str,
+    ) -> None:
+        existing = {
+            like[target_key] for like in self.state[collection] if like["user_id"] == to_user_id
+        }
+        merged = []
+        for like in self.state[collection]:
+            if like["user_id"] != from_user_id:
+                merged.append(like)
+            elif like[target_key] not in existing:
+                merged.append({**like, "user_id": to_user_id})
+                existing.add(like[target_key])
+        self.state[collection] = merged
+
+    def _refresh_like_counts(self) -> None:
+        plugin_like_counts: dict[str, int] = {}
+        for like in self.state["pluginLikes"]:
+            plugin_like_counts[like["plugin_id"]] = plugin_like_counts.get(like["plugin_id"], 0) + 1
+        for plugin in self.state["plugins"]:
+            plugin["likes"] = plugin_like_counts.get(plugin["id"], 0)
+
+        comment_like_counts: dict[str, int] = {}
+        for like in self.state["commentLikes"]:
+            comment_like_counts[like["comment_id"]] = (
+                comment_like_counts.get(like["comment_id"], 0) + 1
+            )
+        for comment in self.state["comments"]:
+            comment["likes"] = comment_like_counts.get(comment["id"], 0)
 
     def _upsert_plugin(self, plugin: dict[str, Any]) -> None:
         existing = self.get_plugin(plugin["id"])
@@ -502,9 +623,11 @@ class InMemoryMarketStore:
     def _comment_with_user(self, comment: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
         return {
             **deepcopy(comment),
+            "likes": int(comment.get("likes") or 0),
             "github_login": user.get("github_login") or "",
             "github_name": user.get("github_name") or user.get("internal_username") or "",
             "avatar_url": user.get("avatar_url") or "",
+            "role": normalize_role(user.get("role")).value,
         }
 
 
@@ -589,6 +712,7 @@ CREATE TABLE IF NOT EXISTS market_comments (
     user_id text NOT NULL REFERENCES market_users(id) ON DELETE CASCADE,
     parent_id text REFERENCES market_comments(id) ON DELETE SET NULL,
     body text NOT NULL,
+    likes integer NOT NULL DEFAULT 0 CHECK (likes >= 0),
     muted boolean NOT NULL DEFAULT false,
     deleted boolean NOT NULL DEFAULT false,
     deleted_by text REFERENCES market_users(id) ON DELETE SET NULL,
@@ -597,6 +721,24 @@ CREATE TABLE IF NOT EXISTS market_comments (
 );
 CREATE INDEX IF NOT EXISTS market_comments_plugin_idx
     ON market_comments(plugin_id, created_at ASC) WHERE deleted = false;
+
+CREATE TABLE IF NOT EXISTS market_plugin_likes (
+    plugin_id text NOT NULL REFERENCES market_plugins(id) ON DELETE CASCADE,
+    user_id text NOT NULL REFERENCES market_users(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (plugin_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS market_plugin_likes_user_idx
+    ON market_plugin_likes(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_comment_likes (
+    comment_id text NOT NULL REFERENCES market_comments(id) ON DELETE CASCADE,
+    user_id text NOT NULL REFERENCES market_users(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (comment_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS market_comment_likes_user_idx
+    ON market_comment_likes(user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS market_announcements (
     id text PRIMARY KEY,
@@ -691,6 +833,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
                 "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600"
+            )
+            await connection.execute(
+                "ALTER TABLE market_comments ADD COLUMN IF NOT EXISTS likes integer "
+                "NOT NULL DEFAULT 0"
             )
 
     async def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
@@ -840,6 +986,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
     async def get_plugin(self, plugin_id: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow("SELECT * FROM market_plugins WHERE id = $1", plugin_id)
         return self._plugin_from_record(row) if row else None
+
+    async def get_comment(self, comment_id: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow("SELECT * FROM market_comments WHERE id = $1", comment_id)
+        return self._comment_from_record(row) if row else None
 
     async def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         plugin_id = payload.get("id") or payload["name"]
@@ -1015,8 +1165,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
             async with connection.transaction():
                 row = await connection.fetchrow(
                     """
-                    INSERT INTO market_comments (id, plugin_id, user_id, parent_id, body)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO market_comments (id, plugin_id, user_id, parent_id, body, likes)
+                    VALUES ($1, $2, $3, $4, $5, 0)
                     RETURNING *
                     """,
                     new_id("comment"),
@@ -1027,6 +1177,126 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 )
                 await self._refresh_comments_count(connection, plugin_id)
                 return self._comment_from_record(row)
+
+    async def like_plugin(self, plugin_id: str, user_id: str) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                plugin = await connection.fetchrow(
+                    "SELECT * FROM market_plugins WHERE id = $1 FOR UPDATE", plugin_id
+                )
+                if not plugin:
+                    return None
+                inserted = await connection.fetchval(
+                    """
+                    INSERT INTO market_plugin_likes (plugin_id, user_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    RETURNING 1
+                    """,
+                    plugin_id,
+                    user_id,
+                )
+                if inserted:
+                    await connection.execute(
+                        """
+                        UPDATE market_plugins
+                           SET likes = likes + 1, updated_at = now()
+                         WHERE id = $1
+                        """,
+                        plugin_id,
+                    )
+                row = await connection.fetchrow(
+                    "SELECT * FROM market_plugins WHERE id = $1", plugin_id
+                )
+                return {**self._plugin_from_record(row), "liked": True} if row else None
+
+    async def unlike_plugin(self, plugin_id: str, user_id: str) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                plugin = await connection.fetchrow(
+                    "SELECT * FROM market_plugins WHERE id = $1 FOR UPDATE", plugin_id
+                )
+                if not plugin:
+                    return None
+                deleted = await connection.fetchval(
+                    """
+                    DELETE FROM market_plugin_likes
+                     WHERE plugin_id = $1 AND user_id = $2
+                 RETURNING 1
+                    """,
+                    plugin_id,
+                    user_id,
+                )
+                if deleted:
+                    await connection.execute(
+                        """
+                        UPDATE market_plugins
+                           SET likes = GREATEST(likes - 1, 0), updated_at = now()
+                         WHERE id = $1
+                        """,
+                        plugin_id,
+                    )
+                row = await connection.fetchrow(
+                    "SELECT * FROM market_plugins WHERE id = $1", plugin_id
+                )
+                return {**self._plugin_from_record(row), "liked": False} if row else None
+
+    async def like_comment(self, comment_id: str, user_id: str) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                comment = await connection.fetchrow(
+                    "SELECT * FROM market_comments WHERE id = $1 AND deleted = false FOR UPDATE",
+                    comment_id,
+                )
+                if not comment:
+                    return None
+                inserted = await connection.fetchval(
+                    """
+                    INSERT INTO market_comment_likes (comment_id, user_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    RETURNING 1
+                    """,
+                    comment_id,
+                    user_id,
+                )
+                if inserted:
+                    await connection.execute(
+                        "UPDATE market_comments SET likes = likes + 1 WHERE id = $1",
+                        comment_id,
+                    )
+                row = await connection.fetchrow(
+                    "SELECT * FROM market_comments WHERE id = $1", comment_id
+                )
+                return {**self._comment_from_record(row), "liked": True} if row else None
+
+    async def unlike_comment(self, comment_id: str, user_id: str) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                comment = await connection.fetchrow(
+                    "SELECT * FROM market_comments WHERE id = $1 AND deleted = false FOR UPDATE",
+                    comment_id,
+                )
+                if not comment:
+                    return None
+                deleted = await connection.fetchval(
+                    """
+                    DELETE FROM market_comment_likes
+                     WHERE comment_id = $1 AND user_id = $2
+                 RETURNING 1
+                    """,
+                    comment_id,
+                    user_id,
+                )
+                if deleted:
+                    await connection.execute(
+                        "UPDATE market_comments SET likes = GREATEST(likes - 1, 0) WHERE id = $1",
+                        comment_id,
+                    )
+                row = await connection.fetchrow(
+                    "SELECT * FROM market_comments WHERE id = $1", comment_id
+                )
+                return {**self._comment_from_record(row), "liked": False} if row else None
 
     async def delete_comment(self, comment_id: str, by_user_id: str) -> dict[str, Any] | None:
         async with self._pool().acquire() as connection:
@@ -1042,6 +1312,15 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     by_user_id,
                 )
                 if row:
+                    await connection.execute(
+                        """
+                        UPDATE market_comments
+                           SET deleted = true, deleted_by = $2, deleted_at = now()
+                         WHERE parent_id = $1 AND deleted = false
+                        """,
+                        comment_id,
+                        by_user_id,
+                    )
                     await self._refresh_comments_count(connection, row["plugin_id"])
                 return self._comment_from_record(row) if row else None
 
@@ -1196,6 +1475,68 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     from_user_id,
                     to_user_id,
                 )
+                await connection.execute(
+                    """
+                    INSERT INTO market_plugin_likes (plugin_id, user_id, created_at)
+                    SELECT plugin_id, $2, min(created_at)
+                      FROM market_plugin_likes
+                     WHERE user_id = $1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM market_plugin_likes existing
+                            WHERE existing.plugin_id = market_plugin_likes.plugin_id
+                              AND existing.user_id = $2
+                       )
+                  GROUP BY plugin_id
+                    """,
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    "DELETE FROM market_plugin_likes WHERE user_id = $1", from_user_id
+                )
+                await connection.execute(
+                    """
+                    UPDATE market_plugins p
+                       SET likes = counts.total
+                      FROM (
+                          SELECT plugin_id, count(*)::integer AS total
+                            FROM market_plugin_likes
+                        GROUP BY plugin_id
+                      ) counts
+                     WHERE p.id = counts.plugin_id
+                    """
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO market_comment_likes (comment_id, user_id, created_at)
+                    SELECT comment_id, $2, min(created_at)
+                      FROM market_comment_likes
+                     WHERE user_id = $1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM market_comment_likes existing
+                            WHERE existing.comment_id = market_comment_likes.comment_id
+                              AND existing.user_id = $2
+                       )
+                  GROUP BY comment_id
+                    """,
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    "DELETE FROM market_comment_likes WHERE user_id = $1", from_user_id
+                )
+                await connection.execute(
+                    """
+                    UPDATE market_comments c
+                       SET likes = counts.total
+                      FROM (
+                          SELECT comment_id, count(*)::integer AS total
+                            FROM market_comment_likes
+                        GROUP BY comment_id
+                      ) counts
+                     WHERE c.id = counts.comment_id
+                    """
+                )
                 await connection.execute("DELETE FROM market_users WHERE id = $1", from_user_id)
                 return self._user_from_record(target)
 
@@ -1319,8 +1660,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    u.github_login,
                    u.github_name,
                    u.avatar_url,
-                   u.internal_username
-              FROM market_comments c
+                   u.internal_username,
+                   u.role
+            FROM market_comments c
          LEFT JOIN market_users u ON u.id = c.user_id
              WHERE c.plugin_id = $1 AND c.deleted = false
           ORDER BY c.created_at ASC
@@ -1328,6 +1670,30 @@ class PgRedisMarketStore(InMemoryMarketStore):
             plugin_id,
         )
         return [self._comment_from_record(row) for row in rows]
+
+    async def has_plugin_like(self, plugin_id: str, user_id: str) -> bool:
+        return bool(
+            await self._pool().fetchval(
+                "SELECT 1 FROM market_plugin_likes WHERE plugin_id = $1 AND user_id = $2",
+                plugin_id,
+                user_id,
+            )
+        )
+
+    async def list_liked_comment_ids(self, plugin_id: str, user_id: str) -> list[str]:
+        rows = await self._pool().fetch(
+            """
+            SELECT cl.comment_id
+              FROM market_comment_likes cl
+              JOIN market_comments c ON c.id = cl.comment_id
+             WHERE c.plugin_id = $1
+               AND c.deleted = false
+               AND cl.user_id = $2
+            """,
+            plugin_id,
+            user_id,
+        )
+        return [row["comment_id"] for row in rows]
 
     async def summary(self) -> dict[str, int]:
         row = await self._pool().fetchrow(

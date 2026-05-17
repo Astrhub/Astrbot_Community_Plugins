@@ -463,7 +463,127 @@ def test_plugin_detail_returns_nested_comments_with_user_profile() -> None:
     assert reply.status_code == 201
     assert detail["comments_count"] == 2
     assert detail["comments"][0]["github_name"] == "Alice Dev"
+    assert detail["comments"][0]["floor"] == 1
+    assert detail["comments"][0]["is_plugin_author"] is True
+    assert detail["comments"][0]["is_admin"] is False
     assert detail["comments"][1]["parent_id"] == root.json()["id"]
+    assert detail["comments"][1]["floor"] == 2
+
+
+def test_plugin_detail_marks_admin_author_comments() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user_id = login.json()["user"]["id"]
+    client.app.state.store.update_user_role(user_id, Role.ADMIN.value)
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(user_id),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", user_id)
+
+    client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Maintainer note"})
+    detail = client.get(f"/v1/plugins/{plugin['id']}").json()
+
+    assert detail["comments"][0]["floor"] == 1
+    assert detail["comments"][0]["is_admin"] is True
+    assert detail["comments"][0]["is_plugin_author"] is True
+
+
+def test_plugin_likes_are_unique_per_user() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user_id = login.json()["user"]["id"]
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(user_id),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", user_id)
+
+    first = client.post(f"/v1/plugins/{plugin['id']}/like")
+    second = client.post(f"/v1/plugins/{plugin['id']}/like")
+    detail = client.get(f"/v1/plugins/{plugin['id']}")
+    unliked = client.post(f"/v1/plugins/{plugin['id']}/unlike")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["likes"] == 1
+    assert second.json()["likes"] == 1
+    assert second.json()["liked"] is True
+    assert detail.json()["liked"] is True
+    assert unliked.json()["likes"] == 0
+    assert unliked.json()["liked"] is False
+
+
+def test_comment_owner_and_admin_can_delete_comments() -> None:
+    client = make_client()
+    store = client.app.state.store
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    alice_login = client.get("/v1/auth/debug-login?login=alice")
+    alice = alice_login.json()["user"]
+    plugin = store.submit_plugin(store.get_user_by_id(alice["id"]), plugin_payload())
+    store.update_plugin_status(plugin["id"], "listed", alice["id"])
+    comment = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"}).json()
+
+    client.get("/v1/auth/debug-login?login=bob")
+    forbidden = client.delete(f"/v1/comments/{comment['id']}")
+    client.get("/v1/auth/debug-login?login=alice")
+    deleted_by_owner = client.delete(f"/v1/comments/{comment['id']}")
+    second = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Again"}).json()
+    client.post("/v1/auth/internal/login", json={"username": "admin", "password": "password123"})
+    deleted_by_admin = client.delete(f"/v1/comments/{second['id']}")
+
+    assert forbidden.status_code == 403
+    assert deleted_by_owner.status_code == 200
+    assert deleted_by_owner.json()["deleted"] is True
+    assert deleted_by_admin.status_code == 200
+    assert client.get(f"/v1/plugins/{plugin['id']}").json()["comments"] == []
+
+
+def test_deleting_root_comment_hides_replies() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user_id = login.json()["user"]["id"]
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(user_id),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", user_id)
+    root = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"}).json()
+    client.post(
+        f"/v1/plugins/{plugin['id']}/comments",
+        json={"body": "Agree", "parent_id": root["id"]},
+    )
+
+    deleted = client.delete(f"/v1/comments/{root['id']}")
+    detail = client.get(f"/v1/plugins/{plugin['id']}")
+
+    assert deleted.status_code == 200
+    assert detail.json()["comments"] == []
+    assert detail.json()["comments_count"] == 0
+
+
+def test_comment_likes_are_unique_per_user() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user_id = login.json()["user"]["id"]
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(user_id),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", user_id)
+    comment = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"}).json()
+
+    first = client.post(f"/v1/comments/{comment['id']}/like")
+    second = client.post(f"/v1/comments/{comment['id']}/like")
+    detail = client.get(f"/v1/plugins/{plugin['id']}")
+    unliked = client.post(f"/v1/comments/{comment['id']}/unlike")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["likes"] == 1
+    assert second.json()["likes"] == 1
+    assert detail.json()["comments"][0]["liked"] is True
+    assert unliked.json()["likes"] == 0
 
 
 def test_core_admin_can_review_plugin_submissions() -> None:
@@ -1355,8 +1475,11 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "CREATE TABLE IF NOT EXISTS market_users" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_plugins" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_notifications" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS market_plugin_likes" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS market_comment_likes" in SCHEMA_SQL
     assert "github_token text NOT NULL DEFAULT ''" in SCHEMA_SQL
     assert "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600" in SCHEMA_SQL
+    assert "likes integer NOT NULL DEFAULT 0" in SCHEMA_SQL
     assert "jsonb NOT NULL DEFAULT '[]'::jsonb" in SCHEMA_SQL
     assert "CHECK (status IN ('pending', 'listed', 'unlisted'))" in SCHEMA_SQL
     assert "REFERENCES market_users(id)" in SCHEMA_SQL
@@ -1381,7 +1504,8 @@ async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> No
         async with store._pool().acquire() as connection:
             await connection.execute(
                 """
-                TRUNCATE market_api_keys, market_notifications, market_comments,
+                TRUNCATE market_api_keys, market_notifications, market_comment_likes,
+                         market_plugin_likes, market_comments,
                          market_submissions, market_plugins, market_announcements, market_users
                 RESTART IDENTITY CASCADE
                 """

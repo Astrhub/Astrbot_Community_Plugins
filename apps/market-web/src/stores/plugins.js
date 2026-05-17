@@ -114,6 +114,8 @@ export const usePluginStore = defineStore('plugins', () => {
   const themeMode = ref('system')
   const isLoading = ref(true)
   const sortBy = ref('default')
+  const sortDirection = ref('asc')
+  const fuzzySearchEnabled = ref(false)
   const randomSeed = ref(0)
   const irisMaskActive = ref(false)
   const irisMaskPosition = ref({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
@@ -214,6 +216,75 @@ export const usePluginStore = defineStore('plugins', () => {
     return h >>> 0
   }
 
+  function normalizeSearchValue(value) {
+    return String(value || '').trim().toLowerCase()
+  }
+
+  function pluginSearchText(plugin) {
+    return [
+      plugin.name,
+      plugin.display_name,
+      plugin.id,
+      plugin.desc,
+      plugin.short_desc,
+      plugin.author,
+      plugin.owner_github_login,
+      plugin.owner_user_id,
+      plugin.repo,
+      ...(Array.isArray(plugin.tags) ? plugin.tags : [])
+    ].filter(Boolean).join(' ').toLowerCase()
+  }
+
+  function pluginMatchesSearch(plugin, searchValue) {
+    const text = pluginSearchText(plugin)
+    if (!fuzzySearchEnabled.value) return text.includes(searchValue)
+    return fuzzyIncludes(text, searchValue)
+  }
+
+  function fuzzyIncludes(text, query) {
+    let index = 0
+    for (const char of query) {
+      index = text.indexOf(char, index)
+      if (index === -1) return false
+      index += 1
+    }
+    return true
+  }
+
+  function comparePlugins(a, b) {
+    const direction = sortDirection.value === 'asc' ? 1 : -1
+    if (sortBy.value === 'random') {
+      return direction * compareRandomPlugins(a, b)
+    }
+    if (sortBy.value === 'updated') {
+      return direction * compareValues(getPluginTime(a), getPluginTime(b))
+    }
+    return direction * compareValues(getPluginSortValue(a), getPluginSortValue(b))
+  }
+
+  function getPluginSortValue(plugin) {
+    if (sortBy.value === 'stars') return Number(plugin.stars || 0)
+    if (sortBy.value === 'likes') return Number(plugin.likes || 0)
+    if (sortBy.value === 'comments') return Number(plugin.comments_count || 0)
+    return Number(plugin.list_index || 0)
+  }
+
+  function getPluginTime(plugin) {
+    return new Date(plugin.updated_at || plugin.created_at || 0).getTime() || 0
+  }
+
+  function compareValues(a, b) {
+    if (a > b) return 1
+    if (a < b) return -1
+    return 0
+  }
+
+  function compareRandomPlugins(a, b) {
+    const ha = stableHash(a.id || a.name || '', randomSeed.value)
+    const hb = stableHash(b.id || b.name || '', randomSeed.value)
+    return ha - hb
+  }
+
   const allTags = computed(() => {
     const tags = new Set()
     plugins.value.forEach((plugin) => {
@@ -225,42 +296,25 @@ export const usePluginStore = defineStore('plugins', () => {
   const tagOptions = computed(() => allTags.value.map((tag) => ({ label: tag, value: tag })))
 
   const filteredPlugins = computed(() => {
-    const searchValue = searchQuery.value ? searchQuery.value.toLowerCase() : ''
+    const searchValue = normalizeSearchValue(searchQuery.value)
     let filtered = plugins.value.filter((plugin) => {
       if (!searchValue && !selectedTag.value) return true
-      const matchesSearch = !searchValue ||
-        (plugin.name && plugin.name.toLowerCase().includes(searchValue)) ||
-        (plugin.display_name && plugin.display_name.toLowerCase().includes(searchValue)) ||
-        (plugin.id && plugin.id.toLowerCase().includes(searchValue)) ||
-        (plugin.desc && plugin.desc.toLowerCase().includes(searchValue)) ||
-        (plugin.author && plugin.author.toLowerCase().includes(searchValue))
+      const matchesSearch = !searchValue || pluginMatchesSearch(plugin, searchValue)
       const matchesTag = !selectedTag.value ||
         (Array.isArray(plugin.tags) && plugin.tags.includes(selectedTag.value))
       return matchesSearch && matchesTag
     })
 
-    if (sortBy.value === 'stars') {
-      filtered.sort((a, b) => (b.stars || 0) - (a.stars || 0))
-    } else if (sortBy.value === 'updated') {
-      filtered.sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0))
-    } else if (sortBy.value === 'random') {
-      filtered.sort((a, b) => {
-        const ha = stableHash(a.id || a.name || '', randomSeed.value)
-        const hb = stableHash(b.id || b.name || '', randomSeed.value)
-        return ha - hb
-      })
-    }
+    filtered.sort(comparePlugins)
 
     return filtered
   })
 
   const totalPages = computed(() => {
-    if (sortBy.value === 'random') return filteredPlugins.value.length > 0 ? 1 : 0
     return Math.ceil(filteredPlugins.value.length / pageSize.value)
   })
 
   const paginatedPlugins = computed(() => {
-    if (sortBy.value === 'random') return filteredPlugins.value.slice(0, pageSize.value)
     const start = (currentPage.value - 1) * pageSize.value
     return filteredPlugins.value.slice(start, start + pageSize.value)
   })
@@ -272,24 +326,29 @@ export const usePluginStore = defineStore('plugins', () => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const data = await response.json()
       const items = Array.isArray(data) ? data : (data.items || [])
-      plugins.value = items.map((plugin, index) => {
-        const id = plugin.id || plugin.name || `plugin-${index}`
-        return {
-          ...plugin,
-          id,
-          name: plugin.name || id,
-          display_name: plugin.display_name || plugin.name || id,
-          version: plugin.version || '1.0.0',
-          logo: plugin.logo || '',
-          tags: Array.isArray(plugin.tags) ? plugin.tags : [],
-          stars: plugin.stars || 0
-        }
-      })
+      plugins.value = items.map((plugin, index) => normalizePluginItem(plugin, index))
     } catch (error) {
       console.error('Error loading plugins:', error)
       plugins.value = []
     } finally {
       isLoading.value = false
+    }
+  }
+
+  function normalizePluginItem(plugin, index) {
+    const id = plugin.id || plugin.name || `plugin-${index}`
+    return {
+      ...plugin,
+      id,
+      name: plugin.name || id,
+      display_name: plugin.display_name || plugin.name || id,
+      version: plugin.version || '1.0.0',
+      logo: plugin.logo || '',
+      tags: Array.isArray(plugin.tags) ? plugin.tags : [],
+      stars: Number(plugin.stars || 0),
+      likes: Number(plugin.likes || 0),
+      comments_count: Number(plugin.comments_count || 0),
+      list_index: index
     }
   }
 
@@ -412,6 +471,36 @@ export const usePluginStore = defineStore('plugins', () => {
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '评论失败')
+    return data
+  }
+
+  async function deletePluginComment(commentId) {
+    const response = await fetch(`${apiBaseUrl}/v1/comments/${commentId}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '删除评论失败')
+    return data
+  }
+
+  async function likePluginComment(commentId) {
+    const response = await fetch(`${apiBaseUrl}/v1/comments/${commentId}/like`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '点赞评论失败')
+    return data
+  }
+
+  async function unlikePluginComment(commentId) {
+    const response = await fetch(`${apiBaseUrl}/v1/comments/${commentId}/unlike`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '取消评论点赞失败')
     return data
   }
 
@@ -567,11 +656,31 @@ export const usePluginStore = defineStore('plugins', () => {
     currentPage.value = 1
   }
 
+  function setSortDirection(value) {
+    sortDirection.value = value === 'asc' ? 'asc' : 'desc'
+    currentPage.value = 1
+  }
+
+  function setFuzzySearchEnabled(value) {
+    fuzzySearchEnabled.value = Boolean(value)
+    currentPage.value = 1
+  }
+
+  function updatePluginInList(plugin) {
+    const pluginId = plugin?.id
+    if (!pluginId) return
+    plugins.value = plugins.value.map((item) =>
+      item.id === pluginId ? { ...item, ...normalizePluginItem(plugin, item.list_index) } : item
+    )
+  }
+
   function resetPluginFilters() {
     searchQuery.value = ''
     selectedTag.value = null
     currentPage.value = 1
     sortBy.value = 'updated'
+    sortDirection.value = 'desc'
+    fuzzySearchEnabled.value = false
   }
 
   function refreshRandomOrder() {
@@ -600,6 +709,8 @@ export const usePluginStore = defineStore('plugins', () => {
     isDarkMode,
     themeMode,
     sortBy,
+    sortDirection,
+    fuzzySearchEnabled,
     isLoading,
     randomSeed,
     apiBaseUrl,
@@ -627,6 +738,9 @@ export const usePluginStore = defineStore('plugins', () => {
     likePlugin,
     unlikePlugin,
     addPluginComment,
+    deletePluginComment,
+    likePluginComment,
+    unlikePluginComment,
     updatePluginListing,
     refreshPluginGithubMetadata,
     loadNotifications,
@@ -637,6 +751,9 @@ export const usePluginStore = defineStore('plugins', () => {
     setSelectedTag,
     setCurrentPage,
     setSortBy,
+    setSortDirection,
+    setFuzzySearchEnabled,
+    updatePluginInList,
     resetPluginFilters,
     toggleTheme,
     useSystemTheme,

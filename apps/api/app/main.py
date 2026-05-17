@@ -546,7 +546,8 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/v1/plugins/{plugin_id}")
     async def plugin_detail(request: Request, plugin_id: str) -> dict[str, Any]:
         plugin = await get_plugin_or_404(request, plugin_id)
-        return {**plugin, "comments": await call_store(request, "list_comments", plugin_id)}
+        user = await current_user(request)
+        return await plugin_with_interaction_state(request, plugin, user)
 
     @app.patch("/v1/plugins/{plugin_id}")
     async def update_plugin(
@@ -605,28 +606,19 @@ def register_routes(app: FastAPI) -> None:
     async def like_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
         if not get_settings(request).market_likes_enabled:
             raise error(403, "Plugin likes are closed")
-        plugin = await get_plugin_or_404(request, plugin_id)
-        return (
-            await call_store(
-                request, "update_plugin_metadata", plugin_id, {"likes": plugin["likes"] + 1}
-            )
-            or {}
-        )
+        user = await require_user(request)
+        await get_plugin_or_404(request, plugin_id)
+        plugin = await call_store(request, "like_plugin", plugin_id, user["id"])
+        return await plugin_with_interaction_state(request, plugin, user)
 
     @app.post("/v1/plugins/{plugin_id}/unlike")
     async def unlike_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
         if not get_settings(request).market_likes_enabled:
             raise error(403, "Plugin likes are closed")
-        plugin = await get_plugin_or_404(request, plugin_id)
-        return (
-            await call_store(
-                request,
-                "update_plugin_metadata",
-                plugin_id,
-                {"likes": max(0, plugin["likes"] - 1)},
-            )
-            or {}
-        )
+        user = await require_user(request)
+        await get_plugin_or_404(request, plugin_id)
+        plugin = await call_store(request, "unlike_plugin", plugin_id, user["id"])
+        return await plugin_with_interaction_state(request, plugin, user)
 
     @app.post("/v1/plugins/{plugin_id}/comments", status_code=201)
     async def add_comment(
@@ -644,6 +636,31 @@ def register_routes(app: FastAPI) -> None:
         return await call_store(
             request, "add_comment", plugin_id, user["id"], payload.body, payload.parent_id
         )
+
+    @app.post("/v1/comments/{comment_id}/like")
+    async def like_comment(request: Request, comment_id: str) -> dict[str, Any]:
+        if not get_settings(request).market_likes_enabled:
+            raise error(403, "Comment likes are closed")
+        user = await require_user(request)
+        comment = await call_store(request, "like_comment", comment_id, user["id"])
+        if not comment:
+            raise error(404, "Comment not found")
+        return with_comment_permissions(comment, user, liked=True)
+
+    @app.post("/v1/comments/{comment_id}/unlike")
+    async def unlike_comment(request: Request, comment_id: str) -> dict[str, Any]:
+        if not get_settings(request).market_likes_enabled:
+            raise error(403, "Comment likes are closed")
+        user = await require_user(request)
+        comment = await call_store(request, "unlike_comment", comment_id, user["id"])
+        if not comment:
+            raise error(404, "Comment not found")
+        return with_comment_permissions(comment, user, liked=False)
+
+    @app.delete("/v1/comments/{comment_id}")
+    async def delete_own_comment(request: Request, comment_id: str) -> dict[str, Any]:
+        user = await require_user(request)
+        return await delete_comment_by_user(request, comment_id, user)
 
     @app.post("/v1/plugins/{plugin_id}/reindex")
     async def reindex_plugin(request: Request, plugin_id: str) -> dict[str, bool]:
@@ -741,10 +758,7 @@ def register_routes(app: FastAPI) -> None:
         user = await require_user(request)
         if not can_moderate_community(user):
             raise error(403, "Forbidden")
-        deleted = await call_store(request, "delete_comment", comment_id, user["id"])
-        if not deleted:
-            raise error(404, "Comment not found")
-        return deleted
+        return await delete_comment_by_user(request, comment_id, user)
 
     @app.post("/v1/admin/users/{user_id}/mute")
     async def mute_user(request: Request, user_id: str, payload: MuteUserPayload) -> dict[str, Any]:
@@ -938,6 +952,86 @@ async def get_plugin_or_404(request: Request, plugin_id: str) -> dict[str, Any]:
     if not plugin:
         raise error(404, "Plugin not found")
     return plugin
+
+
+async def plugin_with_interaction_state(
+    request: Request,
+    plugin: dict[str, Any] | None,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not plugin:
+        raise error(404, "Plugin not found")
+    comments = await call_store(request, "list_comments", plugin["id"])
+    liked_comment_ids = set()
+    plugin_liked = False
+    if user:
+        plugin_liked = await call_store(request, "has_plugin_like", plugin["id"], user["id"])
+        liked_comment_ids = set(
+            await call_store(request, "list_liked_comment_ids", plugin["id"], user["id"])
+        )
+    return {
+        **plugin,
+        "liked": plugin_liked,
+        "comments": [
+            with_comment_permissions(
+                comment,
+                user,
+                comment["id"] in liked_comment_ids,
+                plugin,
+                index + 1,
+            )
+            for index, comment in enumerate(comments)
+        ],
+    }
+
+
+async def delete_comment_by_user(
+    request: Request,
+    comment_id: str,
+    user: dict[str, Any],
+) -> dict[str, Any]:
+    comment = await call_store(request, "get_comment", comment_id)
+    if not comment:
+        raise error(404, "Comment not found")
+    if comment.get("user_id") != user["id"] and not can_moderate_community(user):
+        raise error(403, "Forbidden")
+    deleted = await call_store(request, "delete_comment", comment_id, user["id"])
+    if not deleted:
+        raise error(404, "Comment not found")
+    return deleted
+
+
+def with_comment_permissions(
+    comment: dict[str, Any],
+    user: dict[str, Any] | None,
+    liked: bool,
+    plugin: dict[str, Any] | None = None,
+    floor: int | None = None,
+) -> dict[str, Any]:
+    return {
+        **comment,
+        "liked": liked,
+        "floor": floor,
+        "is_admin": normalize_role(comment.get("role")) in {Role.CORE_ADMIN, Role.ADMIN},
+        "is_plugin_author": is_plugin_author_comment(comment, plugin),
+        "can_delete": bool(user)
+        and (comment.get("user_id") == user.get("id") or can_moderate_community(user)),
+    }
+
+
+def is_plugin_author_comment(
+    comment: dict[str, Any],
+    plugin: dict[str, Any] | None,
+) -> bool:
+    if not plugin:
+        return False
+    if plugin.get("owner_user_id") and comment.get("user_id") == plugin.get("owner_user_id"):
+        return True
+    return bool(
+        plugin.get("owner_github_login")
+        and comment.get("github_login")
+        and plugin["owner_github_login"] == comment["github_login"]
+    )
 
 
 def validate_plugin_submission(payload: dict[str, Any], settings: Settings | None = None) -> None:

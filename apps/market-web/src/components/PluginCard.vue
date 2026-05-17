@@ -91,10 +91,20 @@
           </div>
           <div class="plugin-meta" role="group" aria-label="插件元数据">
             <span class="author" role="text" :aria-label="`作者: ${plugin.author}`">作者: {{ plugin.author }}</span>
-            <n-space align="center" class="stars" role="group" aria-label="星标数">
-              <n-icon aria-hidden="true"><star-sharp /></n-icon>
-              <span role="text">{{ plugin.stars }}</span>
-            </n-space>
+            <div class="metric-list" role="group" aria-label="插件互动数据">
+              <span class="metric-item" role="text" :aria-label="`星标数：${plugin.stars || 0}`">
+                <n-icon aria-hidden="true"><star-sharp /></n-icon>
+                {{ plugin.stars || 0 }}
+              </span>
+              <span class="metric-item" role="text" :aria-label="`点赞数：${plugin.likes || 0}`">
+                <n-icon aria-hidden="true"><heart-outline /></n-icon>
+                {{ plugin.likes || 0 }}
+              </span>
+              <span class="metric-item" role="text" :aria-label="`评论数：${plugin.comments_count || 0}`">
+                <n-icon aria-hidden="true"><chatbubble-ellipses-outline /></n-icon>
+                {{ plugin.comments_count || 0 }}
+              </span>
+            </div>
           </div>
           <!-- 优化后的按钮区域 -->
           <div class="plugin-links" role="toolbar" aria-label="插件操作区">
@@ -224,12 +234,15 @@ import {
   NIcon,
   NInput,
   NModal,
+  useDialog,
   useMessage,
   NTooltip
 } from 'naive-ui'
 import {
   CloudOfflineOutline,
   StarSharp,
+  HeartOutline,
+  ChatbubbleEllipsesOutline,
   LinkOutline,
   PersonOutline,
   CheckmarkOutline
@@ -332,6 +345,7 @@ onUnmounted(() => {
 })
 
 const message = useMessage()
+const dialog = useDialog()
 const isCopied = ref(false)
 
 const copyRepoUrl = async (e) => {
@@ -352,7 +366,15 @@ const copyRepoUrl = async (e) => {
 const openUrl = (url, e) => {
   e?.stopPropagation() 
   if (url) {
-    window.open(url, '_blank')
+    dialog.info({
+      title: '即将打开外链',
+      content: `将跳转到：${url}`,
+      positiveText: '继续打开',
+      negativeText: '取消',
+      onPositiveClick: () => {
+        window.open(url, '_blank', 'noopener,noreferrer')
+      }
+    })
   }
 }
 
@@ -700,12 +722,21 @@ const handleLogoError = (event) => {
   color: var(--primary-color);
 }
 
-.stars {
+.metric-list {
   color: var(--primary-color);
   font-weight: 700;
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.metric-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 .plugin-links {

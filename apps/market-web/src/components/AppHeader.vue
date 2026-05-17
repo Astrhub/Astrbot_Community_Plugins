@@ -52,10 +52,14 @@
           :search-query="searchQuery"
           :current-page="currentPage"
           :sort-by="sortBy"
+          :sort-direction="sortDirection"
+          :fuzzy-search-enabled="fuzzySearchEnabled"
           :on-header="true"
           @update:searchQuery="handleSearchQueryChange"
           @update:currentPage="handleCurrentPageChange"
           @update:sortBy="handleSortByChange"
+          @update:sortDirection="handleSortDirectionChange"
+          @update:fuzzySearchEnabled="handleFuzzySearchEnabledChange"
         />
       </div>
     </section>
@@ -76,10 +80,14 @@
           :search-query="searchQuery"
           :current-page="currentPage"
           :sort-by="sortBy"
+          :sort-direction="sortDirection"
+          :fuzzy-search-enabled="fuzzySearchEnabled"
           :compact="true"
           @update:searchQuery="handleSearchQueryChange"
           @update:currentPage="handleCurrentPageChange"
           @update:sortBy="handleSortByChange"
+          @update:sortDirection="handleSortDirectionChange"
+          @update:fuzzySearchEnabled="handleFuzzySearchEnabledChange"
         />
         <div class="mobile-inline-search" :class="{ 'is-open': isMobileSearchOpen }">
           <n-input
@@ -192,6 +200,8 @@ defineProps({
   currentPage: Number,
   totalPages: Number,
   sortBy: String,
+  sortDirection: String,
+  fuzzySearchEnabled: Boolean,
   selectedTag: String,
   tagOptions: Array
 })
@@ -200,6 +210,8 @@ const emit = defineEmits([
   'update:searchQuery',
   'update:currentPage',
   'update:sortBy',
+  'update:sortDirection',
+  'update:fuzzySearchEnabled',
   'update:selectedTag'
 ])
 
@@ -274,6 +286,14 @@ const handleCurrentPageChange = (value) => {
 
 const handleSortByChange = (value) => {
   emit('update:sortBy', value)
+}
+
+const handleSortDirectionChange = (value) => {
+  emit('update:sortDirection', value)
+}
+
+const handleFuzzySearchEnabledChange = (value) => {
+  emit('update:fuzzySearchEnabled', value)
 }
 
 const goSettings = () => {
