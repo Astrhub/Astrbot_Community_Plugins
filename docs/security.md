@@ -40,9 +40,9 @@ PostgreSQL 是市场数据的持久化存储。Redis 当前用于会话令牌短
 
 ## 首次启动设置
 
-若首次启动时缺少 PostgreSQL 或 Redis 配置，前端 UI 可通过 `/v1/setup` 分步收集站点基础信息、内部核心管理员、PostgreSQL 和 Redis 必要字段。保存时后端先验证连接，必要时创建 PostgreSQL 目标数据库，再初始化 schema、验证 Redis，并把核心管理员写入目标数据库；任何一步失败都不会写入 `apps/api/data/runtime.env`。写入成功后，当前 FastAPI 进程会直接切换到 PostgreSQL/Redis 存储，无需杀进程重启。写入后，仅核心管理员可修改。
+若首次启动时缺少 PostgreSQL 或 Redis 配置，前端 UI 可通过 `/v1/setup` 分步收集站点基础信息、内部核心管理员、PostgreSQL 和 Redis 必要字段。保存时后端先验证连接，必要时创建 PostgreSQL 目标数据库，再初始化 schema、验证 Redis，并把核心管理员写入目标数据库；任何一步失败都不会写入 `apps/api/.env`。写入成功后，当前 FastAPI 进程会直接切换到 PostgreSQL/Redis 存储，无需杀进程重启。初始化完成后 `/v1/setup` 关闭，基础设施连接后续只通过 `.env` 修改。
 
-环境变量优先级：运行时配置文件（`runtime.env`）中的值会被同名系统环境变量覆盖（`apps/api/app/config.py` 第 61 行）。
+环境变量优先级：默认读取 `apps/api/.env`，同名系统环境变量覆盖 `.env`；测试或特殊部署可用 `APP_ENV_FILE` 指向其他 env 文件。Web 后台保存的站点、OAuth、市场策略和邮件设置进入数据库配置表，并覆盖 `.env` 中的同名系统设置。
 
 核心管理员可通过 `/v1/admin/settings` 修改站点、登录、GitHub OAuth、市场策略和邮件服务。Cloudflare Email Service 使用 Cloudflare REST API 的 `/accounts/{account_id}/email/sending/send` 端点，并只将 Cloudflare 错误摘要返回给管理员。
 

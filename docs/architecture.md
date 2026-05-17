@@ -26,13 +26,13 @@
 
 PostgreSQL schema 在首次配置保存前和服务启动时都会自动创建。插件可变扩展字段使用 `jsonb`，标签字段建立 GIN 索引；用户、插件、评论等核心关系使用主键、唯一约束、外键和状态 CHECK 约束保护数据一致性。Redis session 使用 `SET key value EX seconds` 写入，并在读取 session 时刷新 TTL。
 
-首次启动可通过前端 `/setup` 页面完成基础设施配置。安装向导分步收集站点名称/图标、内部核心管理员、PostgreSQL 主机/端口/数据库/账号/密码/SSL 和 Redis 主机/端口/数据库/密码/SSL。保存时后端会先创建或确认 PostgreSQL 目标数据库、初始化 schema、验证 Redis，并把内部核心管理员写入目标数据库；全部成功后才写入 `apps/api/data/runtime.env`、生成内部 `DATABASE_URL` / `REDIS_URL`，随后在当前 FastAPI 进程内切换到 `PgRedisMarketStore`，无需重启服务。
+首次启动可通过前端 `/setup` 页面完成基础设施配置。安装向导分步收集站点名称/图标、内部核心管理员、PostgreSQL 主机/端口/数据库/账号/密码/SSL 和 Redis 主机/端口/数据库/密码/SSL。保存时后端会先创建或确认 PostgreSQL 目标数据库、初始化 schema、验证 Redis，并把内部核心管理员写入目标数据库；全部成功后只把 `DATABASE_URL` / `REDIS_URL`、PostgreSQL/Redis 拆分字段和核心管理员引导信息写入 `apps/api/.env`，站点展示写入数据库配置表，随后在当前 FastAPI 进程内切换到 `PgRedisMarketStore`，无需重启服务。初始化完成后 `/v1/setup` 不再可用，基础设施连接后续通过 `.env` 修改。
 
-核心管理员登录后可进入 `/settings` 修改运行时系统设置，范围借鉴 sub2api 的站点/OAuth/登录条款/服务条款/集成配置模型，并只保留本市场需要的字段：站点展示、GitHub OAuth、市场功能开关、自动上架、最大标签数，以及 SMTP / Cloudflare Email Service。除 PostgreSQL 和 Redis 连接变更需要重启外，其余设置保存后会热更新当前 API 进程。
+核心管理员登录后可进入 `/settings` 修改运行时系统设置，范围借鉴 sub2api 的站点/OAuth/登录条款/服务条款/集成配置模型，并只保留本市场需要的字段：站点展示、GitHub OAuth、市场功能开关、自动上架、最大标签数，以及 SMTP / Cloudflare Email Service。这些设置保存到数据库配置表并热更新当前 API 进程；PostgreSQL 和 Redis 连接不在 Web 后台修改。
 
 ## 部署状态
 
-生产部署不再使用 Vercel。标准流程是在服务器上执行 `npm run build:web`，然后启动 FastAPI：
+生产部署不再使用 Vercel。可用 Docker Compose 单机部署，也可在裸机上执行 `npm run build:web` 后用 systemd 启动 FastAPI：
 
 ```bash
 npm install --prefix apps/market-web
@@ -48,11 +48,14 @@ FastAPI 会按以下路径提供服务：
 - `/plugins.json`、`/plugins-md5.json`：提供 AstrBot 自定义插件源
 - `/v1/...`：提供市场 API
 
-当前仓库内仍缺少完整生产运维配置：
+当前仓库提供的部署模板：
 
-- 容器化（Dockerfile / docker-compose）
+- `Dockerfile` / `docker-compose.yml`：单机容器部署，包含 PostgreSQL 和 Redis。
+- `deploy/systemd/`：裸机源码部署的 service 和环境变量模板。
+
+仍缺少的生产运维配置：
+
 - 编排（Kubernetes / Helm）
-- 进程管理（systemd / supervisor）
 - 反向代理（Nginx / Caddy）
 - 基础设施即代码（Terraform）
 - 数据库迁移工具（Alembic 等）

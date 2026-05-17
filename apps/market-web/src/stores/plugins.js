@@ -24,6 +24,7 @@ const COMMUNITY_REPO_URL = String(import.meta.env.VITE_COMMUNITY_REPO_URL || '')
 const DEFAULT_SITE_CONFIG = Object.freeze({
   name: 'AstrBot Community Plugins',
   icon_url: '/logo.webp',
+  web_url: BASE_URL,
   subtitle: '全新社区插件市场',
   description: '发现、评价和提交 AstrBot 插件。',
   contact_email: '',
@@ -49,6 +50,7 @@ const createDefaultSetupConfig = () => ({
   site: {
     name: DEFAULT_SITE_CONFIG.name,
     icon_url: DEFAULT_SITE_CONFIG.icon_url,
+    web_url: DEFAULT_SITE_CONFIG.web_url,
     subtitle: DEFAULT_SITE_CONFIG.subtitle,
     description: DEFAULT_SITE_CONFIG.description,
     contact_email: DEFAULT_SITE_CONFIG.contact_email,
@@ -185,6 +187,8 @@ export const usePluginStore = defineStore('plugins', () => {
       name: String(value.name || DEFAULT_SITE_CONFIG.name).trim() || DEFAULT_SITE_CONFIG.name,
       icon_url: String(value.icon_url || DEFAULT_SITE_CONFIG.icon_url).trim() ||
         DEFAULT_SITE_CONFIG.icon_url,
+      web_url: String(value.web_url || DEFAULT_SITE_CONFIG.web_url).trim() ||
+        DEFAULT_SITE_CONFIG.web_url,
       subtitle: String(value.subtitle ?? DEFAULT_SITE_CONFIG.subtitle).trim(),
       description: String(value.description ?? DEFAULT_SITE_CONFIG.description).trim(),
       contact_email: String(value.contact_email || '').trim(),
@@ -378,22 +382,38 @@ export const usePluginStore = defineStore('plugins', () => {
     }
   }
 
-  async function loadSetupStatus() {
-    const response = await fetch(`${apiBaseUrl}/v1/setup/status`, {
+  async function loadSetupStatus(path = '/v1/setup/status') {
+    const response = await fetch(`${apiBaseUrl}${path}`, {
       credentials: 'include',
       cache: 'no-store'
     })
     const data = await response.json().catch(() => ({}))
-    const site = applySiteConfig(data.site || data.saved_setup?.site || siteConfig.value)
+    if (!response.ok) {
+      if (response.status === 404) {
+        setupStatus.value = {
+          ...setupStatus.value,
+          required: false,
+          missing: [],
+          saved_setup: createDefaultSetupConfig()
+        }
+        return setupStatus.value
+      }
+      throw new Error(data.error || '加载安装状态失败')
+    }
+    const setupConfig = mergeSetupConfig(data.saved_setup, data.saved_setup?.site || data.site || {})
     setupStatus.value = {
       required: Boolean(data.required),
       missing: Array.isArray(data.missing) ? data.missing : [],
       database_configured: Boolean(data.database_configured),
       redis_configured: Boolean(data.redis_configured),
-      saved_setup: mergeSetupConfig(data.saved_setup, site),
+      saved_setup: setupConfig,
       restart_required: Boolean(data.restart_required)
     }
     return setupStatus.value
+  }
+
+  function loadAdminSetupStatus() {
+    return loadSetupStatus('/v1/admin/setup/status')
   }
 
   async function loadSiteConfig() {
@@ -767,6 +787,7 @@ export const usePluginStore = defineStore('plugins', () => {
     loadAnnouncements,
     loadSiteConfig,
     loadSetupStatus,
+    loadAdminSetupStatus,
     loadPlugins,
     loadCurrentUser,
     loginWithGithub,

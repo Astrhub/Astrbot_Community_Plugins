@@ -36,7 +36,7 @@ def make_setup_client(tmp_path) -> TestClient:
         {
             "ENABLE_DEV_AUTH": "true",
             "CORS_ORIGIN": "http://127.0.0.1:5173",
-            "RUNTIME_CONFIG_FILE": str(tmp_path / "runtime.env"),
+            "APP_ENV_FILE": str(tmp_path / ".env"),
         }
     )
     app = main_module.create_app(settings=settings, store=InMemoryMarketStore())
@@ -114,6 +114,7 @@ def system_settings_payload() -> dict[str, object]:
         "site": {
             "name": "AstrHub",
             "icon_url": "/hub.webp",
+            "web_url": "https://market.example.com",
             "subtitle": "社区插件中心",
             "description": "发现和管理插件。",
             "contact_email": "ops@example.com",
@@ -231,6 +232,22 @@ def test_normal_user_can_store_github_token_and_refresh_interval() -> None:
     stored = client.app.state.store.get_user_by_id(login.json()["user"]["id"])
     assert stored["github_token"] == "github_pat_readonly"
     assert stored["github_refresh_interval_seconds"] == 300
+
+
+def test_admin_user_listing_redacts_github_tokens() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    store = client.app.state.store
+    store.update_user_role(login.json()["user"]["id"], Role.ADMIN.value)
+    client.patch("/v1/me/profile", json={"github_token": "github_pat_readonly"})
+
+    response = client.get("/v1/admin/users")
+
+    assert response.status_code == 200
+    users = response.json()["items"]
+    alice = next(user for user in users if user["github_login"] == "alice")
+    assert alice["has_github_token"] is True
+    assert "github_token" not in alice
 
 
 def test_internal_admin_can_link_existing_github_identity() -> None:
@@ -404,14 +421,14 @@ def test_github_login_is_disabled_when_oauth_closed() -> None:
     assert response.status_code == 403
 
 
-def test_github_login_uses_runtime_callback_url_over_initial_settings(tmp_path) -> None:
-    runtime_file = tmp_path / "runtime.env"
-    runtime_file.write_text(
+def test_github_login_uses_env_file_callback_url_over_initial_settings(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
         "\n".join(
             [
                 "GITHUB_LOGIN_ENABLED=true",
-                "GITHUB_CLIENT_ID=runtime-client",
-                "GITHUB_CLIENT_SECRET=runtime-secret",
+                "GITHUB_CLIENT_ID=file-client",
+                "GITHUB_CLIENT_SECRET=file-secret",
                 "GITHUB_CALLBACK_URL=https://market.example.com/v1/auth/github/callback",
                 "",
             ]
@@ -420,13 +437,9 @@ def test_github_login_uses_runtime_callback_url_over_initial_settings(tmp_path) 
     settings = load_settings(
         {
             "ENABLE_DEV_AUTH": "true",
-            "RUNTIME_CONFIG_FILE": str(runtime_file),
+            "APP_ENV_FILE": str(env_file),
             "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
             "REDIS_URL": "redis://127.0.0.1:6379/0",
-            "GITHUB_LOGIN_ENABLED": "false",
-            "GITHUB_CLIENT_ID": "env-client",
-            "GITHUB_CLIENT_SECRET": "env-secret",
-            "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
         }
     )
     client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
@@ -435,21 +448,73 @@ def test_github_login_uses_runtime_callback_url_over_initial_settings(tmp_path) 
     location = response.headers["location"]
 
     assert response.status_code == 307
-    assert "client_id=runtime-client" in location
+    assert "client_id=file-client" in location
     assert (
         "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
     )
     assert "127.0.0.1" not in location
 
+    overridden = load_settings(
+        {
+            "APP_ENV_FILE": str(env_file),
+            "GITHUB_LOGIN_ENABLED": "false",
+        }
+    )
+    assert overridden.github_login_enabled is False
 
-def test_github_login_falls_back_to_forwarded_host_for_loopback_callback(tmp_path) -> None:
-    runtime_file = tmp_path / "runtime.env"
-    runtime_file.write_text(
+
+def test_github_login_uses_database_options_over_env_file(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "GITHUB_LOGIN_ENABLED=false",
+                "GITHUB_CLIENT_ID=file-client",
+                "GITHUB_CLIENT_SECRET=file-secret",
+                "GITHUB_CALLBACK_URL=http://127.0.0.1:8787/v1/auth/github/callback",
+                "",
+            ]
+        )
+    )
+    store = InMemoryMarketStore(
+        {
+            "options": {
+                "GITHUB_LOGIN_ENABLED": "true",
+                "GITHUB_CLIENT_ID": "database-client",
+                "GITHUB_CLIENT_SECRET": "database-secret",
+                "GITHUB_CALLBACK_URL": "https://market.example.com/v1/auth/github/callback",
+            }
+        }
+    )
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "APP_ENV_FILE": str(env_file),
+            "GITHUB_LOGIN_ENABLED": "false",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+
+    response = client.get("/v1/auth/github/login", follow_redirects=False)
+    location = response.headers["location"]
+
+    assert response.status_code == 307
+    assert "client_id=database-client" in location
+    assert (
+        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
+    )
+    assert "file-client" not in location
+    assert "127.0.0.1" not in location
+
+
+def test_github_login_ignores_forwarded_host_for_callback_url(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
         "\n".join(
             [
                 "GITHUB_LOGIN_ENABLED=true",
-                "GITHUB_CLIENT_ID=runtime-client",
-                "GITHUB_CLIENT_SECRET=runtime-secret",
+                "GITHUB_CLIENT_ID=file-client",
+                "GITHUB_CLIENT_SECRET=file-secret",
                 "GITHUB_CALLBACK_URL=http://127.0.0.1:8787/v1/auth/github/callback",
                 "",
             ]
@@ -458,7 +523,7 @@ def test_github_login_falls_back_to_forwarded_host_for_loopback_callback(tmp_pat
     settings = load_settings(
         {
             "ENABLE_DEV_AUTH": "true",
-            "RUNTIME_CONFIG_FILE": str(runtime_file),
+            "APP_ENV_FILE": str(env_file),
         }
     )
     client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
@@ -474,23 +539,21 @@ def test_github_login_falls_back_to_forwarded_host_for_loopback_callback(tmp_pat
     location = response.headers["location"]
 
     assert response.status_code == 307
-    assert (
-        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
-    )
-    assert "127.0.0.1" not in location
+    assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A8787%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
+    assert "market.example.com" not in location
 
 
-def test_github_callback_uses_forwarded_origin_for_loopback_settings(
+def test_github_callback_ignores_forwarded_origin_for_loopback_settings(
     monkeypatch,
     tmp_path,
 ) -> None:
-    runtime_file = tmp_path / "runtime.env"
-    runtime_file.write_text(
+    env_file = tmp_path / ".env"
+    env_file.write_text(
         "\n".join(
             [
                 "GITHUB_LOGIN_ENABLED=true",
-                "GITHUB_CLIENT_ID=runtime-client",
-                "GITHUB_CLIENT_SECRET=runtime-secret",
+                "GITHUB_CLIENT_ID=file-client",
+                "GITHUB_CLIENT_SECRET=file-secret",
                 "GITHUB_CALLBACK_URL=http://127.0.0.1:8787/v1/auth/github/callback",
                 "WEB_URL=http://127.0.0.1:8787",
                 "",
@@ -500,7 +563,7 @@ def test_github_callback_uses_forwarded_origin_for_loopback_settings(
     settings = load_settings(
         {
             "ENABLE_DEV_AUTH": "true",
-            "RUNTIME_CONFIG_FILE": str(runtime_file),
+            "APP_ENV_FILE": str(env_file),
         }
     )
     client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
@@ -534,20 +597,20 @@ def test_github_callback_uses_forwarded_origin_for_loopback_settings(
     )
 
     assert response.status_code == 307
-    assert response.headers["location"] == "https://market.example.com"
-    assert captured["callback_url"] == "https://market.example.com/v1/auth/github/callback"
+    assert response.headers["location"] == "http://127.0.0.1:8787"
+    assert captured["callback_url"] == "http://127.0.0.1:8787/v1/auth/github/callback"
 
 
-def test_public_site_config_uses_runtime_oauth_settings(tmp_path) -> None:
-    runtime_file = tmp_path / "runtime.env"
-    runtime_file.write_text(
+def test_public_site_config_uses_env_file_settings(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
         "\n".join(
             [
                 "GITHUB_LOGIN_ENABLED=true",
                 "LOGIN_AGREEMENT_ENABLED=true",
-                "LOGIN_AGREEMENT_TEXT=Runtime login agreement",
+                "LOGIN_AGREEMENT_TEXT=File login agreement",
                 "SERVICE_TERMS_ENABLED=true",
-                "SERVICE_TERMS_TEXT=Runtime service terms",
+                "SERVICE_TERMS_TEXT=File service terms",
                 "MARKET_SUBMISSIONS_ENABLED=false",
                 "MAX_PLUGIN_TAGS=5",
                 "",
@@ -556,10 +619,7 @@ def test_public_site_config_uses_runtime_oauth_settings(tmp_path) -> None:
     )
     settings = load_settings(
         {
-            "RUNTIME_CONFIG_FILE": str(runtime_file),
-            "GITHUB_LOGIN_ENABLED": "false",
-            "MARKET_SUBMISSIONS_ENABLED": "true",
-            "MAX_PLUGIN_TAGS": "8",
+            "APP_ENV_FILE": str(env_file),
         }
     )
     client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
@@ -568,19 +628,60 @@ def test_public_site_config_uses_runtime_oauth_settings(tmp_path) -> None:
 
     assert site_config["auth"]["github_login_enabled"] is True
     assert site_config["auth"]["login_agreement_enabled"] is True
-    assert site_config["auth"]["login_agreement_text"] == "Runtime login agreement"
+    assert site_config["auth"]["login_agreement_text"] == "File login agreement"
     assert site_config["auth"]["service_terms_enabled"] is True
-    assert site_config["auth"]["service_terms_text"] == "Runtime service terms"
+    assert site_config["auth"]["service_terms_text"] == "File service terms"
     assert site_config["auth"]["terms_revision"] == main_module.digest_terms(
         settings.with_updates(
             login_agreement_enabled=True,
-            login_agreement_text="Runtime login agreement",
+            login_agreement_text="File login agreement",
             service_terms_enabled=True,
-            service_terms_text="Runtime service terms",
+            service_terms_text="File service terms",
         )
     )
     assert site_config["market"]["submissions_enabled"] is False
     assert site_config["market"]["max_plugin_tags"] == 5
+
+    overridden = load_settings(
+        {
+            "APP_ENV_FILE": str(env_file),
+            "MARKET_SUBMISSIONS_ENABLED": "true",
+            "MAX_PLUGIN_TAGS": "8",
+        }
+    )
+    assert overridden.market_submissions_enabled is True
+    assert overridden.max_plugin_tags == 8
+
+
+def test_public_site_config_uses_database_options_over_env_file(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "SITE_NAME=File Site",
+                "GITHUB_LOGIN_ENABLED=false",
+                "MARKET_SUBMISSIONS_ENABLED=false",
+                "",
+            ]
+        )
+    )
+    store = InMemoryMarketStore(
+        {
+            "options": {
+                "SITE_NAME": "Database Site",
+                "GITHUB_LOGIN_ENABLED": "true",
+                "MARKET_SUBMISSIONS_ENABLED": "true",
+            }
+        }
+    )
+    settings = load_settings({"APP_ENV_FILE": str(env_file)})
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+
+    site_config = client.get("/v1/site").json()
+
+    assert site_config["name"] == "Database Site"
+    assert site_config["auth"]["github_login_enabled"] is True
+    assert site_config["market"]["submissions_enabled"] is True
 
 
 def test_core_admin_can_manage_admins_while_normal_admin_moderates_plugins() -> None:
@@ -949,7 +1050,7 @@ def test_cors_allows_browser_session_cookies_and_dev_auth_header() -> None:
     assert "x-dev-github-login" in response.headers["access-control-allow-headers"].lower()
 
 
-def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
+def test_first_run_setup_can_save_structured_env_file(tmp_path) -> None:
     client = make_setup_client(tmp_path)
 
     status = client.get("/v1/setup/status")
@@ -974,20 +1075,20 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     )
     assert setup_call["redis_url"] == "redis://127.0.0.1:6379/0"
     assert setup_call["core_admin_password_hash"].startswith("pbkdf2_sha256")
-    runtime_file = (tmp_path / "runtime.env").read_text()
+    env_file = (tmp_path / ".env").read_text()
     assert (
-        "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market?sslmode=disable"
-        in runtime_file
+        "DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market?sslmode=disable" in env_file
     )
-    assert "REDIS_URL=redis://127.0.0.1:6379/0" in runtime_file
-    assert "POSTGRES_SSL=false" in runtime_file
-    assert 'SITE_NAME="AstrHub Plugins"' in runtime_file
-    assert "CORE_ADMIN_USERNAME=admin" in runtime_file
-    assert "CORE_ADMIN_PASSWORD_HASH=pbkdf2_sha256" in runtime_file
-    assert "SITE_SUBTITLE" not in runtime_file
-    assert "GITHUB_LOGIN_ENABLED" not in runtime_file
-    assert "MARKET_SUBMISSIONS_ENABLED" not in runtime_file
-    assert "EMAIL_PROVIDER" not in runtime_file
+    assert "REDIS_URL=redis://127.0.0.1:6379/0" in env_file
+    assert "POSTGRES_SSL=false" in env_file
+    assert "CORE_ADMIN_USERNAME=admin" in env_file
+    assert "CORE_ADMIN_PASSWORD_HASH=pbkdf2_sha256" in env_file
+    assert "SITE_NAME" not in env_file
+    assert "SITE_SUBTITLE" not in env_file
+    assert "GITHUB_LOGIN_ENABLED" not in env_file
+    assert "MARKET_SUBMISSIONS_ENABLED" not in env_file
+    assert "EMAIL_PROVIDER" not in env_file
+    assert client.app.state.store.list_options()["SITE_NAME"] == "AstrHub Plugins"
     login = client.post(
         "/v1/auth/internal/login",
         json={"username": "admin", "password": "password123"},
@@ -995,10 +1096,14 @@ def test_first_run_setup_can_save_structured_runtime_config(tmp_path) -> None:
     assert login.status_code == 200
     assert login.json()["user"]["role"] == Role.CORE_ADMIN
     assert client.get("/health").json()["setup"] == "complete"
-    assert client.get("/v1/setup/status").json()["required"] is False
+    assert client.get("/v1/setup/status").status_code == 404
+    assert client.get("/v1/admin/setup/status").json()["required"] is False
+    client.cookies.clear()
+    repeat_setup = client.post("/v1/setup", json=setup_payload(site_name="Again"))
+    assert repeat_setup.status_code == 404
 
 
-def test_setup_initialization_failure_does_not_write_runtime_config(tmp_path) -> None:
+def test_setup_initialization_failure_does_not_write_env_file(tmp_path) -> None:
     client = make_setup_client(tmp_path)
 
     async def failing_setup_initializer(*_args) -> None:
@@ -1009,7 +1114,7 @@ def test_setup_initialization_failure_does_not_write_runtime_config(tmp_path) ->
 
     assert response.status_code == 400
     assert response.json()["error"] == "PostgreSQL connection failed: refused"
-    assert not (tmp_path / "runtime.env").exists()
+    assert not (tmp_path / ".env").exists()
 
 
 def test_setup_initializer_creates_database_schema_and_internal_admin(monkeypatch) -> None:
@@ -1062,7 +1167,7 @@ def test_setup_activation_switches_store_without_process_restart(tmp_path) -> No
     settings = load_settings(
         {
             "ENABLE_DEV_AUTH": "true",
-            "RUNTIME_CONFIG_FILE": str(tmp_path / "runtime.env"),
+            "APP_ENV_FILE": str(tmp_path / ".env"),
         }
     )
 
@@ -1094,27 +1199,27 @@ def test_setup_activation_switches_store_without_process_restart(tmp_path) -> No
     assert client.get("/health").json()["setup"] == "complete"
 
 
-def test_setup_after_first_run_requires_core_admin(tmp_path) -> None:
+def test_setup_after_first_run_is_closed(tmp_path) -> None:
     client = make_setup_client(tmp_path)
     client.post("/v1/setup", json=setup_payload())
     client.cookies.clear()
 
-    forbidden = client.post(
+    closed = client.post(
         "/v1/setup",
         headers={"x-dev-github-login": "bob"},
         json=setup_payload(postgres_database="other", redis_port=6380),
     )
-    assert forbidden.status_code == 403
+    assert closed.status_code == 404
 
     client.post(
         "/v1/auth/internal/login",
         json={"username": "admin", "password": "password123"},
     )
-    allowed = client.post(
+    still_closed = client.post(
         "/v1/setup",
         json=setup_payload(postgres_database="other", redis_port=6380),
     )
-    assert allowed.status_code == 200
+    assert still_closed.status_code == 404
 
 
 def test_public_site_config_uses_settings() -> None:
@@ -1122,6 +1227,7 @@ def test_public_site_config_uses_settings() -> None:
         {
             "SITE_NAME": "AstrHub",
             "SITE_ICON_URL": "https://example.com/icon.webp",
+            "WEB_URL": "https://plugins.example.com",
             "SITE_SUBTITLE": "社区插件中心",
             "SITE_DESCRIPTION": "浏览 AstrBot 插件。",
             "SITE_CONTACT_EMAIL": "ops@example.com",
@@ -1137,6 +1243,7 @@ def test_public_site_config_uses_settings() -> None:
     assert client.get("/v1/site").json() == {
         "name": "AstrHub",
         "icon_url": "https://example.com/icon.webp",
+        "web_url": "https://plugins.example.com",
         "subtitle": "社区插件中心",
         "description": "浏览 AstrBot 插件。",
         "contact_email": "ops@example.com",
@@ -1159,20 +1266,19 @@ def test_public_site_config_uses_settings() -> None:
     }
 
 
-def test_setup_status_redacts_infrastructure_after_initial_setup(tmp_path) -> None:
+def test_setup_status_closes_after_initial_setup(tmp_path) -> None:
     client = make_setup_client(tmp_path)
     client.post("/v1/setup", json=setup_payload())
     client.cookies.clear()
 
-    public_status = client.get("/v1/setup/status").json()
-    assert public_status["saved_setup"]["postgres"]["database"] == ""
-    assert public_status["saved_setup"]["postgres"]["password"] == ""
+    public_status = client.get("/v1/setup/status")
+    assert public_status.status_code == 404
 
     client.post(
         "/v1/auth/internal/login",
         json={"username": "admin", "password": "password123"},
     )
-    core_status = client.get("/v1/setup/status").json()
+    core_status = client.get("/v1/admin/setup/status").json()
     assert core_status["saved_setup"]["postgres"]["password"] == "market"
     assert core_status["saved_setup"]["github"]["client_secret"] == ""
     assert core_status["saved_setup"]["email"]["cloudflare"]["api_token"] == ""
@@ -1199,6 +1305,12 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert settings["email"]["cloudflare"]["api_token"] == main_module.MASKED_SECRET
     assert settings["email"]["cloudflare"]["api_token_configured"] is True
     assert client.get("/v1/site").json()["market"]["max_plugin_tags"] == 4
+    stored_options = client.app.state.store.list_options()
+    assert stored_options["SITE_NAME"] == "AstrHub"
+    assert stored_options["GITHUB_CLIENT_SECRET"] == "github-secret"
+    assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
+    assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
+    env_file_before = (tmp_path / ".env").read_text()
 
     masked_payload = system_settings_payload()
     masked_payload["github"]["client_secret"] = main_module.MASKED_SECRET
@@ -1207,12 +1319,46 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     masked_payload["site"]["name"] = "AstrHub Updated"
     preserved = client.put("/v1/admin/settings", json=masked_payload)
     assert preserved.status_code == 200
-    runtime_file = (tmp_path / "runtime.env").read_text()
-    assert "GITHUB_CLIENT_SECRET=github-secret" in runtime_file
-    assert "GITHUB_API_TOKEN=system-github-token" in runtime_file
-    assert "GITHUB_METADATA_SYNC_INTERVAL_SECONDS=1800" in runtime_file
-    assert "CLOUDFLARE_EMAIL_API_TOKEN=cf-token" in runtime_file
-    assert 'SITE_NAME="AstrHub Updated"' in runtime_file
+    stored_options = client.app.state.store.list_options()
+    assert stored_options["GITHUB_CLIENT_SECRET"] == "github-secret"
+    assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
+    assert stored_options["GITHUB_METADATA_SYNC_INTERVAL_SECONDS"] == "1800"
+    assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
+    assert stored_options["SITE_NAME"] == "AstrHub Updated"
+    assert stored_options["WEB_URL"] == "https://market.example.com"
+    assert (tmp_path / ".env").read_text() == env_file_before
+
+
+def test_system_settings_reject_local_oauth_callback_when_enabled(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+    client.post("/v1/setup", json=setup_payload())
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    payload = system_settings_payload()
+    payload["github"]["callback_url"] = "http://127.0.0.1:8787/v1/auth/github/callback"
+
+    response = client.put("/v1/admin/settings", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "GitHub callback URL must use a public host"
+
+
+def test_system_settings_reject_local_web_url_when_oauth_enabled(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+    client.post("/v1/setup", json=setup_payload())
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    payload = system_settings_payload()
+    payload["site"]["web_url"] = "http://127.0.0.1:8787"
+
+    response = client.put("/v1/admin/settings", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Web URL must use a public host when GitHub login is enabled"
 
 
 def test_system_settings_require_core_admin(tmp_path) -> None:
@@ -1680,6 +1826,7 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "CREATE TABLE IF NOT EXISTS market_users" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_plugins" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_notifications" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS market_options" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_plugin_likes" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS market_comment_likes" in SCHEMA_SQL
     assert "github_token text NOT NULL DEFAULT ''" in SCHEMA_SQL
@@ -1711,7 +1858,8 @@ async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> No
                 """
                 TRUNCATE market_api_keys, market_notifications, market_comment_likes,
                          market_plugin_likes, market_comments,
-                         market_submissions, market_plugins, market_announcements, market_users
+                         market_submissions, market_plugins, market_announcements,
+                         market_options, market_users
                 RESTART IDENTITY CASCADE
                 """
             )
@@ -1721,6 +1869,8 @@ async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> No
         assert admin["role"] == Role.CORE_ADMIN
         assert alice["role"] == Role.USER
         await store.update_user_role(alice["id"], Role.ADMIN.value)
+        await store.upsert_options({"SITE_NAME": "Database Site"})
+        assert (await store.list_options())["SITE_NAME"] == "Database Site"
 
         plugin = await store.submit_plugin(
             alice,

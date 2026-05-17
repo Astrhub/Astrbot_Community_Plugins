@@ -6,9 +6,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
 
-from .runtime_config import read_runtime_config
+from .env_file import read_env_file
 
-DEFAULT_RUNTIME_CONFIG_PATH = Path(__file__).resolve().parents[1] / "data" / "runtime.env"
+DEFAULT_ENV_FILE_PATH = Path(__file__).resolve().parents[1] / ".env"
 DEFAULT_SITE_ICON_URL = "/logo.webp"
 DEFAULT_SITE_NAME = "AstrBot Community Plugins"
 DEFAULT_SITE_SUBTITLE = "全新社区插件市场"
@@ -34,7 +34,7 @@ class Settings:
     host: str
     port: int
     cors_origins: tuple[str, ...]
-    runtime_config_path: str
+    env_file_path: str
     web_url: str
     github_client_id: str
     github_client_secret: str
@@ -102,16 +102,16 @@ class Settings:
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     source = _normalize_env(os.environ if env is None else env)
-    runtime_config_path = source.get("RUNTIME_CONFIG_FILE", str(DEFAULT_RUNTIME_CONFIG_PATH))
-    runtime_overrides = _normalize_env(read_runtime_config(runtime_config_path))
-    merged = {**runtime_overrides, **source}
+    env_file_path = source.get("APP_ENV_FILE", str(DEFAULT_ENV_FILE_PATH))
+    file_values = _normalize_env(read_env_file(env_file_path))
+    merged = {**file_values, **source}
     return Settings(
         host=merged.get("HOST", "127.0.0.1"),
         port=_int(merged.get("PORT"), 8787),
         cors_origins=_list(
             merged.get("CORS_ORIGIN", "http://127.0.0.1:3000,http://localhost:3000")
         ),
-        runtime_config_path=runtime_config_path,
+        env_file_path=env_file_path,
         web_url=merged.get("WEB_URL", "http://127.0.0.1:8787"),
         github_client_id=merged.get("GITHUB_CLIENT_ID", ""),
         github_client_secret=merged.get("GITHUB_CLIENT_SECRET", ""),

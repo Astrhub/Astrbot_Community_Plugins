@@ -326,7 +326,7 @@ const goAdminPlugins = () => {
 }
 
 const goNotifications = () => {
-  router.push({ path: '/settings/personal', hash: '#notifications' })
+  router.push('/notifications')
 }
 
 function renderIcon(icon) {
