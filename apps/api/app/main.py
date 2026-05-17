@@ -103,6 +103,46 @@ GITHUB_METADATA_SYNC_WORKER_SLEEP_SECONDS = 60
 GITHUB_RATE_LIMIT_MESSAGE = (
     "GitHub API rate limit reached. Provide a read-only GitHub token and try again."
 )
+SYSTEM_OPTION_KEYS = {
+    "CLOUDFLARE_EMAIL_ACCOUNT_ID",
+    "CLOUDFLARE_EMAIL_API_TOKEN",
+    "CLOUDFLARE_EMAIL_FROM",
+    "EMAIL_DAILY_LIMIT",
+    "EMAIL_PROVIDER",
+    "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER",
+    "GITHUB_ADMIN_ORG",
+    "GITHUB_API_TOKEN",
+    "GITHUB_CALLBACK_URL",
+    "GITHUB_CLIENT_ID",
+    "GITHUB_CLIENT_SECRET",
+    "GITHUB_LOGIN_ENABLED",
+    "GITHUB_METADATA_SYNC_ENABLED",
+    "GITHUB_METADATA_SYNC_INTERVAL_SECONDS",
+    "GITHUB_SCOPE",
+    "LOGIN_AGREEMENT_ENABLED",
+    "LOGIN_AGREEMENT_TEXT",
+    "MARKET_COMMENTS_ENABLED",
+    "MARKET_LIKES_ENABLED",
+    "MARKET_SUBMISSIONS_ENABLED",
+    "MAX_PLUGIN_TAGS",
+    "PLUGIN_AUTO_APPROVE_ENABLED",
+    "PUBLIC_LOGIN_ENABLED",
+    "SERVICE_TERMS_ENABLED",
+    "SERVICE_TERMS_TEXT",
+    "SITE_CONTACT_EMAIL",
+    "SITE_DESCRIPTION",
+    "SITE_DOCS_URL",
+    "SITE_ICON_URL",
+    "SITE_NAME",
+    "SITE_SUBTITLE",
+    "SMTP_FROM",
+    "SMTP_HOST",
+    "SMTP_PASSWORD",
+    "SMTP_PORT",
+    "SMTP_SSL",
+    "SMTP_USERNAME",
+    "WEB_URL",
+}
 PLUGIN_METADATA_SYNC_FIELDS = (
     "name",
     "display_name",
@@ -217,7 +257,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/v1/site")
     async def site_config(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
-        runtime_config = read_runtime_config(settings.runtime_config_path)
+        runtime_config = await effective_runtime_config(request)
         return {
             **get_site_config(settings, runtime_config),
             "auth": get_public_auth_config(settings, runtime_config),
@@ -230,7 +270,7 @@ def register_routes(app: FastAPI) -> None:
         if not is_core_admin(user):
             raise error(403, "Only core admin can manage system settings")
         settings = get_settings(request)
-        runtime_config = read_runtime_config(settings.runtime_config_path)
+        runtime_config = await effective_runtime_config(request)
         return build_system_settings(settings, runtime_config, include_secrets=False)
 
     @app.put("/v1/admin/settings")
@@ -242,13 +282,13 @@ def register_routes(app: FastAPI) -> None:
         if not is_core_admin(user):
             raise error(403, "Only core admin can manage system settings")
         settings = get_settings(request)
-        runtime_config = read_runtime_config(settings.runtime_config_path)
+        runtime_config = await effective_runtime_config(request)
         validate_system_settings_payload(payload, runtime_config, settings)
-        write_runtime_config(
-            settings.runtime_config_path,
+        await save_system_options(
+            request,
             runtime_values_from_system_settings(payload, runtime_config),
         )
-        updated_runtime_config = read_runtime_config(settings.runtime_config_path)
+        updated_runtime_config = await effective_runtime_config(request)
         updated = build_system_settings(settings, updated_runtime_config, include_secrets=False)
         request.app.state.settings = settings_from_system_settings(
             settings,
@@ -268,7 +308,7 @@ def register_routes(app: FastAPI) -> None:
             raise error(403, "Only core admin can test email settings")
         if not is_valid_email(payload.to):
             raise error(400, "Invalid recipient email")
-        settings = get_settings(request)
+        settings = await runtime_settings_for_app(request.app)
         await send_email(request.app, settings, payload.to, payload.subject, payload.body)
         return {"sent": True}
 
@@ -278,7 +318,7 @@ def register_routes(app: FastAPI) -> None:
         if not is_core_admin(user):
             raise error(403, "Only core admin can view setup status")
         settings = get_settings(request)
-        runtime_config = read_runtime_config(settings.runtime_config_path)
+        runtime_config = await effective_runtime_config(request)
         return build_setup_status_response(
             settings,
             runtime_config,
@@ -394,7 +434,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/auth/internal/login")
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
-        settings = get_settings(request)
+        settings = await runtime_settings_for_app(request.app)
         user = await call_store(request, "get_user_by_internal_username", payload.username)
         if not user or not verify_password(payload.password, user.get("password_hash", "")):
             raise error(401, "Invalid username or password")
@@ -407,7 +447,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get("/v1/auth/github/login")
     async def github_login(request: Request) -> Response:
-        settings = get_runtime_settings(request)
+        settings = await runtime_settings_for_app(request.app)
         if not settings.github_login_enabled:
             return JSONResponse(status_code=403, content={"error": "GitHub login is disabled"})
         if not settings.github_client_id:
@@ -436,7 +476,7 @@ def register_routes(app: FastAPI) -> None:
     async def github_callback(
         request: Request, code: str | None = None, state: str | None = None
     ) -> Response:
-        settings = get_runtime_settings(request)
+        settings = await runtime_settings_for_app(request.app)
         expected_state = request.cookies.get(settings.oauth_state_cookie_name)
         if not code or not state or not expected_state or state != expected_state:
             raise error(400, "Invalid OAuth callback")
@@ -458,7 +498,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/auth/logout", status_code=204)
     async def logout(request: Request, response: Response) -> None:
-        settings = get_settings(request)
+        settings = await runtime_settings_for_app(request.app)
         session_token = request.cookies.get(settings.session_cookie_name)
         if session_token:
             await call_store(request, "revoke_session", session_token)
@@ -466,7 +506,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get("/v1/auth/debug-login")
     async def debug_login(request: Request, login: str = "") -> Response:
-        settings = get_settings(request)
+        settings = await runtime_settings_for_app(request.app)
         if not settings.enable_dev_auth:
             raise error(403, "Dev auth is disabled")
         if not login.strip():
@@ -538,7 +578,7 @@ def register_routes(app: FastAPI) -> None:
     @app.post("/v1/plugins/submissions", status_code=201)
     async def submit_plugin(request: Request, payload: PluginSubmission) -> dict[str, Any]:
         user = await require_user(request)
-        settings = get_settings(request)
+        settings = await runtime_settings_for_app(request.app)
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
         data = payload.model_dump()
@@ -574,10 +614,17 @@ def register_routes(app: FastAPI) -> None:
             validate_github_repo(patch["repo"])
             validate_repo_owner(patch["repo"], user)
             patch.update(
-                await safe_fetch_plugin_github_metadata(patch["repo"], get_settings(request), user)
+                await safe_fetch_plugin_github_metadata(
+                    patch["repo"],
+                    await runtime_settings_for_app(request.app),
+                    user,
+                )
             )
         if "tags" in patch:
-            validate_plugin_tag_count(patch.get("tags") or [], get_settings(request))
+            validate_plugin_tag_count(
+                patch.get("tags") or [],
+                await runtime_settings_for_app(request.app),
+            )
         updated = await call_store(
             request,
             "update_plugin_metadata",
@@ -614,7 +661,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/plugins/{plugin_id}/like")
     async def like_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
-        if not get_settings(request).market_likes_enabled:
+        if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Plugin likes are closed")
         user = await require_user(request)
         await get_plugin_or_404(request, plugin_id)
@@ -623,7 +670,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/plugins/{plugin_id}/unlike")
     async def unlike_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
-        if not get_settings(request).market_likes_enabled:
+        if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Plugin likes are closed")
         user = await require_user(request)
         await get_plugin_or_404(request, plugin_id)
@@ -634,7 +681,7 @@ def register_routes(app: FastAPI) -> None:
     async def add_comment(
         request: Request, plugin_id: str, payload: CommentCreate
     ) -> dict[str, Any]:
-        if not get_settings(request).market_comments_enabled:
+        if not (await runtime_settings_for_app(request.app)).market_comments_enabled:
             raise error(403, "Plugin comments are closed")
         user = await require_user(request)
         await get_plugin_or_404(request, plugin_id)
@@ -649,7 +696,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/comments/{comment_id}/like")
     async def like_comment(request: Request, comment_id: str) -> dict[str, Any]:
-        if not get_settings(request).market_likes_enabled:
+        if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Comment likes are closed")
         user = await require_user(request)
         comment = await call_store(request, "like_comment", comment_id, user["id"])
@@ -659,7 +706,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.post("/v1/comments/{comment_id}/unlike")
     async def unlike_comment(request: Request, comment_id: str) -> dict[str, Any]:
-        if not get_settings(request).market_likes_enabled:
+        if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Comment likes are closed")
         user = await require_user(request)
         comment = await call_store(request, "unlike_comment", comment_id, user["id"])
@@ -683,7 +730,8 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/v1/admin/users")
     async def admin_users(request: Request) -> dict[str, list[dict[str, Any]]]:
         await require_admin(request)
-        return {"items": await call_store(request, "list_users")}
+        users = await call_store(request, "list_users")
+        return {"items": [public_user(user) for user in users]}
 
     @app.get("/v1/admin/plugins")
     async def admin_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
@@ -796,7 +844,7 @@ def register_routes(app: FastAPI) -> None:
         muted = await call_store(request, "mute_user", user_id, muted_until, user["id"])
         if not muted:
             raise error(404, "User not found")
-        return muted
+        return public_user(muted)
 
     @app.post("/v1/core/admins/{user_id}")
     async def update_admin(
@@ -811,7 +859,7 @@ def register_routes(app: FastAPI) -> None:
         updated = await call_store(
             request, "update_user_role", user_id, "admin" if payload.role == "admin" else "user"
         )
-        return updated or {}
+        return public_user(updated) if updated else {}
 
     @app.post("/v1/core/announcements", status_code=201)
     async def create_announcement(request: Request, payload: AnnouncementCreate) -> dict[str, Any]:
@@ -886,13 +934,43 @@ def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_runtime_settings(request: Request) -> Settings:
-    settings = get_settings(request)
+async def load_system_options(store: Any) -> dict[str, str]:
+    method = getattr(store, "list_options", None)
+    if not method:
+        return {}
+    values = await resolve_optional_awaitable(method())
+    if not isinstance(values, dict):
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in values.items()
+        if key in SYSTEM_OPTION_KEYS
+    }
+
+
+async def runtime_settings_for_app(app: FastAPI) -> Settings:
+    settings = app.state.settings
     runtime_config = read_runtime_config(settings.runtime_config_path)
+    system_options = await load_system_options(app.state.store)
+    if system_options:
+        runtime_config = {**runtime_config, **system_options}
+    return settings_with_runtime_config(settings, runtime_config)
+
+
+def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, str]) -> Settings:
     if not runtime_config:
         return settings
     return settings.with_updates(
         web_url=runtime_config.get("WEB_URL", settings.web_url),
+        site_name=runtime_config.get("SITE_NAME", settings.site_name),
+        site_icon_url=runtime_config.get("SITE_ICON_URL", settings.site_icon_url),
+        site_subtitle=runtime_config.get("SITE_SUBTITLE", settings.site_subtitle),
+        site_description=runtime_config.get("SITE_DESCRIPTION", settings.site_description),
+        site_contact_email=runtime_config.get(
+            "SITE_CONTACT_EMAIL",
+            settings.site_contact_email,
+        ),
+        site_docs_url=runtime_config.get("SITE_DOCS_URL", settings.site_docs_url),
         github_client_id=runtime_config.get("GITHUB_CLIENT_ID", settings.github_client_id),
         github_client_secret=runtime_config.get(
             "GITHUB_CLIENT_SECRET",
@@ -903,6 +981,7 @@ def get_runtime_settings(request: Request) -> Settings:
             settings.github_callback_url,
         ),
         github_scope=runtime_config.get("GITHUB_SCOPE", settings.github_scope),
+        github_admin_org=runtime_config.get("GITHUB_ADMIN_ORG", settings.github_admin_org),
         github_api_token=runtime_config.get("GITHUB_API_TOKEN", settings.github_api_token),
         github_metadata_sync_enabled=parse_bool(
             runtime_config.get("GITHUB_METADATA_SYNC_ENABLED"),
@@ -922,6 +1001,68 @@ def get_runtime_settings(request: Request) -> Settings:
             runtime_config.get("PUBLIC_LOGIN_ENABLED"),
             settings.public_login_enabled,
         ),
+        login_agreement_enabled=parse_bool(
+            runtime_config.get("LOGIN_AGREEMENT_ENABLED"),
+            settings.login_agreement_enabled,
+        ),
+        login_agreement_text=runtime_config.get(
+            "LOGIN_AGREEMENT_TEXT",
+            settings.login_agreement_text,
+        ),
+        service_terms_enabled=parse_bool(
+            runtime_config.get("SERVICE_TERMS_ENABLED"),
+            settings.service_terms_enabled,
+        ),
+        service_terms_text=runtime_config.get(
+            "SERVICE_TERMS_TEXT",
+            settings.service_terms_text,
+        ),
+        market_submissions_enabled=parse_bool(
+            runtime_config.get("MARKET_SUBMISSIONS_ENABLED"),
+            settings.market_submissions_enabled,
+        ),
+        market_comments_enabled=parse_bool(
+            runtime_config.get("MARKET_COMMENTS_ENABLED"),
+            settings.market_comments_enabled,
+        ),
+        market_likes_enabled=parse_bool(
+            runtime_config.get("MARKET_LIKES_ENABLED"),
+            settings.market_likes_enabled,
+        ),
+        plugin_auto_approve_enabled=parse_bool(
+            runtime_config.get("PLUGIN_AUTO_APPROVE_ENABLED"),
+            settings.plugin_auto_approve_enabled,
+        ),
+        max_plugin_tags=parse_int(runtime_config.get("MAX_PLUGIN_TAGS"), settings.max_plugin_tags),
+        email_provider=normalize_email_provider(
+            runtime_config.get("EMAIL_PROVIDER", settings.email_provider)
+        ),
+        smtp_host=runtime_config.get("SMTP_HOST", settings.smtp_host),
+        smtp_port=parse_int(runtime_config.get("SMTP_PORT"), settings.smtp_port),
+        smtp_username=runtime_config.get("SMTP_USERNAME", settings.smtp_username),
+        smtp_password=runtime_config.get("SMTP_PASSWORD", settings.smtp_password),
+        smtp_from=runtime_config.get("SMTP_FROM", settings.smtp_from),
+        smtp_ssl=parse_bool(runtime_config.get("SMTP_SSL"), settings.smtp_ssl),
+        cloudflare_email_account_id=runtime_config.get(
+            "CLOUDFLARE_EMAIL_ACCOUNT_ID",
+            settings.cloudflare_email_account_id,
+        ),
+        cloudflare_email_api_token=runtime_config.get(
+            "CLOUDFLARE_EMAIL_API_TOKEN",
+            settings.cloudflare_email_api_token,
+        ),
+        cloudflare_email_from=runtime_config.get(
+            "CLOUDFLARE_EMAIL_FROM",
+            settings.cloudflare_email_from,
+        ),
+        email_daily_limit=parse_int(
+            runtime_config.get("EMAIL_DAILY_LIMIT"),
+            settings.email_daily_limit,
+        ),
+        email_verification_daily_limit_per_user=parse_int(
+            runtime_config.get("EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER"),
+            settings.email_verification_daily_limit_per_user,
+        ),
     )
 
 
@@ -935,6 +1076,25 @@ async def call_store(request: Request, method_name: str, *args: Any) -> Any:
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+async def effective_runtime_config(request: Request) -> dict[str, str]:
+    settings = get_settings(request)
+    runtime_config = read_runtime_config(settings.runtime_config_path)
+    system_options = await load_system_options(get_store(request))
+    return {**runtime_config, **system_options}
+
+
+async def save_system_options(request: Request, values: dict[str, str]) -> dict[str, str]:
+    system_values = {
+        key: str(value)
+        for key, value in values.items()
+        if key in SYSTEM_OPTION_KEYS
+    }
+    method = getattr(get_store(request), "upsert_options", None)
+    if not method:
+        return {}
+    return await resolve_optional_awaitable(method(system_values))
 
 
 async def current_user(request: Request) -> dict[str, Any] | None:
@@ -1102,7 +1262,7 @@ async def github_metadata_sync_worker(app: FastAPI) -> None:
 
 
 async def sync_due_github_plugin_metadata_once(app: FastAPI, limit: int) -> int:
-    settings = app.state.settings
+    settings = await runtime_settings_for_app(app)
     if not settings.github_metadata_sync_enabled:
         return 0
     plugins = await list_due_github_sync_plugins(app.state.store, limit)
@@ -1206,7 +1366,7 @@ async def refresh_plugin_github_metadata_for_plugin(
     token: str = "",
     raise_errors: bool = False,
 ) -> dict[str, Any] | None:
-    settings = app.state.settings
+    settings = await runtime_settings_for_app(app)
     try:
         metadata = await fetch_plugin_github_metadata(
             plugin.get("repo") or "",
@@ -2603,7 +2763,7 @@ async def promote_org_admin_if_needed(
     user: dict[str, Any],
     access_token: str,
 ) -> None:
-    settings = get_settings(request)
+    settings = await runtime_settings_for_app(request.app)
     if not settings.github_admin_org or is_admin(user):
         return
     if await is_github_org_member(settings.github_admin_org, access_token):

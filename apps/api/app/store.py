@@ -41,6 +41,7 @@ class InMemoryMarketStore:
             "announcements": state.get("announcements", []),
             "notifications": state.get("notifications", []),
             "apiKeys": state.get("apiKeys", []),
+            "options": state.get("options", {}),
             "sessions": state.get("sessions", []),
             "nextNumericId": state.get("nextNumericId", 1),
         }
@@ -153,6 +154,13 @@ class InMemoryMarketStore:
 
     def list_api_keys(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["apiKeys"])
+
+    def list_options(self) -> dict[str, str]:
+        return deepcopy(self.state["options"])
+
+    def upsert_options(self, values: dict[str, str]) -> dict[str, str]:
+        self.state["options"].update({key: str(value) for key, value in values.items()})
+        return self.list_options()
 
     def summary(self) -> dict[str, int]:
         return {
@@ -770,6 +778,12 @@ CREATE TABLE IF NOT EXISTS market_api_keys (
     scopes jsonb NOT NULL DEFAULT '["market:read"]'::jsonb,
     key text NOT NULL UNIQUE,
     created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS market_options (
+    option_key text PRIMARY KEY,
+    option_value text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
 );
 """
 
@@ -1622,6 +1636,28 @@ class PgRedisMarketStore(InMemoryMarketStore):
     async def list_api_keys(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch("SELECT * FROM market_api_keys ORDER BY created_at DESC")
         return [self._api_key_from_record(row) for row in rows]
+
+    async def list_options(self) -> dict[str, str]:
+        rows = await self._pool().fetch("SELECT option_key, option_value FROM market_options")
+        return {str(row["option_key"]): str(row["option_value"]) for row in rows}
+
+    async def upsert_options(self, values: dict[str, str]) -> dict[str, str]:
+        if not values:
+            return await self.list_options()
+        rows = [(str(key), str(value)) for key, value in values.items()]
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                await connection.executemany(
+                    """
+                    INSERT INTO market_options (option_key, option_value)
+                    VALUES ($1, $2)
+                    ON CONFLICT (option_key) DO UPDATE
+                       SET option_value = EXCLUDED.option_value,
+                           updated_at = now()
+                    """,
+                    rows,
+                )
+        return await self.list_options()
 
     async def create_session(self, user_id: str, token: str | None = None) -> dict[str, Any]:
         session = {
