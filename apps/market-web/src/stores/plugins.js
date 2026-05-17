@@ -275,6 +275,8 @@ export const usePluginStore = defineStore('plugins', () => {
           id,
           name: plugin.name || id,
           display_name: plugin.display_name || plugin.name || id,
+          version: plugin.version || '1.0.0',
+          logo: plugin.logo || '',
           tags: Array.isArray(plugin.tags) ? plugin.tags : [],
           stars: plugin.stars || 0
         }
@@ -421,6 +423,16 @@ export const usePluginStore = defineStore('plugins', () => {
     const response = await fetch(`${apiBaseUrl}/v1/admin/plugins/${pluginId}/${action}`, options)
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '更新插件状态失败')
+    return data
+  }
+
+  async function refreshPluginGithubMetadata(pluginId) {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins/${pluginId}/refresh-github`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '刷新 GitHub 数据失败')
     return data
   }
 
@@ -607,6 +619,7 @@ export const usePluginStore = defineStore('plugins', () => {
     unlikePlugin,
     addPluginComment,
     updatePluginListing,
+    refreshPluginGithubMetadata,
     loadNotifications,
     saveSystemSettings,
     sendTestEmail,

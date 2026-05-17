@@ -38,6 +38,7 @@ class Settings:
     github_callback_url: str
     github_scope: str
     github_admin_org: str
+    github_metadata_sync_enabled: bool
     site_name: str
     site_icon_url: str
     site_subtitle: str
@@ -115,6 +116,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         ),
         github_scope=merged.get("GITHUB_SCOPE", "read:user user:email read:org"),
         github_admin_org=merged.get("GITHUB_ADMIN_ORG", ""),
+        github_metadata_sync_enabled=_bool(
+            merged.get("GITHUB_METADATA_SYNC_ENABLED"),
+            default=True,
+        ),
         site_name=merged.get("SITE_NAME", DEFAULT_SITE_NAME),
         site_icon_url=merged.get("SITE_ICON_URL", DEFAULT_SITE_ICON_URL),
         site_subtitle=merged.get("SITE_SUBTITLE", DEFAULT_SITE_SUBTITLE),

@@ -33,7 +33,7 @@
             role="heading"
             aria-level="3"
             :aria-label="plugin.name"
-            :aria-description="`插件：${plugin.name}，版本 ${plugin.version}`"
+            :aria-description="`插件：${plugin.name}，版本 ${pluginVersion}`"
           >
             <span 
               class="plugin-name-text" 
@@ -48,9 +48,9 @@
           :bordered="false" 
           class="version-tag"
           role="text"
-          :aria-label="`版本号：${plugin.version.startsWith('v') ? plugin.version : 'v' + plugin.version}`"
+          :aria-label="`版本号：${formattedVersion}`"
         >
-          {{ plugin.version.startsWith('v') ? plugin.version : 'v' + plugin.version }}
+          {{ formattedVersion }}
         </n-tag>
       </div>
     </template>
@@ -268,6 +268,10 @@ const store = usePluginStore()
 const { currentUser } = storeToRefs(store)
 const { loadPlugins, updatePluginListing } = store
 const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
+const pluginVersion = computed(() => String(props.plugin.version || '1.0.0'))
+const formattedVersion = computed(() => {
+  return pluginVersion.value.startsWith('v') ? pluginVersion.value : `v${pluginVersion.value}`
+})
 
 const checkTextOverflow = () => {
   nextTick(() => {

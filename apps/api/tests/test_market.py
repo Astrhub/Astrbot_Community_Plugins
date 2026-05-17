@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from types import SimpleNamespace
 
@@ -899,6 +900,76 @@ def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
 
     assert client.get("/plugins-md5.json").json()["md5"]
     assert client.get("/v1/astrbot/plugins.json").json() == feed
+
+
+def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    client.app.state.store.update_user_role(login.json()["user"]["id"], Role.ADMIN.value)
+    metadata_text = "\n".join(
+        [
+            "name: astrbot_plugin_demo",
+            "version: v2.1.0",
+            "astrbot_version: '>=4.5.0'",
+            "support_platforms:",
+            "  - aiocqhttp",
+            "  - telegram",
+        ]
+    )
+
+    class FakeResponse:
+        def __init__(self, status_code: int, data: dict[str, object]) -> None:
+            self.status_code = status_code
+            self._data = data
+
+        def json(self) -> dict[str, object]:
+            return self._data
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            if url == "https://api.github.com/repos/alice/astrbot_plugin_demo":
+                return FakeResponse(
+                    200,
+                    {
+                        "stargazers_count": 42,
+                        "updated_at": "2026-05-17T00:00:00Z",
+                        "default_branch": "main",
+                    },
+                )
+            if url.endswith("/contents/metadata.yml"):
+                return FakeResponse(
+                    200,
+                    {"content": base64.b64encode(metadata_text.encode()).decode()},
+                )
+            if url.endswith("/contents/logo.png"):
+                return FakeResponse(200, {"name": "logo.png"})
+            return FakeResponse(404, {})
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    submission = client.post("/v1/plugins/submissions", json=plugin_payload())
+    client.post(f"/v1/admin/plugins/{submission.json()['id']}/list")
+    public_plugin = client.get("/v1/plugins").json()["items"][0]
+    source_plugin = client.get("/plugins.json").json()["astrbot_plugin_demo"]
+
+    assert public_plugin["stars"] == 42
+    assert public_plugin["version"] == "v2.1.0"
+    assert public_plugin["logo"] == (
+        "https://raw.githubusercontent.com/alice/astrbot_plugin_demo/main/logo.png"
+    )
+    assert source_plugin["stars"] == 42
+    assert source_plugin["version"] == "v2.1.0"
+    assert source_plugin["astrbot_version"] == ">=4.5.0"
+    assert source_plugin["support_platforms"] == ["aiocqhttp", "telegram"]
 
 
 def test_cloudflare_email_test_uses_official_sending_endpoint(monkeypatch) -> None:

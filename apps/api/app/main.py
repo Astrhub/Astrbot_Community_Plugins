@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import html
 import inspect
@@ -57,9 +58,14 @@ from .schemas import (
 from .store import InMemoryMarketStore
 from .store import PgRedisMarketStore
 
-GITHUB_REPO_PATTERN = re.compile(r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)/?$")
+GITHUB_REPO_PATTERN = re.compile(
+    r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$"
+)
 PLUGIN_NAME_PATTERN = re.compile(r"^astrbot_plugin_[a-z0-9_-]+$", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+METADATA_FIELD_PATTERN = re.compile(
+    r"^(\s*)(version|astrbot_version|support_platforms)\s*:\s*(.*)$"
+)
 MASKED_SECRET = "********"
 CLOUDFLARE_EMAIL_SEND_ENDPOINT = (
     "https://api.cloudflare.com/client/v4/accounts/{account_id}/email/sending/send"
@@ -501,6 +507,7 @@ def register_routes(app: FastAPI) -> None:
         data = payload.model_dump()
         validate_plugin_submission(data, settings)
         validate_repo_owner(data["repo"], user)
+        data.update(await fetch_plugin_github_metadata(data["repo"], settings))
         plugin = await call_store(request, "submit_plugin", user, data)
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
@@ -528,6 +535,7 @@ def register_routes(app: FastAPI) -> None:
         if "repo" in patch:
             validate_github_repo(patch["repo"])
             validate_repo_owner(patch["repo"], user)
+            patch.update(await fetch_plugin_github_metadata(patch["repo"], get_settings(request)))
         if "tags" in patch:
             validate_plugin_tag_count(patch.get("tags") or [], get_settings(request))
         updated = await call_store(
@@ -615,7 +623,21 @@ def register_routes(app: FastAPI) -> None:
         user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
+        await refresh_plugin_github_metadata(request, plugin_id)
         updated = await call_store(request, "update_plugin_status", plugin_id, "listed", user["id"])
+        if not updated:
+            raise error(404, "Plugin not found")
+        return updated
+
+    @app.post("/v1/admin/plugins/{plugin_id}/refresh-github")
+    async def refresh_admin_plugin_github_metadata(
+        request: Request,
+        plugin_id: str,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        if not can_moderate_plugins(user):
+            raise error(403, "Forbidden")
+        updated = await refresh_plugin_github_metadata(request, plugin_id)
         if not updated:
             raise error(404, "Plugin not found")
         return updated
@@ -866,6 +888,193 @@ def validate_github_repo(repo: str) -> re.Match[str]:
     if not match:
         raise error(400, "Plugin repo must be a GitHub URL")
     return match
+
+
+async def refresh_plugin_github_metadata(
+    request: Request,
+    plugin_id: str,
+) -> dict[str, Any] | None:
+    plugin = await call_store(request, "get_plugin", plugin_id)
+    if not plugin:
+        return None
+    metadata = await fetch_plugin_github_metadata(plugin.get("repo") or "", get_settings(request))
+    if not metadata:
+        return plugin
+    return await call_store(request, "update_plugin_metadata", plugin_id, metadata)
+
+
+async def fetch_plugin_github_metadata(repo: str, settings: Settings) -> dict[str, Any]:
+    if not settings.github_metadata_sync_enabled:
+        return {}
+    match = validate_github_repo(repo)
+    owner = match.group("owner")
+    repo_name = match.group("repo")
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        repository = await fetch_github_repository(client, owner, repo_name)
+        if not repository:
+            return {}
+        metadata = await fetch_github_plugin_metadata_files(client, owner, repo_name)
+        logo = await fetch_github_plugin_logo_url(
+            client,
+            owner,
+            repo_name,
+            repository.get("default_branch") or "main",
+        )
+    payload: dict[str, Any] = {
+        "stars": int(repository.get("stargazers_count") or 0),
+        "updated_at": repository.get("updated_at") or "",
+        "version": str(metadata.get("version") or "1.0.0"),
+    }
+    if metadata.get("astrbot_version"):
+        payload["astrbot_version"] = metadata["astrbot_version"]
+    if metadata.get("support_platforms"):
+        payload["support_platforms"] = metadata["support_platforms"]
+    if logo:
+        payload["logo"] = logo
+    return payload
+
+
+async def fetch_github_repository(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+) -> dict[str, Any]:
+    response = await client.get(
+        f"https://api.github.com/repos/{owner}/{repo}",
+        headers=github_public_headers(),
+    )
+    if response.status_code != 200:
+        return {}
+    data = response.json()
+    return data if isinstance(data, dict) else {}
+
+
+async def fetch_github_plugin_metadata_files(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+) -> dict[str, Any]:
+    for filename in ("metadata.yml", "metadata.yaml"):
+        response = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/{filename}",
+            headers=github_public_headers(),
+        )
+        if response.status_code != 200:
+            continue
+        data = response.json()
+        content = data.get("content") if isinstance(data, dict) else ""
+        if not isinstance(content, str) or not content:
+            continue
+        try:
+            text = base64.b64decode(content).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            continue
+        metadata = parse_plugin_metadata_yaml(text)
+        if metadata:
+            return metadata
+    return {}
+
+
+async def fetch_github_plugin_logo_url(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    default_branch: str,
+) -> str:
+    response = await client.get(
+        f"https://api.github.com/repos/{owner}/{repo}/contents/logo.png",
+        headers=github_public_headers(),
+    )
+    if response.status_code == 200:
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/logo.png"
+    return ""
+
+
+def parse_plugin_metadata_yaml(text: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = METADATA_FIELD_PATTERN.match(line)
+        if not match:
+            index += 1
+            continue
+        indent, key, raw_value = match.groups()
+        value = parse_metadata_scalar(raw_value)
+        if value == "" and key == "support_platforms":
+            value, index = parse_metadata_list(lines, index, len(indent))
+        if has_metadata_value(value):
+            metadata[key] = value
+        index += 1
+    return metadata
+
+
+def parse_metadata_list(
+    lines: list[str],
+    start_index: int,
+    parent_indent: int,
+) -> tuple[list[str] | str, int]:
+    items: list[str] = []
+    index = start_index + 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= parent_indent:
+            return items or "", index - 1
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            return items or "", index - 1
+        item = parse_metadata_scalar(stripped[2:])
+        if item:
+            items.append(str(item))
+        index += 1
+    return items or "", index - 1
+
+
+def parse_metadata_scalar(value: str) -> Any:
+    value = strip_yaml_comment(value).strip()
+    if not value:
+        return ""
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        return value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        items = [parse_metadata_scalar(item) for item in value[1:-1].split(",")]
+        return [item for item in items if item]
+    return value
+
+
+def strip_yaml_comment(value: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_double:
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "#" and not in_single and not in_double:
+            return value[:index].rstrip()
+    return value.strip()
+
+
+def has_metadata_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return bool(value)
+    return value is not None
 
 
 def validate_setup_payload(payload: SetupConfig) -> None:
@@ -1884,6 +2093,13 @@ def github_headers(access_token: str) -> dict[str, str]:
     return {
         "accept": "application/vnd.github+json",
         "authorization": f"Bearer {access_token}",
+        "user-agent": "astrbot-community-plugins",
+    }
+
+
+def github_public_headers() -> dict[str, str]:
+    return {
+        "accept": "application/vnd.github+json",
         "user-agent": "astrbot-community-plugins",
     }
 

@@ -53,6 +53,13 @@
               </n-button>
               <n-button
                 secondary
+                :loading="busyId === plugin.id"
+                @click="refreshGithub(plugin)"
+              >
+                刷新 GitHub
+              </n-button>
+              <n-button
+                secondary
                 type="warning"
                 :disabled="plugin.status === 'unlisted'"
                 :loading="busyId === plugin.id"
@@ -123,6 +130,7 @@ const {
   loadAdminPlugins,
   loadCurrentUser,
   loadPlugins,
+  refreshPluginGithubMetadata,
   resetPluginFilters,
   updatePluginListing
 } = store
@@ -176,6 +184,20 @@ async function setListing(plugin, action, reason = '') {
     }
   } catch (error) {
     message.error(error.message || '操作失败')
+  } finally {
+    busyId.value = ''
+  }
+}
+
+async function refreshGithub(plugin) {
+  busyId.value = plugin.id
+  try {
+    const updated = await refreshPluginGithubMetadata(plugin.id)
+    items.value = items.value.map((item) => (item.id === updated.id ? updated : item))
+    await loadPlugins()
+    message.success('GitHub 数据已刷新')
+  } catch (error) {
+    message.error(error.message || '刷新失败')
   } finally {
     busyId.value = ''
   }
