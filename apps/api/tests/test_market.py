@@ -345,6 +345,44 @@ def test_github_callback_binds_logged_in_internal_admin(monkeypatch) -> None:
     assert me.json()["github_login"] == "admin-gh"
 
 
+def test_core_admin_internal_login_works_when_public_login_closed() -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "PUBLIC_LOGIN_ENABLED": "false",
+        }
+    )
+    store = InMemoryMarketStore()
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+
+    response = client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["role"] == Role.CORE_ADMIN
+
+
+def test_github_login_is_disabled_when_public_login_closed() -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "PUBLIC_LOGIN_ENABLED": "false",
+            "GITHUB_LOGIN_ENABLED": "true",
+            "GITHUB_CLIENT_ID": "client-id",
+            "GITHUB_CLIENT_SECRET": "client-secret",
+            "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+
+    response = client.get("/v1/auth/github/login", follow_redirects=False)
+
+    assert response.status_code == 403
+
+
 def test_github_login_uses_runtime_callback_url_over_initial_settings(tmp_path) -> None:
     runtime_file = tmp_path / "runtime.env"
     runtime_file.write_text(

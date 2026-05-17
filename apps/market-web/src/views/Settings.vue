@@ -128,8 +128,8 @@
               <p>控制是否开放登录，以及登录前必须确认的条款。</p>
             </div>
             <div class="switch-grid">
-              <setting-switch v-model="formData.auth.public_login_enabled" label="开放登录" enabled="允许用户登录" disabled="关闭所有登录" />
-              <setting-switch v-model="formData.auth.github_login_enabled" label="GitHub OAuth" enabled="允许 GitHub 登录" disabled="仅内部账号" />
+              <setting-switch v-model="formData.auth.public_login_enabled" label="开放登录" enabled="允许 GitHub 登录 / 注册" disabled="关闭公开登录，核心管理员内部登录保留" />
+              <setting-switch v-model="formData.auth.github_login_enabled" label="GitHub OAuth" enabled="允许 GitHub 登录 / 注册" disabled="仅核心管理员内部登录" />
               <setting-switch v-model="formData.auth.login_agreement_enabled" label="登录条款" enabled="登录前确认" disabled="不显示" />
               <setting-switch v-model="formData.auth.service_terms_enabled" label="服务条款" enabled="显示服务条款" disabled="不显示" />
             </div>

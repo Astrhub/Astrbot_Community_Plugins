@@ -172,7 +172,34 @@
   </header>
   <div class="sticky-header-spacer" aria-hidden="true"></div>
 
-  <n-modal v-model:show="isLoginModalOpen" preset="card" title="登录" class="login-modal">
+  <n-modal v-model:show="isLoginModalOpen" preset="card" title="登录 / 注册" class="login-modal">
+    <div class="login-methods">
+      <n-button
+        v-if="siteConfig.auth.github_login_enabled"
+        type="primary"
+        block
+        :disabled="!canSubmitPublicLogin"
+        @click="loginWithGithub"
+      >
+        <template #icon>
+          <n-icon><logo-github /></n-icon>
+        </template>
+        GitHub 登录 / 注册
+      </n-button>
+      <n-alert v-else type="warning" :bordered="false">
+        GitHub OAuth 未开启，普通用户暂时无法登录或注册。
+      </n-alert>
+      <n-alert v-if="!siteConfig.auth.public_login_enabled" type="warning" :bordered="false">
+        当前已关闭公开登录，只有核心管理员可以使用内部账号登录。
+      </n-alert>
+      <n-alert v-if="agreementText" type="info" :bordered="false" class="agreement-box">
+        <div class="agreement-text">{{ agreementText }}</div>
+        <n-checkbox v-model:checked="agreementAccepted">我已阅读并同意以上条款</n-checkbox>
+      </n-alert>
+    </div>
+
+    <n-divider>核心管理员内部登录</n-divider>
+
     <n-form :model="loginForm" label-placement="top">
       <n-form-item label="内部账号">
         <n-input v-model:value="loginForm.username" placeholder="admin" />
@@ -182,28 +209,13 @@
           v-model:value="loginForm.password"
           type="password"
           show-password-on="click"
-          placeholder="内部管理员密码"
+          placeholder="核心管理员密码"
           @keyup.enter="submitInternalLogin"
         />
       </n-form-item>
-      <n-alert v-if="agreementText" type="info" :bordered="false" class="agreement-box">
-        <div class="agreement-text">{{ agreementText }}</div>
-        <n-checkbox v-model:checked="agreementAccepted">我已阅读并同意以上条款</n-checkbox>
-      </n-alert>
       <div class="login-actions">
-        <n-button
-          v-if="siteConfig.auth.github_login_enabled"
-          tertiary
-          :disabled="!canSubmitLogin"
-          @click="loginWithGithub"
-        >
-          <template #icon>
-            <n-icon><logo-github /></n-icon>
-          </template>
-          GitHub 登录
-        </n-button>
         <n-button type="primary" :loading="isLoggingIn" :disabled="!canSubmitLogin" @click="submitInternalLogin">
-          登录
+          内部登录
         </n-button>
       </div>
     </n-form>
@@ -214,7 +226,7 @@
 import { computed, h, onMounted, ref, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
-import { NAlert, NCheckbox, NDropdown, NForm, NFormItem, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
+import { NAlert, NCheckbox, NDivider, NDropdown, NForm, NFormItem, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
 import {
   CloseOutline,
   LinkOutline,
@@ -311,6 +323,7 @@ const agreementText = computed(() => {
   return parts.join('\n\n')
 })
 const canSubmitLogin = computed(() => !agreementText.value || agreementAccepted.value)
+const canSubmitPublicLogin = computed(() => siteConfig.value.auth?.public_login_enabled && canSubmitLogin.value)
 
 const handleSearchQueryChange = (value) => {
   emit('update:searchQuery', value)
@@ -369,10 +382,6 @@ async function handleUserMenuSelect(key) {
 }
 
 const openLoginModal = () => {
-  if (!siteConfig.value.auth?.public_login_enabled) {
-    message.warning('当前站点已关闭登录')
-    return
-  }
   isLoginModalOpen.value = true
 }
 
@@ -637,6 +646,11 @@ onUnmounted(() => {
   overflow: auto;
   margin-bottom: 12px;
   white-space: pre-wrap;
+}
+
+.login-methods {
+  display: grid;
+  gap: 12px;
 }
 
 .login-actions {
