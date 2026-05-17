@@ -304,6 +304,44 @@ def test_github_callback_binds_logged_in_internal_admin(monkeypatch) -> None:
     assert me.json()["github_login"] == "admin-gh"
 
 
+def test_github_login_uses_runtime_callback_url_over_initial_settings(tmp_path) -> None:
+    runtime_file = tmp_path / "runtime.env"
+    runtime_file.write_text(
+        "\n".join(
+            [
+                "GITHUB_LOGIN_ENABLED=true",
+                "GITHUB_CLIENT_ID=runtime-client",
+                "GITHUB_CLIENT_SECRET=runtime-secret",
+                "GITHUB_CALLBACK_URL=https://market.example.com/v1/auth/github/callback",
+                "",
+            ]
+        )
+    )
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "RUNTIME_CONFIG_FILE": str(runtime_file),
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "GITHUB_LOGIN_ENABLED": "false",
+            "GITHUB_CLIENT_ID": "env-client",
+            "GITHUB_CLIENT_SECRET": "env-secret",
+            "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+
+    response = client.get("/v1/auth/github/login", follow_redirects=False)
+    location = response.headers["location"]
+
+    assert response.status_code == 307
+    assert "client_id=runtime-client" in location
+    assert (
+        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
+    )
+    assert "127.0.0.1" not in location
+
+
 def test_core_admin_can_manage_admins_while_normal_admin_moderates_plugins() -> None:
     core = {"role": Role.CORE_ADMIN}
     admin = {"role": Role.ADMIN}
@@ -360,6 +398,52 @@ def test_submission_listing_comments_and_moderation_flow() -> None:
     )
     assert muted.status_code == 200
     assert muted.json()["muted_until"] == "2099-01-01T00:00:00Z"
+
+
+def test_plugin_detail_returns_nested_comments_with_user_profile() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user_id = login.json()["user"]["id"]
+    client.patch("/v1/me/profile", json={"github_name": "Alice Dev"})
+    plugin = client.app.state.store.submit_plugin(
+        client.app.state.store.get_user_by_id(user_id),
+        plugin_payload(),
+    )
+    client.app.state.store.update_plugin_status(plugin["id"], "listed", user_id)
+
+    root = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"})
+    reply = client.post(
+        f"/v1/plugins/{plugin['id']}/comments",
+        json={"body": "Agree", "parent_id": root.json()["id"]},
+    )
+    detail = client.get(f"/v1/plugins/{plugin['id']}").json()
+
+    assert root.status_code == 201
+    assert reply.status_code == 201
+    assert detail["comments_count"] == 2
+    assert detail["comments"][0]["github_name"] == "Alice Dev"
+    assert detail["comments"][1]["parent_id"] == root.json()["id"]
+
+
+def test_core_admin_can_review_plugin_submissions() -> None:
+    client = make_client()
+    store = client.app.state.store
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    plugin = store.submit_plugin(owner, plugin_payload())
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    admin_plugins = client.get("/v1/admin/plugins")
+    listed = client.post(f"/v1/admin/plugins/{plugin['id']}/list")
+
+    assert admin_plugins.status_code == 200
+    assert admin_plugins.json()["items"][0]["id"] == plugin["id"]
+    assert listed.status_code == 200
+    assert listed.json()["status"] == "listed"
 
 
 def test_submission_requires_github_repo_owner() -> None:

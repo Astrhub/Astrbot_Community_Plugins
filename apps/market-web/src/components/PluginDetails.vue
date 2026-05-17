@@ -25,7 +25,22 @@
 
     <div class="plugin-details__content">
       <n-space vertical size="large">
-        <!-- README 内容 -->
+        <div class="plugin-actions">
+          <n-button
+            v-if="likesEnabled"
+            secondary
+            type="primary"
+            :loading="liking"
+            @click="toggleLike"
+          >
+            <template #icon>
+              <n-icon><heart-outline /></n-icon>
+            </template>
+            {{ liked ? '取消点赞' : '点赞' }} {{ detail?.likes ?? plugin?.likes ?? 0 }}
+          </n-button>
+          <span v-else class="muted-text">点赞已关闭</span>
+        </div>
+
         <div v-if="loading" class="readme-loading">
           <n-spin size="medium">
             <template #description>
@@ -44,7 +59,11 @@
         </div>
         <div v-else class="markdown-content" v-html="readmeHtml"></div>
 
-        
+        <plugin-comment
+          :comments="comments"
+          :comments-enabled="commentsEnabled"
+          @submit="submitComment"
+        />
       </n-space>
     </div>
 
@@ -74,7 +93,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { marked } from 'marked'
 import {
   NModal,
@@ -84,12 +103,15 @@ import {
   NTag,
   NButton,
   NSpin,
-  NEmpty
+  NEmpty,
+  useMessage
 } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { usePluginStore } from '../stores/plugins'
+import PluginComment from './PluginComment.vue'
 import {
   ExtensionPuzzleOutline,
+  HeartOutline,
   LogoGithub
 } from '@vicons/ionicons5'
 
@@ -104,10 +126,24 @@ const show = ref(props.show)
 const loading = ref(false)
 const error = ref(false)
 const readmeHtml = ref('')
+const detail = ref(null)
+const liking = ref(false)
+const liked = ref(false)
+const comments = computed(() => detail.value?.comments || [])
 
 // 获取全局主题状态
 const store = usePluginStore()
-const { isDarkMode } = storeToRefs(store)
+const message = useMessage()
+const { isDarkMode, siteConfig } = storeToRefs(store)
+const {
+  addPluginComment,
+  likePlugin,
+  loadPluginDetail,
+  loadPlugins,
+  unlikePlugin
+} = store
+const commentsEnabled = computed(() => Boolean(siteConfig.value.market?.comments_enabled))
+const likesEnabled = computed(() => Boolean(siteConfig.value.market?.likes_enabled))
 
 watch(() => props.show, (newVal) => {
   show.value = newVal
@@ -116,6 +152,7 @@ watch(() => props.show, (newVal) => {
 watch(show, (newVal) => {
   emit('update:show', newVal)
   if (newVal) {
+    fetchDetail()
     fetchReadme()
   }
 })
@@ -195,6 +232,45 @@ async function fetchReadme() {
     loading.value = false
   }
 }
+
+async function fetchDetail() {
+  if (!props.plugin?.id) return
+  try {
+    detail.value = await loadPluginDetail(props.plugin.id)
+  } catch (err) {
+    message.error(err.message || '加载互动信息失败')
+  }
+}
+
+async function toggleLike() {
+  if (!props.plugin?.id) return
+  liking.value = true
+  try {
+    detail.value = liked.value
+      ? await unlikePlugin(props.plugin.id)
+      : await likePlugin(props.plugin.id)
+    liked.value = !liked.value
+    await loadPlugins()
+  } catch (err) {
+    message.error(err.message || '操作失败')
+  } finally {
+    liking.value = false
+  }
+}
+
+async function submitComment(payload) {
+  if (!props.plugin?.id) return
+  try {
+    await addPluginComment(props.plugin.id, payload)
+    await fetchDetail()
+    await loadPlugins()
+    message.success(payload.parent_id ? '回复已发布' : '评价已发布')
+    payload.done?.()
+  } catch (err) {
+    message.error(err.message || '发布失败')
+    payload.fail?.()
+  }
+}
 </script>
 
 <style scoped>
@@ -227,6 +303,17 @@ async function fetchReadme() {
   margin-right: 4px;
   overflow-y: auto;
   max-height: calc(80vh - 180px);
+}
+
+.plugin-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.muted-text {
+  color: var(--n-text-color-3);
+  font-size: 13px;
 }
 
 .markdown-content {

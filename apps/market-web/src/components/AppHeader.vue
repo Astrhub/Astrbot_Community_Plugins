@@ -25,14 +25,13 @@
             {{ displayUserName }}
           </n-button>
         </n-dropdown>
-        <n-button v-if="isCoreAdmin" secondary @click="goSettings">系统设置</n-button>
+        <n-button v-if="isAdminUser" secondary @click="goAdminPlugins">插件审核</n-button>
         <n-button v-if="!currentUser" secondary type="primary" @click="openLoginModal">
           <template #icon>
             <n-icon><log-in-outline /></n-icon>
           </template>
           登录
         </n-button>
-        <n-button type="primary" @click="goSubmit">提交插件</n-button>
       </div>
     </nav>
 
@@ -98,6 +97,15 @@
           <n-icon><link-outline /></n-icon>
         </n-button>
         <n-button
+          v-if="isAdminUser"
+          quaternary
+          circle
+          @click="goAdminPlugins"
+          aria-label="插件审核"
+        >
+          <n-icon><settings-outline /></n-icon>
+        </n-button>
+        <n-button
           quaternary
           circle
           class="mobile-only"
@@ -115,9 +123,6 @@
             <sunny v-if="isDarkMode" />
             <moon v-else />
           </n-icon>
-        </n-button>
-        <n-button circle type="primary" class="mobile-only" @click="goSubmit" aria-label="提交插件">
-          <n-icon><add-circle-outline /></n-icon>
         </n-button>
       </div>
     </div>
@@ -168,7 +173,6 @@ import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import { NAlert, NCheckbox, NDropdown, NForm, NFormItem, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
 import {
-  AddCircleOutline,
   CloseOutline,
   LinkOutline,
   LogInOutline,
@@ -218,6 +222,7 @@ const siteIconUrl = computed(() => siteConfig.value.icon_url)
 const siteSubtitle = computed(() => siteConfig.value.subtitle)
 const siteDescription = computed(() => siteConfig.value.description)
 const isCoreAdmin = computed(() => currentUser.value?.role === 'core_admin')
+const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
 const displayUserName = computed(() => (
   currentUser.value?.github_login ||
   currentUser.value?.internal_username ||
@@ -271,16 +276,12 @@ const handleSortByChange = (value) => {
   emit('update:sortBy', value)
 }
 
-const goSubmit = () => {
-  if (!siteConfig.value.market?.submissions_enabled) {
-    message.warning('当前站点已暂停插件提交')
-    return
-  }
-  router.push('/submit')
-}
-
 const goSettings = () => {
   router.push('/settings')
+}
+
+const goAdminPlugins = () => {
+  router.push('/admin/plugins')
 }
 
 function renderIcon(icon) {

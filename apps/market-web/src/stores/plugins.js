@@ -357,6 +357,68 @@ export const usePluginStore = defineStore('plugins', () => {
     return mergeSetupConfig(data, data.site)
   }
 
+  async function loadAdminPlugins() {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载插件审核列表失败')
+    return data.items || []
+  }
+
+  async function loadPluginDetail(pluginId) {
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载插件详情失败')
+    return data
+  }
+
+  async function likePlugin(pluginId) {
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/like`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '点赞失败')
+    return data
+  }
+
+  async function unlikePlugin(pluginId) {
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/unlike`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '取消点赞失败')
+    return data
+  }
+
+  async function addPluginComment(pluginId, payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/comments`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '评论失败')
+    return data
+  }
+
+  async function updatePluginListing(pluginId, action) {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins/${pluginId}/${action}`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '更新插件状态失败')
+    return data
+  }
+
   async function saveSystemSettings(payload) {
     const response = await fetch(`${apiBaseUrl}/v1/admin/settings`, {
       method: 'PUT',
@@ -517,6 +579,12 @@ export const usePluginStore = defineStore('plugins', () => {
     updateProfile,
     saveSetupConfig,
     loadSystemSettings,
+    loadAdminPlugins,
+    loadPluginDetail,
+    likePlugin,
+    unlikePlugin,
+    addPluginComment,
+    updatePluginListing,
     saveSystemSettings,
     sendTestEmail,
     submitPlugin,
