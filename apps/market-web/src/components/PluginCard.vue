@@ -156,6 +156,30 @@
                   </template>
                   <span role="tooltip">访问作者主页</span>
                 </n-tooltip>
+                <n-popconfirm
+                  v-if="isAdminUser"
+                  positive-text="下架"
+                  negative-text="取消"
+                  @positive-click="unlistPlugin"
+                >
+                  <template #trigger>
+                    <n-button
+                      secondary
+                      size="small"
+                      circle
+                      type="warning"
+                      :loading="isUnlisting"
+                      @click.stop
+                      role="button"
+                      :aria-label="`下架 ${plugin.name}`"
+                    >
+                      <n-icon size="18" aria-hidden="true">
+                        <cloud-offline-outline />
+                      </n-icon>
+                    </n-button>
+                  </template>
+                  下架后插件将从市场首页隐藏。
+                </n-popconfirm>
               </div>
             </div>
           </div>
@@ -172,18 +196,27 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, onUnmounted, watch } from 'vue'
+import { computed, ref, onMounted, nextTick, onUnmounted, watch } from 'vue'
 import {
   NCard,
   NSpace,
   NTag,
   NButton,
   NIcon,
+  NPopconfirm,
   useMessage,
   NTooltip
 } from 'naive-ui'
-import { StarSharp, LinkOutline, PersonOutline, CheckmarkOutline } from '@vicons/ionicons5'
+import {
+  CloudOfflineOutline,
+  StarSharp,
+  LinkOutline,
+  PersonOutline,
+  CheckmarkOutline
+} from '@vicons/ionicons5'
 import { defineAsyncComponent } from 'vue'
+import { storeToRefs } from 'pinia'
+import { usePluginStore } from '@/stores/plugins'
 const PluginDetails = defineAsyncComponent(() => import('./PluginDetails.vue'))
 
 const showPluginDetails = ref(false)
@@ -208,6 +241,11 @@ const nameTextEl = ref(null)
 const pluginNameEl = ref(null)
 const cardRef = ref(null)
 const resizeObserver = ref(null)
+const isUnlisting = ref(false)
+const store = usePluginStore()
+const { currentUser } = storeToRefs(store)
+const { loadPlugins, updatePluginListing } = store
+const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
 
 const checkTextOverflow = () => {
   nextTick(() => {
@@ -294,6 +332,19 @@ const openUrl = (url, e) => {
 
 const showDetails = () => {
   showPluginDetails.value = true
+}
+
+async function unlistPlugin() {
+  isUnlisting.value = true
+  try {
+    await updatePluginListing(props.plugin.id, 'unlist')
+    await loadPlugins()
+    message.success('插件已下架')
+  } catch (error) {
+    message.error(error.message || '下架失败')
+  } finally {
+    isUnlisting.value = false
+  }
 }
 
 // 获取logo URL的逻辑
