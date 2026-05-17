@@ -531,6 +531,13 @@ export const usePluginStore = defineStore('plugins', () => {
     currentPage.value = 1
   }
 
+  function resetPluginFilters() {
+    searchQuery.value = ''
+    selectedTag.value = null
+    currentPage.value = 1
+    sortBy.value = 'updated'
+  }
+
   function refreshRandomOrder() {
     if (sortBy.value === 'random') randomSeed.value = Math.random()
   }
@@ -592,6 +599,7 @@ export const usePluginStore = defineStore('plugins', () => {
     setSelectedTag,
     setCurrentPage,
     setSortBy,
+    resetPluginFilters,
     toggleTheme,
     useSystemTheme,
     refreshRandomOrder,

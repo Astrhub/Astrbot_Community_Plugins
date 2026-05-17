@@ -13,7 +13,10 @@
             <h1>插件审核</h1>
           </div>
         </div>
-        <n-button tertiary :loading="loading" @click="loadItems">刷新</n-button>
+        <div class="header-actions">
+          <n-button tertiary @click="goHome">首页</n-button>
+          <n-button tertiary :loading="loading" @click="loadItems">刷新</n-button>
+        </div>
       </div>
     </n-layout-header>
 
@@ -86,7 +89,13 @@ const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
 const { currentUser } = storeToRefs(store)
-const { loadAdminPlugins, loadCurrentUser, loadPlugins, updatePluginListing } = store
+const {
+  loadAdminPlugins,
+  loadCurrentUser,
+  loadPlugins,
+  resetPluginFilters,
+  updatePluginListing
+} = store
 
 const loading = ref(true)
 const busyId = ref('')
@@ -124,7 +133,13 @@ async function setListing(plugin, action) {
     const updated = await updatePluginListing(plugin.id, action)
     items.value = items.value.map((item) => (item.id === updated.id ? updated : item))
     await loadPlugins()
-    message.success(action === 'list' ? '插件已上架' : '插件已下架')
+    if (action === 'list') {
+      resetPluginFilters()
+      message.success('插件已上架，正在返回首页')
+      router.push('/')
+    } else {
+      message.success('插件已下架')
+    }
   } catch (error) {
     message.error(error.message || '操作失败')
   } finally {
@@ -134,6 +149,11 @@ async function setListing(plugin, action) {
 
 function goBack() {
   router.back()
+}
+
+function goHome() {
+  resetPluginFilters()
+  router.push('/')
 }
 
 onMounted(loadItems)
@@ -166,6 +186,7 @@ onMounted(loadItems)
 }
 
 .header-left,
+.header-actions,
 .plugin-title,
 .plugin-actions {
   display: flex;

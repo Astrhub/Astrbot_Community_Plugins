@@ -82,7 +82,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { NLayout, NSpin, NIcon, NButton } from 'naive-ui'
 import { SearchOutline, SyncOutline } from '@vicons/ionicons5'
@@ -93,6 +94,7 @@ import AppFooter from '../components/AppFooter.vue'
 import { usePluginStore } from '../stores/plugins'
 
 const store = usePluginStore()
+const route = useRoute()
 const {
   searchQuery,
   selectedTag,
@@ -113,6 +115,10 @@ const filterKey = computed(() => {
 const { refreshRandomOrder } = store
 onMounted(() => {
   store.loadPlugins()
+})
+
+watch(() => route.fullPath, () => {
+  if (route.path === '/') store.loadPlugins()
 })
 </script>
 
