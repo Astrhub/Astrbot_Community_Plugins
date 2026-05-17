@@ -386,11 +386,11 @@ def register_routes(app: FastAPI) -> None:
     @app.post("/v1/auth/internal/login")
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
         settings = get_settings(request)
-        if not settings.public_login_enabled:
-            raise error(403, "Login is closed")
         user = await call_store(request, "get_user_by_internal_username", payload.username)
         if not user or not verify_password(payload.password, user.get("password_hash", "")):
             raise error(401, "Invalid username or password")
+        if not settings.public_login_enabled and not is_core_admin(user):
+            raise error(403, "Login is closed")
         session = await call_store(request, "create_session", user["id"])
         response = JSONResponse({"user": public_user(user), "session": session})
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
