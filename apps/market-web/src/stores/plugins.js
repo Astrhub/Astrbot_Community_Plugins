@@ -384,13 +384,13 @@ export const usePluginStore = defineStore('plugins', () => {
       cache: 'no-store'
     })
     const data = await response.json().catch(() => ({}))
-    const site = applySiteConfig(data.site || data.saved_setup?.site || siteConfig.value)
+    const setupConfig = mergeSetupConfig(data.saved_setup, data.saved_setup?.site || data.site || {})
     setupStatus.value = {
       required: Boolean(data.required),
       missing: Array.isArray(data.missing) ? data.missing : [],
       database_configured: Boolean(data.database_configured),
       redis_configured: Boolean(data.redis_configured),
-      saved_setup: mergeSetupConfig(data.saved_setup, site),
+      saved_setup: setupConfig,
       restart_required: Boolean(data.restart_required)
     }
     return setupStatus.value
