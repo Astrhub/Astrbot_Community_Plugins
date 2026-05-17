@@ -7,6 +7,12 @@
       </div>
       <div class="nav-actions">
         <theme-mode-button class="theme-button" />
+        <n-button v-if="currentUser" secondary @click="goNotifications">
+          <template #icon>
+            <n-icon><notifications-outline /></n-icon>
+          </template>
+          消息
+        </n-button>
         <n-dropdown
           v-if="currentUser"
           :options="userMenuOptions"
@@ -101,6 +107,16 @@
           aria-label="复制 AstrBot 插件源"
         >
           <n-icon><link-outline /></n-icon>
+        </n-button>
+        <n-button
+          v-if="currentUser"
+          quaternary
+          circle
+          class="hide-on-mobile-search"
+          @click="goNotifications"
+          aria-label="消息"
+        >
+          <n-icon><notifications-outline /></n-icon>
         </n-button>
         <n-button
           v-if="isAdminUser"
@@ -205,6 +221,7 @@ import {
   LogInOutline,
   LogOutOutline,
   LogoGithub,
+  NotificationsOutline,
   PersonOutline,
   SearchOutline,
   SettingsOutline,
@@ -321,6 +338,10 @@ const goSettings = () => {
 
 const goAdminPlugins = () => {
   router.push('/admin/plugins')
+}
+
+const goNotifications = () => {
+  router.push({ path: '/settings/personal', hash: '#notifications' })
 }
 
 function renderIcon(icon) {

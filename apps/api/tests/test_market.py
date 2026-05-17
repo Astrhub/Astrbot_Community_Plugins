@@ -650,6 +650,11 @@ def test_core_admin_can_review_plugin_submissions() -> None:
     assert admin_plugins.json()["items"][0]["id"] == plugin["id"]
     assert listed.status_code == 200
     assert listed.json()["status"] == "listed"
+    client.get("/v1/auth/debug-login?login=alice")
+    notifications = client.get("/v1/me/notifications").json()["items"]
+    assert notifications[0]["type"] == "plugin_listed"
+    assert notifications[0]["metadata"]["plugin_id"] == plugin["id"]
+    assert "已通过审核并上架" in notifications[0]["body"]
 
 
 def test_admin_unlist_requires_reason_and_notifies_owner() -> None:

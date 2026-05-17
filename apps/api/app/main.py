@@ -692,10 +692,27 @@ def register_routes(app: FastAPI) -> None:
         user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
+        plugin = await get_plugin_or_404(request, plugin_id)
+        previous_status = plugin.get("status")
         await refresh_plugin_github_metadata(request, plugin_id, user)
         updated = await call_store(request, "update_plugin_status", plugin_id, "listed", user["id"])
         if not updated:
             raise error(404, "Plugin not found")
+        if previous_status != "listed" and updated.get("owner_user_id"):
+            plugin_name = updated.get("display_name") or updated.get("name") or plugin_id
+            await call_store(
+                request,
+                "create_notification",
+                updated["owner_user_id"],
+                "插件已上架",
+                f"{plugin_name} 已通过审核并上架。",
+                "plugin_listed",
+                {
+                    "plugin_id": plugin_id,
+                    "plugin_name": updated.get("name") or plugin_id,
+                    "moderator_user_id": user["id"],
+                },
+            )
         return updated
 
     @app.post("/v1/admin/plugins/{plugin_id}/refresh-github")

@@ -83,7 +83,7 @@
             </n-form-item>
           </section>
 
-          <section class="profile-section">
+          <section id="notifications" ref="notificationsSection" class="profile-section">
             <div class="section-title">
               <h2>消息</h2>
               <p>插件审核、下架等站内通知会显示在这里。</p>
@@ -110,8 +110,8 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { nextTick, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import {
   NButton,
@@ -134,6 +134,7 @@ import {
 import { usePluginStore } from '@/stores/plugins'
 
 const router = useRouter()
+const route = useRoute()
 const message = useMessage()
 const store = usePluginStore()
 const { currentUser } = storeToRefs(store)
@@ -142,6 +143,7 @@ const { loadCurrentUser, loadNotifications, loginWithGithub, updateProfile } = s
 const loading = ref(true)
 const saving = ref(false)
 const notifications = ref([])
+const notificationsSection = ref(null)
 const formData = reactive({
   github_name: '',
   github_token: '',
@@ -191,6 +193,12 @@ function formatTime(value) {
   return new Date(value).toLocaleString()
 }
 
+async function scrollToNotifications() {
+  if (route.hash !== '#notifications') return
+  await nextTick()
+  notificationsSection.value?.scrollIntoView({ block: 'start' })
+}
+
 onMounted(async () => {
   await loadCurrentUser()
   if (!currentUser.value) {
@@ -205,6 +213,7 @@ onMounted(async () => {
     message.error(error.message || '消息加载失败')
   }
   loading.value = false
+  await scrollToNotifications()
 })
 </script>
 
