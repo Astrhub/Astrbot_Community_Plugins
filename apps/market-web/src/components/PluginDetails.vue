@@ -755,7 +755,7 @@ function confirmExternalOpen(url) {
   border-radius: 8px;
 }
 
-.markdown-content :deep(code) {
+.markdown-content :deep(:not(pre) > code) {
   background: var(--markdown-code-bg);
   border: 1px solid var(--markdown-code-border);
   padding: 0.2em 0.4em;
@@ -801,6 +801,17 @@ function confirmExternalOpen(url) {
 
 .markdown-content :deep(pre code) {
   background: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.markdown-content :deep(pre code *),
+.markdown-content :deep(pre code .hljs) {
+  border: 0;
+  background: transparent;
   padding: 0;
   border-radius: 0;
 }
