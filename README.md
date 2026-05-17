@@ -12,14 +12,7 @@ Astrbot Community Plugins 是一个服务端驱动的 AstrBot 社区插件市场
 
 ### 服务器端部署
 
-前端不再走 Vercel。生产部署时先构建 `apps/market-web`，再由 `apps/api` 的 FastAPI 应用直接托管 `apps/market-web/dist`：
-
-```bash
-npm install --prefix apps/market-web
-npm run build:web
-uv sync --project apps/api
-npm run start:api
-```
+前端不再走 Vercel。生产部署时先构建 `apps/market-web`，再由 `apps/api` 的 FastAPI 应用直接托管 `apps/market-web/dist`。
 
 启动后同一个服务同时提供网站、API 和 AstrBot 插件源：
 
@@ -29,11 +22,14 @@ npm run start:api
 
 后端使用 **FastAPI + uvicorn**，依赖 **PostgreSQL**（持久化存储）和 **Redis**（会话存储）。配置 PostgreSQL 与 Redis 后会启用 `PgRedisMarketStore`；未配置时回退到 `InMemoryMarketStore` 方便首次启动和本地开发。
 
-仓库目前尚未提供完整生产运维配置，包括：
+仓库提供 Docker Compose 和 systemd 模板：
 
-- Dockerfile / docker-compose
+- `Dockerfile` / `docker-compose.yml` — 单机容器部署，包含 PostgreSQL 和 Redis。
+- `deploy/systemd/` — 裸机源码部署的 systemd service 和环境变量模板。
+
+尚未提供的运维配置包括：
+
 - Kubernetes / Helm 配置
-- systemd / supervisor 配置
 - Nginx / Caddy 反向代理配置
 - Terraform / 基础设施即代码配置
 - 数据库迁移脚本（无 Alembic 等）
@@ -43,6 +39,65 @@ npm run start:api
 核心管理员登录后可进入 `/settings` 管理运行时设置。当前支持站点名称/图标/描述、GitHub OAuth、登录条款、服务条款、市场提交/评论/点赞开关、自动上架、最大标签数，以及 SMTP 或 Cloudflare Email Service。密钥字段保存后只返回遮蔽状态；保持遮蔽值不会覆盖已有密钥。
 
 保存首次配置时，后端会先连接 PostgreSQL，目标数据库不存在时尝试创建，再初始化 schema、验证 Redis，并把内部核心管理员写入目标库；全部成功后只把基础设施连接和核心管理员引导信息写入 `apps/api/.env`，站点展示和后续系统设置写入数据库配置表。当前 FastAPI 进程会立即切换到 PostgreSQL/Redis 存储，无需依赖 systemd、Docker 或 supervisor 重启服务。PostgreSQL schema 在后续启动时也会自动补齐；Redis 使用带过期时间的 session key 保存登录态。初始化完成后 `/v1/setup` 关闭，数据库或 Redis 连接后续只通过 `.env` 调整。
+
+### Docker Compose
+
+首次运行前先创建后端 `.env` 文件，否则 Docker 会把挂载目标创建成目录：
+
+```bash
+cp apps/api/.env.docker.example apps/api/.env
+docker compose up -d --build
+```
+
+打开 `http://127.0.0.1:8787/setup` 完成初始化。compose 内置服务地址如下：
+
+- PostgreSQL host：`postgres`
+- PostgreSQL port：`5432`
+- PostgreSQL database/user/password：默认都是 `market`，也可通过 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 覆盖
+- Redis host：`redis`
+- Redis port：`6379`
+
+常用命令：
+
+```bash
+docker compose ps
+docker compose logs -f app
+docker compose restart app
+docker compose down
+```
+
+### Systemd
+
+裸机部署示例路径为 `/opt/astrbot-community-plugins`，服务用户为 `astrbot-market`：
+
+```bash
+sudo useradd --system --create-home --shell /usr/sbin/nologin astrbot-market
+sudo mkdir -p /opt /etc/astrbot-community-plugins
+sudo rsync -a --delete ./ /opt/astrbot-community-plugins/
+sudo chown -R astrbot-market:astrbot-market /opt/astrbot-community-plugins
+cd /opt/astrbot-community-plugins
+sudo cp deploy/systemd/astrbot-community-plugins.env.example /etc/astrbot-community-plugins/astrbot-community-plugins.env
+sudo cp deploy/systemd/astrbot-community-plugins.service /etc/systemd/system/
+```
+
+构建和安装依赖：
+
+```bash
+npm install --prefix apps/market-web
+npm run build:web
+uv sync --project apps/api --no-dev
+```
+
+编辑 `/etc/astrbot-community-plugins/astrbot-community-plugins.env` 后启动：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now astrbot-community-plugins
+sudo systemctl status astrbot-community-plugins
+journalctl -u astrbot-community-plugins -f
+```
+
+若 `.env` 中暂不填写 `DATABASE_URL` 和 `REDIS_URL`，首次访问 `/setup` 完成初始化；初始化后后端会写入 `apps/api/.env`。生产环境通常还需要在前面放 Nginx/Caddy 并启用 HTTPS。
 
 ### CI/CD
 

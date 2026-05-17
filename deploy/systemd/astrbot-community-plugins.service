@@ -1,0 +1,21 @@
+[Unit]
+Description=AstrBot Community Plugins Market
+After=network-online.target postgresql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=astrbot-market
+Group=astrbot-market
+WorkingDirectory=/opt/astrbot-community-plugins/apps/api
+EnvironmentFile=/etc/astrbot-community-plugins/astrbot-community-plugins.env
+ExecStart=/opt/astrbot-community-plugins/apps/api/.venv/bin/uvicorn app.main:app --host ${HOST} --port ${PORT}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/astrbot-community-plugins/apps/api
+
+[Install]
+WantedBy=multi-user.target
