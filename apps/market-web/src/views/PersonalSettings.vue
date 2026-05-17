@@ -24,14 +24,6 @@
               <h2>基本资料</h2>
               <p>资料会显示在评论、插件提交和管理记录中。</p>
             </div>
-            <div class="avatar-row">
-              <n-avatar :size="72" :src="formData.avatar_url || undefined">
-                {{ avatarFallback }}
-              </n-avatar>
-              <n-form-item label="头像 URL" path="avatar_url">
-                <n-input v-model:value="formData.avatar_url" placeholder="https://..." />
-              </n-form-item>
-            </div>
             <n-form-item label="显示名称" path="github_name">
               <n-input v-model:value="formData.github_name" placeholder="你的显示名称" />
             </n-form-item>
@@ -118,11 +110,10 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import {
-  NAvatar,
   NButton,
   NEmpty,
   NForm,
@@ -152,19 +143,12 @@ const loading = ref(true)
 const saving = ref(false)
 const notifications = ref([])
 const formData = reactive({
-  avatar_url: '',
   github_name: '',
   github_token: '',
   github_refresh_interval_seconds: 3600
 })
 
-const avatarFallback = computed(() => {
-  const value = currentUser.value?.github_login || currentUser.value?.internal_username || '?'
-  return value.slice(0, 1).toUpperCase()
-})
-
 function applyCurrentUser() {
-  formData.avatar_url = currentUser.value?.avatar_url || ''
   formData.github_name = currentUser.value?.github_name || ''
   formData.github_token = ''
   formData.github_refresh_interval_seconds = currentUser.value?.github_refresh_interval_seconds || 3600
@@ -174,7 +158,6 @@ async function saveProfile() {
   saving.value = true
   try {
     const payload = {
-      avatar_url: formData.avatar_url.trim(),
       github_name: formData.github_name.trim(),
       github_refresh_interval_seconds: Number(formData.github_refresh_interval_seconds || 3600)
     }
@@ -244,7 +227,6 @@ onMounted(async () => {
 }
 
 .header-left,
-.avatar-row,
 .actions,
 .github-state,
 .notification-title {
@@ -301,14 +283,6 @@ h2 {
   color: var(--text-color-2);
 }
 
-.avatar-row {
-  align-items: flex-end;
-}
-
-.avatar-row :deep(.n-form-item) {
-  flex: 1;
-}
-
 .actions {
   justify-content: flex-end;
 }
@@ -349,11 +323,6 @@ h2 {
 }
 
 @media (max-width: 640px) {
-  .avatar-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
   .actions {
     justify-content: stretch;
   }
