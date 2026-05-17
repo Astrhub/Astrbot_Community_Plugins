@@ -442,7 +442,7 @@ def test_github_login_uses_runtime_callback_url_over_initial_settings(tmp_path) 
     assert "127.0.0.1" not in location
 
 
-def test_github_login_falls_back_to_forwarded_host_for_loopback_callback(tmp_path) -> None:
+def test_github_login_ignores_forwarded_host_for_callback_url(tmp_path) -> None:
     runtime_file = tmp_path / "runtime.env"
     runtime_file.write_text(
         "\n".join(
@@ -475,12 +475,12 @@ def test_github_login_falls_back_to_forwarded_host_for_loopback_callback(tmp_pat
 
     assert response.status_code == 307
     assert (
-        "redirect_uri=https%3A%2F%2Fmarket.example.com%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
+        "redirect_uri=http%3A%2F%2F127.0.0.1%3A8787%2Fv1%2Fauth%2Fgithub%2Fcallback" in location
     )
-    assert "127.0.0.1" not in location
+    assert "market.example.com" not in location
 
 
-def test_github_callback_uses_forwarded_origin_for_loopback_settings(
+def test_github_callback_ignores_forwarded_origin_for_loopback_settings(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -534,8 +534,8 @@ def test_github_callback_uses_forwarded_origin_for_loopback_settings(
     )
 
     assert response.status_code == 307
-    assert response.headers["location"] == "https://market.example.com"
-    assert captured["callback_url"] == "https://market.example.com/v1/auth/github/callback"
+    assert response.headers["location"] == "http://127.0.0.1:8787"
+    assert captured["callback_url"] == "http://127.0.0.1:8787/v1/auth/github/callback"
 
 
 def test_public_site_config_uses_runtime_oauth_settings(tmp_path) -> None:
@@ -1216,6 +1216,22 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert "GITHUB_METADATA_SYNC_INTERVAL_SECONDS=1800" in runtime_file
     assert "CLOUDFLARE_EMAIL_API_TOKEN=cf-token" in runtime_file
     assert 'SITE_NAME="AstrHub Updated"' in runtime_file
+
+
+def test_system_settings_reject_local_oauth_callback_when_enabled(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+    client.post("/v1/setup", json=setup_payload())
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    payload = system_settings_payload()
+    payload["github"]["callback_url"] = "http://127.0.0.1:8787/v1/auth/github/callback"
+
+    response = client.put("/v1/admin/settings", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "GitHub callback URL must use a public host"
 
 
 def test_system_settings_require_core_admin(tmp_path) -> None:

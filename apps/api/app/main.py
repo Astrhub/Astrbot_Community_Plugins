@@ -421,7 +421,7 @@ def register_routes(app: FastAPI) -> None:
         params = urlencode(
             {
                 "client_id": settings.github_client_id,
-                "redirect_uri": github_callback_url_for_request(request, settings),
+                "redirect_uri": settings.github_callback_url,
                 "scope": settings.github_scope,
                 "state": state,
             }
@@ -439,10 +439,7 @@ def register_routes(app: FastAPI) -> None:
         if not code or not state or not expected_state or state != expected_state:
             raise error(400, "Invalid OAuth callback")
 
-        oauth_settings = settings.with_updates(
-            github_callback_url=github_callback_url_for_request(request, settings)
-        )
-        access_token = await exchange_github_code(oauth_settings, code)
+        access_token = await exchange_github_code(settings, code)
         profile = await fetch_github_profile(access_token)
         current = await current_user(request)
         profile_payload = github_profile_payload(profile)
@@ -452,7 +449,7 @@ def register_routes(app: FastAPI) -> None:
             user = await call_store(request, "upsert_github_user", profile_payload)
         await promote_org_admin_if_needed(request, user, access_token)
         session = await call_store(request, "create_session", user["id"])
-        response = RedirectResponse(web_url_for_request(request, settings))
+        response = RedirectResponse(settings.web_url.rstrip("/"))
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         response.delete_cookie(settings.oauth_state_cookie_name, path="/")
         return response
@@ -924,38 +921,6 @@ def get_runtime_settings(request: Request) -> Settings:
             settings.public_login_enabled,
         ),
     )
-
-
-def github_callback_url_for_request(request: Request, settings: Settings) -> str:
-    if not is_loopback_url(settings.github_callback_url):
-        return settings.github_callback_url
-    return f"{public_request_origin(request)}/v1/auth/github/callback"
-
-
-def web_url_for_request(request: Request, settings: Settings) -> str:
-    if not is_loopback_url(settings.web_url):
-        return settings.web_url.rstrip("/")
-    return public_request_origin(request)
-
-
-def public_request_origin(request: Request) -> str:
-    forwarded_proto = first_forwarded_header(request, "x-forwarded-proto")
-    forwarded_host = first_forwarded_header(request, "x-forwarded-host")
-    forwarded_port = first_forwarded_header(request, "x-forwarded-port")
-    proto = forwarded_proto or request.url.scheme
-    host = forwarded_host or request.headers.get("host") or request.url.netloc
-    if forwarded_port and ":" not in host:
-        host = f"{host}:{forwarded_port}"
-    return f"{proto}://{host}".rstrip("/")
-
-
-def first_forwarded_header(request: Request, name: str) -> str:
-    return request.headers.get(name, "").split(",", 1)[0].strip()
-
-
-def is_loopback_url(value: str) -> bool:
-    hostname = (urlparse(value).hostname or "").lower()
-    return hostname in {"localhost", "::1", "0.0.0.0"} or hostname.startswith("127.")
 
 
 def get_store(request: Request) -> InMemoryMarketStore | PgRedisMarketStore:
@@ -1736,6 +1701,8 @@ def validate_system_settings_payload(
             raise error(400, "GitHub OAuth client secret is required when GitHub login is enabled")
         if not payload.github.callback_url or not is_valid_public_url(payload.github.callback_url):
             raise error(400, "GitHub callback URL must be http(s)")
+        if is_local_url(payload.github.callback_url):
+            raise error(400, "GitHub callback URL must use a public host")
     if payload.email.provider == "smtp":
         if not payload.email.smtp.host:
             raise error(400, "SMTP host is required when SMTP email is enabled")
@@ -2276,6 +2243,11 @@ def is_valid_site_icon_url(value: str) -> bool:
 def is_valid_public_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def is_local_url(value: str) -> bool:
+    hostname = (urlparse(value or "").hostname or "").lower()
+    return hostname in {"localhost", "::1", "0.0.0.0"} or hostname.startswith("127.")
 
 
 def is_valid_email(value: str) -> bool:

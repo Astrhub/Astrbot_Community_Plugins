@@ -409,8 +409,16 @@ const rules = {
   ],
   'github.callback_url': [
     {
-      validator: (_, value) => !formData.auth.github_login_enabled || /^https?:\/\//.test(value),
-      message: '启用 GitHub 登录后必须填写 http(s) 回调地址',
+      validator: (_, value) => {
+        if (!formData.auth.github_login_enabled) return true
+        try {
+          const hostname = new URL(value).hostname.toLowerCase()
+          return !['localhost', '0.0.0.0', '::1'].includes(hostname) && !hostname.startsWith('127.')
+        } catch {
+          return false
+        }
+      },
+      message: '启用 GitHub 登录后必须填写公网 http(s) 回调地址',
       trigger: 'blur'
     }
   ],
