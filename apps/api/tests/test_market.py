@@ -1594,6 +1594,43 @@ def test_github_metadata_uses_system_fallback_token(monkeypatch) -> None:
     assert client.get("/v1/plugins").json()["items"][0]["stars"] == 7
 
 
+def test_admin_github_refresh_is_queued_without_frontend_failure(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 403
+        headers = {"x-ratelimit-remaining": "0"}
+
+        def json(self) -> dict[str, object]:
+            return {"message": "API rate limit exceeded"}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user = client.app.state.store.get_user_by_id(login.json()["user"]["id"])
+    client.app.state.store.update_user_role(user["id"], Role.ADMIN.value)
+    plugin = client.app.state.store.submit_plugin(user, plugin_payload())
+
+    response = client.post(f"/v1/admin/plugins/{plugin['id']}/refresh-github", json={})
+    stored = client.app.state.store.get_plugin(plugin["id"])
+
+    assert response.status_code == 202
+    assert response.json() == {"accepted": True, "plugin_id": plugin["id"]}
+    assert stored["github_sync_status"] == "error"
+    assert "GitHub API rate limit" in stored["github_sync_error"]
+
+
 def test_plugin_owner_can_force_refresh_with_temporary_token(monkeypatch) -> None:
     seen_authorizations = []
     metadata_text = "version: v3.0.0"

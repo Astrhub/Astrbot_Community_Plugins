@@ -670,6 +670,21 @@ export const usePluginStore = defineStore('plugins', () => {
     return data
   }
 
+  async function refreshAdminPluginGithubMetadata(pluginId, payload = null) {
+    const options = {
+      method: 'POST',
+      credentials: 'include'
+    }
+    if (payload && Object.keys(payload).length > 0) {
+      options.headers = { 'content-type': 'application/json' }
+      options.body = JSON.stringify(payload)
+    }
+    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins/${pluginId}/refresh-github`, options)
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '刷新 GitHub 数据失败')
+    return data
+  }
+
   async function loadNotifications() {
     const response = await fetch(`${apiBaseUrl}/v1/me/notifications`, {
       credentials: 'include',
@@ -903,6 +918,7 @@ export const usePluginStore = defineStore('plugins', () => {
     unlikePluginComment,
     updatePluginListing,
     refreshPluginGithubMetadata,
+    refreshAdminPluginGithubMetadata,
     loadNotifications,
     saveSystemSettings,
     sendTestEmail,

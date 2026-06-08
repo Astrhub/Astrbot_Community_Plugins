@@ -130,8 +130,7 @@ const {
   loadAdminPlugins,
   loadCurrentUser,
   loadPlugins,
-  refreshPluginGithubMetadata,
-  resetPluginFilters,
+  refreshAdminPluginGithubMetadata,
   updatePluginListing
 } = store
 
@@ -172,13 +171,11 @@ async function setListing(plugin, action, reason = '') {
   busyId.value = plugin.id
   try {
     const payload = action === 'unlist' ? { reason } : null
-    const updated = await updatePluginListing(plugin.id, action, payload)
-    items.value = items.value.filter((item) => item.id !== updated.id)
+    await updatePluginListing(plugin.id, action, payload)
+    await loadItems()
     await loadPlugins({ force: true })
     if (action === 'list') {
-      resetPluginFilters()
-      message.success('插件已上架，正在返回首页')
-      router.push('/')
+      message.success('插件已上架')
     } else {
       message.success('插件已下架')
     }
@@ -192,10 +189,9 @@ async function setListing(plugin, action, reason = '') {
 async function refreshGithub(plugin) {
   busyId.value = plugin.id
   try {
-    const updated = await refreshPluginGithubMetadata(plugin.id, {})
-    items.value = items.value.map((item) => (item.id === updated.id ? updated : item))
-    await loadPlugins({ force: true })
-    message.success('GitHub 数据已刷新')
+    await refreshAdminPluginGithubMetadata(plugin.id, {})
+    await loadItems()
+    message.success('GitHub 数据刷新已在后台开始')
   } catch (error) {
     message.error(error.message || '刷新失败')
   } finally {
@@ -225,7 +221,6 @@ function goBack() {
 }
 
 function goHome() {
-  resetPluginFilters()
   router.push('/')
 }
 

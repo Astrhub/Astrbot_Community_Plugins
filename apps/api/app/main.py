@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import httpx
 import asyncpg
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
@@ -744,16 +744,20 @@ def register_routes(app: FastAPI) -> None:
         return {**summary, "role": user["role"]}
 
     @app.post("/v1/admin/plugins/{plugin_id}/list")
-    async def list_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
+    async def list_plugin(
+        request: Request,
+        plugin_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
         user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
         plugin = await get_plugin_or_404(request, plugin_id)
         previous_status = plugin.get("status")
-        await refresh_plugin_github_metadata(request, plugin_id, user)
         updated = await call_store(request, "update_plugin_status", plugin_id, "listed", user["id"])
         if not updated:
             raise error(404, "Plugin not found")
+        queue_plugin_github_metadata_refresh(background_tasks, request.app, updated, user)
         if previous_status != "listed" and updated.get("owner_user_id"):
             plugin_name = updated.get("display_name") or updated.get("name") or plugin_id
             await call_store(
@@ -771,28 +775,33 @@ def register_routes(app: FastAPI) -> None:
             )
         return updated
 
-    @app.post("/v1/admin/plugins/{plugin_id}/refresh-github")
+    @app.post("/v1/admin/plugins/{plugin_id}/refresh-github", status_code=202)
     async def refresh_admin_plugin_github_metadata(
         request: Request,
         plugin_id: str,
+        background_tasks: BackgroundTasks,
         payload: PluginGithubRefreshPayload | None = None,
     ) -> dict[str, Any]:
         user = await require_user(request)
         if not can_moderate_plugins(user):
             raise error(403, "Forbidden")
+        plugin = await get_plugin_or_404(request, plugin_id)
         refresh_payload = payload or PluginGithubRefreshPayload()
-        updated = await refresh_plugin_github_metadata(
+        user = await update_user_github_sync_preferences(
             request,
-            plugin_id,
+            user,
+            refresh_payload.github_token,
+            refresh_payload.save_token,
+            refresh_payload.refresh_interval_seconds,
+        )
+        queue_plugin_github_metadata_refresh(
+            background_tasks,
+            request.app,
+            plugin,
             user,
             token=refresh_payload.github_token,
-            save_token=refresh_payload.save_token,
-            refresh_interval_seconds=refresh_payload.refresh_interval_seconds,
-            raise_errors=True,
         )
-        if not updated:
-            raise error(404, "Plugin not found")
-        return updated
+        return {"accepted": True, "plugin_id": plugin_id}
 
     @app.post("/v1/admin/plugins/{plugin_id}/unlist")
     async def unlist_plugin(
@@ -1312,6 +1321,24 @@ async def get_plugin_owner_for_sync(
     if not method:
         return None
     return await resolve_optional_awaitable(method(owner_id))
+
+
+def queue_plugin_github_metadata_refresh(
+    background_tasks: BackgroundTasks,
+    app: FastAPI,
+    plugin: dict[str, Any],
+    user: dict[str, Any] | None = None,
+    *,
+    token: str = "",
+) -> None:
+    background_tasks.add_task(
+        refresh_plugin_github_metadata_for_plugin,
+        app,
+        plugin,
+        user,
+        token=token,
+        raise_errors=False,
+    )
 
 
 async def refresh_plugin_github_metadata(
