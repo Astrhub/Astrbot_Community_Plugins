@@ -603,12 +603,13 @@ export const usePluginStore = defineStore('plugins', () => {
     return data
   }
 
-  async function muteAdminUser(userId, mutedUntil) {
+  async function muteAdminUser(userId, payload) {
+    const body = typeof payload === 'string' ? { muted_until: payload } : payload
     const response = await fetch(`${apiBaseUrl}/v1/admin/users/${userId}/mute`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ muted_until: mutedUntil })
+      body: JSON.stringify(body || {})
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '封禁用户失败')

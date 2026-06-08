@@ -685,9 +685,11 @@ async function updateUserRole({ user, role }) {
   }
 }
 
-async function muteUser({ user, muted_until }) {
+async function muteUser({ user, muted_until, reason }) {
   try {
-    const updated = await withUserBusy(user, 'mute', () => muteAdminUser(user.id, muted_until))
+    const updated = await withUserBusy(user, 'mute', () =>
+      muteAdminUser(user.id, { muted_until, reason })
+    )
     replaceUser(updated)
     message.success('用户已封禁')
   } catch (error) {

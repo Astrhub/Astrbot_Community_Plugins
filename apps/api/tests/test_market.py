@@ -784,14 +784,16 @@ def test_admin_can_mute_and_unmute_users() -> None:
 
     muted = client.post(
         f"/v1/admin/users/{user['id']}/mute",
-        json={"muted_until": "2099-01-01T00:00:00Z"},
+        json={"muted_until": "2099-01-01T00:00:00Z", "reason": "spam"},
     )
     unmuted = client.post(f"/v1/admin/users/{user['id']}/unmute")
 
     assert muted.status_code == 200
     assert muted.json()["muted_until"] == "2099-01-01T00:00:00Z"
+    assert muted.json()["muted_reason"] == "spam"
     assert unmuted.status_code == 200
     assert unmuted.json()["muted_until"] is None
+    assert unmuted.json()["muted_reason"] == ""
 
 
 def test_plugin_owners_can_edit_their_own_metadata() -> None:
@@ -837,10 +839,11 @@ def test_submission_listing_comments_and_moderation_flow() -> None:
 
     muted = client.post(
         f"/v1/admin/users/{admin['id']}/mute",
-        json={"muted_until": "2099-01-01T00:00:00Z"},
+        json={"muted_until": "2099-01-01T00:00:00Z", "reason": "review"},
     )
     assert muted.status_code == 200
     assert muted.json()["muted_until"] == "2099-01-01T00:00:00Z"
+    assert muted.json()["muted_reason"] == "review"
 
 
 def test_plugin_detail_returns_nested_comments_with_user_profile() -> None:
@@ -2167,6 +2170,7 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600" in SCHEMA_SQL
     assert "notify_replies boolean NOT NULL DEFAULT true" in SCHEMA_SQL
     assert "notify_likes boolean NOT NULL DEFAULT true" in SCHEMA_SQL
+    assert "muted_reason text NOT NULL DEFAULT ''" in SCHEMA_SQL
     assert "likes integer NOT NULL DEFAULT 0" in SCHEMA_SQL
     assert "read boolean NOT NULL DEFAULT false" in SCHEMA_SQL
     assert "jsonb NOT NULL DEFAULT '[]'::jsonb" in SCHEMA_SQL

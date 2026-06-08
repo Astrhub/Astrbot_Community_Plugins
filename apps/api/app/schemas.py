@@ -81,6 +81,14 @@ class CommentCreate(BaseModel):
 
 class MuteUserPayload(BaseModel):
     muted_until: str | None = None
+    reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()
 
 
 class UserProfileUpdate(BaseModel):

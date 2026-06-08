@@ -975,7 +975,14 @@ def register_routes(app: FastAPI) -> None:
         if not can_moderate_community(user):
             raise error(403, "Forbidden")
         muted_until = payload.muted_until or (datetime.now(UTC) + timedelta(days=1)).isoformat()
-        muted = await call_store(request, "mute_user", user_id, muted_until, user["id"])
+        muted = await call_store(
+            request,
+            "mute_user",
+            user_id,
+            muted_until,
+            user["id"],
+            payload.reason or "",
+        )
         if not muted:
             raise error(404, "User not found")
         return public_user(muted)

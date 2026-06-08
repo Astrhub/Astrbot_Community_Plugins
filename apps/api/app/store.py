@@ -79,6 +79,7 @@ class InMemoryMarketStore:
                 "avatar_url": profile.get("avatar_url") or "",
                 "role": Role.USER,
                 "muted_until": None,
+                "muted_reason": "",
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
             }
@@ -106,6 +107,7 @@ class InMemoryMarketStore:
                 "avatar_url": "",
                 "role": Role.CORE_ADMIN,
                 "muted_until": None,
+                "muted_reason": "",
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
             }
@@ -131,6 +133,7 @@ class InMemoryMarketStore:
                 "avatar_url": "",
                 "role": normalize_role(role),
                 "muted_until": None,
+                "muted_reason": "",
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
             }
@@ -443,12 +446,14 @@ class InMemoryMarketStore:
         user_id: str,
         muted_until: str,
         by_user_id: str,
+        reason: str = "",
     ) -> dict[str, Any] | None:
         user = self.get_user_by_id(user_id)
         if not user:
             return None
         user["muted_until"] = muted_until
         user["muted_by"] = by_user_id
+        user["muted_reason"] = reason
         user["updated_at"] = utc_now()
         return deepcopy(user)
 
@@ -458,6 +463,7 @@ class InMemoryMarketStore:
             return None
         user["muted_until"] = None
         user["muted_by"] = None
+        user["muted_reason"] = ""
         user["updated_at"] = utc_now()
         return deepcopy(user)
 
@@ -819,6 +825,7 @@ class InMemoryMarketStore:
             or user.get("login")
             or "",
             "muted_until": user.get("muted_until") or None,
+            "muted_reason": user.get("muted_reason") or "",
         }
 
     def _normalize_plugin(self, plugin: dict[str, Any]) -> dict[str, Any]:
@@ -905,6 +912,7 @@ CREATE TABLE IF NOT EXISTS market_users (
     role text NOT NULL CHECK (role IN ('core_admin', 'admin', 'user')),
     muted_until timestamptz,
     muted_by text REFERENCES market_users(id) ON DELETE SET NULL,
+    muted_reason text NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -1088,6 +1096,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
                 "notify_likes boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS muted_reason text "
+                "NOT NULL DEFAULT ''"
             )
             await connection.execute(
                 "ALTER TABLE market_comments ADD COLUMN IF NOT EXISTS likes integer "
@@ -1713,17 +1725,22 @@ class PgRedisMarketStore(InMemoryMarketStore):
         user_id: str,
         muted_until: str,
         by_user_id: str,
+        reason: str = "",
     ) -> dict[str, Any] | None:
         row = await self._pool().fetchrow(
             """
             UPDATE market_users
-               SET muted_until = $2::timestamptz, muted_by = $3, updated_at = now()
+               SET muted_until = $2::timestamptz,
+                   muted_by = $3,
+                   muted_reason = $4,
+                   updated_at = now()
              WHERE id = $1
          RETURNING *
             """,
             user_id,
             muted_until,
             by_user_id,
+            reason,
         )
         return self._user_from_record(row) if row else None
 
@@ -1731,7 +1748,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
         row = await self._pool().fetchrow(
             """
             UPDATE market_users
-               SET muted_until = NULL, muted_by = NULL, updated_at = now()
+               SET muted_until = NULL,
+                   muted_by = NULL,
+                   muted_reason = '',
+                   updated_at = now()
              WHERE id = $1
          RETURNING *
             """,

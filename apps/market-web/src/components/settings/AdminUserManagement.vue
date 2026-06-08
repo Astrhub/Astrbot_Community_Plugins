@@ -6,6 +6,8 @@ import {
   NFormItem,
   NIcon,
   NInput,
+  NInputNumber,
+  NModal,
   NSelect,
   NSpace,
   NSpin,
@@ -47,10 +49,17 @@ const emit = defineEmits(['refresh', 'create-user', 'update-role', 'mute-user', 
 
 const dialog = useDialog()
 const searchQuery = shallowRef('')
+const showCreateModal = shallowRef(false)
+const showMuteModal = shallowRef(false)
+const muteTarget = shallowRef(null)
 const createForm = reactive({
   username: '',
   password: '',
   role: 'user'
+})
+const muteForm = reactive({
+  days: 7,
+  reason: ''
 })
 
 const roleOptions = Object.freeze([
@@ -72,6 +81,13 @@ const filteredUsers = computed(() => {
     ].filter(Boolean).join(' ').toLowerCase()
     return searchText.includes(query)
   })
+})
+
+const createDisabled = computed(() => !createForm.username.trim() || createForm.password.length < 8)
+
+const muteDisabled = computed(() => {
+  const days = Number(muteForm.days)
+  return !muteTarget.value || !Number.isInteger(days) || days < 1
 })
 
 function displayName(user) {
@@ -120,18 +136,28 @@ function busyState(user) {
   return props.busyIds?.[user.id] || ''
 }
 
+function resetCreateForm() {
+  createForm.username = ''
+  createForm.password = ''
+  createForm.role = 'user'
+}
+
+function openCreateModal() {
+  resetCreateForm()
+  showCreateModal.value = true
+}
+
 function submitCreateUser() {
   const usernameValue = createForm.username.trim()
   const passwordValue = createForm.password
-  if (!usernameValue || !passwordValue) return
+  if (createDisabled.value) return
   emit('create-user', {
     username: usernameValue,
     password: passwordValue,
     role: createForm.role
   })
-  createForm.username = ''
-  createForm.password = ''
-  createForm.role = 'user'
+  showCreateModal.value = false
+  resetCreateForm()
 }
 
 function confirmRoleChange(user, role) {
@@ -139,18 +165,34 @@ function confirmRoleChange(user, role) {
   emit('update-role', { user, role })
 }
 
-function muteUntilSevenDays() {
-  return new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+function muteUntilDays(days) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
 }
 
-function confirmMute(user) {
-  dialog.warning({
-    title: '封禁用户',
-    content: `${displayName(user)} 将被封禁 7 天，期间不能发表评论。`,
-    positiveText: '封禁',
-    negativeText: '取消',
-    onPositiveClick: () => emit('mute-user', { user, muted_until: muteUntilSevenDays() })
+function resetMuteForm() {
+  muteForm.days = 7
+  muteForm.reason = ''
+  muteTarget.value = null
+}
+
+function openMuteModal(user) {
+  muteTarget.value = user
+  muteForm.days = 7
+  muteForm.reason = ''
+  showMuteModal.value = true
+}
+
+function submitMuteUser() {
+  if (muteDisabled.value) return
+  const user = muteTarget.value
+  const days = Number(muteForm.days)
+  emit('mute-user', {
+    user,
+    muted_until: muteUntilDays(days),
+    reason: muteForm.reason.trim()
   })
+  showMuteModal.value = false
+  resetMuteForm()
 }
 
 function confirmUnmute(user) {
@@ -177,39 +219,17 @@ function confirmDelete(user) {
 <template>
   <div class="user-management">
     <section class="settings-section">
-      <div class="section-title">
-        <h2>添加内部用户</h2>
-        <p>用于后台登录和协作管理；GitHub 用户仍通过 OAuth 自动创建。</p>
-      </div>
-
-      <div class="create-grid">
-        <NFormItem label="用户名">
-          <NInput v-model:value="createForm.username" placeholder="至少 3 个字符" />
-        </NFormItem>
-        <NFormItem label="密码">
-          <NInput
-            v-model:value="createForm.password"
-            type="password"
-            show-password-on="click"
-            placeholder="至少 8 个字符"
-          />
-        </NFormItem>
-        <NFormItem label="角色">
-          <NSelect v-model:value="createForm.role" :options="roleOptions" />
-        </NFormItem>
-        <div class="create-action">
-          <NButton
-            type="primary"
-            :loading="creating"
-            :disabled="!createForm.username.trim() || createForm.password.length < 8"
-            @click="submitCreateUser"
-          >
-            <template #icon>
-              <NIcon><PersonAddOutline /></NIcon>
-            </template>
-            添加用户
-          </NButton>
+      <div class="section-title row-title">
+        <div>
+          <h2>添加内部用户</h2>
+          <p>用于后台登录和协作管理；GitHub 用户仍通过 OAuth 自动创建。</p>
         </div>
+        <NButton type="primary" :loading="creating" @click="openCreateModal">
+          <template #icon>
+            <NIcon><PersonAddOutline /></NIcon>
+          </template>
+          添加用户
+        </NButton>
       </div>
     </section>
 
@@ -249,6 +269,7 @@ function confirmDelete(user) {
                 <span>ID：{{ user.id }}</span>
                 <span>注册：{{ formatTime(user.created_at) }}</span>
                 <span v-if="isMuted(user)">封禁至：{{ formatTime(user.muted_until) }}</span>
+                <span v-if="isMuted(user) && user.muted_reason">理由：{{ user.muted_reason }}</span>
               </div>
             </div>
 
@@ -284,12 +305,12 @@ function confirmDelete(user) {
                 type="warning"
                 :disabled="isCurrentUser(user)"
                 :loading="busyState(user) === 'mute'"
-                @click="confirmMute(user)"
+                @click="openMuteModal(user)"
               >
                 <template #icon>
                   <NIcon><BanOutline /></NIcon>
                 </template>
-                封禁 7 天
+                封禁
               </NButton>
 
               <NButton
@@ -309,6 +330,87 @@ function confirmDelete(user) {
         </div>
       </NSpin>
     </section>
+
+    <NModal
+      v-model:show="showCreateModal"
+      preset="card"
+      title="添加内部用户"
+      :bordered="false"
+      :mask-closable="!creating"
+      class="management-modal"
+    >
+      <div class="modal-form">
+        <NFormItem label="用户名">
+          <NInput v-model:value="createForm.username" placeholder="至少 3 个字符" />
+        </NFormItem>
+        <NFormItem label="密码">
+          <NInput
+            v-model:value="createForm.password"
+            type="password"
+            show-password-on="click"
+            placeholder="至少 8 个字符"
+          />
+        </NFormItem>
+        <NFormItem label="角色">
+          <NSelect v-model:value="createForm.role" :options="roleOptions" />
+        </NFormItem>
+      </div>
+      <template #footer>
+        <div class="modal-actions">
+          <NButton :disabled="creating" @click="showCreateModal = false">取消</NButton>
+          <NButton type="primary" :loading="creating" :disabled="createDisabled" @click="submitCreateUser">
+            添加用户
+          </NButton>
+        </div>
+      </template>
+    </NModal>
+
+    <NModal
+      v-model:show="showMuteModal"
+      preset="card"
+      :title="muteTarget ? `封禁 ${displayName(muteTarget)}` : '封禁用户'"
+      :bordered="false"
+      :mask-closable="!muteTarget || busyState(muteTarget) !== 'mute'"
+      class="management-modal"
+      @after-leave="resetMuteForm"
+    >
+      <div class="modal-form">
+        <NFormItem label="封禁天数">
+          <NInputNumber
+            v-model:value="muteForm.days"
+            class="full-width"
+            :min="1"
+            :precision="0"
+            placeholder="输入封禁天数"
+          />
+        </NFormItem>
+        <NFormItem label="封禁理由">
+          <NInput
+            v-model:value="muteForm.reason"
+            type="textarea"
+            :maxlength="500"
+            show-count
+            :autosize="{ minRows: 3, maxRows: 5 }"
+            placeholder="可选，填写后会记录在用户封禁信息中"
+          />
+        </NFormItem>
+      </div>
+      <template #footer>
+        <div class="modal-actions">
+          <NButton :disabled="muteTarget && busyState(muteTarget) === 'mute'" @click="showMuteModal = false">
+            取消
+          </NButton>
+          <NButton
+            type="warning"
+            :loading="muteTarget && busyState(muteTarget) === 'mute'"
+            :disabled="muteDisabled"
+            @click="submitMuteUser"
+          >
+            确认封禁
+          </NButton>
+        </div>
+      </template>
+    </NModal>
   </div>
 </template>
 
@@ -329,6 +431,10 @@ function confirmDelete(user) {
 
 .section-title {
   margin-bottom: 18px;
+}
+
+.section-title:last-child {
+  margin-bottom: 0;
 }
 
 .section-title h2,
@@ -358,19 +464,6 @@ function confirmDelete(user) {
 .user-toolbar {
   justify-content: space-between;
   gap: 12px;
-}
-
-.create-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 180px auto;
-  gap: 4px 14px;
-  align-items: start;
-}
-
-.create-action {
-  display: flex;
-  align-items: flex-end;
-  min-height: 64px;
 }
 
 .user-toolbar {
@@ -429,14 +522,28 @@ function confirmDelete(user) {
   width: 132px;
 }
 
+.management-modal {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.modal-form {
+  display: grid;
+  gap: 14px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.full-width {
+  width: 100%;
+}
+
 @media (max-width: 960px) {
-  .create-grid,
   .user-row {
     grid-template-columns: 1fr;
-  }
-
-  .create-action {
-    min-height: 0;
   }
 
   .user-actions {
