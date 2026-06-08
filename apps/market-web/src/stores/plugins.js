@@ -157,6 +157,7 @@ export const usePluginStore = defineStore('plugins', () => {
   const plugins = ref([])
   const announcements = ref([])
   const currentUser = ref(null)
+  const unreadNotificationCount = ref(0)
   const setupStatus = ref({
     required: false,
     missing: [],
@@ -692,7 +693,31 @@ export const usePluginStore = defineStore('plugins', () => {
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '加载消息失败')
-    return data.items || []
+    const items = data.items || []
+    unreadNotificationCount.value = items.filter((item) => !item.read).length
+    return items
+  }
+
+  async function loadUnreadNotificationCount() {
+    const response = await fetch(`${apiBaseUrl}/v1/me/notifications/unread-count`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载未读消息失败')
+    unreadNotificationCount.value = Number(data.count || 0)
+    return unreadNotificationCount.value
+  }
+
+  async function markNotificationsRead() {
+    const response = await fetch(`${apiBaseUrl}/v1/me/notifications/read`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '标记消息已读失败')
+    unreadNotificationCount.value = 0
+    return data.updated || 0
   }
 
   async function saveSystemSettings(payload) {
@@ -744,11 +769,16 @@ export const usePluginStore = defineStore('plugins', () => {
       const response = await fetch(`${apiBaseUrl}/v1/me`, { credentials: 'include' })
       if (!response.ok) {
         currentUser.value = null
+        unreadNotificationCount.value = 0
         return
       }
       currentUser.value = await response.json()
+      await loadUnreadNotificationCount().catch(() => {
+        unreadNotificationCount.value = 0
+      })
     } catch {
       currentUser.value = null
+      unreadNotificationCount.value = 0
     }
   }
 
@@ -766,6 +796,9 @@ export const usePluginStore = defineStore('plugins', () => {
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '登录失败')
     currentUser.value = data.user
+    await loadUnreadNotificationCount().catch(() => {
+      unreadNotificationCount.value = 0
+    })
     return data.user
   }
 
@@ -775,6 +808,7 @@ export const usePluginStore = defineStore('plugins', () => {
       credentials: 'include'
     })
     currentUser.value = null
+    unreadNotificationCount.value = 0
   }
 
   async function updateProfile(payload) {
@@ -871,6 +905,7 @@ export const usePluginStore = defineStore('plugins', () => {
     plugins,
     announcements,
     currentUser,
+    unreadNotificationCount,
     setupStatus,
     siteConfig,
     searchQuery,
@@ -920,6 +955,8 @@ export const usePluginStore = defineStore('plugins', () => {
     refreshPluginGithubMetadata,
     refreshAdminPluginGithubMetadata,
     loadNotifications,
+    loadUnreadNotificationCount,
+    markNotificationsRead,
     saveSystemSettings,
     sendTestEmail,
     publishAnnouncement,

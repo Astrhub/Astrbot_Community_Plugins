@@ -61,8 +61,8 @@ import { usePluginStore } from '@/stores/plugins'
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { currentUser } = storeToRefs(store)
-const { loadCurrentUser, loadNotifications } = store
+const { currentUser, unreadNotificationCount } = storeToRefs(store)
+const { loadCurrentUser, loadNotifications, markNotificationsRead } = store
 
 const loading = ref(true)
 const notifications = ref([])
@@ -80,6 +80,13 @@ async function loadMessages() {
   loading.value = true
   try {
     notifications.value = await loadNotifications()
+    if (unreadNotificationCount.value > 0) {
+      await markNotificationsRead()
+      notifications.value = notifications.value.map((notification) => ({
+        ...notification,
+        read: true
+      }))
+    }
   } catch (error) {
     message.error(error.message || '消息加载失败')
   } finally {

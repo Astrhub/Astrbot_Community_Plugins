@@ -9,7 +9,14 @@
         <theme-mode-button class="theme-button" />
         <n-button v-if="currentUser" secondary @click="goNotifications">
           <template #icon>
-            <n-icon><notifications-outline /></n-icon>
+            <span class="notification-icon-wrapper">
+              <n-icon><notifications-outline /></n-icon>
+              <span
+                v-if="hasUnreadNotifications"
+                class="notification-dot"
+                aria-hidden="true"
+              ></span>
+            </span>
           </template>
           消息
         </n-button>
@@ -131,9 +138,16 @@
           circle
           class="hide-on-mobile-search"
           @click="goNotifications"
-          aria-label="消息"
+          :aria-label="notificationButtonLabel"
         >
-          <n-icon><notifications-outline /></n-icon>
+          <span class="notification-icon-wrapper">
+            <n-icon><notifications-outline /></n-icon>
+            <span
+              v-if="hasUnreadNotifications"
+              class="notification-dot"
+              aria-hidden="true"
+            ></span>
+          </span>
         </n-button>
         <n-button
           v-if="isAdminUser"
@@ -261,7 +275,7 @@ const emit = defineEmits([
 const router = useRouter()
 const message = useMessage()
 const store = usePluginStore()
-const { currentUser, siteConfig } = storeToRefs(store)
+const { currentUser, siteConfig, unreadNotificationCount } = storeToRefs(store)
 const { loginWithGithub, logout } = store
 
 const fullHeader = ref(null)
@@ -276,6 +290,10 @@ const siteSubtitle = computed(() => siteConfig.value.subtitle)
 const siteDescription = computed(() => siteConfig.value.description)
 const isCoreAdmin = computed(() => currentUser.value?.role === 'core_admin')
 const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
+const hasUnreadNotifications = computed(() => unreadNotificationCount.value > 0)
+const notificationButtonLabel = computed(() =>
+  hasUnreadNotifications.value ? `消息，${unreadNotificationCount.value} 条未读` : '消息'
+)
 const displayUserName = computed(() => (
   currentUser.value?.github_login ||
   currentUser.value?.internal_username ||
@@ -499,6 +517,25 @@ onUnmounted(() => {
 
 .theme-button {
   color: var(--text-secondary);
+}
+
+.notification-icon-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.notification-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--bg-card);
+  border-radius: 999px;
+  background: #ef4444;
 }
 
 .hero {

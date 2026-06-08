@@ -945,6 +945,29 @@ def test_admin_unlist_requires_reason_and_notifies_owner() -> None:
     assert "插件无法正常安装" in notifications[0]["body"]
 
 
+def test_notification_unread_count_and_mark_read() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    user_id = login.json()["user"]["id"]
+    store = client.app.state.store
+    store.create_notification(user_id, "第一条", "消息一")
+    store.create_notification(user_id, "第二条", "消息二")
+
+    unread = client.get("/v1/me/notifications/unread-count")
+    notifications = client.get("/v1/me/notifications")
+    marked = client.post("/v1/me/notifications/read")
+    unread_after = client.get("/v1/me/notifications/unread-count")
+    notifications_after = client.get("/v1/me/notifications")
+
+    assert unread.status_code == 200
+    assert unread.json()["count"] == 2
+    assert [item["read"] for item in notifications.json()["items"]] == [False, False]
+    assert marked.status_code == 200
+    assert marked.json()["updated"] == 2
+    assert unread_after.json()["count"] == 0
+    assert [item["read"] for item in notifications_after.json()["items"]] == [True, True]
+
+
 def test_listing_clears_previous_unlist_metadata() -> None:
     client = make_client()
     store = client.app.state.store
@@ -1902,6 +1925,7 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "github_token text NOT NULL DEFAULT ''" in SCHEMA_SQL
     assert "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600" in SCHEMA_SQL
     assert "likes integer NOT NULL DEFAULT 0" in SCHEMA_SQL
+    assert "read boolean NOT NULL DEFAULT false" in SCHEMA_SQL
     assert "jsonb NOT NULL DEFAULT '[]'::jsonb" in SCHEMA_SQL
     assert "CHECK (status IN ('pending', 'listed', 'unlisted'))" in SCHEMA_SQL
     assert "REFERENCES market_users(id)" in SCHEMA_SQL

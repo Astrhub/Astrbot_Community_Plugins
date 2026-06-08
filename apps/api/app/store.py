@@ -489,6 +489,21 @@ class InMemoryMarketStore:
             if notification["user_id"] == user_id
         ]
 
+    def count_unread_notifications(self, user_id: str) -> int:
+        return sum(
+            1
+            for notification in self.state["notifications"]
+            if notification["user_id"] == user_id and not notification.get("read")
+        )
+
+    def mark_notifications_read(self, user_id: str) -> int:
+        updated = 0
+        for notification in self.state["notifications"]:
+            if notification["user_id"] == user_id and not notification.get("read"):
+                notification["read"] = True
+                updated += 1
+        return updated
+
     def issue_api_key(
         self,
         name: str,
@@ -875,6 +890,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
             await connection.execute(
                 "ALTER TABLE market_comments ADD COLUMN IF NOT EXISTS likes integer "
                 "NOT NULL DEFAULT 0"
+            )
+            await connection.execute(
+                "ALTER TABLE market_notifications ADD COLUMN IF NOT EXISTS read boolean "
+                "NOT NULL DEFAULT false"
             )
 
     async def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
@@ -1667,6 +1686,31 @@ class PgRedisMarketStore(InMemoryMarketStore):
             user_id,
         )
         return [self._notification_from_record(row) for row in rows]
+
+    async def count_unread_notifications(self, user_id: str) -> int:
+        return int(
+            await self._pool().fetchval(
+                """
+                SELECT count(*) FROM market_notifications
+                 WHERE user_id = $1
+                   AND read = false
+                """,
+                user_id,
+            )
+            or 0
+        )
+
+    async def mark_notifications_read(self, user_id: str) -> int:
+        result = await self._pool().execute(
+            """
+            UPDATE market_notifications
+               SET read = true
+             WHERE user_id = $1
+               AND read = false
+            """,
+            user_id,
+        )
+        return int(result.rsplit(" ", 1)[-1])
 
     async def issue_api_key(
         self,

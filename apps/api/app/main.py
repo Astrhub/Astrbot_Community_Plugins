@@ -429,6 +429,20 @@ def register_routes(app: FastAPI) -> None:
         user = await require_user(request)
         return {"items": await call_store(request, "list_notifications", user["id"])}
 
+    @app.get("/v1/me/notifications/unread-count")
+    async def my_unread_notification_count(request: Request) -> dict[str, int]:
+        user = await require_user(request)
+        return {
+            "count": await call_store(request, "count_unread_notifications", user["id"])
+        }
+
+    @app.post("/v1/me/notifications/read")
+    async def mark_my_notifications_read(request: Request) -> dict[str, int]:
+        user = await require_user(request)
+        return {
+            "updated": await call_store(request, "mark_notifications_read", user["id"])
+        }
+
     @app.post("/v1/auth/internal/login")
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
         settings = await runtime_settings_for_app(request.app)
