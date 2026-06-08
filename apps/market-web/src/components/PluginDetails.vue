@@ -65,12 +65,41 @@
             </template>
           </n-empty>
         </div>
-        <div
-          v-else
-          class="markdown-content"
-          @click="handleMarkdownClick"
-          v-html="readmeHtml"
-        ></div>
+        <template v-else>
+          <div v-if="readmeHtml && readmeNavigationVisible" class="readme-navigation">
+            <div class="readme-navigation__main">
+              <n-button
+                v-if="canGoBackReadme"
+                size="small"
+                tertiary
+                @click="goBackReadmeFile"
+              >
+                <template #icon>
+                  <n-icon><arrow-back-outline /></n-icon>
+                </template>
+                返回
+              </n-button>
+              <span class="readme-current-path">
+                <n-icon size="16"><document-text-outline /></n-icon>
+                {{ readmeViewTitle }}
+              </span>
+            </div>
+            <n-button
+              v-if="isViewingRepositoryFile"
+              size="small"
+              quaternary
+              @click="restoreRootReadme"
+            >
+              README
+            </n-button>
+          </div>
+          <div
+            ref="markdownContentRef"
+            class="markdown-content"
+            @click="handleMarkdownClick"
+            v-html="readmeHtml"
+          ></div>
+        </template>
 
         <plugin-comment
           :comments="comments"
@@ -151,7 +180,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import {
@@ -176,6 +205,8 @@ import { storeToRefs } from 'pinia'
 import { usePluginStore } from '../stores/plugins'
 import PluginComment from './PluginComment.vue'
 import {
+  ArrowBackOutline,
+  DocumentTextOutline,
   ExtensionPuzzleOutline,
   HeartOutline,
   LogoGithub
@@ -192,6 +223,15 @@ const show = ref(props.show)
 const loading = ref(false)
 const error = ref(false)
 const readmeHtml = ref('')
+const readmeContext = ref(null)
+const rootReadmeView = ref(null)
+const readmeHistory = ref([])
+const readmeView = ref({
+  kind: 'readme',
+  path: '',
+  browserUrl: ''
+})
+const markdownContentRef = ref(null)
 const detail = ref(null)
 const liking = ref(false)
 const liked = ref(false)
@@ -220,9 +260,41 @@ const {
   unlikePluginComment,
   unlikePlugin
 } = store
+const MARKDOWN_FILE_EXTENSIONS = new Set(['.md', '.markdown', '.mdown', '.mkd'])
+const IMAGE_FILE_EXTENSIONS = new Set(['.avif', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.webp'])
+const TEXT_FILE_EXTENSIONS = new Set([
+  '.cfg',
+  '.conf',
+  '.css',
+  '.env',
+  '.ini',
+  '.js',
+  '.json',
+  '.log',
+  '.mjs',
+  '.py',
+  '.sh',
+  '.toml',
+  '.ts',
+  '.txt',
+  '.vue',
+  '.yaml',
+  '.yml'
+])
+const MAX_INLINE_FILE_SIZE = 300000
 const commentsEnabled = computed(() => Boolean(siteConfig.value.market?.comments_enabled))
 const likesEnabled = computed(() => Boolean(siteConfig.value.market?.likes_enabled))
 const activePlugin = computed(() => detail.value || props.plugin || {})
+const canGoBackReadme = computed(() => readmeHistory.value.length > 0)
+const isViewingRepositoryFile = computed(() => readmeView.value.kind !== 'readme')
+const readmeNavigationVisible = computed(() =>
+  canGoBackReadme.value || isViewingRepositoryFile.value
+)
+const readmeViewTitle = computed(() => {
+  if (readmeView.value.kind === 'directory') return `${readmeView.value.path || '/'} /`
+  if (readmeView.value.path) return readmeView.value.path
+  return 'README'
+})
 const canManagePlugin = computed(() => {
   const user = currentUser.value
   const plugin = activePlugin.value
@@ -328,7 +400,17 @@ async function fetchReadme() {
       throw new Error('README 内容为空')
     }
 
-    readmeHtml.value = renderReadmeHtml(readmeText, readmeContext)
+    setReadmeDocument({
+      html: renderReadmeHtml(readmeText, readmeContext),
+      context: readmeContext,
+      view: {
+        kind: 'readme',
+        path: readmeContext.path,
+        browserUrl: `https://github.com/${owner}/${repo}/blob/${readmeContext.branch}/${readmeContext.path}`
+      }
+    })
+    rootReadmeView.value = currentReadmeSnapshot()
+    readmeHistory.value = []
   } catch (err) {
     console.error('Error fetching README:', err)
     error.value = true
@@ -452,7 +534,11 @@ function parseGithubRepo(repoUrl) {
 function decodeBase64Content(value) {
   const normalized = String(value || '').replace(/\s/g, '')
   if (!normalized) return ''
-  return decodeURIComponent(escape(atob(normalized)))
+  try {
+    return decodeURIComponent(escape(atob(normalized)))
+  } catch (_) {
+    return atob(normalized)
+  }
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
@@ -466,6 +552,202 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
   } finally {
     window.clearTimeout(timeoutId)
   }
+}
+
+function currentReadmeSnapshot() {
+  return {
+    html: readmeHtml.value,
+    context: readmeContext.value ? { ...readmeContext.value } : null,
+    view: { ...readmeView.value }
+  }
+}
+
+function setReadmeDocument(snapshot) {
+  readmeHtml.value = snapshot.html || ''
+  readmeContext.value = snapshot.context ? { ...snapshot.context } : null
+  readmeView.value = {
+    kind: 'readme',
+    path: '',
+    browserUrl: '',
+    ...(snapshot.view || {})
+  }
+}
+
+function restoreReadmeSnapshot(snapshot) {
+  if (!snapshot) return
+  setReadmeDocument(snapshot)
+  nextTick(() => {
+    scrollMarkdownAnchor(snapshot.view?.hash || '')
+  })
+}
+
+function goBackReadmeFile() {
+  const snapshot = readmeHistory.value.pop()
+  restoreReadmeSnapshot(snapshot)
+}
+
+function restoreRootReadme() {
+  if (!rootReadmeView.value) return
+  readmeHistory.value = []
+  restoreReadmeSnapshot(rootReadmeView.value)
+}
+
+async function openReadmeTarget(target) {
+  if (!target) return false
+  if (target.kind === 'anchor') {
+    scrollMarkdownAnchor(target.hash)
+    return true
+  }
+  if (target.kind === 'root') {
+    restoreRootReadme()
+    return true
+  }
+  if (isCurrentReadmeTarget(target)) {
+    scrollMarkdownAnchor(target.hash)
+    return true
+  }
+
+  const previous = currentReadmeSnapshot()
+  loading.value = true
+  error.value = false
+  try {
+    await loadRepositoryResource(target)
+    readmeHistory.value.push(previous)
+    await nextTick()
+    scrollMarkdownAnchor(target.hash)
+    return true
+  } catch (err) {
+    console.error('Error loading repository file:', err)
+    message.warning(err.message || '无法在站内预览该文件')
+    if (target.browserUrl) confirmExternalOpen(target.browserUrl)
+    return true
+  } finally {
+    loading.value = false
+  }
+}
+
+function isCurrentReadmeTarget(target) {
+  const context = readmeContext.value
+  if (!context || !target?.path) return false
+  return sameText(context.owner, target.owner) &&
+    sameText(context.repo, target.repo) &&
+    context.branch === target.branch &&
+    normalizeReadmePath('', context.path) === normalizeReadmePath('', target.path)
+}
+
+async function loadRepositoryResource(target) {
+  const data = await fetchGithubContents(target)
+  if (Array.isArray(data)) {
+    setReadmeDocument({
+      html: renderDirectoryListingHtml(data, target),
+      context: {
+        owner: target.owner,
+        repo: target.repo,
+        branch: target.branch,
+        path: target.path || ''
+      },
+      view: {
+        kind: 'directory',
+        path: target.path || '/',
+        browserUrl: target.browserUrl
+      }
+    })
+    return
+  }
+
+  const path = data.path || target.path || ''
+  if (isImageFile(path)) {
+    const imageUrl = data.download_url || target.rawUrl
+    if (!imageUrl) throw new Error('无法获取图片地址')
+    setReadmeDocument({
+      html: renderImageFileHtml(imageUrl, path),
+      context: {
+        owner: target.owner,
+        repo: target.repo,
+        branch: target.branch,
+        path
+      },
+      view: {
+        kind: 'file',
+        path,
+        browserUrl: data.html_url || target.browserUrl
+      }
+    })
+    return
+  }
+
+  const text = await readGithubFileText(data, target)
+  if (!isMarkdownFile(path) && !isPreviewableTextFile(path, text)) {
+    throw new Error('此文件类型暂不支持站内预览')
+  }
+
+  const context = {
+    owner: target.owner,
+    repo: target.repo,
+    branch: target.branch,
+    path
+  }
+  setReadmeDocument({
+    html: isMarkdownFile(path)
+      ? renderReadmeHtml(text, context)
+      : renderTextFileHtml(text, path),
+    context,
+    view: {
+      kind: isMarkdownFile(path) ? 'markdown' : 'file',
+      path,
+      browserUrl: data.html_url || target.browserUrl
+    }
+  })
+}
+
+async function fetchGithubContents(target) {
+  const path = encodeGithubPath(target.path)
+  const pathSuffix = path ? `/${path}` : ''
+  const response = await fetchWithTimeout(
+    `https://api.github.com/repos/${target.owner}/${target.repo}/contents${pathSuffix}?ref=${encodeURIComponent(target.branch)}`,
+    {
+      method: 'GET',
+      headers: { Accept: 'application/vnd.github+json' }
+    },
+    10000
+  )
+  if (response.ok) return response.json()
+  if (!target.rawUrl || target.kind === 'directory') {
+    throw new Error(`GitHub contents API 返回 ${response.status}`)
+  }
+  const rawResponse = await fetchWithTimeout(target.rawUrl, {
+    method: 'GET',
+    headers: { Accept: 'text/plain' }
+  }, 10000)
+  if (!rawResponse.ok) throw new Error(`raw 文件返回 ${rawResponse.status}`)
+  return {
+    type: 'file',
+    path: target.path,
+    html_url: target.browserUrl,
+    rawText: await rawResponse.text()
+  }
+}
+
+async function readGithubFileText(data, target) {
+  if (typeof data.rawText === 'string') return data.rawText
+  if (data.size > MAX_INLINE_FILE_SIZE) {
+    throw new Error('文件过大，已保留为外链打开')
+  }
+  if (data.encoding === 'base64' && data.content) {
+    return decodeBase64Content(data.content)
+  }
+  const downloadUrl = data.download_url || target.rawUrl
+  if (!downloadUrl) throw new Error('无法获取文件内容')
+  const response = await fetchWithTimeout(downloadUrl, {
+    method: 'GET',
+    headers: { Accept: 'text/plain' }
+  }, 10000)
+  if (!response.ok) throw new Error(`文件下载返回 ${response.status}`)
+  const text = await response.text()
+  if (text.length > MAX_INLINE_FILE_SIZE) {
+    throw new Error('文件过大，已保留为外链打开')
+  }
+  return text
 }
 
 function renderReadmeHtml(markdown, context) {
@@ -482,6 +764,15 @@ function renderReadmeHtml(markdown, context) {
 
   container.querySelectorAll('a[href]').forEach((link) => {
     const cleanHref = normalizeRenderedHref(link)
+    const target = buildReadmeLinkTarget(cleanHref, context, basePath)
+    if (target?.kind === 'anchor') {
+      link.href = target.hash
+      return
+    }
+    if (target) {
+      applyInternalReadmeLink(link, target)
+      return
+    }
     const href = resolveReadmeUrl(cleanHref, context, basePath, false)
     link.href = href
     if (!href.startsWith('#')) {
@@ -506,6 +797,167 @@ function renderReadmeHtml(markdown, context) {
   })
 
   return container.innerHTML
+}
+
+function renderDirectoryListingHtml(entries, target) {
+  const container = document.createElement('div')
+  const title = document.createElement('p')
+  title.className = 'markdown-file-note'
+  title.textContent = '目录内容'
+  const list = document.createElement('ul')
+  list.className = 'markdown-directory-list'
+  entries
+    .filter((entry) => entry?.name && ['dir', 'file'].includes(entry.type))
+    .sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'dir' ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+    .forEach((entry) => {
+      const item = document.createElement('li')
+      const link = document.createElement('a')
+      const childTarget = createRepositoryTarget({
+        owner: target.owner,
+        repo: target.repo,
+        branch: target.branch,
+        path: entry.path,
+        kind: entry.type === 'dir' ? 'directory' : 'file'
+      })
+      link.textContent = `${entry.type === 'dir' ? '目录' : '文件'} ${entry.name}`
+      applyInternalReadmeLink(link, childTarget)
+      item.append(link)
+      list.append(item)
+    })
+  container.append(title, list)
+  return container.innerHTML
+}
+
+function renderTextFileHtml(text, path) {
+  const wrapper = document.createElement('div')
+  const note = document.createElement('p')
+  note.className = 'markdown-file-note'
+  note.textContent = '文件预览'
+  const block = document.createElement('div')
+  block.className = 'markdown-code-block'
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'markdown-copy-code'
+  button.dataset.copyCode = 'true'
+  button.textContent = '复制'
+  const pre = document.createElement('pre')
+  const code = document.createElement('code')
+  code.className = languageClassFromPath(path)
+  code.textContent = text || ' '
+  pre.append(code)
+  block.append(button, pre)
+  wrapper.append(note, block)
+  return wrapper.innerHTML
+}
+
+function renderImageFileHtml(imageUrl, path) {
+  const wrapper = document.createElement('div')
+  const note = document.createElement('p')
+  note.className = 'markdown-file-note'
+  note.textContent = '图片预览'
+  const image = document.createElement('img')
+  image.src = imageUrl
+  image.alt = path
+  image.loading = 'lazy'
+  wrapper.append(note, image)
+  return wrapper.innerHTML
+}
+
+function buildReadmeLinkTarget(url, context, basePath) {
+  if (!url || /^mailto:/i.test(url)) return null
+  if (url.startsWith('#')) return { kind: 'anchor', hash: url }
+  const absoluteTarget = githubUrlToReadmeTarget(url, context)
+  if (absoluteTarget) return absoluteTarget
+  if (/^[a-z][a-z\d+.-]*:/i.test(url) || url.startsWith('//')) return null
+
+  const [path, suffix = ''] = splitReadmeUrl(url)
+  if (!path) return suffix.startsWith('#') ? { kind: 'anchor', hash: suffix } : null
+  const cleanPath = normalizeReadmePath(path.startsWith('/') ? '' : basePath, path)
+  if (!cleanPath) return { kind: 'root' }
+  return createRepositoryTarget({
+    owner: context.owner,
+    repo: context.repo,
+    branch: context.branch,
+    path: cleanPath,
+    hash: extractUrlHash(suffix),
+    kind: path.endsWith('/') ? 'directory' : 'file'
+  })
+}
+
+function githubUrlToReadmeTarget(url, context) {
+  try {
+    const parsed = new URL(url.startsWith('//') ? `https:${url}` : url)
+    if (parsed.hostname === 'raw.githubusercontent.com') {
+      const [owner, repo, branch, ...pathParts] = parsed.pathname.split('/').filter(Boolean)
+      if (!isSameGithubRepo(owner, repo, context) || !branch || !pathParts.length) return null
+      return createRepositoryTarget({
+        owner,
+        repo,
+        branch,
+        path: decodeGithubPath(pathParts),
+        hash: parsed.hash,
+        kind: 'file'
+      })
+    }
+    if (parsed.hostname !== 'github.com') return null
+    const [owner, repo, mode, branch, ...pathParts] = parsed.pathname.split('/').filter(Boolean)
+    if (!isSameGithubRepo(owner, repo, context)) return null
+    if (!mode) return { kind: 'root' }
+    if (!['blob', 'tree', 'raw'].includes(mode) || !branch) return null
+    if (!pathParts.length) {
+      return mode === 'tree'
+        ? createRepositoryTarget({ owner, repo, branch, path: '', hash: parsed.hash, kind: 'directory' })
+        : { kind: 'root' }
+    }
+    return createRepositoryTarget({
+      owner,
+      repo,
+      branch,
+      path: decodeGithubPath(pathParts),
+      hash: parsed.hash,
+      kind: mode === 'tree' ? 'directory' : 'file'
+    })
+  } catch (_) {
+    return null
+  }
+}
+
+function createRepositoryTarget({ owner, repo, branch, path, hash = '', kind = 'file' }) {
+  const cleanPath = normalizeReadmePath('', path)
+  const encodedPath = encodeGithubPath(cleanPath)
+  const browserMode = kind === 'directory' ? 'tree' : 'blob'
+  const browserPath = encodedPath ? `/${encodedPath}` : ''
+  return {
+    kind,
+    owner,
+    repo,
+    branch,
+    path: cleanPath,
+    hash,
+    browserUrl: `https://github.com/${owner}/${repo}/${browserMode}/${branch}${browserPath}${hash}`,
+    rawUrl: cleanPath
+      ? `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encodedPath}${hash}`
+      : ''
+  }
+}
+
+function applyInternalReadmeLink(link, target) {
+  link.href = target.browserUrl || '#'
+  link.dataset.readmeInternal = 'true'
+  link.dataset.readmeKind = target.kind
+  link.dataset.readmeOwner = target.owner || ''
+  link.dataset.readmeRepo = target.repo || ''
+  link.dataset.readmeBranch = target.branch || ''
+  link.dataset.readmePath = target.path || ''
+  link.dataset.readmeHash = target.hash || ''
+  link.dataset.readmeBrowserUrl = target.browserUrl || ''
+  link.dataset.readmeRawUrl = target.rawUrl || ''
+  link.classList.add('markdown-internal-link')
+  link.removeAttribute('target')
+  link.removeAttribute('rel')
 }
 
 function normalizeRenderedHref(link) {
@@ -619,17 +1071,126 @@ function normalizeReadmePath(basePath, url) {
   return normalized.join('/')
 }
 
+function readmeTargetFromLink(link) {
+  if (link.dataset.readmeInternal !== 'true') return null
+  return {
+    kind: link.dataset.readmeKind || 'file',
+    owner: link.dataset.readmeOwner || '',
+    repo: link.dataset.readmeRepo || '',
+    branch: link.dataset.readmeBranch || 'main',
+    path: link.dataset.readmePath || '',
+    hash: link.dataset.readmeHash || '',
+    browserUrl: link.dataset.readmeBrowserUrl || link.href,
+    rawUrl: link.dataset.readmeRawUrl || ''
+  }
+}
+
+function encodeGithubPath(path) {
+  return String(path || '')
+    .split('/')
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join('/')
+}
+
+function decodeGithubPath(pathParts) {
+  return pathParts.map((part) => {
+    try {
+      return decodeURIComponent(part)
+    } catch (_) {
+      return part
+    }
+  }).join('/')
+}
+
+function extractUrlHash(suffix) {
+  const hashIndex = String(suffix || '').indexOf('#')
+  return hashIndex === -1 ? '' : suffix.slice(hashIndex)
+}
+
+function isSameGithubRepo(owner, repo, context) {
+  return sameText(owner, context?.owner) && sameText(repo, context?.repo)
+}
+
+function sameText(left, right) {
+  return String(left || '').toLowerCase() === String(right || '').toLowerCase()
+}
+
+function fileExtension(path) {
+  const filename = String(path || '').split('/').pop() || ''
+  const dotIndex = filename.lastIndexOf('.')
+  return dotIndex === -1 ? '' : filename.slice(dotIndex).toLowerCase()
+}
+
+function isMarkdownFile(path) {
+  return MARKDOWN_FILE_EXTENSIONS.has(fileExtension(path))
+}
+
+function isImageFile(path) {
+  return IMAGE_FILE_EXTENSIONS.has(fileExtension(path))
+}
+
+function isPreviewableTextFile(path, text) {
+  if (String(text || '').length > MAX_INLINE_FILE_SIZE) return false
+  const extension = fileExtension(path)
+  if (TEXT_FILE_EXTENSIONS.has(extension) || !extension) return isProbablyText(text)
+  return isProbablyText(text)
+}
+
+function isProbablyText(text) {
+  const value = String(text || '')
+  if (!value) return true
+  const sample = value.slice(0, 4096)
+  const controlChars = sample.match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g) || []
+  return controlChars.length / sample.length < 0.02
+}
+
+function languageClassFromPath(path) {
+  const extension = fileExtension(path).slice(1)
+  return extension ? `language-${extension}` : ''
+}
+
+function scrollMarkdownAnchor(hash) {
+  if (!hash || !markdownContentRef.value) return
+  const id = decodeHash(hash)
+  if (!id) return
+  const target = [...markdownContentRef.value.querySelectorAll('[id], a[name]')]
+    .find((element) => element.id === id || element.getAttribute('name') === id)
+  target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function decodeHash(hash) {
+  try {
+    return decodeURIComponent(String(hash || '').replace(/^#/, ''))
+  } catch (_) {
+    return String(hash || '').replace(/^#/, '')
+  }
+}
+
 function handleMarkdownClick(event) {
-  const copyButton = event.target.closest('[data-copy-code]')
+  const target = event.target instanceof Element ? event.target : event.target?.parentElement
+  if (!target) return
+  const copyButton = target.closest('[data-copy-code]')
   if (copyButton) {
     event.preventDefault()
     copyMarkdownCode(copyButton)
     return
   }
-  const link = event.target.closest('a[href]')
+  const link = target.closest('a[href]')
   if (!link) return
+  const internalTarget = readmeTargetFromLink(link)
+  if (internalTarget) {
+    event.preventDefault()
+    openReadmeTarget(internalTarget)
+    return
+  }
   const href = link.getAttribute('href')
-  if (!href || href.startsWith('#')) return
+  if (!href) return
+  if (href.startsWith('#')) {
+    event.preventDefault()
+    scrollMarkdownAnchor(href)
+    return
+  }
   event.preventDefault()
   confirmExternalOpen(link.href)
 }
@@ -728,6 +1289,33 @@ function confirmExternalOpen(url) {
   gap: 10px;
 }
 
+.readme-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--n-border-color);
+}
+
+.readme-navigation__main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.readme-current-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--n-text-color-2);
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
 .muted-text {
   color: var(--n-text-color-3);
   font-size: 13px;
@@ -789,6 +1377,27 @@ function confirmExternalOpen(url) {
 .markdown-content :deep(img) {
   max-width: 100%;
   border-radius: 8px;
+}
+
+.markdown-content :deep(.markdown-file-note) {
+  margin: 0 0 12px;
+  color: var(--n-text-color-3);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.markdown-content :deep(.markdown-directory-list) {
+  display: grid;
+  gap: 8px;
+  padding-left: 0;
+  list-style: none;
+}
+
+.markdown-content :deep(.markdown-directory-list li) {
+  padding: 8px 10px;
+  border: 1px solid var(--n-border-color);
+  border-radius: 6px;
+  background: var(--n-color);
 }
 
 .markdown-content :deep(:not(pre) > code) {
