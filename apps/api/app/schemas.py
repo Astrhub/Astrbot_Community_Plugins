@@ -99,6 +99,15 @@ class UserProfileUpdate(BaseModel):
         return str(value).strip()
 
 
+class NotificationDeletePayload(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+
+    @field_validator("ids", mode="before")
+    @classmethod
+    def clean_ids(cls, value: list[str] | None) -> list[str]:
+        return [str(item).strip() for item in value or [] if str(item).strip()]
+
+
 class RoleUpdatePayload(BaseModel):
     role: str = "user"
 

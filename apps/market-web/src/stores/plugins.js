@@ -736,16 +736,30 @@ export const usePluginStore = defineStore('plugins', () => {
     return data
   }
 
-  async function loadNotifications() {
-    const response = await fetch(`${apiBaseUrl}/v1/me/notifications`, {
+  async function loadNotifications(options = {}) {
+    const page = Number(options.page || 1)
+    const pageSize = Number(options.pageSize || 20)
+    const params = new URLSearchParams({
+      limit: String(pageSize),
+      offset: String(Math.max(0, page - 1) * pageSize)
+    })
+    const response = await fetch(`${apiBaseUrl}/v1/me/notifications?${params}`, {
       credentials: 'include',
       cache: 'no-store'
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '加载消息失败')
     const items = data.items || []
-    unreadNotificationCount.value = items.filter((item) => !item.read).length
-    return items
+    unreadNotificationCount.value = Number(data.unread_count ?? items.filter((item) => !item.read).length)
+    return {
+      items,
+      total: Number(data.total || 0),
+      page,
+      page_size: Number(data.limit || pageSize),
+      limit: Number(data.limit || pageSize),
+      offset: Number(data.offset || 0),
+      unread_count: unreadNotificationCount.value
+    }
   }
 
   async function loadUnreadNotificationCount() {
@@ -768,6 +782,45 @@ export const usePluginStore = defineStore('plugins', () => {
     if (!response.ok) throw new Error(data.error || '标记消息已读失败')
     unreadNotificationCount.value = 0
     return data.updated || 0
+  }
+
+  async function deleteNotification(notificationId) {
+    const response = await fetch(`${apiBaseUrl}/v1/me/notifications/${notificationId}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '删除消息失败')
+    await loadUnreadNotificationCount().catch(() => {
+      unreadNotificationCount.value = 0
+    })
+    return Number(data.deleted || 0)
+  }
+
+  async function deleteNotifications(notificationIds) {
+    const response = await fetch(`${apiBaseUrl}/v1/me/notifications/delete`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: notificationIds })
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '删除消息失败')
+    await loadUnreadNotificationCount().catch(() => {
+      unreadNotificationCount.value = 0
+    })
+    return Number(data.deleted || 0)
+  }
+
+  async function clearNotifications() {
+    const response = await fetch(`${apiBaseUrl}/v1/me/notifications`, {
+      method: 'DELETE',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '清空消息失败')
+    unreadNotificationCount.value = 0
+    return Number(data.deleted || 0)
   }
 
   async function saveSystemSettings(payload) {
@@ -1011,6 +1064,9 @@ export const usePluginStore = defineStore('plugins', () => {
     loadNotifications,
     loadUnreadNotificationCount,
     markNotificationsRead,
+    deleteNotification,
+    deleteNotifications,
+    clearNotifications,
     saveSystemSettings,
     sendTestEmail,
     publishAnnouncement,

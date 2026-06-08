@@ -46,6 +46,7 @@ from .schemas import (
     CommentCreate,
     InternalLoginPayload,
     MuteUserPayload,
+    NotificationDeletePayload,
     PluginGithubRefreshPayload,
     PluginPatch,
     PluginSubmission,
@@ -425,22 +426,70 @@ def register_routes(app: FastAPI) -> None:
         return public_user(updated)
 
     @app.get("/v1/me/notifications")
-    async def my_notifications(request: Request) -> dict[str, list[dict[str, Any]]]:
+    async def my_notifications(
+        request: Request,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         user = await require_user(request)
-        return {"items": await call_store(request, "list_notifications", user["id"])}
+        safe_limit = max(1, min(int(limit or 20), 100))
+        safe_offset = max(0, int(offset or 0))
+        return {
+            "items": await call_store(
+                request,
+                "list_notifications",
+                user["id"],
+                safe_limit,
+                safe_offset,
+            ),
+            "total": await call_store(request, "count_notifications", user["id"]),
+            "unread_count": await call_store(request, "count_unread_notifications", user["id"]),
+            "limit": safe_limit,
+            "offset": safe_offset,
+        }
 
     @app.get("/v1/me/notifications/unread-count")
     async def my_unread_notification_count(request: Request) -> dict[str, int]:
         user = await require_user(request)
-        return {
-            "count": await call_store(request, "count_unread_notifications", user["id"])
-        }
+        return {"count": await call_store(request, "count_unread_notifications", user["id"])}
 
     @app.post("/v1/me/notifications/read")
     async def mark_my_notifications_read(request: Request) -> dict[str, int]:
         user = await require_user(request)
+        return {"updated": await call_store(request, "mark_notifications_read", user["id"])}
+
+    @app.delete("/v1/me/notifications")
+    async def clear_my_notifications(request: Request) -> dict[str, int]:
+        user = await require_user(request)
+        return {"deleted": await call_store(request, "delete_notifications", user["id"], None)}
+
+    @app.delete("/v1/me/notifications/{notification_id}")
+    async def delete_my_notification(request: Request, notification_id: str) -> dict[str, int]:
+        user = await require_user(request)
         return {
-            "updated": await call_store(request, "mark_notifications_read", user["id"])
+            "deleted": await call_store(
+                request,
+                "delete_notifications",
+                user["id"],
+                [notification_id],
+            )
+        }
+
+    @app.post("/v1/me/notifications/delete")
+    async def delete_my_notifications(
+        request: Request,
+        payload: NotificationDeletePayload,
+    ) -> dict[str, int]:
+        user = await require_user(request)
+        if not payload.ids:
+            raise error(400, "Notification ids are required")
+        return {
+            "deleted": await call_store(
+                request,
+                "delete_notifications",
+                user["id"],
+                payload.ids,
+            )
         }
 
     @app.get("/v1/me/plugins")

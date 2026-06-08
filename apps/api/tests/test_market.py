@@ -1074,6 +1074,62 @@ def test_notification_unread_count_and_mark_read() -> None:
     assert [item["read"] for item in notifications_after.json()["items"]] == [True, True]
 
 
+def test_notifications_support_pagination_and_delete_operations() -> None:
+    client = make_client()
+    alice_login = client.get("/v1/auth/debug-login?login=alice")
+    alice_id = alice_login.json()["user"]["id"]
+    store = client.app.state.store
+    for index in range(25):
+        store.create_notification(alice_id, f"消息 {index}", "内容")
+
+    first_page = client.get("/v1/me/notifications?limit=10&offset=0")
+    second_page = client.get("/v1/me/notifications?limit=10&offset=10")
+    first_id = first_page.json()["items"][0]["id"]
+    second_page_ids = [item["id"] for item in second_page.json()["items"][:3]]
+
+    deleted_one = client.delete(f"/v1/me/notifications/{first_id}")
+    deleted_many = client.post("/v1/me/notifications/delete", json={"ids": second_page_ids})
+    after_delete = client.get("/v1/me/notifications?limit=100&offset=0")
+    cleared = client.delete("/v1/me/notifications")
+    after_clear = client.get("/v1/me/notifications")
+
+    assert first_page.status_code == 200
+    assert len(first_page.json()["items"]) == 10
+    assert first_page.json()["total"] == 25
+    assert first_page.json()["limit"] == 10
+    assert first_page.json()["offset"] == 0
+    assert len(second_page.json()["items"]) == 10
+    assert deleted_one.status_code == 200
+    assert deleted_one.json()["deleted"] == 1
+    assert deleted_many.status_code == 200
+    assert deleted_many.json()["deleted"] == 3
+    assert after_delete.json()["total"] == 21
+    assert cleared.status_code == 200
+    assert cleared.json()["deleted"] == 21
+    assert after_clear.json()["items"] == []
+    assert after_clear.json()["total"] == 0
+
+
+def test_notification_delete_is_scoped_to_current_user() -> None:
+    client = make_client()
+    alice_login = client.get("/v1/auth/debug-login?login=alice")
+    alice_id = alice_login.json()["user"]["id"]
+    store = client.app.state.store
+    notification = store.create_notification(alice_id, "私有消息", "内容")
+
+    client.get("/v1/auth/debug-login?login=bob")
+    deleted = client.delete(f"/v1/me/notifications/{notification['id']}")
+    bob_notifications = client.get("/v1/me/notifications")
+
+    client.get("/v1/auth/debug-login?login=alice")
+    alice_notifications = client.get("/v1/me/notifications")
+
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] == 0
+    assert bob_notifications.json()["items"] == []
+    assert alice_notifications.json()["items"][0]["id"] == notification["id"]
+
+
 def test_listing_clears_previous_unlist_metadata() -> None:
     client = make_client()
     store = client.app.state.store

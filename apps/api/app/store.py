@@ -538,12 +538,23 @@ class InMemoryMarketStore:
         self.state["notifications"].insert(0, notification)
         return deepcopy(notification)
 
-    def list_notifications(self, user_id: str) -> list[dict[str, Any]]:
-        return [
+    def list_notifications(
+        self,
+        user_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        notifications = [
             deepcopy(notification)
             for notification in self.state["notifications"]
             if notification["user_id"] == user_id
         ]
+        return notifications[offset : offset + limit]
+
+    def count_notifications(self, user_id: str) -> int:
+        return sum(
+            1 for notification in self.state["notifications"] if notification["user_id"] == user_id
+        )
 
     def count_unread_notifications(self, user_id: str) -> int:
         return sum(
@@ -559,6 +570,25 @@ class InMemoryMarketStore:
                 notification["read"] = True
                 updated += 1
         return updated
+
+    def delete_notifications(
+        self,
+        user_id: str,
+        notification_ids: list[str] | None = None,
+    ) -> int:
+        id_set = set(notification_ids or [])
+        if notification_ids is not None and not id_set:
+            return 0
+        before = len(self.state["notifications"])
+        self.state["notifications"] = [
+            notification
+            for notification in self.state["notifications"]
+            if not (
+                notification["user_id"] == user_id
+                and (notification_ids is None or notification["id"] in id_set)
+            )
+        ]
+        return before - len(self.state["notifications"])
 
     def issue_api_key(
         self,
@@ -1842,16 +1872,33 @@ class PgRedisMarketStore(InMemoryMarketStore):
         )
         return self._notification_from_record(row)
 
-    async def list_notifications(self, user_id: str) -> list[dict[str, Any]]:
+    async def list_notifications(
+        self,
+        user_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(
             """
             SELECT * FROM market_notifications
              WHERE user_id = $1
           ORDER BY created_at DESC
+             LIMIT $2 OFFSET $3
             """,
             user_id,
+            limit,
+            offset,
         )
         return [self._notification_from_record(row) for row in rows]
+
+    async def count_notifications(self, user_id: str) -> int:
+        return int(
+            await self._pool().fetchval(
+                "SELECT count(*) FROM market_notifications WHERE user_id = $1",
+                user_id,
+            )
+            or 0
+        )
 
     async def count_unread_notifications(self, user_id: str) -> int:
         return int(
@@ -1874,6 +1921,31 @@ class PgRedisMarketStore(InMemoryMarketStore):
              WHERE user_id = $1
                AND read = false
             """,
+            user_id,
+        )
+        return int(result.rsplit(" ", 1)[-1])
+
+    async def delete_notifications(
+        self,
+        user_id: str,
+        notification_ids: list[str] | None = None,
+    ) -> int:
+        if notification_ids is not None:
+            ids = [str(item) for item in notification_ids if str(item)]
+            if not ids:
+                return 0
+            result = await self._pool().execute(
+                """
+                DELETE FROM market_notifications
+                 WHERE user_id = $1
+                   AND id = ANY($2::text[])
+                """,
+                user_id,
+                ids,
+            )
+            return int(result.rsplit(" ", 1)[-1])
+        result = await self._pool().execute(
+            "DELETE FROM market_notifications WHERE user_id = $1",
             user_id,
         )
         return int(result.rsplit(" ", 1)[-1])
