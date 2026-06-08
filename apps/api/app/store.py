@@ -150,7 +150,11 @@ class InMemoryMarketStore:
         return deepcopy(self.state["plugins"])
 
     def list_submissions(self) -> list[dict[str, Any]]:
-        return deepcopy(self.state["submissions"])
+        return [
+            deepcopy(submission)
+            for submission in self.state["submissions"]
+            if submission.get("status") == "pending"
+        ]
 
     def list_api_keys(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["apiKeys"])
@@ -179,6 +183,7 @@ class InMemoryMarketStore:
     def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         plugin = self._normalize_plugin(
             {
+                **plugin_metadata_from_payload(payload),
                 "id": payload.get("id") or payload["name"],
                 "name": payload["name"],
                 "display_name": payload.get("display_name") or payload["name"],
@@ -224,6 +229,7 @@ class InMemoryMarketStore:
         if status == "listed":
             for key in ("unlist_reason", "unlisted_at", "unlisted_by"):
                 plugin.pop(key, None)
+        self._complete_pending_submissions(plugin_id, status)
         plugin["updated_at"] = utc_now()
         return deepcopy(plugin)
 
@@ -242,6 +248,7 @@ class InMemoryMarketStore:
         plugin["unlisted_at"] = utc_now()
         plugin["unlisted_by"] = by_user_id
         plugin["updated_at"] = utc_now()
+        self._complete_pending_submissions(plugin_id, "unlisted")
         return deepcopy(plugin)
 
     def update_plugin_metadata(
@@ -255,6 +262,13 @@ class InMemoryMarketStore:
         plugin.update({key: value for key, value in patch.items() if value is not None})
         plugin["updated_at"] = utc_now()
         return deepcopy(plugin)
+
+    def _complete_pending_submissions(self, plugin_id: str, status: str) -> None:
+        if status == "pending":
+            return
+        for submission in self.state["submissions"]:
+            if submission.get("plugin_id") == plugin_id and submission.get("status") == "pending":
+                submission["status"] = status
 
     def add_comment(
         self,
@@ -657,6 +671,16 @@ PLUGIN_COLUMN_KEYS = {
 }
 
 
+def plugin_metadata_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in PLUGIN_COLUMN_KEYS
+        and key not in {"id", "created_at", "updated_at"}
+        and value is not None
+    }
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS market_users (
     id text PRIMARY KEY,
@@ -1007,16 +1031,18 @@ class PgRedisMarketStore(InMemoryMarketStore):
 
     async def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         plugin_id = payload.get("id") or payload["name"]
+        metadata = plugin_metadata_from_payload(payload)
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 row = await connection.fetchrow(
                     """
                     INSERT INTO market_plugins (
                         id, name, display_name, desc_text, author, repo, tags, social_link,
-                        owner_user_id, owner_github_login, status, stars, likes, comments_count
+                        owner_user_id, owner_github_login, status, stars, likes, comments_count,
+                        metadata
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
-                            'pending', 0, 0, 0)
+                            'pending', 0, 0, 0, $11::jsonb)
                     ON CONFLICT (id) DO UPDATE
                        SET name = EXCLUDED.name,
                            display_name = EXCLUDED.display_name,
@@ -1027,6 +1053,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                            social_link = EXCLUDED.social_link,
                            owner_user_id = EXCLUDED.owner_user_id,
                            owner_github_login = EXCLUDED.owner_github_login,
+                           metadata = EXCLUDED.metadata,
                            status = 'pending',
                            updated_at = now()
                     RETURNING *
@@ -1041,6 +1068,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     payload.get("social_link", ""),
                     user["id"],
                     user["github_login"],
+                    metadata,
                 )
                 await connection.execute(
                     """
@@ -1055,7 +1083,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 return self._plugin_from_record(row)
 
     async def list_submissions(self) -> list[dict[str, Any]]:
-        rows = await self._pool().fetch("SELECT * FROM market_submissions ORDER BY created_at DESC")
+        rows = await self._pool().fetch(
+            "SELECT * FROM market_submissions WHERE status = 'pending' ORDER BY created_at DESC"
+        )
         return [self._submission_from_record(row) for row in rows]
 
     async def update_plugin_status(
@@ -1064,24 +1094,37 @@ class PgRedisMarketStore(InMemoryMarketStore):
         status: str,
         by_user_id: str | None,
     ) -> dict[str, Any] | None:
-        row = await self._pool().fetchrow(
-            """
-            UPDATE market_plugins
-               SET status = $2,
-                   moderated_by = $3,
-                   metadata = CASE
-                       WHEN $2 = 'listed'
-                       THEN metadata - 'unlist_reason' - 'unlisted_at' - 'unlisted_by'
-                       ELSE metadata
-                   END,
-                   updated_at = now()
-             WHERE id = $1
-         RETURNING *
-            """,
-            plugin_id,
-            status,
-            by_user_id,
-        )
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    UPDATE market_plugins
+                       SET status = $2,
+                           moderated_by = $3,
+                           metadata = CASE
+                               WHEN $2 = 'listed'
+                               THEN metadata - 'unlist_reason' - 'unlisted_at' - 'unlisted_by'
+                               ELSE metadata
+                           END,
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    plugin_id,
+                    status,
+                    by_user_id,
+                )
+                if row and status != "pending":
+                    await connection.execute(
+                        """
+                        UPDATE market_submissions
+                           SET status = $2
+                         WHERE plugin_id = $1
+                           AND status = 'pending'
+                        """,
+                        plugin_id,
+                        status,
+                    )
         return self._plugin_from_record(row) if row else None
 
     async def unlist_plugin(
@@ -1090,24 +1133,36 @@ class PgRedisMarketStore(InMemoryMarketStore):
         by_user_id: str,
         reason: str,
     ) -> dict[str, Any] | None:
-        row = await self._pool().fetchrow(
-            """
-            UPDATE market_plugins
-               SET status = 'unlisted',
-                   moderated_by = $2,
-                   metadata = metadata || $3::jsonb,
-                   updated_at = now()
-             WHERE id = $1
-         RETURNING *
-            """,
-            plugin_id,
-            by_user_id,
-            {
-                "unlist_reason": reason,
-                "unlisted_at": utc_now(),
-                "unlisted_by": by_user_id,
-            },
-        )
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    UPDATE market_plugins
+                       SET status = 'unlisted',
+                           moderated_by = $2,
+                           metadata = metadata || $3::jsonb,
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    plugin_id,
+                    by_user_id,
+                    {
+                        "unlist_reason": reason,
+                        "unlisted_at": utc_now(),
+                        "unlisted_by": by_user_id,
+                    },
+                )
+                if row:
+                    await connection.execute(
+                        """
+                        UPDATE market_submissions
+                           SET status = 'unlisted'
+                         WHERE plugin_id = $1
+                           AND status = 'pending'
+                        """,
+                        plugin_id,
+                    )
         return self._plugin_from_record(row) if row else None
 
     async def update_plugin_metadata(

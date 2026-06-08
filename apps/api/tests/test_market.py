@@ -725,9 +725,11 @@ def test_submission_listing_comments_and_moderation_flow() -> None:
     plugin = submission.json()
     assert plugin["status"] == "pending"
     assert client.get("/v1/plugins").json()["items"] == []
+    assert client.get("/v1/plugins/submissions").json()["items"][0]["plugin_id"] == plugin["id"]
 
     listed = client.post(f"/v1/admin/plugins/{plugin['id']}/list")
     assert listed.status_code == 200
+    assert client.get("/v1/plugins/submissions").json()["items"] == []
     assert client.get("/v1/plugins").json()["items"][0]["id"] == plugin["id"]
 
     comment = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"})
@@ -1033,6 +1035,37 @@ def test_plugin_auto_approve_and_max_tags_are_enforced() -> None:
         json={"tags": ["demo", "tool"]},
     )
     assert patch.status_code == 400
+
+
+def test_plugin_submission_accepts_only_official_categories() -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "GITHUB_METADATA_SYNC_ENABLED": "false",
+        }
+    )
+    client = TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+    client.get("/v1/auth/debug-login?login=alice")
+
+    payload = plugin_payload()
+    payload["category"] = "AI-Tools"
+    accepted = client.post("/v1/plugins/submissions", json=payload)
+
+    invalid_payload = plugin_payload(name="astrbot_plugin_bad")
+    invalid_payload["category"] = "chatbot"
+    rejected = client.post("/v1/plugins/submissions", json=invalid_payload)
+
+    legacy_payload = plugin_payload(name="astrbot_plugin_legacy")
+    legacy = client.post("/v1/plugins/submissions", json=legacy_payload)
+
+    assert accepted.status_code == 201
+    assert accepted.json()["category"] == "ai_tools"
+    assert rejected.status_code == 400
+    assert rejected.json()["error"] == "Plugin category is invalid"
+    assert legacy.status_code == 201
+    assert legacy.json().get("category", "") == ""
 
 
 def test_cors_allows_browser_session_cookies_and_dev_auth_header() -> None:

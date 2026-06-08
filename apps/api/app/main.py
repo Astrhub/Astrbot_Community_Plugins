@@ -157,6 +157,13 @@ PLUGIN_METADATA_SYNC_FIELDS = (
     "download_url",
     "support_platforms",
 )
+OFFICIAL_PLUGIN_CATEGORIES = {
+    "ai_tools",
+    "entertainment",
+    "integrations",
+    "productivity",
+    "utilities",
+}
 
 
 def create_app(
@@ -615,6 +622,8 @@ def register_routes(app: FastAPI) -> None:
                 patch.get("tags") or [],
                 await runtime_settings_for_app(request.app),
             )
+        if "category" in patch:
+            patch["category"] = validate_plugin_category(patch.get("category", ""))
         updated = await call_store(
             request,
             "update_plugin_metadata",
@@ -1212,7 +1221,19 @@ def validate_plugin_submission(payload: dict[str, Any], settings: Settings | Non
             raise error(400, "Missing required plugin fields")
     validate_plugin_name(payload["name"])
     validate_github_repo(payload["repo"])
+    payload["category"] = validate_plugin_category(payload.get("category", ""))
     validate_plugin_tag_count(payload.get("tags") or [], settings)
+
+
+def normalize_plugin_category(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def validate_plugin_category(value: Any) -> str:
+    category = normalize_plugin_category(value)
+    if category and category not in OFFICIAL_PLUGIN_CATEGORIES:
+        raise error(400, "Plugin category is invalid")
+    return category
 
 
 def validate_plugin_tag_count(tags: list[str], settings: Settings | None = None) -> None:
@@ -1509,6 +1530,9 @@ def github_response_message(response: Any) -> str:
 def normalize_plugin_metadata_field(field: str, value: Any) -> Any:
     if field == "name" and value and not PLUGIN_NAME_PATTERN.match(str(value)):
         return ""
+    if field == "category":
+        category = normalize_plugin_category(value)
+        return category if category in OFFICIAL_PLUGIN_CATEGORIES else ""
     if field in {"tags", "support_platforms"}:
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]

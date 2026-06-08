@@ -10,9 +10,19 @@ class PluginSubmission(BaseModel):
     author: str
     repo: str
     social_link: str = ""
+    category: str = ""
     tags: list[str] = Field(default_factory=list)
 
-    @field_validator("name", "display_name", "desc", "author", "repo", "social_link", mode="before")
+    @field_validator(
+        "name",
+        "display_name",
+        "desc",
+        "author",
+        "repo",
+        "social_link",
+        "category",
+        mode="before",
+    )
     @classmethod
     def strip_text(cls, value: str | None) -> str:
         return str(value or "").strip()
@@ -30,9 +40,19 @@ class PluginPatch(BaseModel):
     author: str | None = None
     repo: str | None = None
     social_link: str | None = None
+    category: str | None = None
     tags: list[str] | None = None
 
-    @field_validator("name", "display_name", "desc", "author", "repo", "social_link", mode="before")
+    @field_validator(
+        "name",
+        "display_name",
+        "desc",
+        "author",
+        "repo",
+        "social_link",
+        "category",
+        mode="before",
+    )
     @classmethod
     def strip_optional_text(cls, value: str | None) -> str | None:
         if value is None:
