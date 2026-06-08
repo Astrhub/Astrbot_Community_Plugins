@@ -47,6 +47,15 @@ export const normalizePluginCategory = (value) => {
   if (!category) return 'other'
   return PLUGIN_CATEGORY_VALUES.includes(category) ? category : 'other'
 }
+export const normalizePluginTags = (value) => {
+  const rawTags = Array.isArray(value)
+    ? value
+    : (typeof value === 'string' ? value.split(/[,，、;\n]+/) : [])
+  const tags = rawTags
+    .map((tag) => String(tag || '').trim())
+    .filter(Boolean)
+  return Array.from(new Set(tags))
+}
 export const getPluginCategoryLabel = (value) => {
   const category = normalizePluginCategory(value)
   return PLUGIN_CATEGORY_LABELS[category] || category
@@ -288,7 +297,7 @@ export const usePluginStore = defineStore('plugins', () => {
       plugin.repo,
       plugin.category,
       getPluginCategoryLabel(plugin.category),
-      ...(Array.isArray(plugin.tags) ? plugin.tags : [])
+      ...normalizePluginTags(plugin.tags)
     ].filter(Boolean).join(' ').toLowerCase()
   }
 
@@ -345,7 +354,7 @@ export const usePluginStore = defineStore('plugins', () => {
   const allTags = computed(() => {
     const tags = new Set()
     plugins.value.forEach((plugin) => {
-      if (Array.isArray(plugin.tags)) plugin.tags.forEach((tag) => tags.add(tag))
+      normalizePluginTags(plugin.tags).forEach((tag) => tags.add(tag))
     })
     return Array.from(tags).sort()
   })
@@ -381,8 +390,7 @@ export const usePluginStore = defineStore('plugins', () => {
       if (!matchesCategory) return false
       if (!searchValue && !selectedTag.value) return true
       const matchesSearch = !searchValue || pluginMatchesSearch(plugin, searchValue)
-      const matchesTag = !selectedTag.value ||
-        (Array.isArray(plugin.tags) && plugin.tags.includes(selectedTag.value))
+      const matchesTag = !selectedTag.value || normalizePluginTags(plugin.tags).includes(selectedTag.value)
       return matchesSearch && matchesTag
     })
 
@@ -444,7 +452,7 @@ export const usePluginStore = defineStore('plugins', () => {
       display_name: plugin.display_name || plugin.name || id,
       version: plugin.version || '1.0.0',
       logo: plugin.logo || '',
-      tags: Array.isArray(plugin.tags) ? plugin.tags : [],
+      tags: normalizePluginTags(plugin.tags),
       category: normalizePluginCategory(plugin.category),
       stars: Number(plugin.stars || 0),
       likes: Number(plugin.likes || 0),

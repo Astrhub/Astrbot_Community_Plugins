@@ -54,6 +54,8 @@
           :fuzzy-search-enabled="fuzzySearchEnabled"
           :selected-category="selectedCategory"
           :category-options="categoryOptions"
+          :selected-tag="selectedTag"
+          :tag-options="tagOptions"
           :on-header="true"
           @update:searchQuery="handleSearchQueryChange"
           @update:currentPage="handleCurrentPageChange"
@@ -61,6 +63,7 @@
           @update:sortDirection="handleSortDirectionChange"
           @update:fuzzySearchEnabled="handleFuzzySearchEnabledChange"
           @update:selectedCategory="handleSelectedCategoryChange"
+          @update:selectedTag="handleSelectedTagChange"
         />
       </div>
     </section>
@@ -85,6 +88,8 @@
           :fuzzy-search-enabled="fuzzySearchEnabled"
           :selected-category="selectedCategory"
           :category-options="categoryOptions"
+          :selected-tag="selectedTag"
+          :tag-options="tagOptions"
           :compact="true"
           @update:searchQuery="handleSearchQueryChange"
           @update:currentPage="handleCurrentPageChange"
@@ -92,6 +97,7 @@
           @update:sortDirection="handleSortDirectionChange"
           @update:fuzzySearchEnabled="handleFuzzySearchEnabledChange"
           @update:selectedCategory="handleSelectedCategoryChange"
+          @update:selectedTag="handleSelectedTagChange"
         />
         <div class="mobile-inline-search" :class="{ 'is-open': isMobileSearchOpen }">
           <n-input
@@ -335,6 +341,10 @@ const handleSelectedCategoryChange = (value) => {
   emit('update:selectedCategory', value)
 }
 
+const handleSelectedTagChange = (value) => {
+  emit('update:selectedTag', value)
+}
+
 const goSettings = () => {
   router.push('/admin/settings')
 }
@@ -567,7 +577,7 @@ onUnmounted(() => {
   margin: 0 auto;
   padding: 10px 20px;
   display: grid;
-  grid-template-columns: auto minmax(240px, 520px) auto;
+  grid-template-columns: auto minmax(240px, 640px) auto;
   align-items: center;
   gap: 18px;
 }

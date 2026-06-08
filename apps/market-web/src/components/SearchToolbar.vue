@@ -27,16 +27,33 @@
         </button>
       </div>
       <n-select
+        v-if="hasCategoryFilters"
         :value="props.selectedCategory"
         :options="props.categoryOptions"
-        placeholder="分类…"
-        aria-label="插件分类"
+        placeholder="官方分类…"
+        aria-label="插件官方分类"
         @update:value="handleCategoryChange"
         :size="compact ? 'small' : 'medium'"
         class="sort-select category-select"
         :class="{
           'sort-select--compact': compact,
           'category-select--compact': compact
+        }"
+      />
+      <n-select
+        v-if="props.tagOptions.length"
+        :value="props.selectedTag"
+        :options="props.tagOptions"
+        placeholder="标签…"
+        aria-label="插件标签"
+        filterable
+        clearable
+        @update:value="handleTagChange"
+        :size="compact ? 'small' : 'medium'"
+        class="sort-select tag-select"
+        :class="{
+          'sort-select--compact': compact,
+          'tag-select--compact': compact
         }"
       />
       <n-switch
@@ -72,6 +89,7 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { NButton, NSelect, NIcon, NSwitch } from 'naive-ui'
 import { Search, CloseCircle } from '@vicons/ionicons5'
 
@@ -95,6 +113,14 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  selectedTag: {
+    type: String,
+    default: null
+  },
+  tagOptions: {
+    type: Array,
+    default: () => []
+  },
   compact: {
     type: Boolean,
     default: false
@@ -111,8 +137,13 @@ const emit = defineEmits([
   'update:sortBy',
   'update:sortDirection',
   'update:fuzzySearchEnabled',
-  'update:selectedCategory'
+  'update:selectedCategory',
+  'update:selectedTag'
 ])
+
+const hasCategoryFilters = computed(() =>
+  props.categoryOptions.some((option) => option.value !== 'all' && option.value !== 'other')
+)
 
 const sortOptions = [
   { label: '默认排序', value: 'default' },
@@ -160,6 +191,13 @@ const handleCategoryChange = (value) => {
   }
 }
 
+const handleTagChange = (value) => {
+  emit('update:selectedTag', value || null)
+  if (props.currentPage > 1) {
+    emit('update:currentPage', 1)
+  }
+}
+
 const handleSearchInput = (e) => {
   const value = e.target.value
   emit('update:searchQuery', value)
@@ -201,6 +239,10 @@ const handleClearSearch = () => {
 }
 
 .category-select {
+  width: 150px;
+}
+
+.tag-select {
   width: 150px;
 }
 
@@ -525,8 +567,9 @@ const handleClearSearch = () => {
   width: 80px;
 }
 
-.category-select--compact {
-  width: 124px;
+.category-select--compact,
+.tag-select--compact {
+  width: 112px;
 }
 
 .search-wrapper--compact .fuzzy-switch {
