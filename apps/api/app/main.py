@@ -45,6 +45,7 @@ from .schemas import (
     ApiKeyCreate,
     CommentCreate,
     InternalLoginPayload,
+    InternalUserCreate,
     MuteUserPayload,
     NotificationDeletePayload,
     PluginGithubRefreshPayload,
@@ -979,6 +980,59 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "User not found")
         return public_user(muted)
 
+    @app.post("/v1/admin/users/{user_id}/unmute")
+    async def unmute_user(request: Request, user_id: str) -> dict[str, Any]:
+        user = await require_user(request)
+        if not can_moderate_community(user):
+            raise error(403, "Forbidden")
+        unmuted = await call_store(request, "unmute_user", user_id)
+        if not unmuted:
+            raise error(404, "User not found")
+        return public_user(unmuted)
+
+    @app.post("/v1/core/users", status_code=201)
+    async def create_internal_user(
+        request: Request,
+        payload: InternalUserCreate,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        if not can_manage_admins(user):
+            raise error(403, "Forbidden")
+        username = payload.username.strip()
+        password = payload.password
+        role = normalize_role(payload.role)
+        if role == Role.CORE_ADMIN:
+            raise error(400, "Cannot create core admin from user management")
+        if len(username) < 3:
+            raise error(400, "Username must be at least 3 characters")
+        if len(password) < 8:
+            raise error(400, "Password must be at least 8 characters")
+        if await call_store(request, "get_user_by_internal_username", username):
+            raise error(409, "Username already exists")
+        created = await call_store(
+            request,
+            "create_internal_user",
+            username,
+            hash_password(password),
+            role.value,
+        )
+        return public_user(created)
+
+    @app.delete("/v1/core/users/{user_id}")
+    async def delete_user(request: Request, user_id: str) -> dict[str, Any]:
+        user = await require_user(request)
+        if not can_manage_admins(user):
+            raise error(403, "Forbidden")
+        if user_id == user["id"]:
+            raise error(400, "Cannot delete yourself")
+        target = await call_store(request, "get_user_by_id", user_id)
+        if not target:
+            raise error(404, "User not found")
+        if normalize_role(target.get("role")) == Role.CORE_ADMIN:
+            raise error(400, "Cannot delete core admin")
+        deleted = await call_store(request, "delete_user", user_id, user["id"])
+        return {"deleted": bool(deleted)}
+
     @app.post("/v1/core/admins/{user_id}")
     async def update_admin(
         request: Request, user_id: str, payload: RoleUpdatePayload
@@ -989,6 +1043,8 @@ def register_routes(app: FastAPI) -> None:
         target = await call_store(request, "get_user_by_id", user_id)
         if not target:
             raise error(404, "User not found")
+        if normalize_role(target.get("role")) == Role.CORE_ADMIN:
+            raise error(400, "Cannot change core admin role")
         updated = await call_store(
             request, "update_user_role", user_id, "admin" if payload.role == "admin" else "user"
         )

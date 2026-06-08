@@ -265,6 +265,24 @@
               </div>
             </n-tab-pane>
 
+            <n-tab-pane name="users" tab="用户管理" display-directive="show">
+              <div class="settings-tab-content">
+                <admin-user-management
+                  :users="adminUsers"
+                  :current-user="currentUser"
+                  :loading="loadingUsers"
+                  :creating="creatingUser"
+                  :busy-ids="userBusyIds"
+                  @refresh="refreshAdminUsers"
+                  @create-user="createUser"
+                  @update-role="updateUserRole"
+                  @mute-user="muteUser"
+                  @unmute-user="unmuteUser"
+                  @delete-user="deleteUser"
+                />
+              </div>
+            </n-tab-pane>
+
             <n-tab-pane name="infra" tab="基础设施" display-directive="show">
               <div class="settings-tab-content">
                 <section class="settings-section">
@@ -304,7 +322,7 @@
 </template>
 
 <script setup>
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref, shallowRef } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 import {
@@ -327,6 +345,7 @@ import {
 import { ArrowBack } from '@vicons/ionicons5'
 import { usePluginStore } from '@/stores/plugins'
 import ThemeModeButton from '@/components/ThemeModeButton.vue'
+import AdminUserManagement from '@/components/settings/AdminUserManagement.vue'
 
 const SettingSwitch = {
   props: {
@@ -357,10 +376,16 @@ const { currentUser, setupStatus } = storeToRefs(store)
 const {
   loadCurrentUser,
   loadAdminSetupStatus,
+  loadAdminUsers,
   loadSystemSettings,
   saveSystemSettings,
   sendTestEmail,
-  publishAnnouncement
+  publishAnnouncement,
+  createInternalUser,
+  updateAdminUserRole,
+  muteAdminUser,
+  unmuteAdminUser,
+  deleteAdminUser
 } = store
 
 const formRef = ref(null)
@@ -368,6 +393,10 @@ const loading = ref(true)
 const saving = ref(false)
 const testingEmail = ref(false)
 const publishingAnnouncement = ref(false)
+const loadingUsers = shallowRef(false)
+const creatingUser = shallowRef(false)
+const adminUsers = shallowRef([])
+const userBusyIds = reactive({})
 const isCoreAdmin = computed(() => currentUser.value?.role === 'core_admin')
 const testEmail = reactive({ to: '' })
 const announcementForm = reactive({ title: '', body: '' })
@@ -598,10 +627,91 @@ async function loadSettings() {
     }
     await loadAdminSetupStatus()
     applySettings(await loadSystemSettings())
+    await refreshAdminUsers()
   } catch (error) {
     message.error(error.message || '加载设置失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function refreshAdminUsers() {
+  if (!isCoreAdmin.value) return
+  loadingUsers.value = true
+  try {
+    adminUsers.value = await loadAdminUsers()
+  } catch (error) {
+    message.error(error.message || '加载用户失败')
+  } finally {
+    loadingUsers.value = false
+  }
+}
+
+function replaceUser(updatedUser) {
+  adminUsers.value = adminUsers.value.map((user) =>
+    user.id === updatedUser.id ? { ...user, ...updatedUser } : user
+  )
+}
+
+async function withUserBusy(user, action, task) {
+  userBusyIds[user.id] = action
+  try {
+    return await task()
+  } finally {
+    delete userBusyIds[user.id]
+  }
+}
+
+async function createUser(payload) {
+  creatingUser.value = true
+  try {
+    const created = await createInternalUser(payload)
+    adminUsers.value = [created, ...adminUsers.value]
+    message.success('用户已添加')
+  } catch (error) {
+    message.error(error.message || '创建用户失败')
+  } finally {
+    creatingUser.value = false
+  }
+}
+
+async function updateUserRole({ user, role }) {
+  try {
+    const updated = await withUserBusy(user, 'role', () => updateAdminUserRole(user.id, role))
+    replaceUser(updated)
+    message.success('用户角色已更新')
+  } catch (error) {
+    message.error(error.message || '更新角色失败')
+  }
+}
+
+async function muteUser({ user, muted_until }) {
+  try {
+    const updated = await withUserBusy(user, 'mute', () => muteAdminUser(user.id, muted_until))
+    replaceUser(updated)
+    message.success('用户已封禁')
+  } catch (error) {
+    message.error(error.message || '封禁失败')
+  }
+}
+
+async function unmuteUser(user) {
+  try {
+    const updated = await withUserBusy(user, 'unmute', () => unmuteAdminUser(user.id))
+    replaceUser(updated)
+    message.success('封禁已解除')
+  } catch (error) {
+    message.error(error.message || '解除封禁失败')
+  }
+}
+
+async function deleteUser(user) {
+  try {
+    await withUserBusy(user, 'delete', () => deleteAdminUser(user.id))
+    adminUsers.value = adminUsers.value.filter((item) => item.id !== user.id)
+    message.success('用户已删除')
+  } catch (error) {
+    message.error(error.message || '删除用户失败')
   }
 }
 

@@ -569,6 +569,72 @@ export const usePluginStore = defineStore('plugins', () => {
     })
   }
 
+  async function loadAdminUsers() {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/users`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载用户列表失败')
+    return data.items || []
+  }
+
+  async function createInternalUser(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/core/users`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '创建用户失败')
+    return data
+  }
+
+  async function updateAdminUserRole(userId, role) {
+    const response = await fetch(`${apiBaseUrl}/v1/core/admins/${userId}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ role })
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '更新用户角色失败')
+    return data
+  }
+
+  async function muteAdminUser(userId, mutedUntil) {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/users/${userId}/mute`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ muted_until: mutedUntil })
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '封禁用户失败')
+    return data
+  }
+
+  async function unmuteAdminUser(userId) {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/users/${userId}/unmute`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '解除封禁失败')
+    return data
+  }
+
+  async function deleteAdminUser(userId) {
+    const response = await fetch(`${apiBaseUrl}/v1/core/users/${userId}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '删除用户失败')
+    return data
+  }
+
   async function loadMyPlugins() {
     const response = await fetch(`${apiBaseUrl}/v1/me/plugins`, {
       credentials: 'include',
@@ -1047,6 +1113,12 @@ export const usePluginStore = defineStore('plugins', () => {
     saveSetupConfig,
     loadSystemSettings,
     loadAdminPlugins,
+    loadAdminUsers,
+    createInternalUser,
+    updateAdminUserRole,
+    muteAdminUser,
+    unmuteAdminUser,
+    deleteAdminUser,
     loadMyPlugins,
     updatePluginMetadata,
     requestPluginListing,

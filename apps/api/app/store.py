@@ -113,6 +113,31 @@ class InMemoryMarketStore:
         self.state["users"].append(user)
         return deepcopy(user)
 
+    def create_internal_user(
+        self,
+        username: str,
+        password_hash: str,
+        role: str = Role.USER.value,
+    ) -> dict[str, Any]:
+        user = self._normalize_user(
+            {
+                "id": self._next_id("user"),
+                "github_id": None,
+                "github_login": "",
+                "internal_username": username,
+                "password_hash": password_hash,
+                "auth_source": "internal",
+                "github_name": username,
+                "avatar_url": "",
+                "role": normalize_role(role),
+                "muted_until": None,
+                "created_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+        )
+        self.state["users"].append(user)
+        return deepcopy(user)
+
     def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
         return self._find("users", "id", user_id)
 
@@ -427,12 +452,73 @@ class InMemoryMarketStore:
         user["updated_at"] = utc_now()
         return deepcopy(user)
 
+    def unmute_user(self, user_id: str) -> dict[str, Any] | None:
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        user["muted_until"] = None
+        user["muted_by"] = None
+        user["updated_at"] = utc_now()
+        return deepcopy(user)
+
     def update_user_role(self, user_id: str, role: str) -> dict[str, Any] | None:
         user = self.get_user_by_id(user_id)
         if not user:
             return None
         user["role"] = normalize_role(role).value
         user["updated_at"] = utc_now()
+        return deepcopy(user)
+
+    def delete_user(self, user_id: str, replacement_user_id: str) -> dict[str, Any] | None:
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        for plugin in self.state["plugins"]:
+            if plugin.get("owner_user_id") == user_id:
+                plugin["owner_user_id"] = replacement_user_id
+                plugin["updated_at"] = utc_now()
+            if plugin.get("moderated_by") == user_id:
+                plugin["moderated_by"] = None
+        removed_comment_ids = {
+            comment["id"] for comment in self.state["comments"] if comment.get("user_id") == user_id
+        }
+        self.state["comments"] = [
+            comment for comment in self.state["comments"] if comment.get("user_id") != user_id
+        ]
+        for comment in self.state["comments"]:
+            if comment.get("parent_id") in removed_comment_ids:
+                comment["parent_id"] = None
+            if comment.get("deleted_by") == user_id:
+                comment["deleted_by"] = None
+        self.state["submissions"] = [
+            submission
+            for submission in self.state["submissions"]
+            if submission.get("user_id") != user_id
+        ]
+        self.state["announcements"] = [
+            announcement
+            for announcement in self.state["announcements"]
+            if announcement.get("author_user_id") != user_id
+        ]
+        self.state["pluginLikes"] = [
+            like for like in self.state["pluginLikes"] if like.get("user_id") != user_id
+        ]
+        self.state["commentLikes"] = [
+            like
+            for like in self.state["commentLikes"]
+            if like.get("user_id") != user_id and like.get("comment_id") not in removed_comment_ids
+        ]
+        for target in self.state["users"]:
+            if target.get("muted_by") == user_id:
+                target["muted_by"] = None
+        for collection in ("notifications", "apiKeys", "sessions"):
+            self.state[collection] = [
+                item for item in self.state[collection] if item.get("user_id") != user_id
+            ]
+        self.state["users"] = [item for item in self.state["users"] if item["id"] != user_id]
+        self._refresh_like_counts()
+        for plugin in self.state["plugins"]:
+            plugin["comments_count"] = len(self.list_comments(plugin["id"]))
         return deepcopy(user)
 
     def update_user_profile(
@@ -1103,6 +1189,28 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 )
                 return self._user_from_record(row)
 
+    async def create_internal_user(
+        self,
+        username: str,
+        password_hash: str,
+        role: str = Role.USER.value,
+    ) -> dict[str, Any]:
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO market_users (
+                id, github_id, github_login, internal_username, password_hash,
+                auth_source, github_name, avatar_url, role
+            )
+            VALUES ($1, NULL, '', $2, $3, 'internal', $2, '', $4)
+            RETURNING *
+            """,
+            new_id("user"),
+            username,
+            password_hash,
+            normalize_role(role).value,
+        )
+        return self._user_from_record(row)
+
     async def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow("SELECT * FROM market_users WHERE id = $1", user_id)
         return self._user_from_record(row) if row else None
@@ -1619,6 +1727,18 @@ class PgRedisMarketStore(InMemoryMarketStore):
         )
         return self._user_from_record(row) if row else None
 
+    async def unmute_user(self, user_id: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_users
+               SET muted_until = NULL, muted_by = NULL, updated_at = now()
+             WHERE id = $1
+         RETURNING *
+            """,
+            user_id,
+        )
+        return self._user_from_record(row) if row else None
+
     async def update_user_role(self, user_id: str, role: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow(
             """
@@ -1631,6 +1751,77 @@ class PgRedisMarketStore(InMemoryMarketStore):
             normalize_role(role).value,
         )
         return self._user_from_record(row) if row else None
+
+    async def delete_user(
+        self,
+        user_id: str,
+        replacement_user_id: str,
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                target = await connection.fetchrow(
+                    "SELECT * FROM market_users WHERE id = $1 FOR UPDATE",
+                    user_id,
+                )
+                if not target:
+                    return None
+                await connection.execute(
+                    """
+                    UPDATE market_plugins
+                       SET owner_user_id = $2,
+                           updated_at = now()
+                     WHERE owner_user_id = $1
+                    """,
+                    user_id,
+                    replacement_user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_plugins SET moderated_by = NULL WHERE moderated_by = $1",
+                    user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_comments SET deleted_by = NULL WHERE deleted_by = $1",
+                    user_id,
+                )
+                await connection.execute(
+                    "UPDATE market_users SET muted_by = NULL WHERE muted_by = $1",
+                    user_id,
+                )
+                await connection.execute("DELETE FROM market_users WHERE id = $1", user_id)
+                await connection.execute(
+                    """
+                    UPDATE market_comments c
+                       SET likes = counts.total
+                      FROM (
+                          SELECT c.id, count(cl.comment_id)::integer AS total
+                            FROM market_comments c
+                       LEFT JOIN market_comment_likes cl ON cl.comment_id = c.id
+                        GROUP BY c.id
+                      ) counts
+                     WHERE c.id = counts.id
+                    """
+                )
+                await connection.execute(
+                    """
+                    UPDATE market_plugins p
+                       SET likes = counts.likes,
+                           comments_count = counts.comments_count,
+                           updated_at = now()
+                      FROM (
+                          SELECT p.id,
+                                 count(DISTINCT pl.user_id)::integer AS likes,
+                                 count(DISTINCT c.id)::integer AS comments_count
+                            FROM market_plugins p
+                       LEFT JOIN market_plugin_likes pl ON pl.plugin_id = p.id
+                       LEFT JOIN market_comments c
+                              ON c.plugin_id = p.id
+                             AND c.deleted = false
+                        GROUP BY p.id
+                      ) counts
+                     WHERE p.id = counts.id
+                    """
+                )
+                return self._user_from_record(target)
 
     async def update_user_profile(
         self,

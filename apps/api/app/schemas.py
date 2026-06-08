@@ -112,6 +112,17 @@ class RoleUpdatePayload(BaseModel):
     role: str = "user"
 
 
+class InternalUserCreate(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+    @field_validator("username", "password", "role")
+    @classmethod
+    def strip_internal_user_fields(cls, value: str) -> str:
+        return value.strip()
+
+
 class InternalLoginPayload(BaseModel):
     username: str
     password: str

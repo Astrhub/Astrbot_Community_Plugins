@@ -715,6 +715,85 @@ def test_core_admin_can_manage_admins_while_normal_admin_moderates_plugins() -> 
     assert can_moderate_plugins(user) is False
 
 
+def test_core_admin_can_create_internal_users_and_change_roles() -> None:
+    client = make_client()
+    store = client.app.state.store
+    core = store.create_internal_admin("admin", main_module.hash_password("password123"))
+    client.post("/v1/auth/internal/login", json={"username": "admin", "password": "password123"})
+
+    created = client.post(
+        "/v1/core/users",
+        json={"username": "operator", "password": "password123", "role": "user"},
+    )
+    duplicate = client.post(
+        "/v1/core/users",
+        json={"username": "operator", "password": "password123", "role": "user"},
+    )
+    promoted = client.post(
+        f"/v1/core/admins/{created.json()['id']}",
+        json={"role": "admin"},
+    )
+    demote_core = client.post(f"/v1/core/admins/{core['id']}", json={"role": "user"})
+    operator_login = client.post(
+        "/v1/auth/internal/login",
+        json={"username": "operator", "password": "password123"},
+    )
+
+    assert created.status_code == 201
+    assert created.json()["internal_username"] == "operator"
+    assert created.json()["role"] == Role.USER
+    assert "password_hash" not in created.json()
+    assert duplicate.status_code == 409
+    assert promoted.status_code == 200
+    assert promoted.json()["role"] == Role.ADMIN
+    assert demote_core.status_code == 400
+    assert operator_login.status_code == 200
+    assert operator_login.json()["user"]["role"] == Role.ADMIN
+
+
+def test_core_admin_can_delete_non_core_users_without_removing_plugins() -> None:
+    client = make_client()
+    store = client.app.state.store
+    core = store.create_internal_admin("admin", main_module.hash_password("password123"))
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    plugin = store.submit_plugin(store.get_user_by_id(owner["id"]), plugin_payload())
+    client.post("/v1/auth/internal/login", json={"username": "admin", "password": "password123"})
+
+    delete_self = client.delete(f"/v1/core/users/{core['id']}")
+    deleted = client.delete(f"/v1/core/users/{owner['id']}")
+    deleted_again = client.delete(f"/v1/core/users/{owner['id']}")
+    transferred_plugin = store.get_plugin(plugin["id"])
+
+    assert delete_self.status_code == 400
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert deleted_again.status_code == 404
+    assert store.get_user_by_id(owner["id"]) is None
+    assert transferred_plugin["owner_user_id"] == core["id"]
+    assert transferred_plugin["owner_github_login"] == "alice"
+
+
+def test_admin_can_mute_and_unmute_users() -> None:
+    client = make_client()
+    store = client.app.state.store
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    user_login = client.get("/v1/auth/debug-login?login=alice")
+    user = user_login.json()["user"]
+    client.post("/v1/auth/internal/login", json={"username": "admin", "password": "password123"})
+
+    muted = client.post(
+        f"/v1/admin/users/{user['id']}/mute",
+        json={"muted_until": "2099-01-01T00:00:00Z"},
+    )
+    unmuted = client.post(f"/v1/admin/users/{user['id']}/unmute")
+
+    assert muted.status_code == 200
+    assert muted.json()["muted_until"] == "2099-01-01T00:00:00Z"
+    assert unmuted.status_code == 200
+    assert unmuted.json()["muted_until"] is None
+
+
 def test_plugin_owners_can_edit_their_own_metadata() -> None:
     plugin = {"owner_user_id": "user_1", "owner_github_login": "alice"}
 
