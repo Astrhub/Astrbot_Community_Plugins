@@ -569,6 +569,56 @@ export const usePluginStore = defineStore('plugins', () => {
     })
   }
 
+  async function loadMyPlugins() {
+    const response = await fetch(`${apiBaseUrl}/v1/me/plugins`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载我的插件失败')
+    return (data.items || []).map((plugin, index) => normalizePluginItem(plugin, index))
+  }
+
+  async function updatePluginMetadata(pluginId, payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '保存插件信息失败')
+    updatePluginInList(data)
+    return normalizePluginItem(data, 0)
+  }
+
+  async function requestPluginListing(pluginId) {
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/request-list`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '申请上架失败')
+    updatePluginInList(data)
+    return normalizePluginItem(data, 0)
+  }
+
+  async function unlistOwnPlugin(pluginId, payload = null) {
+    const options = {
+      method: 'POST',
+      credentials: 'include'
+    }
+    if (payload && Object.keys(payload).length > 0) {
+      options.headers = { 'content-type': 'application/json' }
+      options.body = JSON.stringify(payload)
+    }
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/unlist`, options)
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '下架插件失败')
+    updatePluginInList(data)
+    return normalizePluginItem(data, 0)
+  }
+
   async function loadPluginDetail(pluginId) {
     const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}`, {
       credentials: 'include',
@@ -944,6 +994,10 @@ export const usePluginStore = defineStore('plugins', () => {
     saveSetupConfig,
     loadSystemSettings,
     loadAdminPlugins,
+    loadMyPlugins,
+    updatePluginMetadata,
+    requestPluginListing,
+    unlistOwnPlugin,
     loadPluginDetail,
     likePlugin,
     unlikePlugin,

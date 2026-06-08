@@ -88,6 +88,8 @@ class UserProfileUpdate(BaseModel):
     avatar_url: str | None = None
     github_token: str | None = None
     github_refresh_interval_seconds: int | None = Field(default=None, ge=300, le=86400)
+    notify_replies: bool | None = None
+    notify_likes: bool | None = None
 
     @field_validator("github_name", "avatar_url", "github_token")
     @classmethod

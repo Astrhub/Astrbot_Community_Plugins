@@ -443,6 +443,18 @@ def register_routes(app: FastAPI) -> None:
             "updated": await call_store(request, "mark_notifications_read", user["id"])
         }
 
+    @app.get("/v1/me/plugins")
+    async def my_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
+        user = await require_user(request)
+        return {
+            "items": await call_store(
+                request,
+                "list_user_plugins",
+                user["id"],
+                user.get("github_login") or "",
+            )
+        }
+
     @app.post("/v1/auth/internal/login")
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
         settings = await runtime_settings_for_app(request.app)
@@ -650,6 +662,35 @@ def register_routes(app: FastAPI) -> None:
         )
         return updated or {}
 
+    @app.post("/v1/plugins/{plugin_id}/request-list")
+    async def request_plugin_list(request: Request, plugin_id: str) -> dict[str, Any]:
+        user = await require_user(request)
+        plugin = await get_plugin_or_404(request, plugin_id)
+        if not can_edit_plugin(user, plugin):
+            raise error(403, "Forbidden")
+        if plugin.get("status") == "listed":
+            return plugin
+        updated = await call_store(request, "request_plugin_listing", plugin_id, user["id"])
+        if not updated:
+            raise error(404, "Plugin not found")
+        return updated
+
+    @app.post("/v1/plugins/{plugin_id}/unlist")
+    async def unlist_own_plugin(
+        request: Request,
+        plugin_id: str,
+        payload: PluginUnlistPayload | None = None,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        plugin = await get_plugin_or_404(request, plugin_id)
+        if not can_edit_plugin(user, plugin):
+            raise error(403, "Forbidden")
+        reason = (payload.reason if payload else "").strip() or "作者主动下架"
+        updated = await call_store(request, "unlist_plugin", plugin_id, user["id"], reason)
+        if not updated:
+            raise error(404, "Plugin not found")
+        return updated
+
     @app.post("/v1/plugins/{plugin_id}/refresh-github")
     async def refresh_own_plugin_github_metadata(
         request: Request,
@@ -677,8 +718,11 @@ def register_routes(app: FastAPI) -> None:
         if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Plugin likes are closed")
         user = await require_user(request)
-        await get_plugin_or_404(request, plugin_id)
+        original_plugin = await get_plugin_or_404(request, plugin_id)
+        original_likes = int(original_plugin.get("likes") or 0)
         plugin = await call_store(request, "like_plugin", plugin_id, user["id"])
+        if plugin and int(plugin.get("likes") or 0) > original_likes:
+            await notify_plugin_like(request, original_plugin, user)
         return await plugin_with_interaction_state(request, plugin, user)
 
     @app.post("/v1/plugins/{plugin_id}/unlike")
@@ -697,24 +741,42 @@ def register_routes(app: FastAPI) -> None:
         if not (await runtime_settings_for_app(request.app)).market_comments_enabled:
             raise error(403, "Plugin comments are closed")
         user = await require_user(request)
-        await get_plugin_or_404(request, plugin_id)
+        plugin = await get_plugin_or_404(request, plugin_id)
         if not payload.body:
             raise error(400, "Comment body is required")
+        parent_comment = None
+        if payload.parent_id:
+            parent_comment = await call_store(request, "get_comment", payload.parent_id)
+            if (
+                not parent_comment
+                or parent_comment.get("deleted")
+                or parent_comment.get("plugin_id") != plugin_id
+            ):
+                raise error(400, "Parent comment is invalid")
         muted_until = parse_iso_datetime(user.get("muted_until"))
         if muted_until and muted_until > datetime.now(UTC):
             raise error(403, "User is muted")
-        return await call_store(
+        comment = await call_store(
             request, "add_comment", plugin_id, user["id"], payload.body, payload.parent_id
         )
+        await notify_comment_reply(request, plugin, parent_comment, comment, user)
+        return comment
 
     @app.post("/v1/comments/{comment_id}/like")
     async def like_comment(request: Request, comment_id: str) -> dict[str, Any]:
         if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Comment likes are closed")
         user = await require_user(request)
+        original_comment = await call_store(request, "get_comment", comment_id)
+        if not original_comment:
+            raise error(404, "Comment not found")
+        original_likes = int(original_comment.get("likes") or 0)
         comment = await call_store(request, "like_comment", comment_id, user["id"])
         if not comment:
             raise error(404, "Comment not found")
+        if int(comment.get("likes") or 0) > original_likes:
+            plugin = await call_store(request, "get_plugin", comment.get("plugin_id"))
+            await notify_comment_like(request, plugin, original_comment, user)
         return with_comment_permissions(comment, user, liked=True)
 
     @app.post("/v1/comments/{comment_id}/unlike")
@@ -1156,6 +1218,132 @@ async def get_plugin_or_404(request: Request, plugin_id: str) -> dict[str, Any]:
     if not plugin:
         raise error(404, "Plugin not found")
     return plugin
+
+
+def notification_preference_enabled(user: dict[str, Any] | None, key: str) -> bool:
+    if not user:
+        return False
+    return user.get(key, True) is not False
+
+
+def user_display_name(user: dict[str, Any]) -> str:
+    return (
+        user.get("github_name")
+        or user.get("github_login")
+        or user.get("internal_username")
+        or "用户"
+    )
+
+
+def plugin_display_name(plugin: dict[str, Any] | None) -> str:
+    if not plugin:
+        return "插件"
+    return plugin.get("display_name") or plugin.get("name") or plugin.get("id") or "插件"
+
+
+def notification_excerpt(value: str, limit: int = 80) -> str:
+    text = re.sub(r"\s+", " ", value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."
+
+
+async def create_preference_notification(
+    request: Request,
+    recipient_user_id: str | None,
+    actor_user_id: str,
+    preference_key: str,
+    title: str,
+    body: str,
+    notification_type: str,
+    metadata: dict[str, Any],
+) -> None:
+    if not recipient_user_id or recipient_user_id == actor_user_id:
+        return
+    recipient = await call_store(request, "get_user_by_id", recipient_user_id)
+    if not notification_preference_enabled(recipient, preference_key):
+        return
+    await call_store(
+        request,
+        "create_notification",
+        recipient_user_id,
+        title,
+        body,
+        notification_type,
+        metadata,
+    )
+
+
+async def notify_comment_reply(
+    request: Request,
+    plugin: dict[str, Any],
+    parent_comment: dict[str, Any] | None,
+    comment: dict[str, Any],
+    actor: dict[str, Any],
+) -> None:
+    if not parent_comment:
+        return
+    await create_preference_notification(
+        request,
+        parent_comment.get("user_id"),
+        actor["id"],
+        "notify_replies",
+        "你的评论有新回复",
+        f"{user_display_name(actor)} 回复了你在 {plugin_display_name(plugin)} 的评论："
+        f"{notification_excerpt(comment.get('body', ''))}",
+        "comment_reply",
+        {
+            "plugin_id": plugin.get("id"),
+            "plugin_name": plugin.get("name") or plugin.get("id"),
+            "comment_id": comment.get("id"),
+            "parent_id": parent_comment.get("id"),
+            "actor_user_id": actor["id"],
+        },
+    )
+
+
+async def notify_plugin_like(
+    request: Request,
+    plugin: dict[str, Any],
+    actor: dict[str, Any],
+) -> None:
+    await create_preference_notification(
+        request,
+        plugin.get("owner_user_id"),
+        actor["id"],
+        "notify_likes",
+        "你的插件收到了点赞",
+        f"{user_display_name(actor)} 点赞了 {plugin_display_name(plugin)}。",
+        "plugin_like",
+        {
+            "plugin_id": plugin.get("id"),
+            "plugin_name": plugin.get("name") or plugin.get("id"),
+            "actor_user_id": actor["id"],
+        },
+    )
+
+
+async def notify_comment_like(
+    request: Request,
+    plugin: dict[str, Any] | None,
+    comment: dict[str, Any],
+    actor: dict[str, Any],
+) -> None:
+    await create_preference_notification(
+        request,
+        comment.get("user_id"),
+        actor["id"],
+        "notify_likes",
+        "你的评论收到了点赞",
+        f"{user_display_name(actor)} 点赞了你在 {plugin_display_name(plugin)} 的评论。",
+        "comment_like",
+        {
+            "plugin_id": comment.get("plugin_id"),
+            "plugin_name": (plugin or {}).get("name") or comment.get("plugin_id"),
+            "comment_id": comment.get("id"),
+            "actor_user_id": actor["id"],
+        },
+    )
 
 
 async def plugin_with_interaction_state(

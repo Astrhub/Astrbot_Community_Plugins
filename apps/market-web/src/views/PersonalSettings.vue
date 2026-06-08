@@ -1,139 +1,63 @@
-<template>
-  <div class="profile-page">
-    <n-layout-header class="profile-header">
-      <div class="header-content">
-        <div class="header-left">
-          <n-button quaternary circle @click="goBack" aria-label="返回">
-            <template #icon>
-              <n-icon><arrow-back /></n-icon>
-            </template>
-          </n-button>
-          <div>
-            <p class="eyebrow">个人设置</p>
-            <h1>个人资料</h1>
-          </div>
-        </div>
-      </div>
-    </n-layout-header>
-
-    <main class="profile-content">
-      <n-spin :show="loading">
-        <n-form :model="formData" label-placement="top" class="profile-form">
-          <section class="profile-section">
-            <div class="section-title">
-              <h2>基本资料</h2>
-              <p>资料会显示在评论、插件提交和管理记录中。</p>
-            </div>
-            <n-form-item label="显示名称" path="github_name">
-              <n-input v-model:value="formData.github_name" placeholder="你的显示名称" />
-            </n-form-item>
-            <div class="actions">
-              <n-button type="primary" :loading="saving" @click="saveProfile">
-                保存资料
-              </n-button>
-            </div>
-          </section>
-
-          <section class="profile-section">
-            <div class="section-title">
-              <h2>GitHub 绑定</h2>
-              <p>绑定后可以用 GitHub 登录，并用仓库所有权编辑自己的插件。</p>
-            </div>
-            <div class="github-state" :class="{ linked: Boolean(currentUser?.github_login) }">
-              <n-icon>
-                <checkmark-circle-outline v-if="currentUser?.github_login" />
-                <close-circle-outline v-else />
-              </n-icon>
-              <span v-if="currentUser?.github_login">
-                已绑定 <strong>{{ currentUser.github_login }}</strong>
-              </span>
-              <span v-else>未绑定 GitHub 账号</span>
-            </div>
-            <n-button type="primary" tertiary @click="bindGithub">
-              <template #icon>
-                <n-icon><logo-github /></n-icon>
-              </template>
-              {{ currentUser?.github_login ? '重新绑定 GitHub' : '绑定 GitHub' }}
-            </n-button>
-          </section>
-
-          <section class="profile-section">
-            <div class="section-title">
-              <h2>GitHub API Token</h2>
-              <p>仅需要只读权限，用于读取公开仓库信息、metadata.yaml 和 logo.png；插件作者会优先使用自己的 Token 刷新元数据。</p>
-            </div>
-            <n-form-item label="Token" path="github_token">
-              <n-input
-                v-model:value="formData.github_token"
-                type="password"
-                show-password-on="click"
-                :placeholder="currentUser?.has_github_token ? '已配置，留空保持不变' : 'ghp_... 或 fine-grained token'"
-              />
-            </n-form-item>
-            <div class="token-state">
-              {{ currentUser?.has_github_token ? '当前已配置 Token' : '当前未配置 Token' }}
-            </div>
-            <n-form-item label="自动刷新间隔（秒）" path="github_refresh_interval_seconds">
-              <n-input-number
-                v-model:value="formData.github_refresh_interval_seconds"
-                :min="300"
-                :max="86400"
-                :step="300"
-              />
-            </n-form-item>
-          </section>
-
-        </n-form>
-      </n-spin>
-    </main>
-  </div>
-</template>
-
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, shallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import {
   NButton,
-  NForm,
-  NFormItem,
   NIcon,
-  NInput,
-  NInputNumber,
   NLayoutHeader,
   NSpin,
+  useDialog,
   useMessage
 } from 'naive-ui'
-import {
-  ArrowBack,
-  CheckmarkCircleOutline,
-  CloseCircleOutline,
-  LogoGithub
-} from '@vicons/ionicons5'
+import { ArrowBack } from '@vicons/ionicons5'
+import NotificationPreferencesSection from '@/components/settings/NotificationPreferencesSection.vue'
+import PersonalPluginManager from '@/components/settings/PersonalPluginManager.vue'
+import ProfileAccountSection from '@/components/settings/ProfileAccountSection.vue'
 import { usePluginStore } from '@/stores/plugins'
 
 const router = useRouter()
 const message = useMessage()
+const dialog = useDialog()
 const store = usePluginStore()
-const { currentUser } = storeToRefs(store)
-const { loadCurrentUser, loginWithGithub, updateProfile } = store
+const { currentUser, siteConfig } = storeToRefs(store)
+const {
+  loadCurrentUser,
+  loadMyPlugins,
+  requestPluginListing,
+  setSearchQuery,
+  unlistOwnPlugin,
+  updatePluginMetadata,
+  updateProfile
+} = store
 
-const loading = ref(true)
-const saving = ref(false)
+const loading = shallowRef(true)
+const savingProfile = shallowRef(false)
+const savingNotifications = shallowRef(false)
+const loadingPlugins = shallowRef(false)
+const myPlugins = shallowRef([])
+const pluginBusyIds = reactive({})
 const formData = reactive({
   github_name: '',
   github_token: '',
-  github_refresh_interval_seconds: 3600
+  github_refresh_interval_seconds: 3600,
+  notify_replies: true,
+  notify_likes: true
 })
+
+const maxPluginTags = computed(() => Number(siteConfig.value.market?.max_plugin_tags || 8))
 
 function applyCurrentUser() {
   formData.github_name = currentUser.value?.github_name || ''
   formData.github_token = ''
-  formData.github_refresh_interval_seconds = currentUser.value?.github_refresh_interval_seconds || 3600
+  formData.github_refresh_interval_seconds =
+    currentUser.value?.github_refresh_interval_seconds || 3600
+  formData.notify_replies = currentUser.value?.notify_replies !== false
+  formData.notify_likes = currentUser.value?.notify_likes !== false
 }
 
 async function saveProfile() {
-  saving.value = true
+  savingProfile.value = true
   try {
     const payload = {
       github_name: formData.github_name.trim(),
@@ -148,16 +72,94 @@ async function saveProfile() {
   } catch (error) {
     message.error(error.message || '保存失败')
   } finally {
-    saving.value = false
+    savingProfile.value = false
   }
 }
 
-function bindGithub() {
-  if (!store.siteConfig.auth?.github_login_enabled) {
-    message.warning('GitHub 登录尚未开启，请先由核心管理员配置 OAuth')
-    return
+async function saveNotificationPreferences() {
+  savingNotifications.value = true
+  try {
+    await updateProfile({
+      notify_replies: formData.notify_replies,
+      notify_likes: formData.notify_likes
+    })
+    applyCurrentUser()
+    message.success('通知设置已保存')
+  } catch (error) {
+    message.error(error.message || '保存失败')
+  } finally {
+    savingNotifications.value = false
   }
-  loginWithGithub()
+}
+
+async function refreshMyPlugins() {
+  loadingPlugins.value = true
+  try {
+    myPlugins.value = await loadMyPlugins()
+  } catch (error) {
+    message.error(error.message || '插件加载失败')
+  } finally {
+    loadingPlugins.value = false
+  }
+}
+
+function replacePlugin(updatedPlugin) {
+  myPlugins.value = myPlugins.value.map((plugin) =>
+    plugin.id === updatedPlugin.id ? { ...plugin, ...updatedPlugin } : plugin
+  )
+}
+
+async function withPluginBusy(plugin, action, task) {
+  pluginBusyIds[plugin.id] = action
+  try {
+    const updated = await task()
+    replacePlugin(updated)
+    return updated
+  } finally {
+    delete pluginBusyIds[plugin.id]
+  }
+}
+
+async function savePluginTags({ plugin, tags }) {
+  try {
+    await withPluginBusy(plugin, 'tags', () => updatePluginMetadata(plugin.id, { tags }))
+    message.success('标签已保存')
+  } catch (error) {
+    message.error(error.message || '保存标签失败')
+  }
+}
+
+function unlistPlugin(plugin) {
+  dialog.warning({
+    title: '下架插件',
+    content: `${plugin.display_name || plugin.name} 下架后将从公开市场隐藏。`,
+    positiveText: '下架',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await withPluginBusy(plugin, 'unlist', () =>
+          unlistOwnPlugin(plugin.id, { reason: '作者主动下架' })
+        )
+        message.success('插件已下架')
+      } catch (error) {
+        message.error(error.message || '下架失败')
+      }
+    }
+  })
+}
+
+async function requestListPlugin(plugin) {
+  try {
+    await withPluginBusy(plugin, 'request', () => requestPluginListing(plugin.id))
+    message.success('已提交上架申请')
+  } catch (error) {
+    message.error(error.message || '申请上架失败')
+  }
+}
+
+function openPlugin(plugin) {
+  setSearchQuery(plugin.name || plugin.id)
+  router.push('/')
 }
 
 function goBack() {
@@ -172,9 +174,64 @@ onMounted(async () => {
     return
   }
   applyCurrentUser()
+  await refreshMyPlugins()
   loading.value = false
 })
 </script>
+
+<template>
+  <div class="profile-page">
+    <NLayoutHeader class="profile-header">
+      <div class="header-content">
+        <div class="header-left">
+          <NButton quaternary circle @click="goBack" aria-label="返回">
+            <template #icon>
+              <NIcon><ArrowBack /></NIcon>
+            </template>
+          </NButton>
+          <div class="header-copy">
+            <p class="eyebrow">个人设置</p>
+            <h1 class="page-title">账号与插件</h1>
+          </div>
+        </div>
+      </div>
+    </NLayoutHeader>
+
+    <main class="profile-content">
+      <NSpin :show="loading">
+        <div class="settings-grid">
+          <ProfileAccountSection
+            v-model:github-name="formData.github_name"
+            v-model:github-token="formData.github_token"
+            v-model:refresh-interval="formData.github_refresh_interval_seconds"
+            :current-user="currentUser"
+            :saving="savingProfile"
+            @save="saveProfile"
+          />
+
+          <NotificationPreferencesSection
+            v-model:notify-replies="formData.notify_replies"
+            v-model:notify-likes="formData.notify_likes"
+            :saving="savingNotifications"
+            @save="saveNotificationPreferences"
+          />
+
+          <PersonalPluginManager
+            :plugins="myPlugins"
+            :loading="loadingPlugins"
+            :busy-ids="pluginBusyIds"
+            :max-tags="maxPluginTags"
+            @refresh="refreshMyPlugins"
+            @save-tags="savePluginTags"
+            @request-list="requestListPlugin"
+            @unlist="unlistPlugin"
+            @open-plugin="openPlugin"
+          />
+        </div>
+      </NSpin>
+    </main>
+  </div>
+</template>
 
 <style scoped>
 .profile-page {
@@ -189,23 +246,23 @@ onMounted(async () => {
 }
 
 .header-content {
-  max-width: 880px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 20px;
 }
 
-.header-left,
-.actions,
-.github-state {
+.header-left {
   display: flex;
   align-items: center;
   gap: 14px;
 }
 
+.header-copy {
+  min-width: 0;
+}
+
 .eyebrow,
-h1,
-h2,
-.section-title p {
+.page-title {
   margin: 0;
 }
 
@@ -215,65 +272,25 @@ h2,
   font-weight: 700;
 }
 
-h1 {
+.page-title {
   font-size: 24px;
-}
-
-h2 {
-  font-size: 18px;
+  line-height: 1.25;
 }
 
 .profile-content {
-  max-width: 760px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 24px 20px 48px;
 }
 
-.profile-form {
+.settings-grid {
   display: grid;
   gap: 18px;
 }
 
-.profile-section {
-  padding: 22px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--card-color);
-}
-
-.section-title {
-  margin-bottom: 18px;
-}
-
-.section-title p {
-  margin-top: 6px;
-  color: var(--text-color-2);
-}
-
-.actions {
-  justify-content: flex-end;
-}
-
-.github-state {
-  margin-bottom: 14px;
-  color: var(--text-color-2);
-}
-
-.github-state.linked {
-  color: #18a058;
-}
-
-.token-state {
-  color: var(--text-color-2);
-}
-
 @media (max-width: 640px) {
-  .actions {
-    justify-content: stretch;
-  }
-
-  .actions :deep(.n-button) {
-    width: 100%;
+  .profile-content {
+    padding: 20px 14px 38px;
   }
 }
 </style>

@@ -26,6 +26,14 @@ def serialize_value(value: Any) -> Any:
     return value
 
 
+def coerce_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
 class InMemoryMarketStore:
     """Development store. Production will persist data in PostgreSQL and Redis."""
 
@@ -149,6 +157,15 @@ class InMemoryMarketStore:
     def list_plugins(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["plugins"])
 
+    def list_user_plugins(self, user_id: str, github_login: str = "") -> list[dict[str, Any]]:
+        login = str(github_login or "").lower()
+        return [
+            deepcopy(plugin)
+            for plugin in self.state["plugins"]
+            if plugin.get("owner_user_id") == user_id
+            or (login and str(plugin.get("owner_github_login") or "").lower() == login)
+        ]
+
     def list_submissions(self) -> list[dict[str, Any]]:
         return [
             deepcopy(submission)
@@ -249,6 +266,43 @@ class InMemoryMarketStore:
         plugin["unlisted_by"] = by_user_id
         plugin["updated_at"] = utc_now()
         self._complete_pending_submissions(plugin_id, "unlisted")
+        return deepcopy(plugin)
+
+    def request_plugin_listing(
+        self,
+        plugin_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        plugin = self.get_plugin(plugin_id)
+        if not plugin:
+            return None
+        plugin["status"] = "pending"
+        plugin["moderated_by"] = None
+        plugin["updated_at"] = utc_now()
+        payload = submission_payload_from_plugin(plugin)
+        existing = next(
+            (
+                submission
+                for submission in self.state["submissions"]
+                if submission.get("plugin_id") == plugin_id
+                and submission.get("status") == "pending"
+            ),
+            None,
+        )
+        if existing:
+            existing["payload"] = deepcopy(payload)
+            existing["user_id"] = user_id
+        else:
+            self.state["submissions"].append(
+                {
+                    "id": self._next_id("submission"),
+                    "plugin_id": plugin_id,
+                    "user_id": user_id,
+                    "payload": deepcopy(payload),
+                    "status": "pending",
+                    "created_at": utc_now(),
+                }
+            )
         return deepcopy(plugin)
 
     def update_plugin_metadata(
@@ -397,6 +451,8 @@ class InMemoryMarketStore:
             "auth_source",
             "github_token",
             "github_refresh_interval_seconds",
+            "notify_replies",
+            "notify_likes",
         ):
             if key in profile:
                 user[key] = profile[key]
@@ -638,6 +694,8 @@ class InMemoryMarketStore:
             "github_refresh_interval_seconds": int(
                 user.get("github_refresh_interval_seconds") or 3600
             ),
+            "notify_replies": coerce_bool(user.get("notify_replies"), True),
+            "notify_likes": coerce_bool(user.get("notify_likes"), True),
             "github_name": user.get("github_name")
             or user.get("name")
             or user.get("github_login")
@@ -696,6 +754,24 @@ def plugin_metadata_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def submission_payload_from_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        key: deepcopy(plugin[key])
+        for key in (
+            "name",
+            "display_name",
+            "desc",
+            "author",
+            "repo",
+            "tags",
+            "social_link",
+            "category",
+        )
+        if key in plugin and plugin[key] is not None
+    }
+    return payload
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS market_users (
     id text PRIMARY KEY,
@@ -708,6 +784,8 @@ CREATE TABLE IF NOT EXISTS market_users (
     avatar_url text NOT NULL DEFAULT '',
     github_token text NOT NULL DEFAULT '',
     github_refresh_interval_seconds integer NOT NULL DEFAULT 3600,
+    notify_replies boolean NOT NULL DEFAULT true,
+    notify_likes boolean NOT NULL DEFAULT true,
     role text NOT NULL CHECK (role IN ('core_admin', 'admin', 'user')),
     muted_until timestamptz,
     muted_by text REFERENCES market_users(id) ON DELETE SET NULL,
@@ -888,6 +966,14 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600"
             )
             await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "notify_replies boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "notify_likes boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
                 "ALTER TABLE market_comments ADD COLUMN IF NOT EXISTS likes integer "
                 "NOT NULL DEFAULT 0"
             )
@@ -1040,6 +1126,20 @@ class PgRedisMarketStore(InMemoryMarketStore):
         rows = await self._pool().fetch("SELECT * FROM market_plugins ORDER BY updated_at DESC")
         return [self._plugin_from_record(row) for row in rows]
 
+    async def list_user_plugins(self, user_id: str, github_login: str = "") -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            SELECT *
+              FROM market_plugins
+             WHERE owner_user_id = $1
+                OR ($2 <> '' AND lower(owner_github_login) = lower($2))
+          ORDER BY updated_at DESC
+            """,
+            user_id,
+            github_login or "",
+        )
+        return [self._plugin_from_record(row) for row in rows]
+
     async def get_plugin(self, plugin_id: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow("SELECT * FROM market_plugins WHERE id = $1", plugin_id)
         return self._plugin_from_record(row) if row else None
@@ -1181,6 +1281,64 @@ class PgRedisMarketStore(InMemoryMarketStore):
                            AND status = 'pending'
                         """,
                         plugin_id,
+                    )
+        return self._plugin_from_record(row) if row else None
+
+    async def request_plugin_listing(
+        self,
+        plugin_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        current = await self.get_plugin(plugin_id)
+        if not current:
+            return None
+        payload = submission_payload_from_plugin(current)
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    UPDATE market_plugins
+                       SET status = 'pending',
+                           moderated_by = NULL,
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    plugin_id,
+                )
+                existing_submission_id = await connection.fetchval(
+                    """
+                    SELECT id
+                      FROM market_submissions
+                     WHERE plugin_id = $1
+                       AND status = 'pending'
+                  ORDER BY created_at DESC
+                     LIMIT 1
+                    """,
+                    plugin_id,
+                )
+                if existing_submission_id:
+                    await connection.execute(
+                        """
+                        UPDATE market_submissions
+                           SET user_id = $2,
+                               payload = $3::jsonb
+                         WHERE id = $1
+                        """,
+                        existing_submission_id,
+                        user_id,
+                        payload,
+                    )
+                else:
+                    await connection.execute(
+                        """
+                        INSERT INTO market_submissions (id, plugin_id, user_id, payload, status)
+                        VALUES ($1, $2, $3, $4::jsonb, 'pending')
+                        """,
+                        new_id("submission"),
+                        plugin_id,
+                        user_id,
+                        payload,
                     )
         return self._plugin_from_record(row) if row else None
 
@@ -1459,6 +1617,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 "auth_source",
                 "github_token",
                 "github_refresh_interval_seconds",
+                "notify_replies",
+                "notify_likes",
             )
             if key in profile
         }
@@ -1475,6 +1635,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    github_token = CASE WHEN $12 THEN $13 ELSE github_token END,
                    github_refresh_interval_seconds =
                        CASE WHEN $14 THEN $15 ELSE github_refresh_interval_seconds END,
+                   notify_replies = CASE WHEN $16 THEN $17 ELSE notify_replies END,
+                   notify_likes = CASE WHEN $18 THEN $19 ELSE notify_likes END,
                    updated_at = now()
              WHERE id = $1
          RETURNING *
@@ -1494,6 +1656,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
             profile.get("github_token"),
             "github_refresh_interval_seconds" in profile,
             profile.get("github_refresh_interval_seconds"),
+            "notify_replies" in profile,
+            profile.get("notify_replies"),
+            "notify_likes" in profile,
+            profile.get("notify_likes"),
         )
         return self._user_from_record(row) if row else None
 

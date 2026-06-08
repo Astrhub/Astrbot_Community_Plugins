@@ -234,6 +234,26 @@ def test_normal_user_can_store_github_token_and_refresh_interval() -> None:
     assert stored["github_refresh_interval_seconds"] == 300
 
 
+def test_user_notification_preferences_default_on_and_update() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+
+    assert login.json()["user"]["notify_replies"] is True
+    assert login.json()["user"]["notify_likes"] is True
+
+    response = client.patch(
+        "/v1/me/profile",
+        json={"notify_replies": False, "notify_likes": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["notify_replies"] is False
+    assert response.json()["notify_likes"] is False
+    stored = client.app.state.store.get_user_by_id(login.json()["user"]["id"])
+    assert stored["notify_replies"] is False
+    assert stored["notify_likes"] is False
+
+
 def test_admin_user_listing_redacts_github_tokens() -> None:
     client = make_client()
     login = client.get("/v1/auth/debug-login?login=alice")
@@ -887,6 +907,92 @@ def test_comment_likes_are_unique_per_user() -> None:
     assert second.json()["likes"] == 1
     assert detail.json()["comments"][0]["liked"] is True
     assert unliked.json()["likes"] == 0
+
+
+def test_reply_and_like_actions_notify_recipients_once() -> None:
+    client = make_client()
+    store = client.app.state.store
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    plugin = store.submit_plugin(store.get_user_by_id(owner["id"]), plugin_payload())
+    store.update_plugin_status(plugin["id"], "listed", owner["id"])
+    root = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"}).json()
+
+    bob_login = client.get("/v1/auth/debug-login?login=bob")
+    bob = bob_login.json()["user"]
+    reply = client.post(
+        f"/v1/plugins/{plugin['id']}/comments",
+        json={"body": "Agree with this", "parent_id": root["id"]},
+    )
+    plugin_like = client.post(f"/v1/plugins/{plugin['id']}/like")
+    duplicate_plugin_like = client.post(f"/v1/plugins/{plugin['id']}/like")
+    comment_like = client.post(f"/v1/comments/{root['id']}/like")
+    duplicate_comment_like = client.post(f"/v1/comments/{root['id']}/like")
+
+    assert reply.status_code == 201
+    assert plugin_like.status_code == 200
+    assert duplicate_plugin_like.status_code == 200
+    assert comment_like.status_code == 200
+    assert duplicate_comment_like.status_code == 200
+
+    client.get("/v1/auth/debug-login?login=alice")
+    notifications = client.get("/v1/me/notifications").json()["items"]
+    notification_types = [item["type"] for item in notifications]
+
+    assert notification_types.count("comment_reply") == 1
+    assert notification_types.count("plugin_like") == 1
+    assert notification_types.count("comment_like") == 1
+    assert all(item["metadata"]["actor_user_id"] == bob["id"] for item in notifications)
+
+
+def test_notification_preferences_disable_reply_and_like_notifications() -> None:
+    client = make_client()
+    store = client.app.state.store
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    client.patch("/v1/me/profile", json={"notify_replies": False, "notify_likes": False})
+    plugin = store.submit_plugin(store.get_user_by_id(owner["id"]), plugin_payload())
+    store.update_plugin_status(plugin["id"], "listed", owner["id"])
+    root = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Nice"}).json()
+
+    client.get("/v1/auth/debug-login?login=bob")
+    client.post(
+        f"/v1/plugins/{plugin['id']}/comments",
+        json={"body": "Agree with this", "parent_id": root["id"]},
+    )
+    client.post(f"/v1/plugins/{plugin['id']}/like")
+    client.post(f"/v1/comments/{root['id']}/like")
+
+    client.get("/v1/auth/debug-login?login=alice")
+    notifications = client.get("/v1/me/notifications")
+
+    assert notifications.status_code == 200
+    assert notifications.json()["items"] == []
+
+
+def test_owner_can_manage_own_plugins_without_bypassing_review() -> None:
+    client = make_client()
+    store = client.app.state.store
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    plugin = store.submit_plugin(store.get_user_by_id(owner["id"]), plugin_payload())
+    store.update_plugin_status(plugin["id"], "listed", owner["id"])
+
+    mine = client.get("/v1/me/plugins")
+    patched = client.patch(f"/v1/plugins/{plugin['id']}", json={"tags": ["demo", "tool"]})
+    unlisted = client.post(f"/v1/plugins/{plugin['id']}/unlist", json={"reason": "维护中"})
+    requested = client.post(f"/v1/plugins/{plugin['id']}/request-list")
+
+    assert mine.status_code == 200
+    assert mine.json()["items"][0]["id"] == plugin["id"]
+    assert patched.status_code == 200
+    assert patched.json()["tags"] == ["demo", "tool"]
+    assert unlisted.status_code == 200
+    assert unlisted.json()["status"] == "unlisted"
+    assert unlisted.json()["unlist_reason"] == "维护中"
+    assert requested.status_code == 200
+    assert requested.json()["status"] == "pending"
+    assert store.list_submissions()[0]["plugin_id"] == plugin["id"]
 
 
 def test_core_admin_can_review_plugin_submissions() -> None:
@@ -1924,6 +2030,8 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "CREATE TABLE IF NOT EXISTS market_comment_likes" in SCHEMA_SQL
     assert "github_token text NOT NULL DEFAULT ''" in SCHEMA_SQL
     assert "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600" in SCHEMA_SQL
+    assert "notify_replies boolean NOT NULL DEFAULT true" in SCHEMA_SQL
+    assert "notify_likes boolean NOT NULL DEFAULT true" in SCHEMA_SQL
     assert "likes integer NOT NULL DEFAULT 0" in SCHEMA_SQL
     assert "read boolean NOT NULL DEFAULT false" in SCHEMA_SQL
     assert "jsonb NOT NULL DEFAULT '[]'::jsonb" in SCHEMA_SQL
