@@ -52,12 +52,15 @@
           :sort-by="sortBy"
           :sort-direction="sortDirection"
           :fuzzy-search-enabled="fuzzySearchEnabled"
+          :selected-category="selectedCategory"
+          :category-options="categoryOptions"
           :on-header="true"
           @update:searchQuery="handleSearchQueryChange"
           @update:currentPage="handleCurrentPageChange"
           @update:sortBy="handleSortByChange"
           @update:sortDirection="handleSortDirectionChange"
           @update:fuzzySearchEnabled="handleFuzzySearchEnabledChange"
+          @update:selectedCategory="handleSelectedCategoryChange"
         />
       </div>
     </section>
@@ -80,21 +83,29 @@
           :sort-by="sortBy"
           :sort-direction="sortDirection"
           :fuzzy-search-enabled="fuzzySearchEnabled"
+          :selected-category="selectedCategory"
+          :category-options="categoryOptions"
           :compact="true"
           @update:searchQuery="handleSearchQueryChange"
           @update:currentPage="handleCurrentPageChange"
           @update:sortBy="handleSortByChange"
           @update:sortDirection="handleSortDirectionChange"
           @update:fuzzySearchEnabled="handleFuzzySearchEnabledChange"
+          @update:selectedCategory="handleSelectedCategoryChange"
         />
         <div class="mobile-inline-search" :class="{ 'is-open': isMobileSearchOpen }">
           <n-input
             size="medium"
             :value="searchQuery"
             @update:value="handleSearchQueryChange"
-            placeholder="搜索插件"
+            placeholder="搜索插件…"
+            aria-label="搜索插件"
+            :input-props="{
+              name: 'mobile-plugin-search',
+              autocomplete: 'off',
+              spellcheck: 'false'
+            }"
             clearable
-            autofocus
           />
         </div>
       </div>
@@ -225,6 +236,8 @@ defineProps({
   sortBy: String,
   sortDirection: String,
   fuzzySearchEnabled: Boolean,
+  selectedCategory: String,
+  categoryOptions: Array,
   selectedTag: String,
   tagOptions: Array
 })
@@ -235,6 +248,7 @@ const emit = defineEmits([
   'update:sortBy',
   'update:sortDirection',
   'update:fuzzySearchEnabled',
+  'update:selectedCategory',
   'update:selectedTag'
 ])
 
@@ -315,6 +329,10 @@ const handleSortDirectionChange = (value) => {
 
 const handleFuzzySearchEnabledChange = (value) => {
   emit('update:fuzzySearchEnabled', value)
+}
+
+const handleSelectedCategoryChange = (value) => {
+  emit('update:selectedCategory', value)
 }
 
 const goSettings = () => {

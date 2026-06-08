@@ -123,7 +123,7 @@
             v-model:value="refreshForm.github_token"
             type="password"
             show-password-on="click"
-            placeholder="可选，ghp_... 或 fine-grained token"
+            placeholder="可选，ghp_… 或 fine-grained token…"
           />
         </n-form-item>
         <n-checkbox v-model:checked="refreshForm.save_token">
@@ -152,6 +152,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import {
   NModal,
@@ -272,13 +273,12 @@ async function fetchReadme() {
     }
 
     try {
-      const apiResp = await fetch(`https://api.github.com/repos/${owner}/${repo}/readme`, {
+      const apiResp = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/readme`, {
         method: 'GET',
         headers: {
           'Accept': 'application/vnd.github+json'
-        },
-        timeout: 10000
-      })
+        }
+      }, 10000)
 
       if (apiResp.ok) {
         const data = await apiResp.json()
@@ -300,13 +300,12 @@ async function fetchReadme() {
       for (const branch of branches) {
         for (const filename of candidates) {
           try {
-            const resp = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filename}`, {
+            const resp = await fetchWithTimeout(`https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filename}`, {
               method: 'GET',
               headers: {
                 'Accept': 'text/plain'
-              },
-              timeout: 10000
-            })
+              }
+            }, 10000)
             if (resp.ok) {
               readmeText = await resp.text()
               readmeContext = { owner, repo, branch, path: filename }
@@ -456,9 +455,24 @@ function decodeBase64Content(value) {
   return decodeURIComponent(escape(atob(normalized)))
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    })
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
+}
+
 function renderReadmeHtml(markdown, context) {
   const container = document.createElement('div')
-  container.innerHTML = marked(markdown)
+  container.innerHTML = DOMPurify.sanitize(marked(markdown), {
+    USE_PROFILES: { html: true }
+  })
   const basePath = context.path.split('/').slice(0, -1).join('/')
 
   container.querySelectorAll('img[src]').forEach((image) => {

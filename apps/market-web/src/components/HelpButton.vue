@@ -7,10 +7,10 @@
             有疑问？来看看呗！
           </div>
         </div>
-        <div 
+        <button
+          type="button"
           class="float-button help-button"
           @click="toggleHelp"
-          role="button"
           aria-label="帮助"
         >
           <div class="float-button__inner help-button__inner">
@@ -19,7 +19,7 @@
             </n-icon>
             <div class="float-button__ripple"></div>
           </div>
-        </div>
+        </button>
       </div>
     </transition>
 
@@ -45,14 +45,14 @@
         </template>
         <n-space vertical size="large" class="help-modal__content">
           <div 
-            v-for="(section, index) in helpContent.sections" 
-            :key="index" 
+            v-for="section in renderedSections"
+            :key="section.title"
             class="help-section"
           >
             <div class="help-section__header">
               <n-h3>{{ section.title }}</n-h3>
             </div>
-            <div class="markdown-content" v-html="marked(section.content)"></div>
+            <div class="markdown-content" v-html="section.html"></div>
           </div>
         </n-space>
         <template #footer>
@@ -63,8 +63,8 @@
                 <div class="panel-input-group">
                   <n-input
                     v-model:value="panelUrl"
-                    type="text"
-                    placeholder="例如：demo.astrbot.app"
+                    type="url"
+                    placeholder="例如：demo.astrbot.app…"
                     class="panel-input"
                   />
                   <n-button
@@ -96,16 +96,26 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import DOMPurify from 'dompurify'
 import { NIcon, NModal, NCard, NSpace, NH2, NH3, NText, NButton, NInput } from 'naive-ui'
 import { HelpCircle, OpenOutline } from '@vicons/ionicons5'
 import { helpContent } from '../config/helpContent'
 import { marked } from 'marked'
 
 const isMobile = ref(window.innerWidth <= 768)
-window.addEventListener('resize', () => {
+let helpTextTimer = null
+
+const updateIsMobile = () => {
   isMobile.value = window.innerWidth <= 768
-})
+}
+
+const renderedSections = computed(() => helpContent.sections.map((section) => ({
+  ...section,
+  html: DOMPurify.sanitize(marked(section.content), {
+    USE_PROFILES: { html: true }
+  })
+})))
 
 const modalStyle = computed(() => {
   if (isMobile.value) {
@@ -133,9 +143,17 @@ const toggleHelp = () => {
   showHelp.value = !showHelp.value
 }
 
-setInterval(() => {
-  showHelpText.value = !showHelpText.value
-}, 3000)
+onMounted(() => {
+  window.addEventListener('resize', updateIsMobile)
+  helpTextTimer = window.setInterval(() => {
+    showHelpText.value = !showHelpText.value
+  }, 3000)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateIsMobile)
+  if (helpTextTimer) window.clearInterval(helpTextTimer)
+})
 
 const openPanelUrl = () => {
   if (panelUrl.value) {
@@ -143,7 +161,7 @@ const openPanelUrl = () => {
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       url = 'https://' + url
     }
-    window.open(url, '_blank')
+    window.open(url, '_blank', 'noopener,noreferrer')
   }
 }
 </script>
@@ -156,8 +174,17 @@ const openPanelUrl = () => {
 .float-button {
   width: 56px;
   height: 56px;
+  padding: 0;
+  border: 0;
+  appearance: none;
+  background: transparent;
   cursor: pointer;
   user-select: none;
+}
+
+.float-button:focus-visible {
+  outline: 3px solid rgba(96, 165, 250, 0.45);
+  outline-offset: 3px;
 }
 
 .float-button__inner {
@@ -170,7 +197,9 @@ const openPanelUrl = () => {
   justify-content: center;
   color: white;
   box-shadow: var(--n-box-shadow-2, 0 3px 6px -4px rgba(0, 0, 0, 0.12), 0 6px 16px 0 rgba(0, 0, 0, 0.08), 0 9px 28px 8px rgba(0, 0, 0, 0.05));
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
 }
 
@@ -226,11 +255,13 @@ const openPanelUrl = () => {
 }
 
 .float-button-fade-enter-active {
-  transition: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+  transition: opacity 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55),
+    transform 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
 }
 
 .float-button-fade-leave-active {
-  transition: all 0.3s cubic-bezier(0.4, 0, 1, 1);
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 1, 1),
+    transform 0.3s cubic-bezier(0.4, 0, 1, 1);
 }
 
 .float-button-fade-enter-from {
@@ -270,7 +301,8 @@ const openPanelUrl = () => {
   margin-right: -56px;
   transform: translateX(100%);
   opacity: 0;
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--shadow-sm);
   background-clip: padding-box;
   position: relative;
@@ -567,13 +599,19 @@ const openPanelUrl = () => {
 @media (prefers-reduced-motion: reduce) {
   .float-button__inner,
   .float-button__icon,
+  .help-text,
   .float-button-fade-enter-active,
   .float-button-fade-leave-active {
-    transition-duration: 0.1s;
+    animation: none !important;
+    transition: none !important;
   }
   
   .float-button__ripple {
     display: none;
+  }
+
+  .float-button:active .float-button__inner {
+    transform: none;
   }
 }
 </style>

@@ -21,6 +21,36 @@ const BASE_URL = canUseConfiguredBaseUrl && CONFIGURED_BASE_URL ? CONFIGURED_BAS
 const API_BASE_URL = CONFIGURED_API_BASE_URL ||
   (canUseConfiguredBaseUrl ? CONFIGURED_BASE_URL : '')
 const COMMUNITY_REPO_URL = String(import.meta.env.VITE_COMMUNITY_REPO_URL || '')
+export const PLUGIN_CATEGORY_LABELS = Object.freeze({
+  ai_tools: 'AI 增强',
+  entertainment: '娱乐',
+  integrations: '外部集成',
+  productivity: '效率',
+  utilities: '生活实用',
+  other: '其他'
+})
+export const PLUGIN_CATEGORY_VALUES = Object.freeze([
+  'ai_tools',
+  'entertainment',
+  'integrations',
+  'productivity',
+  'utilities'
+])
+export const PLUGIN_CATEGORY_OPTIONS = Object.freeze(
+  PLUGIN_CATEGORY_VALUES.map((value) => ({
+    label: PLUGIN_CATEGORY_LABELS[value],
+    value
+  }))
+)
+export const normalizePluginCategory = (value) => {
+  const category = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_')
+  if (!category) return 'other'
+  return PLUGIN_CATEGORY_VALUES.includes(category) ? category : 'other'
+}
+export const getPluginCategoryLabel = (value) => {
+  const category = normalizePluginCategory(value)
+  return PLUGIN_CATEGORY_LABELS[category] || category
+}
 const DEFAULT_SITE_CONFIG = Object.freeze({
   name: 'AstrBot Community Plugins',
   icon_url: '/logo.webp',
@@ -129,6 +159,7 @@ export const usePluginStore = defineStore('plugins', () => {
   const siteConfig = ref({ ...DEFAULT_SITE_CONFIG })
   const searchQuery = ref('')
   const selectedTag = ref(null)
+  const selectedCategory = ref('all')
   const currentPage = ref(1)
   const pageSize = ref(12)
   const isDarkMode = ref(false)
@@ -145,6 +176,8 @@ export const usePluginStore = defineStore('plugins', () => {
   const pluginSourceUrl = `${BASE_URL}/plugins.json`
   const communityRepoUrl = COMMUNITY_REPO_URL
   let mediaQuery = null
+  let pluginsLoaded = false
+  let loadPluginsPromise = null
 
   function prefersDark() {
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches || false
@@ -253,6 +286,8 @@ export const usePluginStore = defineStore('plugins', () => {
       plugin.owner_github_login,
       plugin.owner_user_id,
       plugin.repo,
+      plugin.category,
+      getPluginCategoryLabel(plugin.category),
       ...(Array.isArray(plugin.tags) ? plugin.tags : [])
     ].filter(Boolean).join(' ').toLowerCase()
   }
@@ -317,9 +352,33 @@ export const usePluginStore = defineStore('plugins', () => {
 
   const tagOptions = computed(() => allTags.value.map((tag) => ({ label: tag, value: tag })))
 
+  const categoryOptions = computed(() => {
+    const counts = plugins.value.reduce((acc, plugin) => {
+      const category = normalizePluginCategory(plugin.category)
+      acc[category] = (acc[category] || 0) + 1
+      return acc
+    }, { all: plugins.value.length })
+    const options = [
+      { label: `全部 (${counts.all || 0})`, value: 'all' },
+      ...PLUGIN_CATEGORY_OPTIONS
+        .filter((option) => counts[option.value])
+        .map((option) => ({
+          label: `${option.label} (${counts[option.value] || 0})`,
+          value: option.value
+        }))
+    ]
+    if (counts.other) {
+      options.push({ label: `${PLUGIN_CATEGORY_LABELS.other} (${counts.other})`, value: 'other' })
+    }
+    return options
+  })
+
   const filteredPlugins = computed(() => {
     const searchValue = normalizeSearchValue(searchQuery.value)
     let filtered = plugins.value.filter((plugin) => {
+      const category = selectedCategory.value || 'all'
+      const matchesCategory = category === 'all' || normalizePluginCategory(plugin.category) === category
+      if (!matchesCategory) return false
       if (!searchValue && !selectedTag.value) return true
       const matchesSearch = !searchValue || pluginMatchesSearch(plugin, searchValue)
       const matchesTag = !selectedTag.value ||
@@ -341,20 +400,31 @@ export const usePluginStore = defineStore('plugins', () => {
     return filteredPlugins.value.slice(start, start + pageSize.value)
   })
 
-  async function loadPlugins() {
+  async function loadPlugins(options = {}) {
+    const { force = false } = options
+    if (loadPluginsPromise) return loadPluginsPromise
+    if (pluginsLoaded && !force) return plugins.value
     isLoading.value = true
-    try {
-      const response = await fetch(`${apiBaseUrl}/v1/plugins`, { cache: 'no-store' })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const data = await response.json()
-      const items = Array.isArray(data) ? data : (data.items || [])
-      plugins.value = items.map((plugin, index) => normalizePluginItem(plugin, index))
-    } catch (error) {
-      console.error('Error loading plugins:', error)
-      plugins.value = []
-    } finally {
-      isLoading.value = false
-    }
+    loadPluginsPromise = (async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/v1/plugins`, { cache: 'no-store' })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const data = await response.json()
+        const items = Array.isArray(data) ? data : (data.items || [])
+        plugins.value = items.map((plugin, index) => normalizePluginItem(plugin, index))
+        pluginsLoaded = true
+        return plugins.value
+      } catch (error) {
+        console.error('Error loading plugins:', error)
+        plugins.value = []
+        pluginsLoaded = false
+        return plugins.value
+      } finally {
+        isLoading.value = false
+        loadPluginsPromise = null
+      }
+    })()
+    return loadPluginsPromise
   }
 
   async function loadAnnouncements() {
@@ -375,6 +445,7 @@ export const usePluginStore = defineStore('plugins', () => {
       version: plugin.version || '1.0.0',
       logo: plugin.logo || '',
       tags: Array.isArray(plugin.tags) ? plugin.tags : [],
+      category: normalizePluginCategory(plugin.category),
       stars: Number(plugin.stars || 0),
       likes: Number(plugin.likes || 0),
       comments_count: Number(plugin.comments_count || 0),
@@ -469,13 +540,24 @@ export const usePluginStore = defineStore('plugins', () => {
   }
 
   async function loadAdminPlugins() {
-    const response = await fetch(`${apiBaseUrl}/v1/admin/plugins`, {
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/submissions`, {
       credentials: 'include',
       cache: 'no-store'
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || '加载插件审核列表失败')
-    return data.items || []
+    return (data.items || []).map((submission) => {
+      const payload = submission.payload || {}
+      return normalizePluginItem(
+        {
+          ...payload,
+          id: submission.plugin_id,
+          submission_id: submission.id,
+          status: submission.status || 'pending'
+        },
+        0
+      )
+    })
   }
 
   async function loadPluginDetail(pluginId) {
@@ -705,6 +787,10 @@ export const usePluginStore = defineStore('plugins', () => {
     selectedTag.value = tag
   }
 
+  function setSelectedCategory(category) {
+    selectedCategory.value = category || 'all'
+  }
+
   function setCurrentPage(page) {
     currentPage.value = page
   }
@@ -736,6 +822,7 @@ export const usePluginStore = defineStore('plugins', () => {
   function resetPluginFilters() {
     searchQuery.value = ''
     selectedTag.value = null
+    selectedCategory.value = 'all'
     currentPage.value = 1
     sortBy.value = 'updated'
     sortDirection.value = 'desc'
@@ -765,6 +852,7 @@ export const usePluginStore = defineStore('plugins', () => {
     siteConfig,
     searchQuery,
     selectedTag,
+    selectedCategory,
     currentPage,
     isDarkMode,
     themeMode,
@@ -780,6 +868,7 @@ export const usePluginStore = defineStore('plugins', () => {
     irisMaskPosition,
     allTags,
     tagOptions,
+    categoryOptions,
     filteredPlugins,
     totalPages,
     paginatedPlugins,
@@ -813,6 +902,7 @@ export const usePluginStore = defineStore('plugins', () => {
     submitPlugin,
     setSearchQuery,
     setSelectedTag,
+    setSelectedCategory,
     setCurrentPage,
     setSortBy,
     setSortDirection,

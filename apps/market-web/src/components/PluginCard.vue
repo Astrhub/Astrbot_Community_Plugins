@@ -11,15 +11,16 @@
     :aria-expanded="showPluginDetails"
     tabindex="0"
     ref="cardRef"
+    @keydown="handleCardKeydown"
   >
     <template #header>
       <div 
         class="card-header" 
         role="banner" 
-        aria-labelledby="plugin-header-content"
+        :aria-labelledby="headerId"
       >
         <div 
-          id="plugin-header-content"
+          :id="headerId"
           class="plugin-name-container" 
           ref="nameContainer" 
           role="heading" 
@@ -62,6 +63,9 @@
           :src="getLogoUrl()" 
           :alt="`${plugin.name} logo`"
           class="plugin-logo"
+          width="60"
+          height="60"
+          loading="lazy"
           @error="handleLogoError"
         />
       </div>
@@ -137,8 +141,7 @@
                       size="small"
                       circle
                       @click="copyRepoUrl"
-                      role="button"
-                      :aria-label="`复制 ${plugin.name} 的仓库链接`"
+                    :aria-label="`复制 ${plugin.name} 的仓库链接`"
                       :aria-pressed="isCopied"
                       aria-live="polite"
                     >
@@ -182,7 +185,6 @@
                       type="warning"
                       :loading="isUnlisting"
                       @click.stop="openUnlistModal"
-                      role="button"
                       :aria-label="`下架 ${plugin.name}`"
                     >
                       <n-icon size="18" aria-hidden="true">
@@ -292,6 +294,11 @@ const pluginVersion = computed(() => String(props.plugin.version || '1.0.0'))
 const formattedVersion = computed(() => {
   return pluginVersion.value.startsWith('v') ? pluginVersion.value : `v${pluginVersion.value}`
 })
+const headerId = computed(() => {
+  const rawId = String(props.plugin.id || props.plugin.name || `plugin-${props.index}`)
+  const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, '-')
+  return `plugin-header-${safeId}`
+})
 
 const checkTextOverflow = () => {
   nextTick(() => {
@@ -389,6 +396,17 @@ const showDetails = () => {
   showPluginDetails.value = true
 }
 
+function handleCardKeydown(event) {
+  if (!['Enter', ' '].includes(event.key)) return
+  const target = event.target
+  if (target instanceof Element &&
+    target.closest('button, a, input, textarea, select, [role="button"], [role="link"]')) {
+    return
+  }
+  event.preventDefault()
+  showDetails()
+}
+
 function searchAuthor(event) {
   event.stopPropagation()
   const author = String(props.plugin.author || '').trim()
@@ -411,7 +429,7 @@ async function unlistPlugin() {
   isUnlisting.value = true
   try {
     await updatePluginListing(props.plugin.id, 'unlist', { reason })
-    await loadPlugins()
+    await loadPlugins({ force: true })
     showUnlistModal.value = false
     message.success('插件已下架')
   } catch (error) {
@@ -698,7 +716,7 @@ const handleLogoError = (event) => {
 }
 
 .plugin-tag {
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
   margin-bottom: 2px;
   background-color: rgba(37, 99, 235, 0.12) !important;
   color: var(--primary-color) !important;
@@ -749,6 +767,7 @@ const handleLogoError = (event) => {
 .author:focus-visible {
   background: rgba(37, 99, 235, 0.1);
   outline: none;
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
 }
 
 .metric-list {
@@ -814,7 +833,7 @@ const handleLogoError = (event) => {
   color: var(--text-secondary);
   background-color: rgba(37, 99, 235, 0.08);
   border: 1px solid var(--primary-color);
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease;
   border-radius: 4px;
 }
 
@@ -874,5 +893,21 @@ const handleLogoError = (event) => {
 .plugin-name.marquee .plugin-name-text {
   backface-visibility: hidden;
   perspective: 1000px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-card,
+  .plugin-name.marquee .plugin-name-text,
+  .plugin-tag,
+  .icon-buttons :deep(.n-button) {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .plugin-card:hover,
+  .plugin-tag:hover,
+  .icon-buttons :deep(.n-button:hover) {
+    transform: none;
+  }
 }
 </style>

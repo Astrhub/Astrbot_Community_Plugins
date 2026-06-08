@@ -173,8 +173,8 @@ async function setListing(plugin, action, reason = '') {
   try {
     const payload = action === 'unlist' ? { reason } : null
     const updated = await updatePluginListing(plugin.id, action, payload)
-    items.value = items.value.map((item) => (item.id === updated.id ? updated : item))
-    await loadPlugins()
+    items.value = items.value.filter((item) => item.id !== updated.id)
+    await loadPlugins({ force: true })
     if (action === 'list') {
       resetPluginFilters()
       message.success('插件已上架，正在返回首页')
@@ -194,7 +194,7 @@ async function refreshGithub(plugin) {
   try {
     const updated = await refreshPluginGithubMetadata(plugin.id, {})
     items.value = items.value.map((item) => (item.id === updated.id ? updated : item))
-    await loadPlugins()
+    await loadPlugins({ force: true })
     message.success('GitHub 数据已刷新')
   } catch (error) {
     message.error(error.message || '刷新失败')

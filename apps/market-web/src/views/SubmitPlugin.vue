@@ -59,17 +59,42 @@
             <n-grid :x-gap="16" :y-gap="10" :cols="2" responsive="screen">
               <n-grid-item span="2 m:1">
                 <n-form-item label="插件名" path="name">
-                  <n-input v-model:value="formData.name" placeholder="astrbot_plugin_example" />
+                  <n-input
+                    v-model:value="formData.name"
+                    placeholder="例如：astrbot_plugin_example…"
+                    :input-props="{
+                      name: 'plugin-name',
+                      autocomplete: 'off',
+                      spellcheck: 'false'
+                    }"
+                  />
                 </n-form-item>
               </n-grid-item>
               <n-grid-item span="2 m:1">
                 <n-form-item label="展示名称" path="display_name">
-                  <n-input v-model:value="formData.display_name" placeholder="给用户看的名称" />
+                  <n-input
+                    v-model:value="formData.display_name"
+                    placeholder="给用户看的名称…"
+                    :input-props="{
+                      name: 'plugin-display-name',
+                      autocomplete: 'off'
+                    }"
+                  />
                 </n-form-item>
               </n-grid-item>
               <n-grid-item span="2">
                 <n-form-item label="GitHub 仓库地址" path="repo">
-                  <n-input v-model:value="formData.repo" placeholder="https://github.com/owner/repository" />
+                  <n-input
+                    v-model:value="formData.repo"
+                    type="url"
+                    placeholder="例如：https://github.com/owner/repository…"
+                    :input-props="{
+                      name: 'plugin-repo',
+                      autocomplete: 'off',
+                      inputmode: 'url',
+                      spellcheck: 'false'
+                    }"
+                  />
                 </n-form-item>
               </n-grid-item>
               <n-grid-item span="2">
@@ -77,7 +102,11 @@
                   <n-input
                     v-model:value="formData.desc"
                     type="textarea"
-                    placeholder="一句话说明插件能做什么"
+                    placeholder="一句话说明插件能做什么…"
+                    :input-props="{
+                      name: 'plugin-description',
+                      autocomplete: 'off'
+                    }"
                     :maxlength="120"
                     :show-count="true"
                     :rows="4"
@@ -87,12 +116,40 @@
               </n-grid-item>
               <n-grid-item span="2 m:1">
                 <n-form-item label="作者显示名" path="author">
-                  <n-input v-model:value="formData.author" placeholder="默认建议与 GitHub 用户名一致" />
+                  <n-input
+                    v-model:value="formData.author"
+                    placeholder="默认建议与 GitHub 用户名一致…"
+                    :input-props="{
+                      name: 'plugin-author',
+                      autocomplete: 'off',
+                      spellcheck: 'false'
+                    }"
+                  />
                 </n-form-item>
               </n-grid-item>
               <n-grid-item span="2 m:1">
+                <n-form-item label="官方分类" path="category">
+                  <n-select
+                    v-model:value="formData.category"
+                    :options="pluginCategoryOptions"
+                    placeholder="选择分类…"
+                    aria-label="官方分类"
+                  />
+                </n-form-item>
+              </n-grid-item>
+              <n-grid-item span="2">
                 <n-form-item label="社交链接" path="social_link">
-                  <n-input v-model:value="formData.social_link" placeholder="可选，个人主页或 GitHub 主页" />
+                  <n-input
+                    v-model:value="formData.social_link"
+                    type="url"
+                    placeholder="可选，例如：https://github.com/owner…"
+                    :input-props="{
+                      name: 'plugin-social-link',
+                      autocomplete: 'off',
+                      inputmode: 'url',
+                      spellcheck: 'false'
+                    }"
+                  />
                 </n-form-item>
               </n-grid-item>
               <n-grid-item span="2">
@@ -137,11 +194,12 @@ import {
   NIcon,
   NInput,
   NLayoutHeader,
+  NSelect,
   NTag,
   useMessage
 } from 'naive-ui'
 import { ArrowBack, LogoGithub } from '@vicons/ionicons5'
-import { usePluginStore } from '@/stores/plugins'
+import { PLUGIN_CATEGORY_OPTIONS, usePluginStore } from '@/stores/plugins'
 import ThemeModeButton from '@/components/ThemeModeButton.vue'
 
 const router = useRouter()
@@ -152,6 +210,7 @@ const { loginWithGithub } = store
 const formRef = ref(null)
 const submitting = ref(false)
 const maxPluginTags = computed(() => siteConfig.value.market?.max_plugin_tags || 8)
+const pluginCategoryOptions = PLUGIN_CATEGORY_OPTIONS
 
 const formData = reactive({
   name: '',
@@ -159,6 +218,7 @@ const formData = reactive({
   desc: '',
   author: '',
   repo: '',
+  category: '',
   tags: [],
   social_link: ''
 })
@@ -190,6 +250,11 @@ const rules = {
     { required: true, message: '请输入 GitHub 仓库地址', trigger: 'blur' },
     { pattern: /^https:\/\/github\.com\/[\w-]+\/[\w.-]+\/?$/, message: '请输入有效的 GitHub 仓库地址', trigger: 'blur' }
   ],
+  category: {
+    required: true,
+    message: '请选择官方分类',
+    trigger: ['change', 'blur']
+  },
   tags: [
     {
       validator: (_, value) => !Array.isArray(value) || value.length <= maxPluginTags.value,

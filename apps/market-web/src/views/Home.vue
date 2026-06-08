@@ -3,11 +3,13 @@
     <app-header
       v-model:search-query="searchQuery"
       v-model:selected-tag="selectedTag"
+      v-model:selected-category="selectedCategory"
       v-model:current-page="currentPage"
       v-model:sort-by="sortBy"
       v-model:sort-direction="sortDirection"
       v-model:fuzzy-search-enabled="fuzzySearchEnabled"
       :tag-options="tagOptions"
+      :category-options="categoryOptions"
       :total-pages="totalPages"
     />
     <section v-if="announcements.length" class="announcements" aria-label="站点公告">
@@ -66,7 +68,7 @@
         </div>
         <h3 class="empty-title">没有找到相关插件哦</h3>
         <p class="empty-description">
-          <span v-if="searchQuery || selectedTag">
+          <span v-if="searchQuery || selectedTag || selectedCategory !== 'all'">
             试试调整搜索内容呢
           </span>
           <span v-else>
@@ -79,7 +81,7 @@
       <template v-else>
         <plugin-card
           v-for="(plugin, index) in paginatedPlugins"
-          :key="`${plugin.id || plugin.name}-${filterKey}-${randomSeed}`"
+          :key="plugin.id"
           :plugin="plugin"
           :index="index"
           :seed="randomSeed"
@@ -99,7 +101,7 @@
 
 <script setup>
 import { computed, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { NLayout, NIcon, NButton } from 'naive-ui'
 import { MegaphoneOutline, SearchOutline, SyncOutline } from '@vicons/ionicons5'
@@ -107,18 +109,21 @@ import AppHeader from '../components/AppHeader.vue'
 import PluginCard from '../components/PluginCard.vue'
 import AppPagination from '../components/AppPagination.vue'
 import AppFooter from '../components/AppFooter.vue'
-import { usePluginStore } from '../stores/plugins'
+import { normalizePluginCategory, usePluginStore } from '../stores/plugins'
 
 const store = usePluginStore()
 const route = useRoute()
+const router = useRouter()
 const {
   searchQuery,
   selectedTag,
+  selectedCategory,
   currentPage,
   sortBy,
   sortDirection,
   fuzzySearchEnabled,
   tagOptions,
+  categoryOptions,
   totalPages,
   paginatedPlugins,
   isLoading,
@@ -129,32 +134,34 @@ const {
 
 const visibleAnnouncements = computed(() => announcements.value.slice(0, 2))
 
-const filterKey = computed(() => {
-  return [
-    searchQuery.value,
-    selectedTag.value,
-    sortBy.value,
-    sortDirection.value,
-    fuzzySearchEnabled.value,
-    currentPage.value
-  ].join('-')
-})
-
 const { refreshRandomOrder } = store
+const FILTER_QUERY_KEYS = ['q', 'tag', 'category', 'page', 'sort', 'direction', 'fuzzy']
+const SORT_VALUES = new Set(['default', 'random', 'updated', 'stars', 'likes', 'comments'])
+let applyingRouteQuery = false
+
+watch(() => route.query, applyQueryState, { immediate: true })
+
+watch([
+  searchQuery,
+  selectedTag,
+  selectedCategory,
+  currentPage,
+  sortBy,
+  sortDirection,
+  fuzzySearchEnabled
+], syncRouteQuery)
+
+watch(totalPages, (pages) => {
+  if (pages > 0 && currentPage.value > pages) {
+    currentPage.value = pages
+  }
+}, { immediate: true })
+
 onMounted(() => {
   store.loadPlugins()
   store.loadAnnouncements().catch((error) => {
     console.error('Error loading announcements:', error)
   })
-})
-
-watch(() => route.fullPath, () => {
-  if (route.path === '/') {
-    store.loadPlugins()
-    store.loadAnnouncements().catch((error) => {
-      console.error('Error loading announcements:', error)
-    })
-  }
 })
 
 function formatTime(value) {
@@ -165,6 +172,77 @@ function formatTime(value) {
     month: '2-digit',
     day: '2-digit'
   })
+}
+
+function applyQueryState() {
+  applyingRouteQuery = true
+  const query = route.query
+  const sortValue = firstQueryValue(query.sort)
+  const directionValue = firstQueryValue(query.direction)
+  const categoryValue = firstQueryValue(query.category)
+
+  searchQuery.value = firstQueryValue(query.q)
+  selectedTag.value = firstQueryValue(query.tag) || null
+  selectedCategory.value = categoryValue && categoryValue !== 'all'
+    ? normalizePluginCategory(categoryValue)
+    : 'all'
+  currentPage.value = parsePage(firstQueryValue(query.page))
+  sortBy.value = SORT_VALUES.has(sortValue) ? sortValue : 'default'
+  sortDirection.value = directionValue === 'desc' ? 'desc' : 'asc'
+  fuzzySearchEnabled.value = ['1', 'true'].includes(firstQueryValue(query.fuzzy))
+  applyingRouteQuery = false
+}
+
+function syncRouteQuery() {
+  if (applyingRouteQuery) return
+  const nextQuery = mergedFilterQuery()
+  if (queriesEqual(route.query, nextQuery)) return
+  router.replace({ query: nextQuery })
+}
+
+function mergedFilterQuery() {
+  const query = { ...route.query }
+  FILTER_QUERY_KEYS.forEach((key) => {
+    delete query[key]
+  })
+  const filterQuery = {}
+  if (searchQuery.value.trim()) filterQuery.q = searchQuery.value.trim()
+  if (selectedTag.value) filterQuery.tag = selectedTag.value
+  if (selectedCategory.value && selectedCategory.value !== 'all') {
+    filterQuery.category = selectedCategory.value
+  }
+  if (currentPage.value > 1) filterQuery.page = String(currentPage.value)
+  if (sortBy.value !== 'default') filterQuery.sort = sortBy.value
+  if (sortDirection.value !== 'asc') filterQuery.direction = sortDirection.value
+  if (fuzzySearchEnabled.value) filterQuery.fuzzy = '1'
+  return { ...query, ...filterQuery }
+}
+
+function firstQueryValue(value) {
+  if (Array.isArray(value)) return String(value[0] || '')
+  return String(value || '')
+}
+
+function parsePage(value) {
+  const page = Number.parseInt(value, 10)
+  return Number.isFinite(page) && page > 0 ? page : 1
+}
+
+function queriesEqual(left, right) {
+  const normalizedLeft = normalizeQuery(left)
+  const normalizedRight = normalizeQuery(right)
+  const leftKeys = Object.keys(normalizedLeft).sort()
+  const rightKeys = Object.keys(normalizedRight).sort()
+  if (leftKeys.length !== rightKeys.length) return false
+  return leftKeys.every((key, index) => (
+    key === rightKeys[index] && normalizedLeft[key] === normalizedRight[key]
+  ))
+}
+
+function normalizeQuery(query) {
+  return Object.fromEntries(Object.entries(query)
+    .map(([key, value]) => [key, firstQueryValue(value)])
+    .filter(([, value]) => value !== ''))
 }
 </script>
 
@@ -433,5 +511,14 @@ function formatTime(value) {
   font-size: 14px;
   color: var(--text-color-2);
   opacity: 0.8;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugins-grid,
+  .dot,
+  .loading-text,
+  .loading-container :deep(.n-spin-icon) {
+    animation: none !important;
+  }
 }
 </style>

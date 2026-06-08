@@ -14,7 +14,7 @@
       >
         <template #goto>
           <label 
-            id="pagination-goto-label" 
+            :id="quickJumperLabelId"
             class="sr-only" 
             :for="quickJumperId"
           >跳转到</label>
@@ -28,7 +28,7 @@
 </template>
 
 <script setup>
-import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { NPagination } from 'naive-ui'
 
 const props = defineProps({
@@ -48,19 +48,21 @@ const props = defineProps({
 
 const paginationRef = ref(null)
 const quickJumperId = ref('pagination-quick-jumper-' + Math.random().toString(36).substr(2, 9))
+const quickJumperLabelId = computed(() => `${quickJumperId.value}-label`)
+
+function syncQuickJumperAttributes() {
+  const input = paginationRef.value?.$el?.querySelector('.n-pagination-quick-jumper input')
+  if (!input) return
+  input.setAttribute('id', quickJumperId.value)
+  input.setAttribute('aria-labelledby', quickJumperLabelId.value)
+  input.setAttribute('role', 'spinbutton')
+  input.setAttribute('aria-valuemin', '1')
+  input.setAttribute('aria-valuemax', props.totalPages.toString())
+  input.setAttribute('aria-valuenow', props.modelValue.toString())
+}
 
 onMounted(() => {
-  nextTick(() => {
-    const input = paginationRef.value?.$el?.querySelector('.n-pagination-quick-jumper input')
-    if (input) {
-      input.setAttribute('id', quickJumperId.value)
-      input.setAttribute('aria-labelledby', 'pagination-goto-label')
-      input.setAttribute('role', 'spinbutton')
-      input.setAttribute('aria-valuemin', '1')
-      input.setAttribute('aria-valuemax', props.totalPages.toString())
-      input.setAttribute('aria-valuenow', props.modelValue.toString())
-    }
-  })
+  nextTick(syncQuickJumperAttributes)
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -68,6 +70,10 @@ const screenWidth = ref(window.innerWidth)
 
 const showQuickJumper = computed(() => {
   return screenWidth.value > 768 && props.totalPages > 10
+})
+
+watch(() => [props.modelValue, props.totalPages, showQuickJumper.value], () => {
+  nextTick(syncQuickJumperAttributes)
 })
 
 const pageSlot = computed(() => {
@@ -130,7 +136,8 @@ onUnmounted(() => {
   width: fit-content;
   box-shadow: var(--shadow-sm);
   will-change: transform, opacity;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   
   &:hover {
     background: var(--pagination-bg-hover, rgba(255, 255, 255, 0.08));
@@ -140,7 +147,8 @@ onUnmounted(() => {
 
 :deep(.n-pagination) {
   gap: 4px;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform, opacity;
   
   &:hover .n-pagination-item:not(:hover):not(.n-pagination-item--active) {
@@ -164,7 +172,12 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   font-weight: 600;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
   will-change: transform, background-color, color;
   transform-origin: center;
 }

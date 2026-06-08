@@ -346,7 +346,7 @@ async function save() {
     await saveSetupConfig(setupPayload())
     activated.value = true
     message.success('配置已保存并已启用')
-    await store.loadPlugins()
+    await store.loadPlugins({ force: true })
     await store.loadCurrentUser()
     window.setTimeout(() => {
       window.location.assign('/')

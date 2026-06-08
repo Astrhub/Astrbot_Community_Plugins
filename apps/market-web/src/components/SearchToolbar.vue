@@ -6,21 +6,44 @@
         <input
           :value="searchQuery"
           @input="handleSearchInput"
-          :placeholder="compact ? '搜索' : '搜索插件'"
+          :placeholder="compact ? '搜索…' : '搜索插件…'"
+          type="search"
+          name="plugin-search"
+          aria-label="搜索插件"
+          autocomplete="off"
+          spellcheck="false"
           class="search-input"
         />
-        <n-icon 
+        <button
           v-if="searchQuery"
-          class="clear-icon"
+          type="button"
+          class="clear-button"
+          aria-label="清除搜索"
           @click="handleClearSearch"
         >
-          <close-circle />
-        </n-icon>
+          <n-icon class="clear-icon" aria-hidden="true">
+            <close-circle />
+          </n-icon>
+        </button>
       </div>
+      <n-select
+        :value="props.selectedCategory"
+        :options="props.categoryOptions"
+        placeholder="分类…"
+        aria-label="插件分类"
+        @update:value="handleCategoryChange"
+        :size="compact ? 'small' : 'medium'"
+        class="sort-select category-select"
+        :class="{
+          'sort-select--compact': compact,
+          'category-select--compact': compact
+        }"
+      />
       <n-switch
         :value="fuzzySearchEnabled"
         :size="compact ? 'small' : 'medium'"
         class="fuzzy-switch"
+        aria-label="搜索匹配模式"
         @update:value="handleFuzzySearchChange"
       >
         <template #checked>模糊</template>
@@ -29,6 +52,7 @@
       <n-select
         :value="props.sortBy"
         :options="compact ? compactSortOptions : sortOptions"
+        aria-label="排序方式"
         @update:value="handleSortChange"
         :size="compact ? 'small' : 'medium'"
         class="sort-select"
@@ -63,6 +87,14 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  selectedCategory: {
+    type: String,
+    default: 'all'
+  },
+  categoryOptions: {
+    type: Array,
+    default: () => []
+  },
   compact: {
     type: Boolean,
     default: false
@@ -78,7 +110,8 @@ const emit = defineEmits([
   'update:currentPage',
   'update:sortBy',
   'update:sortDirection',
-  'update:fuzzySearchEnabled'
+  'update:fuzzySearchEnabled',
+  'update:selectedCategory'
 ])
 
 const sortOptions = [
@@ -115,6 +148,13 @@ const toggleSortDirection = () => {
 
 const handleFuzzySearchChange = (value) => {
   emit('update:fuzzySearchEnabled', value)
+  if (props.currentPage > 1) {
+    emit('update:currentPage', 1)
+  }
+}
+
+const handleCategoryChange = (value) => {
+  emit('update:selectedCategory', value || 'all')
   if (props.currentPage > 1) {
     emit('update:currentPage', 1)
   }
@@ -160,6 +200,10 @@ const handleClearSearch = () => {
   flex-shrink: 0;
 }
 
+.category-select {
+  width: 150px;
+}
+
 .fuzzy-switch,
 .sort-direction-button {
   flex-shrink: 0;
@@ -172,7 +216,7 @@ const handleClearSearch = () => {
 :deep(.sort-select .n-base-selection) {
   background: transparent !important;
   border: 0px solid rgba(0, 0, 0, 0.08) !important;
-  transition: all 0.2s ease !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease !important;
   height: 44px !important;
   border-radius: 12px !important;
   padding: 0 0px !important;
@@ -182,7 +226,7 @@ const handleClearSearch = () => {
   background: var(--input-bg) !important;
   border-radius: 12px !important;
   box-shadow: var(--shadow-sm) !important;
-  transition: all 0.3s ease !important;
+  transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
 }
 
 :deep(.sort-select .n-base-selection-overlay:hover) {
@@ -203,7 +247,7 @@ const handleClearSearch = () => {
   align-items: center !important;
   padding: 0 12px !important;
   font-weight: 500 !important;
-  transition: all 0.2s ease !important;
+  transition: background-color 0.2s ease, color 0.2s ease !important;
 }
 
 :deep(.sort-select .n-base-selection:hover .n-base-selection-label) {
@@ -249,7 +293,7 @@ const handleClearSearch = () => {
   border-radius: 12px !important;
   margin: 2px 0 !important;
   padding: 8px 12px !important;
-  transition: all 0.2s ease !important;
+  transition: background-color 0.2s ease, color 0.2s ease !important;
   color: var(--input-text) !important;
 }
 
@@ -266,7 +310,7 @@ const handleClearSearch = () => {
   background: var(--input-bg, rgba(0, 0, 0, 0.03));
   border: 2px solid rgba(0, 0, 0, 0.08);
   border-radius: 12px;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   overflow: hidden;
   padding: 0 16px;
   gap: 12px;
@@ -296,24 +340,42 @@ const handleClearSearch = () => {
   opacity: 1;
 }
 
-/* 清除按钮 */
+.clear-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--input-text);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+}
+
+.clear-button:hover,
+.clear-button:focus-visible {
+  opacity: 0.85;
+  background: var(--primary-light);
+  outline: none;
+}
+
+.clear-button:focus-visible {
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+}
+
+.clear-button:active {
+  opacity: 1;
+  transform: scale(0.95);
+}
+
 .clear-icon {
   color: var(--input-text);
   font-size: 18px;
   flex-shrink: 0;
-  opacity: 0.5;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.clear-icon:hover {
-  opacity: 0.8;
-  transform: scale(1.1);
-}
-
-.clear-icon:active {
-  opacity: 1;
-  transform: scale(0.95);
 }
 
 /* 搜索输入框 */
@@ -461,6 +523,10 @@ const handleClearSearch = () => {
 
 .sort-select--compact {
   width: 80px;
+}
+
+.category-select--compact {
+  width: 124px;
 }
 
 .search-wrapper--compact .fuzzy-switch {
