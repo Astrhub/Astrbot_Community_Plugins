@@ -519,7 +519,9 @@ def register_routes(app: FastAPI) -> None:
     @app.post("/v1/me/api-keys", status_code=201)
     async def issue_my_api_key(request: Request, payload: ApiKeyCreate) -> dict[str, Any]:
         user = await require_user(request)
-        api_key = await call_store(request, "issue_api_key", payload.name, user["id"], payload.scopes)
+        api_key = await call_store(
+            request, "issue_api_key", payload.name, user["id"], payload.scopes
+        )
         return public_api_key(api_key, include_key=True)
 
     @app.delete("/v1/me/api-keys/{api_key_id}")
@@ -1619,7 +1621,11 @@ async def sync_due_github_plugin_metadata_once(app: FastAPI, limit: int) -> int:
     for plugin in plugins:
         try:
             owner = await get_plugin_owner_for_sync(app.state.store, plugin)
-            token = "" if owner and owner.get("github_token") else next_system_github_api_token(app, settings)
+            token = (
+                ""
+                if owner and owner.get("github_token")
+                else next_system_github_api_token(app, settings)
+            )
             await refresh_plugin_github_metadata_for_plugin(app, plugin, owner, token=token)
         except Exception as exc:
             await update_plugin_github_sync_failure(
