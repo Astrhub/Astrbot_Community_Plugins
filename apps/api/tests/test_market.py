@@ -2222,6 +2222,7 @@ def test_market_web_serves_built_spa(tmp_path, monkeypatch) -> None:
 
     assert client.get("/").text == "<html>market</html>"
     assert client.get("/submit").text == "<html>market</html>"
+    assert client.get("/docs/rest").text == "<html>market</html>"
     assert client.get("/logo.webp").text == "logo"
 
 

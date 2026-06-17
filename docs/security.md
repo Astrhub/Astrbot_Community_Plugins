@@ -1,56 +1,148 @@
 # 安全
 
+本文档描述 AstrBot Community Plugins 的身份认证、权限、凭证与部署安全模型。权限矩阵与角色定义见 [architecture.md](architecture.md#认证与权限模型)。
+
 ## 身份认证
 
-首次启动向导会注册内部核心管理员账号，用于配置 GitHub OAuth、管理员权限和站点策略。GitHub OAuth 是普通用户和插件所有者的身份来源；GitHub 用户不会自动成为核心管理员，后续仅能通过核心管理员显式提升或受信任组织规则获得管理员权限。
+首次启动向导注册内部核心管理员账号（用户名 + 密码），用于配置 GitHub OAuth、管理员权限与站点策略。GitHub OAuth 是普通用户与插件所有者的身份来源；GitHub 用户**不会**自动成为核心管理员，仅能通过核心管理员显式提升或 `GITHUB_ADMIN_ORG` 受信任组织规则获得管理员权限。
 
-登录流程（`apps/api/app/main.py`）：
-1. 内部核心管理员通过 `/v1/auth/internal/login` 登录
-2. 若开启 GitHub 登录，访问 `/v1/auth/github/login` 获取 GitHub OAuth 授权链接
-3. GitHub 回调 `/v1/auth/github/callback`，交换 access token 并获取用户信息
-4. 若配置了 `GITHUB_ADMIN_ORG`，自动提升组织成员为管理员
+### 登录方式
 
-已登录的内部管理员可在个人设置页绑定 GitHub。若该 GitHub 账号此前只作为普通 GitHub 用户登录过，系统会把其插件、评论和提交记录合并到当前管理员账号。
+| 方式 | 端点 | 触发条件 |
+|---|---|---|
+| 内部账号 | `POST /v1/auth/internal/login` | 用户名 + 密码（核心管理员及内部用户） |
+| GitHub OAuth | `GET /v1/auth/github/login` → `/callback` | `GITHUB_LOGIN_ENABLED=true` |
+| 开发调试 | `GET /v1/auth/debug-login` | **仅** `ENABLE_DEV_AUTH=true`（生产必须 `false`） |
 
-## 权限
+OAuth 登录后，若用户属于 `GITHUB_ADMIN_ORG` 且当前非 admin，自动提权为 admin（`main.py`）。开发调试登录通过 `X-Dev-GitHub-Login` 请求头自动创建用户，**绝不可在生产开启**。
 
-- 核心管理员 — 授予/撤销管理员，发布公告（`/v1/core/*` 端点）
-- 普通管理员 — 上架/下架插件，删除评论，禁言用户，管理审核（`/v1/admin/*` 端点）
-- 插件所有者 — 仅可编辑自己通过 GitHub 仓库所有权验证的插件元数据
+### GitHub 身份绑定与合并
 
-权限检查函数位于 `apps/api/app/auth.py`。
+已登录的内部管理员可在个人设置绑定 GitHub。若该 GitHub 账号此前仅作为普通 GitHub 用户登录过，系统会将其名下的插件、评论与提交记录合并到当前管理员账号，避免身份分裂。`PUBLIC_LOGIN_ENABLED=false` 时，仅核心管理员可内部登录，GitHub 登录仍按其开关独立控制。
+
+## 会话与 Cookie
+
+认证基于 cookie session（`astrbot_market_session`），**非 JWT**——服务端可即时撤销。
+
+- **token 格式**：`sess_{token_urlsafe(24)}`（`store.py`）。
+- **存储**：Redis，key 为 `astrbot_market:session:{token}`，value 为 `{token, user_id, created_at, last_seen_at}`。
+- **过期**：TTL = `SESSION_MAX_AGE_SECONDS`（默认 7 天）；每次 `get_user_by_session()` 读取时刷新 TTL，活跃用户不会过期。
+- **注销**：`POST /v1/auth/logout` 同时清除客户端 cookie 与 Redis session。
+
+Cookie 属性（`main.py`）：
+
+| 属性 | 默认 | 生产建议 |
+|---|---|---|
+| `HttpOnly` | `true` | 防止 JS 读取 session |
+| `SameSite` | `Lax` | 抑制跨站 CSRF |
+| `Secure` | `false`（`COOKIE_SECURE`） | HTTPS 部署必须设 `true` |
+
+### OAuth state 防 CSRF
+
+GitHub OAuth 使用 `uuid4()` 生成 state，存入独立 cookie（`astrbot_market_oauth_state`，有效期 10 分钟），回调时校验一致性，不匹配则拒绝（`main.py`）。
+
+## 权限模型
+
+| 角色 | 能力范围 |
+|---|---|
+| 核心管理员（core_admin） | 系统设置、邮件、管理员队伍、内部用户、公告（`/v1/core/*`、`/v1/admin/settings`） |
+| 普通管理员（admin） | 审核上架/下架、删除评论、禁言用户、刷新任意插件、颁发全局 Key（`/v1/admin/*`） |
+| 插件所有者 | 经仓库所有权验证后编辑自有插件元数据、申请/自主下架、手动刷新 |
+| 普通用户（user） | 浏览、提交、评论、点赞、管理个人 Key 与通知偏好 |
+
+权限函数位于 `apps/api/app/auth.py`：`can_edit_plugin(user, plugin)`（admin 或所有者匹配 `owner_user_id` / `owner_github_login`）、`can_manage_plugin_submission(user, plugin)`。所有敏感端点在路由层强制角色，前端组件内的角色判定仅为 UX，不构成安全边界。
 
 ## API Key
 
-API key 用于机器客户端（如未来的 AstrBot WebUI 插件）。Key 应具备作用域（scopes）、可撤销，并记录操作日志。使用时通过 `Authorization: Bearer <key>` 头发送。
+API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `Authorization: Bearer <key>` 鉴权。共有三种来源：
 
-API key 可通过环境变量 `MARKET_API_KEYS` 静态配置，也可通过 `/v1/api-keys` 端点动态创建（需管理员权限）。格式：`名称:密钥:scope1|scope2`。
-已登录用户可在个人设置页或通过 `/v1/me/api-keys` 生成自己的访问密钥，动态生成的密钥使用 `sk-ah-` 前缀，原文只在创建响应中返回一次，后续列表仅返回名称、权限和创建时间。
+| 来源 | 端点 / 配置 | 权限 | 特征 |
+|---|---|---|---|
+| 全局静态 | `MARKET_API_KEYS` 环境变量 | 按配置 | 格式 `name:key:scope1\|scope2`，逗号分隔多个 |
+| 管理员颁发 | `POST /v1/api-keys` | admin | `sk-ah-` 前缀 |
+| 个人 Key | `/v1/me/api-keys` | 登录用户（自建自删） | `sk-ah-` 前缀 |
 
-## 数据安全
+已实现的属性：
 
-将插件元数据、README 内容和评论视为不可信输入。需验证 GitHub 仓库 URL 格式，对渲染的 Markdown 进行清理，审核操作在服务端存储。
+- **作用域（scopes）**：`market:read` / `market:write`，鉴权时按 scope 校验（如列出全局 Key 需 `market:read`）。
+- **原文仅返回一次**：创建响应中返回明文 Key，后续列表只返回名称、scopes 与创建时间。
+- **可撤销**：删除（DELETE）即立即失效，数据库 `key` 列有唯一约束。
+- **脱敏**：管理接口不回显明文 Key。
 
-插件名称必须匹配 `astrbot_plugin_*` 模式，仓库 URL 必须为 `https://github.com/<owner>/<repo>` 格式，且提交者需证明 GitHub 仓库所有权。
+> 当前未实现 Key 级操作审计日志。如需机器客户端行为追溯，建议在反向代理或网关层记录。
 
-系统设置中的 GitHub Client Secret、SMTP 密码和 Cloudflare Email API Token 不会通过管理接口明文返回。前端收到 `********` 遮蔽值时，后端会保留已有密钥而不是写入遮蔽文本。
+## 凭证与密钥安全
 
-## 存储
+### 密码哈希
 
-PostgreSQL 是市场数据的持久化存储。Redis 当前用于会话令牌短期存储，并依赖 TTL 自动过期。两者均不应存储 GitHub 密钥或超出登录流程所需的最小 OAuth 原始令牌。
+内部账号密码使用 **PBKDF2-SHA256，260,000 次迭代**（`auth.py`）。`verify_password` 使用 `secrets.compare_digest` 进行常量时间比较，抵御时序攻击。GitHub 用户无本地密码。
 
-## 首次启动设置
+### 敏感字段脱敏保留
 
-若首次启动时缺少 PostgreSQL 或 Redis 配置，前端 UI 可通过 `/v1/setup` 分步收集站点基础信息、内部核心管理员、PostgreSQL 和 Redis 必要字段。保存时后端先验证连接，必要时创建 PostgreSQL 目标数据库，再初始化 schema、验证 Redis，并把核心管理员写入目标数据库；任何一步失败都不会写入 `apps/api/.env`。写入成功后，当前 FastAPI 进程会直接切换到 PostgreSQL/Redis 存储，无需杀进程重启。初始化完成后 `/v1/setup` 关闭，基础设施连接后续只通过 `.env` 修改。
+系统设置中的 GitHub Client Secret、SMTP 密码、Cloudflare Email API Token、用户的 `github_token` 等**不会通过管理或用户接口明文返回**，统一以 `********` 遮蔽。关键机制：前端回传遮蔽值时，后端**保留已有密钥**而非写入遮蔽文本，避免误清空（测试 `test_core_admin_can_update_system_settings_and_preserve_masked_secrets` 覆盖）。
 
-环境变量优先级：默认读取 `apps/api/.env`，同名系统环境变量覆盖 `.env`；测试或特殊部署可用 `APP_ENV_FILE` 指向其他 env 文件。Web 后台保存的站点、OAuth、市场策略和邮件设置进入数据库配置表，并覆盖 `.env` 中的同名系统设置。
+### GitHub token 轮转
 
-核心管理员可通过 `/v1/admin/settings` 修改站点、登录、GitHub OAuth、市场策略和邮件服务。Cloudflare Email Service 使用 Cloudflare REST API 的 `/accounts/{account_id}/email/sending/send` 端点，并只将 Cloudflare 错误摘要返回给管理员。
+`GITHUB_API_TOKEN` 可配置多个 token（`,` / `;` / 换行分隔），通过 `app.state.github_api_token_index` 轮转调用 GitHub API，缓解单 token 速率限制。刷新遇 GitHub rate limit 时会向上游报告，不静默失败。系统级 token 也可经 `/v1/admin/settings` 轮换。
 
-## Session 安全
+### 存储边界
 
-- Cookie 默认 `httponly=True`
-- `COOKIE_SECURE` 在生产环境应设为 `true`（需要 HTTPS）
-- `COOKIE_SAME_SITE` 默认 `Lax`
-- 会话默认有效期 7 天（`SESSION_MAX_AGE_SECONDS`）
-- OAuth state 参数使用独立 cookie，有效期 10 分钟
+- **PostgreSQL**：持久化全部业务数据（用户、插件、评论、点赞、提交、通知、公告、API Key、系统设置）。
+- **Redis**：**仅**存登录会话 token（带 TTL）。不存储 GitHub 密钥、OAuth 原始令牌等超出登录流程所需的敏感数据。
+
+## 输入验证与内容安全
+
+所有用户输入（插件元数据、README 内容、评论）均视为不可信：
+
+- **插件名校验**：必须匹配 `astrbot_plugin_*` 模式。
+- **仓库 URL 校验**：必须为 `https://github.com/<owner>/<repo>` 格式；提交者需证明 GitHub 仓库所有权。
+- **分类白名单**：插件分类必须是预定义官方分类之一。
+- **标签上限**：受 `MAX_PLUGIN_TAGS`（默认 8）限制。
+- **Markdown 渲染**：前端使用 `DOMPurify` 清理渲染输出，`marked` + `highlight.js` 渲染；审核操作在服务端存储。
+- **评论软删除**：删除根评论会隐藏其回复（`deleted` 标记 + partial index `WHERE deleted = false`），保留审计痕迹。
+
+## 网络与部署安全
+
+- **CORS**：`CORS_ORIGIN` 控制允许的前端来源（逗号分隔）；开发态默认允许 `http://127.0.0.1:3000`。生产同源部署时设为站点自身域名。
+- **Cookie**：生产 HTTPS 必须设 `COOKIE_SECURE=true`，配合反向代理（Nginx/Caddy）启用 TLS。
+- **systemd 加固**：`deploy/systemd/` 的 service 启用 `NoNewPrivileges`、`PrivateTmp`、`ProtectSystem=full`，并通过 `ReadWritePaths` 限定仅后端目录可写。
+- **开发认证**：`ENABLE_DEV_AUTH` 生产必须为 `false`，否则任何人可通过 `X-Dev-GitHub-Login` 头伪造登录。Docker 模板（`.env.docker.example`）默认已设 `false`。
+- **OAuth callback URL**：当 GitHub 登录启用时，系统拒绝本地回环 callback，防止开发态配置泄漏到生产（测试 `test_system_settings_reject_local_oauth_callback_when_enabled`）。callback URL 优先级：运行时数据库 options > `.env` > 初始设置。
+
+## 速率限制与配额
+
+- **GitHub API**：依赖 token 轮转缓解速率限制；元数据刷新显式报告 rate limit，不掩盖。
+- **邮件配额**：`EMAIL_DAILY_LIMIT` 控制每日发送上限（内存计数器，按日清零）；`EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER` 限制单用户每日验证邮件。
+- **Cloudflare Email**：发送失败时仅将 Cloudflare 错误摘要返回给管理员，不暴露完整上游响应。
+
+## 首次启动与环境安全
+
+若首次启动缺少 PostgreSQL 或 Redis 配置，前端 `/v1/setup` 分步收集必要字段。保存时后端：
+
+1. 连接 PostgreSQL（目标库不存在则创建）→ 初始化 schema → 验证 Redis → 写入核心管理员；
+2. **任一步失败都不写入 `apps/api/.env`**（测试 `test_setup_initialization_failure_does_not_write_env_file`），避免半成品配置污染；
+3. 全部成功后写入 `.env`，进程内切换到 PgRedis 存储，**无需重启**；
+4. 初始化完成后 `/v1/setup` 关闭（测试 `test_setup_after_first_run_is_closed`）。
+
+### 环境变量优先级
+
+1. 默认读取 `apps/api/.env`；
+2. 同名**系统环境变量**覆盖 `.env`；
+3. `APP_ENV_FILE` 可指向其他 env 文件（测试 / 特殊部署）；
+4. Web 后台（`market_options` 表）保存的站点、OAuth、市场策略、邮件设置**覆盖** `.env` 同名系统设置（运行时层高于静态层）。
+
+基础设施连接（`DATABASE_URL` / `REDIS_URL`）后续只通过 `.env` 修改，不在 Web 后台暴露。
+
+## 安全测试覆盖
+
+`apps/api/tests/test_market.py`（72 个测试，基于 `InMemoryMarketStore` + `TestClient`，无需真实 PG/Redis）覆盖的关键安全场景：
+
+- 角色不可越级（GitHub 用户不自动成为 core_admin；admin 不能管理管理员）。
+- `PUBLIC_LOGIN_ENABLED=false` 时仅核心管理员可登录。
+- 敏感字段脱敏保留（系统设置、用户 `github_token`、管理员列表）。
+- API Key 原文仅返回一次、scope 校验、`sk-ah-` 前缀。
+- setup 失败不写 `.env`、初始化后 `/setup` 关闭、进程内切换存储。
+- OAuth callback 优先级与本地 callback 拒绝。
+- 评论软删除与点赞唯一约束。
+- 插件分类白名单、标签上限、自动上架开关。
+- GitHub 身份绑定合并、token 轮转与 rate limit 报告。

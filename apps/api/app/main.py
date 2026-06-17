@@ -254,6 +254,10 @@ async def bootstrap_internal_core_admin(app: FastAPI) -> None:
 
 
 def register_routes(app: FastAPI) -> None:
+    @app.get("/docs/rest", include_in_schema=False)
+    async def rest_api_docs() -> Response:
+        return serve_market_web_file("docs/rest")
+
     @app.get("/health")
     async def health(request: Request) -> dict[str, str]:
         settings = get_settings(request)

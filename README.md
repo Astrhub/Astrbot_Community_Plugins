@@ -1,44 +1,92 @@
-# Astrbot Community Plugins
+# AstrBot Community Plugins
 
-Astrbot Community Plugins 是一个服务端驱动的 AstrBot 社区插件市场。GitHub 仓库仅托管市场源码和 API 契约，插件记录、评论、点赞、审核状态和用户账户数据均存储在市场服务器上。
+服务端驱动的 AstrBot 社区插件市场。本仓库托管市场前端、后端 API 与 API 契约；插件记录、评论、点赞、审核状态、用户账户与站点配置均存储在市场服务器（PostgreSQL）上，而非 GitHub。
+
+- 同一个 FastAPI 服务同时提供**网站**、**市场 API** 和 **AstrBot 插件源**。
+- GitHub 仅作为身份来源（OAuth）与插件仓库元数据的抓取目标，不是插件数据的权威存储。
+
+## 功能特性
+
+- **浏览与检索**：插件卡片网格、关键词搜索、标签/分类筛选、多种排序（更新时间/星标/点赞/评论/随机）、模糊搜索、分页。
+- **提交与审核**：插件通过网页表单提交，进入待审核队列；管理员审核上架/下架，下架需填写理由并通知所有者。
+- **GitHub 元数据同步**：后台 worker 周期性抓取仓库 stars、README、版本等信息；支持多 API token 轮转应对速率限制；所有者与管理员可手动触发刷新。
+- **社区互动**：嵌套评论（支持 Markdown + 语法高亮）、插件与评论点赞、Giscus 评论集成；回复与点赞触发站内通知。
+- **身份与角色**：内部核心管理员（用户名/密码登录）+ GitHub OAuth 登录；三级角色（core_admin / admin / user）+ 受信任 GitHub 组织自动提权。
+- **用户管理**：管理员可创建内部用户、调整角色、禁言/解禁、删除用户；核心管理员管理管理员队伍。
+- **API Key**：全局静态 Key（环境变量）、管理员动态颁发 Key、登录用户个人 Key（`sk-ah-` 前缀，原文仅返回一次），均支持 scopes 与 `Bearer` 鉴权。
+- **通知中心**：未读徽标、分页列表、标记已读、批量/单条/清空删除；用户可按回复/点赞维度关闭通知偏好。
+- **运行时配置**：核心管理员在 `/admin/settings` 热更新站点展示、GitHub OAuth、市场功能开关、自动上架、最大标签数、邮件服务，无需重启进程。
+- **首次启动向导**：未配置数据库时，前端 `/setup` 分步引导填写站点信息、核心管理员、PostgreSQL、Redis、邮件；保存后进程内热切换到持久化存储。
+- **AstrBot 集成**：`/plugins.json` 与 `/plugins-md5.json` 输出兼容 AstrBot 自定义插件源格式，可直接作为 AstrBot 插件源。
+- **邮件服务**：SMTP 或 Cloudflare Email Service 二选一，含每日发送限额。
+- **主题**：亮色/暗色/跟随系统，页面切换动画。
+
+## 技术栈
+
+| 层 | 技术 |
+|---|---|
+| 前端 | Vue 3.5 + Vite + Naive UI + Pinia + Vue Router 4；`marked` + `DOMPurify` + `highlight.js` 渲染 Markdown；`@giscus/vue` 评论 |
+| 后端 | Python 3.11+ · FastAPI · uvicorn · Pydantic 2 · asyncpg · redis-py（异步）· httpx |
+| 存储 | PostgreSQL（持久化业务数据，10 张表）· Redis（登录会话，TTL 自动过期） |
+| 部署 | Docker Compose · systemd · uv（Python 包管理）· npm（前端） |
+
+> 前端 API 调用使用原生 `fetch`（`credentials: 'include'` cookie session）。`axios` 仅作为历史依赖保留，当前未被引用。
 
 ## 项目结构
 
-- `apps/market-web/` — Vue 3 + Vite 前端，用于浏览、搜索和提交插件。
-- `apps/api/` — FastAPI 后端，提供 GitHub OAuth、角色权限、审核等接口。
-- `docs/` — 架构、安全和 OpenAPI 文档。
+```
+.
+├── apps/
+│   ├── market-web/      # Vue 3 + Vite 前端 SPA
+│   └── api/             # FastAPI 后端（路由 / schemas / auth / store / tests）
+├── deploy/systemd/      # 裸机部署的 systemd service 与 env 模板
+├── docs/                # 架构、安全、OpenAPI 文档
+├── Dockerfile           # 多阶段构建（前端 dist + 后端）
+├── docker-compose.yml   # 单机部署（app + PostgreSQL + Redis）
+└── package.json         # 工作区根脚本（dev:api / dev:web / build:web / start:api / test）
+```
 
-## 部署方式
+## 快速开始（开发）
 
-### 服务器端部署
+```bash
+# 后端依赖
+uv sync --project apps/api
 
-前端不再走 Vercel。生产部署时先构建 `apps/market-web`，再由 `apps/api` 的 FastAPI 应用直接托管 `apps/market-web/dist`。
+# 前端依赖
+npm install --prefix apps/market-web
 
-启动后同一个服务同时提供网站、API 和 AstrBot 插件源：
+# 分别启动（两个终端）
+npm run dev:api    # FastAPI + uvicorn --reload，监听 127.0.0.1:8787
+npm run dev:web    # Vite 开发服务器，监听 0.0.0.0:3000
+```
 
-- 网站首页：`http://your-host:8787/`
+开发态前后端分属不同端口（前端 `3000`，后端 `8787`）。前端需通过环境变量指向后端，否则请求会打到前端自身域名：
+
+```bash
+# apps/market-web/.env（开发）
+VITE_API_BASE_URL=http://127.0.0.1:8787
+```
+
+后端默认允许的 CORS 来源为 `http://127.0.0.1:3000,http://localhost:3000`（见 `apps/api/.env.example` 的 `CORS_ORIGIN`）。未配置 `DATABASE_URL`/`REDIS_URL` 时后端回退到内存存储，可直接启动；生产持久化存储请通过 `/setup` 或环境变量配置 PostgreSQL + Redis。
+
+构建与测试：
+
+```bash
+npm run build:web   # 构建前端到 apps/market-web/dist，供 FastAPI 托管
+npm test            # 运行后端 pytest（使用内存存储，无需真实 PG/Redis）
+```
+
+## 部署
+
+生产部署时先构建前端，再由 FastAPI 直接托管 `apps/market-web/dist`。同一个服务对外提供：
+
+- 网站首页与 SPA 路由：`http://your-host:8787/`
 - AstrBot 插件源：`http://your-host:8787/plugins.json`
-- API：`http://your-host:8787/v1/...`
+- 市场 API：`http://your-host:8787/v1/...`
 
-后端使用 **FastAPI + uvicorn**，依赖 **PostgreSQL**（持久化存储）和 **Redis**（会话存储）。配置 PostgreSQL 与 Redis 后会启用 `PgRedisMarketStore`；未配置时回退到 `InMemoryMarketStore` 方便首次启动和本地开发。
+> FastAPI 通过路径保留机制区分 API 路由（`v1`、`health`、`plugins.json`、`plugins-md5.json`、`openapi.json`、`docs`、`redoc`）与静态文件回退，互不冲突。REST API 文档可访问 `/docs/rest`（Vue + Naive UI API Reference），原生 Swagger UI 仍保留在 `/docs`。
 
-仓库提供 Docker Compose 和 systemd 模板：
-
-- `Dockerfile` / `docker-compose.yml` — 单机容器部署，包含 PostgreSQL 和 Redis。
-- `deploy/systemd/` — 裸机源码部署的 systemd service 和环境变量模板。
-
-尚未提供的运维配置包括：
-
-- Kubernetes / Helm 配置
-- Nginx / Caddy 反向代理配置
-- Terraform / 基础设施即代码配置
-- 数据库迁移脚本（无 Alembic 等）
-
-首次启动时，若 PostgreSQL 或 Redis 缺失，前端会打开 `/setup` 页面。向导只收集站点名称/图标、内部核心管理员、PostgreSQL 和 Redis 必要字段；GitHub OAuth、条款、邮件和市场策略在核心管理员登录后到 `/settings` 配置。
-
-核心管理员登录后可进入 `/settings` 管理运行时设置。当前支持站点名称/图标/描述、GitHub OAuth、登录条款、服务条款、市场提交/评论/点赞开关、自动上架、最大标签数，以及 SMTP 或 Cloudflare Email Service。密钥字段保存后只返回遮蔽状态；保持遮蔽值不会覆盖已有密钥。
-
-保存首次配置时，后端会先连接 PostgreSQL，目标数据库不存在时尝试创建，再初始化 schema、验证 Redis，并把内部核心管理员写入目标库；全部成功后只把基础设施连接和核心管理员引导信息写入 `apps/api/.env`，站点展示和后续系统设置写入数据库配置表。当前 FastAPI 进程会立即切换到 PostgreSQL/Redis 存储，无需依赖 systemd、Docker 或 supervisor 重启服务。PostgreSQL schema 在后续启动时也会自动补齐；Redis 使用带过期时间的 session key 保存登录态。初始化完成后 `/v1/setup` 关闭，数据库或 Redis 连接后续只通过 `.env` 调整。
+后端依赖 **PostgreSQL**（持久化）与 **Redis**（会话）。两者均配置时启用 `PgRedisMarketStore`；否则回退 `InMemoryMarketStore`，仅适合开发与首次启动。
 
 ### Docker Compose
 
@@ -49,13 +97,12 @@ cp apps/api/.env.docker.example apps/api/.env
 docker compose up -d --build
 ```
 
-打开 `http://127.0.0.1:8787/setup` 完成初始化。compose 内置服务地址如下：
+打开 `http://127.0.0.1:8787/setup` 完成初始化。compose 内置服务地址：
 
-- PostgreSQL host：`postgres`
-- PostgreSQL port：`5432`
-- PostgreSQL database/user/password：默认都是 `market`，也可通过 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 覆盖
-- Redis host：`redis`
-- Redis port：`6379`
+- PostgreSQL：host `postgres` / port `5432` / 默认库名、用户、密码均为 `market`（可用 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 覆盖）
+- Redis：host `redis` / port `6379`
+
+容器镜像：`node:24`（前端构建）、`python:3.11` + `uv:0.9.7`（后端）、`postgres:16-alpine`、`redis:7-alpine`。对外端口默认 `8787`，可用 `APP_PORT` 覆盖。
 
 常用命令：
 
@@ -66,9 +113,9 @@ docker compose restart app
 docker compose down
 ```
 
-### Systemd
+### Systemd（裸机源码部署）
 
-裸机部署示例路径为 `/opt/astrbot-community-plugins`，服务用户为 `astrbot-market`：
+示例路径 `/opt/astrbot-community-plugins`，服务用户 `astrbot-market`：
 
 ```bash
 sudo useradd --system --create-home --shell /usr/sbin/nologin astrbot-market
@@ -80,7 +127,7 @@ sudo cp deploy/systemd/astrbot-community-plugins.env.example /etc/astrbot-commun
 sudo cp deploy/systemd/astrbot-community-plugins.service /etc/systemd/system/
 ```
 
-构建和安装依赖：
+构建与安装依赖：
 
 ```bash
 npm install --prefix apps/market-web
@@ -88,7 +135,7 @@ npm run build:web
 uv sync --project apps/api --no-dev
 ```
 
-依赖锁文件默认使用官方源。若本地网络需要镜像，不要修改提交锁文件，可只在本机命令前设置环境变量：
+依赖锁文件默认使用官方源。本地网络需要镜像时，**不要修改并提交锁文件**，仅在本机命令前设置环境变量：
 
 ```bash
 export npm_config_registry=https://registry.npmmirror.com
@@ -97,7 +144,7 @@ npm install --prefix apps/market-web
 uv sync --project apps/api --no-dev
 ```
 
-Docker 构建同样默认使用官方源；需要镜像时通过构建变量传入：
+Docker 构建同样默认用官方源，需要镜像时通过构建变量传入：
 
 ```bash
 NPM_REGISTRY=https://registry.npmmirror.com \
@@ -105,7 +152,7 @@ PYPI_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 docker compose build
 ```
 
-编辑 `/etc/astrbot-community-plugins/astrbot-community-plugins.env` 后启动：
+systemd service 已启用安全加固（`NoNewPrivileges` / `PrivateTmp` / `ProtectSystem=full` / `ReadWritePaths` 限定后端目录）。编辑 env 后启动：
 
 ```bash
 sudo systemctl daemon-reload
@@ -114,48 +161,47 @@ sudo systemctl status astrbot-community-plugins
 journalctl -u astrbot-community-plugins -f
 ```
 
-若 `.env` 中暂不填写 `DATABASE_URL` 和 `REDIS_URL`，首次访问 `/setup` 完成初始化；初始化后后端会写入 `apps/api/.env`。生产环境通常还需要在前面放 Nginx/Caddy 并启用 HTTPS。
+若 `.env` 中暂不填写 `DATABASE_URL` 与 `REDIS_URL`，首次访问 `/setup` 完成初始化；初始化成功后后端会写入 `apps/api/.env`。生产环境通常还需在前置 Nginx/Caddy 启用 HTTPS，并相应设置 `COOKIE_SECURE=true`。
+
+### 首次启动向导
+
+若 PostgreSQL 或 Redis 缺失，前端会打开 `/setup`。向导只收集站点名称/图标、内部核心管理员、PostgreSQL、Redis 与邮件必要字段；GitHub OAuth、登录条款、服务条款和市场策略在核心管理员登录后到 `/admin/settings` 配置。
+
+保存首次配置时，后端会先连接 PostgreSQL（目标库不存在则创建）、初始化 schema、验证 Redis、写入核心管理员；全部成功后才把基础设施连接与核心管理员引导信息写入 `apps/api/.env`，站点展示与系统设置写入数据库配置表。当前 FastAPI 进程会立即切换到 PostgreSQL/Redis 存储，**无需重启服务**。初始化完成后 `/v1/setup` 关闭，基础设施连接后续只通过 `.env` 调整。
 
 ### CI/CD
 
-`.github/workflows/ci.yml` 仅包含代码质量检查（ruff lint + pytest + 前端 build），**没有部署步骤**。
+`.github/workflows/ci.yml` 仅执行代码质量检查（ruff lint + pytest + 前端 build），**不包含部署步骤**。尚未提供的运维配置：Kubernetes/Helm、Nginx/Caddy 反向代理模板、Terraform/基础设施即代码、Alembic 数据库迁移（当前 schema 由应用启动时自动建表/补齐）。
 
-## 开发
+## 配置
 
-```bash
-uv sync --project apps/api
-npm install --prefix apps/market-web
-npm run dev:api    # 启动 API，监听 127.0.0.1:8787
-npm run dev:web    # 启动前端开发服务器
-npm run build:web  # 构建生产前端，供 FastAPI 托管
-npm run start:api  # 生产方式启动 API，监听 0.0.0.0:8787
-```
+### 后端环境变量
 
-开发环境如需镜像，同样使用本地变量，例如 `UV_DEFAULT_INDEX=... uv sync --project apps/api` 或 `npm_config_registry=... npm install --prefix apps/market-web`。
+完整列表见 `apps/api/.env.example`，关键项：
 
-本地安装推送前 Ruff hook：
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `HOST` / `PORT` | `127.0.0.1` / `8787` | 监听地址与端口 |
+| `CORS_ORIGIN` | `http://127.0.0.1:3000,http://localhost:3000` | 允许的前端来源（逗号分隔） |
+| `WEB_URL` | `http://127.0.0.1:8787` | 站点公开 URL |
+| `DATABASE_URL` / `REDIS_URL` | 空 | 首次留空，经 `/setup` 配置；同时配置才启用持久化存储 |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App 凭证 |
+| `GITHUB_CALLBACK_URL` | 空 | OAuth 回调 URL，留空则在 `/admin/settings` 配置 |
+| `GITHUB_ADMIN_ORG` | 空 | 该组织成员登录后自动提权为 admin |
+| `GITHUB_API_TOKEN` | 空 | 元数据同步用 GitHub token，多 token 用 `,` 分隔自动轮转 |
+| `GITHUB_METADATA_SYNC_ENABLED` / `..._INTERVAL_SECONDS` | `true` / `3600` | 后台元数据同步开关与间隔（5 分钟 ~ 24 小时） |
+| `MARKET_SUBMISSIONS_ENABLED` / `MARKET_COMMENTS_ENABLED` / `MARKET_LIKES_ENABLED` | `true` | 市场功能开关 |
+| `PLUGIN_AUTO_APPROVE_ENABLED` | `false` | 提交后自动上架，跳过审核 |
+| `MAX_PLUGIN_TAGS` | `8` | 插件最大标签数 |
+| `EMAIL_PROVIDER` | `disabled` | `disabled` / `smtp` / `cloudflare` |
+| `SESSION_MAX_AGE_SECONDS` | `604800` | 会话有效期（默认 7 天） |
+| `COOKIE_SECURE` / `COOKIE_SAME_SITE` | `false` / `Lax` | Cookie 安全属性（生产 HTTPS 应设 `COOKIE_SECURE=true`） |
+| `ENABLE_DEV_AUTH` | `true` | 开发调试登录（生产必须 `false`） |
+| `MARKET_API_KEYS` | `local:dev-market-key:market:read|market:write` | 全局静态 API Key，格式 `name:key:scope1|scope2` |
 
-```bash
-uv sync --project apps/api
-uv run --project apps/api --directory apps/api pre-commit install --hook-type pre-push
-```
+> 环境变量优先级：默认读取 `apps/api/.env`，同名系统环境变量覆盖之；测试或特殊部署可用 `APP_ENV_FILE` 指向其他 env 文件。Web 后台保存的站点、OAuth、市场策略与邮件设置进入数据库配置表，并覆盖 `.env` 中的同名系统设置。
 
-前端环境变量定义在 `apps/market-web/.env.example`：
-
-- `VITE_BASE_URL` — 可选的公开基础 URL。留空时前端使用当前网站域名；部署在同一 FastAPI 服务下通常不需要设置。
-
-后端使用 Python 3.11+ 和 `uv`：
-
-```bash
-cd apps/api
-uv sync
-uv run uvicorn app.main:app --reload
-uv run pytest
-```
-
-后端完整环境变量见 `apps/api/.env.example`。
-
-生产启用持久化存储可通过首次启动页面填写。若要直接用环境变量启动，至少需要：
+直接用环境变量启动生产持久化的最小示例：
 
 ```env
 DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market
@@ -166,31 +212,69 @@ SITE_NAME=AstrBot Community Plugins
 SITE_ICON_URL=/logo.webp
 SITE_SUBTITLE=全新社区插件市场
 SITE_DESCRIPTION=发现、评价和提交 AstrBot 插件。
-GITHUB_LOGIN_ENABLED=false
-PUBLIC_LOGIN_ENABLED=true
-MARKET_SUBMISSIONS_ENABLED=true
-MARKET_COMMENTS_ENABLED=true
-MARKET_LIKES_ENABLED=true
 EMAIL_PROVIDER=disabled
 ```
 
+### 前端环境变量
+
+定义在 `apps/market-web/.env.example`：
+
+| 变量 | 说明 |
+|---|---|
+| `VITE_BASE_URL` | 站点公开基础 URL。留空时使用当前域名；构建时若已设置还会生成 `sitemap.xml` 与 `robots.txt` |
+| `VITE_API_BASE_URL` | API 服务器地址（优先级最高）。开发态前后端分端口时需要；生产同源部署通常留空 |
+| `VITE_COMMUNITY_REPO_URL` | 页脚展示的社区仓库链接 |
+
 ## 身份与角色
 
-- 首次启动向导注册内部核心管理员（core admin），用于配置 GitHub OAuth 和高级管理项。
-- 核心管理员可以授予或撤销管理员，发布公告。
-- 普通管理员可以下架/上架插件，删除评论，禁言用户，处理插件审核。
-- 插件所有者经过 GitHub 仓库所有权验证后，可编辑自己的插件元数据。
+| 角色 | 能力 |
+|---|---|
+| **核心管理员**（core_admin） | 首次向导注册的内部账号；管理系统设置、管理员队伍、内部用户、发布公告 |
+| **普通管理员**（admin） | 审核上架/下架插件、删除评论、禁言用户、处理审核、刷新任意插件元数据 |
+| **插件所有者** | 经 GitHub 仓库所有权验证后，编辑自有插件元数据、申请上架、自主下架、手动刷新 |
+| **普通用户**（user） | 浏览、提交插件、评论、点赞；管理个人 API Key 与通知偏好 |
 
-## 集成说明
+GitHub 用户不会自动成为核心管理员；受信任组织成员（`GITHUB_ADMIN_ORG`）登录后可自动提权为 admin。已登录的内部管理员可在个人设置绑定 GitHub，绑定时会将该 GitHub 账号名下的插件、评论与提交记录合并到当前管理员账号。权限检查函数位于 `apps/api/app/auth.py`，详见 [docs/security.md](docs/security.md)。
 
-未来的 AstrBot WebUI 插件将通过 API key 调用公开 API。市场网站支持内部核心管理员登录和可配置的 GitHub OAuth 登录；插件通过网页表单提交，不走 GitHub Issues。
+## AstrBot 集成
 
-邮件服务参考 Cloudflare Email Service 的 REST API：当 `EMAIL_PROVIDER=cloudflare` 时，后端使用 `POST /accounts/{account_id}/email/sending/send` 发送站点邮件；也可切换到 SMTP。
-
-AstrBot 本身可将此市场作为自定义插件源。在 AstrBot WebUI 中添加：
+AstrBot 可将本市场作为自定义插件源。在 AstrBot WebUI 中添加：
 
 ```text
 https://your-market-domain/plugins.json
 ```
 
-数据格式兼容 AstrBot 当前的自定义仓库格式：以插件名为键的 JSON 对象，包含 `name`、`display_name`、`desc`、`author`、`repo`、`tags`、`version`、`logo`、`stars`、`updated_at`、`download_url`、`astrbot_version`、`category` 和 `support_platforms`。API 同时提供 `/plugins-md5.json` 用于 AstrBot 的源缓存校验。
+数据格式兼容 AstrBot 自定义仓库格式：以插件名为键的 JSON 对象，包含 `name`、`display_name`、`desc`、`author`、`repo`、`tags`、`version`、`logo`、`stars`、`updated_at`、`download_url`、`astrbot_version`、`category`、`support_platforms`。`/plugins-md5.json` 提供 feed 的 MD5 摘要供 AstrBot 源缓存校验。`/v1/astrbot/plugins(.json|-md5.json)` 是带 `v1` 前缀的等价端点。
+
+未来的 AstrBot WebUI 插件将通过 API Key 消费本 API，不应在本地重复存储市场状态。
+
+## 开发指引
+
+```bash
+# 后端
+cd apps/api
+uv sync
+uv run uvicorn app.main:app --reload
+uv run pytest
+
+# 前端
+cd apps/market-web
+npm install
+npm run dev      # Vite 开发服务器
+npm run build    # 生产构建
+```
+
+安装推送前的 Ruff hook：
+
+```bash
+uv sync --project apps/api
+uv run --project apps/api --directory apps/api pre-commit install --hook-type pre-push
+```
+
+- Python 3.11+，4 空格缩进，公共 helper 加类型注解，单一职责的小函数。
+- 插件 ID 遵循 `astrbot_plugin_<name>` 模式；路由统一在 `/v1/*`，admin 与 core_admin 动作使用显式路径。
+- 测试位于 `apps/api/tests/`，基于 pytest + FastAPI `TestClient`，覆盖角色检查、登录/会话、提交流程、所有权校验、审核与失败路径。
+
+## 许可
+
+详见 [LICENSE](LICENSE)。

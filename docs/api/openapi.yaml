@@ -2,201 +2,807 @@ openapi: 3.0.3
 info:
   title: AstrBot Community Plugins API
   version: 0.1.0
-  description: FastAPI contract for the Vue market, future AstrBot WebUI plugin, PostgreSQL storage, and Redis-backed session/cache infrastructure.
+  description: >
+    AstrBot 社区插件市场 FastAPI 契约概览。本文件是端点级摘要（路径、方法、鉴权、简述），
+
+
+    **权威契约以 FastAPI 运行时自动生成为准**：部署后访问 `/openapi.json` 获取完整
+    OpenAPI 文档（含请求体与响应 schema），或访问 `/docs/rest`（Vue API Reference）、
+    `/docs`（Swagger UI）/ `/redoc` 交互式浏览。本摘要与代码可能存在滞后，以运行时输出为准。
+
+    存储为 PostgreSQL（业务数据），Redis（登录会话）。前端 Vue SPA 与未来的 AstrBot
+    WebUI 插件均消费此 API。
 servers:
   - url: http://127.0.0.1:8787
+    description: 本地 / 单服务部署
+tags:
+  - name: Public
+    description: 公开端点（网站、插件源、公告、setup、健康检查）
+  - name: AstrBot Source
+    description: AstrBot 自定义插件源 feed
+  - name: Auth
+    description: 登录、OAuth、注销、会话
+  - name: Me
+    description: 当前用户资料、插件、个人 API Key、通知
+  - name: Plugins
+    description: 插件详情、元数据编辑、上架/下架、点赞、评论
+  - name: Admin
+    description: 管理员（admin）审核与社区管理
+  - name: Core
+    description: 核心管理员（core_admin）系统设置与用户/管理员管理
+  - name: API Keys
+    description: 全局与个人 API Key
 paths:
   /health:
     get:
+      tags: [Public]
+      summary: 健康检查
+      description: 返回 setup 状态、PostgreSQL/Redis 是否已配置。
       responses:
         "200":
           description: ok
-  /v1/setup/status:
-    get:
-      responses:
-        "200":
-          description: Setup state
-  /v1/setup:
-    post:
-      responses:
-        "200":
-          description: Setup verified, runtime config saved, and PostgreSQL/Redis storage activated
-        "400":
-          description: PostgreSQL or Redis initialization failed
   /v1/site:
     get:
+      tags: [Public]
+      summary: 公开站点配置
+      description: 站点名称、图标、认证开关与市场功能开关。
       responses:
         "200":
-          description: Public site name and icon URL
-  /v1/me:
+          description: 站点配置
+  /v1/setup/status:
     get:
+      tags: [Public]
+      summary: setup 状态（公开）
+      description: 仅首次设置前可用，返回脱敏状态。
       responses:
         "200":
-          description: Current user
-        "401":
-          description: Not authenticated
-  /v1/me/api-keys:
-    get:
-      responses:
-        "200":
-          description: Current user's API key metadata list
-        "401":
-          description: Not authenticated
-    post:
-      responses:
-        "201":
-          description: Personal API key issued. The raw key is returned only once.
-        "401":
-          description: Not authenticated
-  /v1/me/api-keys/{id}:
-    delete:
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Personal API key deleted
-        "401":
-          description: Not authenticated
-  /v1/auth/github/login:
-    get:
-      responses:
-        "302":
-          description: Redirect to GitHub OAuth
-        "501":
-          description: OAuth not configured
-  /v1/auth/github/callback:
-    get:
-      responses:
-        "302":
-          description: GitHub OAuth callback accepted and browser redirected to the market site
-        "400":
-          description: Invalid OAuth state or missing code
-  /v1/plugins:
-    get:
-      responses:
-        "200":
-          description: Plugin list
-  /plugins.json:
-    get:
-      responses:
-        "200":
-          description: AstrBot custom plugin source feed keyed by plugin name
-  /plugins-md5.json:
-    get:
-      responses:
-        "200":
-          description: MD5 digest for /plugins.json used by AstrBot cache validation
-  /v1/astrbot/plugins.json:
-    get:
-      responses:
-        "200":
-          description: Versioned AstrBot custom plugin source feed
-  /v1/astrbot/plugins-md5.json:
-    get:
-      responses:
-        "200":
-          description: Versioned MD5 digest for the AstrBot custom plugin source feed
-  /v1/plugins/submissions:
-    post:
-      responses:
-        "201":
-          description: Plugin submission
-    get:
-      responses:
-        "200":
-          description: Submission queue
-  /v1/plugins/{id}:
-    get:
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Plugin detail
+          description: setup 状态
         "404":
-          description: Not found
-    patch:
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema:
-            type: string
+          description: 已完成初始化，端点已关闭
+  /v1/setup:
+    post:
+      tags: [Public]
+      summary: 执行首次初始化
+      description: >
+        仅 setup_required 时可用。创建/确认 PostgreSQL 目标库、初始化 schema、验证 Redis、
+        写入核心管理员；全部成功后写入 .env 并进程内切换到 PgRedis 存储。
       responses:
         "200":
-          description: Plugin metadata updated
-  /v1/plugins/{id}/like:
-    post:
-      responses:
-        "200":
-          description: Like added
-  /v1/plugins/{id}/unlike:
-    post:
-      responses:
-        "200":
-          description: Like removed
-  /v1/plugins/{id}/comments:
-    post:
-      responses:
-        "201":
-          description: Comment created
-  /v1/admin/plugins/{id}/list:
-    post:
-      responses:
-        "200":
-          description: Plugin listed
-  /v1/admin/plugins/{id}/unlist:
-    post:
-      responses:
-        "200":
-          description: Plugin unlisted
-  /v1/admin/comments/{id}:
-    delete:
-      responses:
-        "200":
-          description: Comment deleted
-  /v1/admin/users/{id}/mute:
-    post:
-      responses:
-        "200":
-          description: User muted
-  /v1/core/admins/{id}:
-    post:
-      responses:
-        "200":
-          description: Admin role updated
-  /v1/core/announcements:
-    post:
-      responses:
-        "201":
-          description: Announcement created
+          description: 初始化成功，运行时配置已保存，PG/Redis 存储已激活
+        "400":
+          description: PostgreSQL 或 Redis 初始化失败（不写入 .env）
+        "404":
+          description: 已完成初始化，端点已关闭
   /v1/announcements:
     get:
+      tags: [Public]
+      summary: 公告列表
       responses:
         "200":
-          description: Announcement list
-  /v1/api-keys:
+          description: 公告数组
+  /v1/plugins:
+    get:
+      tags: [Public]
+      summary: 已上架插件列表
+      description: 仅返回 status=listed 的插件，支持搜索/筛选/排序/分页。
+      responses:
+        "200":
+          description: 插件列表
+  /v1/plugins/{id}:
+    get:
+      tags: [Plugins]
+      summary: 插件详情
+      description: 含评论树、点赞状态。
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 插件详情
+        "404":
+          description: 未找到
+    patch:
+      tags: [Plugins]
+      summary: 编辑插件元数据
+      description: 插件所有者或 admin 可编辑。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 元数据已更新
+        "403":
+          description: 无编辑权限
+        "404":
+          description: 未找到
+  /v1/plugins/submissions:
+    get:
+      tags: [Admin]
+      summary: 待审核提交队列
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 提交队列
+        "403":
+          description: 需要 admin
     post:
+      tags: [Plugins]
+      summary: 提交新插件
+      description: 进入审核队列；PLUGIN_AUTO_APPROVE_ENABLED 时直接上架。
+      security:
+        - cookieAuth: []
       responses:
         "201":
-          description: API key issued
+          description: 提交已创建
+        "400":
+          description: 校验失败（插件名/仓库 URL/分类/标签上限）
+        "403":
+          description: 市场提交已关闭或未登录
+  /v1/plugins/{id}/request-list:
+    post:
+      tags: [Plugins]
+      summary: 申请上架
+      description: 插件所有者将 pending 插件提交审核。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 已加入审核
+        "403":
+          description: 非所有者
+  /v1/plugins/{id}/unlist:
+    post:
+      tags: [Plugins]
+      summary: 自主下架
+      description: 插件所有者下架自己的插件。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 已下架
+        "403":
+          description: 非所有者
+  /v1/plugins/{id}/refresh-github:
+    post:
+      tags: [Plugins]
+      summary: 手动刷新 GitHub 元数据
+      description: 插件所有者可带临时 token 触发刷新。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 元数据已刷新
+        "429":
+          description: GitHub rate limit
+  /v1/plugins/{id}/like:
+    post:
+      tags: [Plugins]
+      summary: 点赞插件
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 已点赞
+        "403":
+          description: 点赞功能已关闭
+  /v1/plugins/{id}/unlike:
+    post:
+      tags: [Plugins]
+      summary: 取消点赞插件
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 已取消点赞
+  /v1/plugins/{id}/comments:
+    post:
+      tags: [Plugins]
+      summary: 添加评论
+      description: 支持 parent_id 嵌套回复。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "201":
+          description: 评论已创建
+        "403":
+          description: 评论功能已关闭
+  /v1/plugins/{id}/reindex:
+    post:
+      tags: [Plugins]
+      summary: 重建索引（占位）
+      description: 当前返回 ok 占位。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: ok
+  /v1/comments/{id}/like:
+    post:
+      tags: [Plugins]
+      summary: 点赞评论
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CommentId"
+      responses:
+        "200":
+          description: 已点赞
+  /v1/comments/{id}/unlike:
+    post:
+      tags: [Plugins]
+      summary: 取消点赞评论
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CommentId"
+      responses:
+        "200":
+          description: 已取消点赞
+  /v1/comments/{id}:
+    delete:
+      tags: [Plugins]
+      summary: 删除评论
+      description: 评论作者或 admin；软删除，删除根评论隐藏回复。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CommentId"
+      responses:
+        "200":
+          description: 评论已删除
+        "403":
+          description: 非作者且非 admin
+  /v1/auth/internal/login:
+    post:
+      tags: [Auth]
+      summary: 内部账号登录
+      description: 用户名 + 密码（核心管理员与内部用户）。
+      responses:
+        "200":
+          description: 登录成功，设置 session cookie
+        "401":
+          description: 凭证无效
+        "403":
+          description: 公开登录已关闭
+  /v1/auth/github/login:
     get:
+      tags: [Auth]
+      summary: 跳转 GitHub OAuth
+      description: 需 GITHUB_LOGIN_ENABLED=true。
+      responses:
+        "302":
+          description: 重定向到 GitHub 授权页
+        "501":
+          description: OAuth 未配置
+  /v1/auth/github/callback:
+    get:
+      tags: [Auth]
+      summary: GitHub OAuth 回调
+      description: 交换 token、创建/关联用户、建立 session；GITHUB_ADMIN_ORG 成员自动提权。
+      responses:
+        "302":
+          description: 回调成功，重定向回站点
+        "400":
+          description: OAuth state 无效或缺少 code
+  /v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: 注销
+      description: 清除 cookie 与 Redis session。
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 已注销
+  /v1/auth/session:
+    get:
+      tags: [Auth]
+      summary: 校验当前 session
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: session 有效
+        "401":
+          description: 未认证
+  /v1/auth/debug-login:
+    get:
+      tags: [Auth]
+      summary: 开发调试登录
+      description: 仅 ENABLE_DEV_AUTH=true；通过 X-Dev-GitHub-Login 头建用户。生产必须关闭。
+      responses:
+        "200":
+          description: 调试登录成功
+        "501":
+          description: 开发认证未启用
+  /v1/admin/check:
+    get:
+      tags: [Admin]
+      summary: 当前用户权限位
+      description: core_admin / admin / can_* 标志。
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 权限位
+        "401":
+          description: 未认证
+  /v1/permissions:
+    get:
+      tags: [Admin]
+      summary: 当前用户功能权限
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 功能权限
+        "401":
+          description: 未认证
+  /v1/me:
+    get:
+      tags: [Me]
+      summary: 当前用户信息
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 当前用户
+        "401":
+          description: 未认证
+  /v1/me/profile:
+    patch:
+      tags: [Me]
+      summary: 更新个人资料
+      description: 头像、github_token、通知偏好（notify_replies/notify_likes）。
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 资料已更新
+        "401":
+          description: 未认证
+  /v1/me/plugins:
+    get:
+      tags: [Me]
+      summary: 我的插件
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 当前用户拥有的插件
+        "401":
+          description: 未认证
+  /v1/me/api-keys:
+    get:
+      tags: [API Keys]
+      summary: 个人 API Key 列表
+      description: 仅返回名称、scopes、创建时间，不含明文。
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 个人 Key 元数据列表
+        "401":
+          description: 未认证
+    post:
+      tags: [API Keys]
+      summary: 创建个人 API Key
+      description: "sk-ah- 前缀，原文仅本次返回。"
+      security:
+        - cookieAuth: []
+      responses:
+        "201":
+          description: 个人 Key 已颁发（明文仅返回一次）
+        "401":
+          description: 未认证
+  /v1/me/api-keys/{id}:
+    delete:
+      tags: [API Keys]
+      summary: 删除个人 API Key
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ApiKeyId"
+      responses:
+        "200":
+          description: 已删除
+        "401":
+          description: 未认证
+  /v1/me/notifications:
+    get:
+      tags: [Me]
+      summary: 我的通知列表（分页）
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 通知列表
+        "401":
+          description: 未认证
+    delete:
+      tags: [Me]
+      summary: 清空全部通知
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 已清空
+        "401":
+          description: 未认证
+  /v1/me/notifications/unread-count:
+    get:
+      tags: [Me]
+      summary: 未读通知数
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 未读计数
+        "401":
+          description: 未认证
+  /v1/me/notifications/read:
+    post:
+      tags: [Me]
+      summary: 全部标记已读
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 已标记
+        "401":
+          description: 未认证
+  /v1/me/notifications/delete:
+    post:
+      tags: [Me]
+      summary: 批量删除通知
+      description: 按 id 列表批量删除（仅限当前用户的通知）。
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 已删除
+        "401":
+          description: 未认证
+  /v1/me/notifications/{id}:
+    delete:
+      tags: [Me]
+      summary: 删除单条通知
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/NotificationId"
+      responses:
+        "200":
+          description: 已删除
+        "401":
+          description: 未认证
+  /v1/admin/summary:
+    get:
+      tags: [Admin]
+      summary: 管理后台统计摘要
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 统计摘要
+        "403":
+          description: 需要 admin
+  /v1/admin/plugins:
+    get:
+      tags: [Admin]
+      summary: 全部插件（含 unlisted）
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 插件列表
+        "403":
+          description: 需要 admin
+  /v1/admin/plugins/{id}/list:
+    post:
+      tags: [Admin]
+      summary: 审核通过上架
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 已上架
+        "403":
+          description: 需要 admin
+  /v1/admin/plugins/{id}/unlist:
+    post:
+      tags: [Admin]
+      summary: 管理员下架插件
+      description: 需填写 reason，并通知所有者。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "200":
+          description: 已下架并通知所有者
+        "403":
+          description: 需要 admin
+  /v1/admin/plugins/{id}/refresh-github:
+    post:
+      tags: [Admin]
+      summary: 异步刷新 GitHub 元数据
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PluginId"
+      responses:
+        "202":
+          description: 已加入异步刷新队列
+        "403":
+          description: 需要 admin
+  /v1/admin/comments/{id}:
+    delete:
+      tags: [Admin]
+      summary: 管理员删除评论
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CommentId"
+      responses:
+        "200":
+          description: 评论已删除
+        "403":
+          description: 需要 admin
+  /v1/admin/users:
+    get:
+      tags: [Admin]
+      summary: 用户列表
+      description: 列表对 github_token 等敏感字段脱敏。
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 用户列表
+        "403":
+          description: 需要 admin
+  /v1/admin/users/{id}/mute:
+    post:
+      tags: [Admin]
+      summary: 禁言用户
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: 已禁言
+        "403":
+          description: 需要 admin
+  /v1/admin/users/{id}/unmute:
+    post:
+      tags: [Admin]
+      summary: 解除禁言
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: 已解禁
+        "403":
+          description: 需要 admin
+  /v1/admin/settings:
+    get:
+      tags: [Core]
+      summary: 读取系统设置（脱敏）
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 系统设置（敏感字段遮蔽）
+        "403":
+          description: 需要 core_admin
+    put:
+      tags: [Core]
+      summary: 更新系统设置
+      description: "热更新站点/OAuth/市场策略/邮件；遮蔽值保留已有密钥。"
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 设置已保存并热更新
+        "403":
+          description: 需要 core_admin
+  /v1/admin/settings/email/test:
+    post:
+      tags: [Core]
+      summary: 发送测试邮件
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 测试邮件已发送
+        "400":
+          description: 邮件未配置或发送失败
+        "403":
+          description: 需要 core_admin
+  /v1/admin/setup/status:
+    get:
+      tags: [Core]
+      summary: setup 状态（管理员，含已保存脱敏配置）
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: setup 状态
+        "403":
+          description: 需要 core_admin
+  /v1/core/users:
+    post:
+      tags: [Core]
+      summary: 创建内部用户
+      security:
+        - cookieAuth: []
+      responses:
+        "201":
+          description: 内部用户已创建
+        "403":
+          description: 需要 core_admin
+  /v1/core/users/{id}:
+    delete:
+      tags: [Core]
+      summary: 删除内部用户
+      description: 不删除 core_admin；不连带删除其插件。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: 已删除
+        "403":
+          description: 需要 core_admin
+  /v1/core/admins/{id}:
+    post:
+      tags: [Core]
+      summary: 修改用户角色
+      description: admin ↔ user 切换。
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: 角色已更新
+        "403":
+          description: 需要 core_admin
+  /v1/core/announcements:
+    post:
+      tags: [Core]
+      summary: 发布公告
+      security:
+        - cookieAuth: []
+      responses:
+        "201":
+          description: 公告已创建
+        "403":
+          description: 需要 core_admin
+  /v1/api-keys:
+    post:
+      tags: [API Keys]
+      summary: 颁发全局 API Key
+      description: "sk-ah- 前缀，admin 操作；原文仅本次返回。"
+      security:
+        - cookieAuth: []
+      responses:
+        "201":
+          description: 全局 Key 已颁发
+        "403":
+          description: 需要 admin
+    get:
+      tags: [API Keys]
+      summary: 列出全局 API Key 元数据
       security:
         - bearerAuth: []
       responses:
         "200":
-          description: API key metadata list
+          description: Key 元数据列表
         "401":
-          description: Missing or invalid API key
+          description: 缺失或无效 API Key
+  /plugins.json:
+    get:
+      tags: [AstrBot Source]
+      summary: AstrBot 插件源 feed
+      description: 以插件名为键，兼容 AstrBot 自定义仓库格式。
+      responses:
+        "200":
+          description: 插件源 JSON
+  /plugins-md5.json:
+    get:
+      tags: [AstrBot Source]
+      summary: 插件源 MD5 摘要
+      description: 供 AstrBot 源缓存校验。
+      responses:
+        "200":
+          description: MD5 摘要
+  /v1/astrbot/plugins:
+    get:
+      tags: [AstrBot Source]
+      summary: 插件源 feed（v1 前缀别名）
+      responses:
+        "200":
+          description: 插件源 JSON
+  /v1/astrbot/plugins.json:
+    get:
+      tags: [AstrBot Source]
+      summary: 插件源 feed（v1 前缀）
+      responses:
+        "200":
+          description: 插件源 JSON
+  /v1/astrbot/plugins-md5.json:
+    get:
+      tags: [AstrBot Source]
+      summary: 插件源 MD5 摘要（v1 前缀）
+      responses:
+        "200":
+          description: MD5 摘要
 components:
+  parameters:
+    PluginId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+      description: 插件 ID
+    CommentId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+      description: 评论 ID
+    UserId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+      description: 用户 ID
+    ApiKeyId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+      description: API Key ID
+    NotificationId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+      description: 通知 ID
   securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: astrbot_market_session
+      description: 登录会话 cookie（内部账号或 GitHub OAuth 建立）。
     bearerAuth:
       type: http
       scheme: bearer
+      description: "API Key（sk-ah- 前缀或 MARKET_API_KEYS 静态 Key），通过 Authorization: Bearer <key> 发送。"

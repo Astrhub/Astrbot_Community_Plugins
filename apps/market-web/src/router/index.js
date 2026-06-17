@@ -8,6 +8,7 @@ const PersonalSettings = () => import('../views/PersonalSettings.vue')
 const Notifications = () => import('../views/Notifications.vue')
 const AdminPlugins = () => import('../views/AdminPlugins.vue')
 const AdminLogin = () => import('../views/AdminLogin.vue')
+const RestDocs = () => import('../views/RestDocs.vue')
 const NotFound = () => import('../views/NotFound.vue')
 const routes = [
   {
@@ -53,6 +54,11 @@ const routes = [
     path: '/admin/plugins',
     name: 'AdminPlugins',
     component: AdminPlugins
+  },
+  {
+    path: '/docs/rest',
+    name: 'RestDocs',
+    component: RestDocs
   },
   {
     path: '/:pathMatch(.*)*',
