@@ -12,6 +12,20 @@
       :category-options="categoryOptions"
       :total-pages="totalPages"
     />
+    <div class="mobile-filter-toolbar">
+      <search-toolbar
+        v-model:search-query="searchQuery"
+        v-model:selected-tag="selectedTag"
+        v-model:current-page="currentPage"
+        v-model:sort-by="sortBy"
+        v-model:sort-direction="sortDirection"
+        v-model:fuzzy-search-enabled="fuzzySearchEnabled"
+        :tag-options="tagOptions"
+        :compact="true"
+        :mobile="true"
+        :show-category-filter="false"
+      />
+    </div>
     <section v-if="announcements.length" class="announcements" aria-label="站点公告">
       <article
         v-for="announcement in visibleAnnouncements"
@@ -26,14 +40,6 @@
         <p>{{ announcement.body }}</p>
       </article>
     </section>
-    <div class="top-pagination-wrapper">
-      <app-pagination
-        v-if="totalPages > 1"
-        v-model="currentPage"
-        :total-pages="totalPages"
-        class="top-pagination"
-      />
-    </div>
 
     <!-- 随机排序时的工具条 -->
     <div v-if="sortBy === 'random'" class="grid-toolbar">
@@ -109,6 +115,7 @@ import AppHeader from '../components/AppHeader.vue'
 import PluginCard from '../components/PluginCard.vue'
 import AppPagination from '../components/AppPagination.vue'
 import AppFooter from '../components/AppFooter.vue'
+import SearchToolbar from '../components/SearchToolbar.vue'
 import { normalizePluginCategory, usePluginStore } from '../stores/plugins'
 
 const store = usePluginStore()
@@ -253,12 +260,15 @@ function normalizeQuery(query) {
   flex-direction: column;
 }
 
-.top-pagination-wrapper,
 .bottom-pagination-wrapper {
   min-height: 48px; 
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.mobile-filter-toolbar {
+  display: none;
 }
 
 .announcements {
@@ -363,6 +373,14 @@ function normalizeQuery(query) {
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 18px;
     padding: 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  .mobile-filter-toolbar {
+    display: block;
+    width: min(100% - 28px, 720px);
+    margin: 10px auto 0;
   }
 }
 

@@ -149,32 +149,6 @@
                     <n-form-item label="授权范围" path="github.scope">
                       <n-input v-model:value="formData.github.scope" placeholder="read:user user:email read:org" />
                     </n-form-item>
-                    <n-form-item label="GitHub API Token（兜底）" path="github.api_token">
-                      <n-input
-                        v-model:value="formData.github.api_token"
-                        type="password"
-                        show-password-on="click"
-                        :placeholder="formData.github.api_token_configured ? '留空或保持遮蔽值表示不更新' : '只读 Token，用于服务端同步兜底'"
-                      />
-                    </n-form-item>
-                  </div>
-                  <div class="switch-grid">
-                    <setting-switch
-                      v-model="formData.github.metadata_sync_enabled"
-                      label="元数据自动同步"
-                      enabled="按间隔同步"
-                      disabled="暂停同步"
-                    />
-                  </div>
-                  <div class="form-grid compact-grid">
-                    <n-form-item label="默认同步间隔（秒）" path="github.metadata_sync_interval_seconds">
-                      <n-input-number
-                        v-model:value="formData.github.metadata_sync_interval_seconds"
-                        :min="300"
-                        :max="86400"
-                        :step="300"
-                      />
-                    </n-form-item>
                   </div>
                 </section>
               </div>
@@ -196,6 +170,42 @@
                   <div class="form-grid compact-grid">
                     <n-form-item label="最多标签数" path="market.max_plugin_tags">
                       <n-input-number v-model:value="formData.market.max_plugin_tags" :min="0" :max="50" />
+                    </n-form-item>
+                  </div>
+                </section>
+
+                <section class="settings-section">
+                  <div class="section-title">
+                    <h2>GitHub 元数据同步</h2>
+                    <p>用于插件 Star、更新时间、metadata.yml 和 logo 的后台同步。多个 Token 会轮询使用。</p>
+                  </div>
+                  <div class="switch-grid">
+                    <setting-switch
+                      v-model="formData.market.metadata_sync_enabled"
+                      label="元数据自动同步"
+                      enabled="按间隔同步"
+                      disabled="暂停同步"
+                    />
+                  </div>
+                  <div class="form-grid">
+                    <n-form-item label="GitHub API Token（轮询）" path="market.api_token" class="form-row-full">
+                      <n-input
+                        v-model:value="formData.market.api_token"
+                        type="textarea"
+                        :autosize="{ minRows: 3, maxRows: 7 }"
+                        :placeholder="formData.market.api_token_configured ? '已配置，留空或保持遮蔽值表示不更新；每行一个 Token，也可用逗号分隔' : '每行一个只读 Token，也可用逗号分隔'"
+                      />
+                      <template #feedback>
+                        {{ formData.market.api_token_configured ? '当前已配置系统 Token 池' : '当前未配置系统 Token，未登录用户同步会使用 GitHub 公共限额' }}
+                      </template>
+                    </n-form-item>
+                    <n-form-item label="默认同步间隔（秒）" path="market.metadata_sync_interval_seconds">
+                      <n-input-number
+                        v-model:value="formData.market.metadata_sync_interval_seconds"
+                        :min="300"
+                        :max="86400"
+                        :step="300"
+                      />
                     </n-form-item>
                   </div>
                 </section>
@@ -558,18 +568,18 @@ function createSettingsForm() {
       client_secret_configured: false,
       callback_url: '',
       scope: 'read:user user:email read:org',
-      admin_org: '',
-      api_token: '',
-      api_token_configured: false,
-      metadata_sync_enabled: true,
-      metadata_sync_interval_seconds: 3600
+      admin_org: ''
     },
     market: {
       submissions_enabled: true,
       comments_enabled: true,
       likes_enabled: true,
       plugin_auto_approve_enabled: false,
-      max_plugin_tags: 8
+      max_plugin_tags: 8,
+      api_token: '',
+      api_token_configured: false,
+      metadata_sync_enabled: true,
+      metadata_sync_interval_seconds: 3600
     },
     email: {
       provider: 'disabled',
@@ -599,6 +609,16 @@ function applySettings(config = {}) {
   Object.assign(formData.auth, config.auth || {})
   Object.assign(formData.github, config.github || {})
   Object.assign(formData.market, config.market || {})
+  if (!config.market?.api_token && config.github?.api_token) {
+    formData.market.api_token = config.github.api_token
+    formData.market.api_token_configured = Boolean(config.github.api_token_configured)
+  }
+  if (!config.market?.metadata_sync_interval_seconds && config.github?.metadata_sync_interval_seconds) {
+    formData.market.metadata_sync_interval_seconds = config.github.metadata_sync_interval_seconds
+  }
+  if (config.market?.metadata_sync_enabled === undefined && config.github?.metadata_sync_enabled !== undefined) {
+    formData.market.metadata_sync_enabled = config.github.metadata_sync_enabled
+  }
   Object.assign(formData.email, config.email || {})
   Object.assign(formData.email.smtp, config.email?.smtp || {})
   Object.assign(formData.email.cloudflare, config.email?.cloudflare || {})
@@ -606,7 +626,7 @@ function applySettings(config = {}) {
 
 function normalizeNumberFields() {
   formData.market.max_plugin_tags = Number(formData.market.max_plugin_tags || 0)
-  formData.github.metadata_sync_interval_seconds = Number(formData.github.metadata_sync_interval_seconds || 3600)
+  formData.market.metadata_sync_interval_seconds = Number(formData.market.metadata_sync_interval_seconds || 3600)
   formData.email.smtp.port = Number(formData.email.smtp.port || 587)
   formData.email.daily_limit = Number(formData.email.daily_limit || 0)
   formData.email.verification_daily_limit_per_user = Number(formData.email.verification_daily_limit_per_user || 0)

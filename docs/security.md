@@ -25,6 +25,7 @@
 API key 用于机器客户端（如未来的 AstrBot WebUI 插件）。Key 应具备作用域（scopes）、可撤销，并记录操作日志。使用时通过 `Authorization: Bearer <key>` 头发送。
 
 API key 可通过环境变量 `MARKET_API_KEYS` 静态配置，也可通过 `/v1/api-keys` 端点动态创建（需管理员权限）。格式：`名称:密钥:scope1|scope2`。
+已登录用户可在个人设置页或通过 `/v1/me/api-keys` 生成自己的访问密钥，动态生成的密钥使用 `sk-ah-` 前缀，原文只在创建响应中返回一次，后续列表仅返回名称、权限和创建时间。
 
 ## 数据安全
 

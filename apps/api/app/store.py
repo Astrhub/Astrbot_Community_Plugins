@@ -16,6 +16,10 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def generate_access_key() -> str:
+    return f"sk-ah-{secrets.token_hex(24)}"
+
+
 def serialize_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -203,6 +207,13 @@ class InMemoryMarketStore:
 
     def list_api_keys(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["apiKeys"])
+
+    def list_api_keys_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            deepcopy(api_key)
+            for api_key in reversed(self.state["apiKeys"])
+            if api_key.get("user_id") == user_id
+        ]
 
     def list_options(self) -> dict[str, str]:
         return deepcopy(self.state["options"])
@@ -693,11 +704,20 @@ class InMemoryMarketStore:
             "name": name,
             "user_id": user_id,
             "scopes": scopes or ["market:read"],
-            "key": f"mk_{secrets.token_urlsafe(24)}",
+            "key": generate_access_key(),
             "created_at": utc_now(),
         }
         self.state["apiKeys"].append(api_key)
         return deepcopy(api_key)
+
+    def delete_api_key(self, user_id: str, key_id: str) -> int:
+        before = len(self.state["apiKeys"])
+        self.state["apiKeys"] = [
+            api_key
+            for api_key in self.state["apiKeys"]
+            if not (api_key.get("user_id") == user_id and api_key.get("id") == key_id)
+        ]
+        return before - len(self.state["apiKeys"])
 
     def create_session(self, user_id: str, token: str | None = None) -> dict[str, Any]:
         session = {
@@ -2177,13 +2197,28 @@ class PgRedisMarketStore(InMemoryMarketStore):
             name,
             user_id,
             scopes or ["market:read"],
-            f"mk_{secrets.token_urlsafe(24)}",
+            generate_access_key(),
         )
         return self._api_key_from_record(row)
 
     async def list_api_keys(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch("SELECT * FROM market_api_keys ORDER BY created_at DESC")
         return [self._api_key_from_record(row) for row in rows]
+
+    async def list_api_keys_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            "SELECT * FROM market_api_keys WHERE user_id = $1 ORDER BY created_at DESC",
+            user_id,
+        )
+        return [self._api_key_from_record(row) for row in rows]
+
+    async def delete_api_key(self, user_id: str, key_id: str) -> int:
+        result = await self._pool().execute(
+            "DELETE FROM market_api_keys WHERE id = $1 AND user_id = $2",
+            key_id,
+            user_id,
+        )
+        return int(result.rsplit(" ", 1)[-1])
 
     async def list_options(self) -> dict[str, str]:
         rows = await self._pool().fetch("SELECT option_key, option_value FROM market_options")

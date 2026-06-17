@@ -134,9 +134,6 @@ def system_settings_payload() -> dict[str, object]:
             "callback_url": "https://market.example.com/v1/auth/github/callback",
             "scope": "read:user user:email read:org",
             "admin_org": "Astrhub",
-            "api_token": "system-github-token",
-            "metadata_sync_enabled": True,
-            "metadata_sync_interval_seconds": 1800,
         },
         "market": {
             "submissions_enabled": True,
@@ -144,6 +141,9 @@ def system_settings_payload() -> dict[str, object]:
             "likes_enabled": True,
             "plugin_auto_approve_enabled": False,
             "max_plugin_tags": 4,
+            "api_token": "system-github-token",
+            "metadata_sync_enabled": True,
+            "metadata_sync_interval_seconds": 1800,
         },
         "email": {
             "provider": "cloudflare",
@@ -252,6 +252,64 @@ def test_user_notification_preferences_default_on_and_update() -> None:
     stored = client.app.state.store.get_user_by_id(login.json()["user"]["id"])
     assert stored["notify_replies"] is False
     assert stored["notify_likes"] is False
+
+
+def test_user_can_manage_personal_api_keys() -> None:
+    client = make_client()
+    client.get("/v1/auth/debug-login?login=alice")
+
+    created = client.post(
+        "/v1/me/api-keys",
+        json={"name": "Plugin Sync", "scopes": ["market:read"]},
+    )
+
+    assert created.status_code == 201
+    api_key = created.json()
+    assert api_key["id"]
+    assert api_key["name"] == "Plugin Sync"
+    assert api_key["scopes"] == ["market:read"]
+    assert api_key["key"].startswith("sk-ah-")
+
+    listed = client.get("/v1/me/api-keys")
+    assert listed.status_code == 200
+    listed_key = listed.json()["items"][0]
+    assert listed_key["id"] == api_key["id"]
+    assert listed_key["name"] == "Plugin Sync"
+    assert listed_key["created_at"]
+    assert "key" not in listed_key
+
+    authenticated = client.get(
+        "/v1/api-keys",
+        headers={"authorization": f"Bearer {api_key['key']}"},
+    )
+    assert authenticated.status_code == 200
+
+    deleted = client.delete(f"/v1/me/api-keys/{api_key['id']}")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] == 1
+    assert client.get("/v1/me/api-keys").json()["items"] == []
+
+    expired = client.get(
+        "/v1/api-keys",
+        headers={"authorization": f"Bearer {api_key['key']}"},
+    )
+    assert expired.status_code == 401
+
+
+def test_admin_api_key_issue_uses_access_key_prefix() -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice")
+    client.app.state.store.update_user_role(login.json()["user"]["id"], Role.ADMIN.value)
+
+    response = client.post(
+        "/v1/api-keys",
+        json={"name": "Admin Client", "scopes": ["market:read", "market:write"]},
+    )
+
+    assert response.status_code == 201
+    api_key = response.json()
+    assert api_key["key"].startswith("sk-ah-")
+    assert api_key["scopes"] == ["market:read", "market:write"]
 
 
 def test_admin_user_listing_redacts_github_tokens() -> None:
@@ -1599,9 +1657,10 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert settings["site"]["name"] == "AstrHub"
     assert settings["github"]["client_secret"] == main_module.MASKED_SECRET
     assert settings["github"]["client_secret_configured"] is True
-    assert settings["github"]["api_token"] == main_module.MASKED_SECRET
-    assert settings["github"]["api_token_configured"] is True
-    assert settings["github"]["metadata_sync_interval_seconds"] == 1800
+    assert "api_token" not in settings["github"]
+    assert settings["market"]["api_token"] == main_module.MASKED_SECRET
+    assert settings["market"]["api_token_configured"] is True
+    assert settings["market"]["metadata_sync_interval_seconds"] == 1800
     assert settings["email"]["cloudflare"]["api_token"] == main_module.MASKED_SECRET
     assert settings["email"]["cloudflare"]["api_token_configured"] is True
     assert client.get("/v1/site").json()["market"]["max_plugin_tags"] == 4
@@ -1614,7 +1673,7 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
 
     masked_payload = system_settings_payload()
     masked_payload["github"]["client_secret"] = main_module.MASKED_SECRET
-    masked_payload["github"]["api_token"] = main_module.MASKED_SECRET
+    masked_payload["market"]["api_token"] = main_module.MASKED_SECRET
     masked_payload["email"]["cloudflare"]["api_token"] = main_module.MASKED_SECRET
     masked_payload["site"]["name"] = "AstrHub Updated"
     preserved = client.put("/v1/admin/settings", json=masked_payload)
@@ -1627,6 +1686,26 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert stored_options["SITE_NAME"] == "AstrHub Updated"
     assert stored_options["WEB_URL"] == "https://market.example.com"
     assert (tmp_path / ".env").read_text() == env_file_before
+
+
+def test_system_github_api_tokens_are_rotated() -> None:
+    settings = load_settings(
+        {
+            "GITHUB_API_TOKEN": "token-a\ntoken-b, token-c",
+        }
+    )
+    app = main_module.create_app(settings=settings, store=InMemoryMarketStore())
+
+    assert main_module.parse_github_api_tokens(settings.github_api_token) == [
+        "token-a",
+        "token-b",
+        "token-c",
+    ]
+    assert main_module.github_api_headers(settings=settings)["authorization"] == "Bearer token-a"
+    assert main_module.next_system_github_api_token(app, settings) == "token-a"
+    assert main_module.next_system_github_api_token(app, settings) == "token-b"
+    assert main_module.next_system_github_api_token(app, settings) == "token-c"
+    assert main_module.next_system_github_api_token(app, settings) == "token-a"
 
 
 def test_system_settings_reject_local_oauth_callback_when_enabled(tmp_path) -> None:
@@ -2246,6 +2325,13 @@ async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> No
         notifications = await store.list_notifications(alice["id"])
         assert notifications[0]["id"] == notification["id"]
         assert notifications[0]["metadata"]["reason"] == "Needs fixes"
+
+        api_key = await store.issue_api_key("Alice Client", alice["id"], ["market:read"])
+        assert api_key["key"].startswith("sk-ah-")
+        user_keys = await store.list_api_keys_for_user(alice["id"])
+        assert user_keys[0]["id"] == api_key["id"]
+        assert await store.delete_api_key(alice["id"], api_key["id"]) == 1
+        assert await store.list_api_keys_for_user(alice["id"]) == []
 
         session = await store.create_session(alice["id"])
         assert (await store.get_user_by_session(session["token"]))["github_login"] == "alice"

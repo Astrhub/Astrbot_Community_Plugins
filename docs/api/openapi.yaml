@@ -35,6 +35,32 @@ paths:
           description: Current user
         "401":
           description: Not authenticated
+  /v1/me/api-keys:
+    get:
+      responses:
+        "200":
+          description: Current user's API key metadata list
+        "401":
+          description: Not authenticated
+    post:
+      responses:
+        "201":
+          description: Personal API key issued. The raw key is returned only once.
+        "401":
+          description: Not authenticated
+  /v1/me/api-keys/{id}:
+    delete:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Personal API key deleted
+        "401":
+          description: Not authenticated
   /v1/auth/github/login:
     get:
       responses:

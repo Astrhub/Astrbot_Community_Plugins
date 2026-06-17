@@ -1,7 +1,9 @@
 FROM node:24-bookworm-slim AS web-build
 WORKDIR /src/apps/market-web
 COPY apps/market-web/package*.json ./
-RUN npm ci
+ARG NPM_REGISTRY=""
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
+    && npm ci
 COPY apps/market-web/ ./
 RUN npm run build
 
@@ -15,7 +17,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY --from=uv /uv /uvx /usr/local/bin/
 COPY apps/api/pyproject.toml apps/api/uv.lock ./apps/api/
-RUN uv sync --project apps/api --locked --no-dev --no-install-project
+ARG PYPI_INDEX_URL=""
+RUN if [ -n "$PYPI_INDEX_URL" ]; then \
+        uv sync --project apps/api --locked --no-dev --no-install-project \
+            --default-index "$PYPI_INDEX_URL"; \
+    else \
+        uv sync --project apps/api --locked --no-dev --no-install-project; \
+    fi
 COPY apps/api ./apps/api
 COPY --from=web-build /src/apps/market-web/dist ./apps/market-web/dist
 EXPOSE 8787

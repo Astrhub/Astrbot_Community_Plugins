@@ -105,18 +105,18 @@ const createDefaultSetupConfig = () => ({
     client_secret: '',
     callback_url: `${BASE_URL}/v1/auth/github/callback`,
     scope: 'read:user user:email read:org',
-    admin_org: '',
-    api_token: '',
-    api_token_configured: false,
-    metadata_sync_enabled: true,
-    metadata_sync_interval_seconds: 3600
+    admin_org: ''
   },
   market: {
     submissions_enabled: true,
     comments_enabled: true,
     likes_enabled: true,
     plugin_auto_approve_enabled: false,
-    max_plugin_tags: 8
+    max_plugin_tags: 8,
+    api_token: '',
+    api_token_configured: false,
+    metadata_sync_enabled: true,
+    metadata_sync_interval_seconds: 3600
   },
   email: {
     provider: 'disabled',
@@ -646,6 +646,38 @@ export const usePluginStore = defineStore('plugins', () => {
     return (data.items || []).map((plugin, index) => normalizePluginItem(plugin, index))
   }
 
+  async function loadMyApiKeys() {
+    const response = await fetch(`${apiBaseUrl}/v1/me/api-keys`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '加载访问密钥失败')
+    return data.items || []
+  }
+
+  async function createMyApiKey(payload) {
+    const response = await fetch(`${apiBaseUrl}/v1/me/api-keys`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '生成访问密钥失败')
+    return data
+  }
+
+  async function deleteMyApiKey(keyId) {
+    const response = await fetch(`${apiBaseUrl}/v1/me/api-keys/${encodeURIComponent(keyId)}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(data.error || '删除访问密钥失败')
+    return data
+  }
+
   async function updatePluginMetadata(pluginId, payload) {
     const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}`, {
       method: 'PATCH',
@@ -1121,6 +1153,9 @@ export const usePluginStore = defineStore('plugins', () => {
     unmuteAdminUser,
     deleteAdminUser,
     loadMyPlugins,
+    loadMyApiKeys,
+    createMyApiKey,
+    deleteMyApiKey,
     updatePluginMetadata,
     requestPluginListing,
     unlistOwnPlugin,

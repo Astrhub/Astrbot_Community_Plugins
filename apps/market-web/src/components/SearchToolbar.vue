@@ -1,12 +1,31 @@
 <template>
-  <div class="search-container" :class="{ 'search-container--compact': compact, 'search-container--header': onHeader }">
-    <div class="search-wrapper" :class="{ 'search-wrapper--compact': compact }">
-      <div class="custom-search-box" :class="{ 'custom-search-box--compact': compact }">
+  <div
+    class="search-container"
+    :class="{
+      'search-container--compact': compact,
+      'search-container--header': onHeader,
+      'search-container--mobile': mobile
+    }"
+  >
+    <div
+      class="search-wrapper"
+      :class="{
+        'search-wrapper--compact': compact,
+        'search-wrapper--mobile': mobile
+      }"
+    >
+      <div
+        class="custom-search-box"
+        :class="{
+          'custom-search-box--compact': compact,
+          'custom-search-box--mobile': mobile
+        }"
+      >
         <n-icon class="search-icon"><search /></n-icon>
         <input
           :value="searchQuery"
           @input="handleSearchInput"
-          :placeholder="compact ? '搜索…' : '搜索插件…'"
+          :placeholder="searchPlaceholder"
           type="search"
           name="plugin-search"
           aria-label="搜索插件"
@@ -27,13 +46,13 @@
         </button>
       </div>
       <n-select
-        v-if="hasCategoryFilters"
+        v-if="showCategoryFilter && hasCategoryFilters"
         :value="props.selectedCategory"
         :options="props.categoryOptions"
-        placeholder="官方分类…"
+        :placeholder="mobile ? '分类' : '官方分类…'"
         aria-label="插件官方分类"
         @update:value="handleCategoryChange"
-        :size="compact ? 'small' : 'medium'"
+        :size="controlSize"
         class="sort-select category-select"
         :class="{
           'sort-select--compact': compact,
@@ -41,15 +60,16 @@
         }"
       />
       <n-select
-        v-if="props.tagOptions.length"
+        v-if="props.tagOptions.length || mobile"
         :value="props.selectedTag"
         :options="props.tagOptions"
-        placeholder="标签…"
+        :placeholder="mobile ? '标签' : '标签…'"
         aria-label="插件标签"
         filterable
         clearable
+        :disabled="mobile && props.tagOptions.length === 0"
         @update:value="handleTagChange"
-        :size="compact ? 'small' : 'medium'"
+        :size="controlSize"
         class="sort-select tag-select"
         :class="{
           'sort-select--compact': compact,
@@ -57,8 +77,9 @@
         }"
       />
       <n-switch
+        v-if="!mobile"
         :value="fuzzySearchEnabled"
-        :size="compact ? 'small' : 'medium'"
+        :size="controlSize"
         class="fuzzy-switch"
         aria-label="搜索匹配模式"
         @update:value="handleFuzzySearchChange"
@@ -66,18 +87,29 @@
         <template #checked>模糊</template>
         <template #unchecked>精确</template>
       </n-switch>
+      <n-button
+        v-else
+        secondary
+        :type="fuzzySearchEnabled ? 'primary' : 'default'"
+        :size="controlSize"
+        class="mobile-mode-button"
+        :aria-label="fuzzySearchEnabled ? '当前模糊搜索，点击切换精确搜索' : '当前精确搜索，点击切换模糊搜索'"
+        @click="handleFuzzySearchChange(!fuzzySearchEnabled)"
+      >
+        {{ fuzzySearchEnabled ? '模糊' : '精确' }}
+      </n-button>
       <n-select
         :value="props.sortBy"
-        :options="compact ? compactSortOptions : sortOptions"
+        :options="dense ? compactSortOptions : sortOptions"
         aria-label="排序方式"
         @update:value="handleSortChange"
-        :size="compact ? 'small' : 'medium'"
-        class="sort-select"
+        :size="controlSize"
+        class="sort-select sort-by-select"
         :class="{ 'sort-select--compact': compact }"
       />
       <n-button
         secondary
-        :size="compact ? 'small' : 'medium'"
+        :size="controlSize"
         class="sort-direction-button"
         :aria-label="sortDirection === 'asc' ? '当前正序，点击切换倒序' : '当前倒序，点击切换正序'"
         @click="toggleSortDirection"
@@ -128,6 +160,14 @@ const props = defineProps({
   onHeader: {
     type: Boolean,
     default: false
+  },
+  mobile: {
+    type: Boolean,
+    default: false
+  },
+  showCategoryFilter: {
+    type: Boolean,
+    default: true
   }
 })
 
@@ -144,6 +184,13 @@ const emit = defineEmits([
 const hasCategoryFilters = computed(() =>
   props.categoryOptions.some((option) => option.value !== 'all' && option.value !== 'other')
 )
+
+const dense = computed(() => props.compact || props.mobile)
+const controlSize = computed(() => dense.value ? 'small' : 'medium')
+const searchPlaceholder = computed(() => {
+  if (props.mobile) return '搜索插件'
+  return props.compact ? '搜索…' : '搜索插件…'
+})
 
 const sortOptions = [
   { label: '默认排序', value: 'default' },
@@ -708,5 +755,93 @@ const handleClearSearch = () => {
 }
 .search-container--header .custom-search-box:focus-within {
   border: none !important;
+}
+
+/* ===== Mobile top filter bar ===== */
+.search-container--mobile {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.search-wrapper--mobile {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 104px 56px 118px;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+
+.custom-search-box--mobile {
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+}
+
+.search-wrapper--mobile .sort-by-select {
+  width: 104px;
+}
+
+.search-wrapper--mobile .tag-select {
+  width: 118px;
+}
+
+.mobile-mode-button {
+  width: 64px;
+  min-width: 64px;
+  padding: 0 8px;
+}
+
+.search-wrapper--mobile .sort-direction-button {
+  width: 56px;
+  min-width: 56px;
+  padding: 0 8px;
+}
+
+.search-container--mobile :deep(.sort-select .n-base-selection) {
+  width: 100%;
+  max-width: none;
+  height: 38px !important;
+}
+
+.search-container--mobile :deep(.sort-select .n-base-selection-label) {
+  height: 38px !important;
+  padding: 0 8px !important;
+}
+
+@media (max-width: 620px) {
+  .search-wrapper--mobile {
+    grid-template-columns: minmax(0, 1fr) 64px 92px;
+  }
+
+  .search-wrapper--mobile .custom-search-box {
+    grid-column: 1 / 3;
+  }
+
+  .search-wrapper--mobile .mobile-mode-button {
+    grid-column: 3;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .search-wrapper--mobile .sort-by-select,
+  .search-wrapper--mobile .tag-select,
+  .search-wrapper--mobile .sort-direction-button {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 360px) {
+  .search-wrapper--mobile {
+    grid-template-columns: minmax(0, 1fr) 58px 80px;
+    gap: 6px;
+  }
+
+  .search-wrapper--mobile .mobile-mode-button,
+  .search-wrapper--mobile .sort-direction-button {
+    padding: 0 6px;
+    font-size: 12px;
+  }
 }
 </style>

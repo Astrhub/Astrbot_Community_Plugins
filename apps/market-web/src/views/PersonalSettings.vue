@@ -7,10 +7,13 @@ import {
   NIcon,
   NLayoutHeader,
   NSpin,
+  NTabPane,
+  NTabs,
   useDialog,
   useMessage
 } from 'naive-ui'
 import { ArrowBack } from '@vicons/ionicons5'
+import AccessKeyManager from '@/components/settings/AccessKeyManager.vue'
 import NotificationPreferencesSection from '@/components/settings/NotificationPreferencesSection.vue'
 import PersonalPluginManager from '@/components/settings/PersonalPluginManager.vue'
 import ProfileAccountSection from '@/components/settings/ProfileAccountSection.vue'
@@ -22,7 +25,10 @@ const dialog = useDialog()
 const store = usePluginStore()
 const { currentUser, siteConfig } = storeToRefs(store)
 const {
+  createMyApiKey,
+  deleteMyApiKey,
   loadCurrentUser,
+  loadMyApiKeys,
   loadMyPlugins,
   requestPluginListing,
   setSearchQuery,
@@ -35,8 +41,13 @@ const loading = shallowRef(true)
 const savingProfile = shallowRef(false)
 const savingNotifications = shallowRef(false)
 const loadingPlugins = shallowRef(false)
+const loadingAccessKeys = shallowRef(false)
+const creatingAccessKey = shallowRef(false)
 const myPlugins = shallowRef([])
+const accessKeys = shallowRef([])
+const newAccessKey = shallowRef('')
 const pluginBusyIds = reactive({})
+const accessKeyBusyIds = reactive({})
 const formData = reactive({
   github_name: '',
   github_token: '',
@@ -100,6 +111,62 @@ async function refreshMyPlugins() {
     message.error(error.message || '插件加载失败')
   } finally {
     loadingPlugins.value = false
+  }
+}
+
+async function refreshAccessKeys() {
+  loadingAccessKeys.value = true
+  try {
+    accessKeys.value = await loadMyApiKeys()
+  } catch (error) {
+    message.error(error.message || '访问密钥加载失败')
+  } finally {
+    loadingAccessKeys.value = false
+  }
+}
+
+async function createAccessKey(payload) {
+  creatingAccessKey.value = true
+  newAccessKey.value = ''
+  try {
+    const apiKey = await createMyApiKey(payload)
+    newAccessKey.value = apiKey.key || ''
+    accessKeys.value = [apiKey, ...accessKeys.value.filter((item) => item.id !== apiKey.id)]
+    message.success('访问密钥已生成')
+  } catch (error) {
+    message.error(error.message || '生成访问密钥失败')
+  } finally {
+    creatingAccessKey.value = false
+  }
+}
+
+function deleteAccessKey(apiKey) {
+  dialog.warning({
+    title: '删除访问密钥',
+    content: `${apiKey.name || '这个访问密钥'} 删除后，正在使用它的插件或脚本会立刻失效。`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      accessKeyBusyIds[apiKey.id] = 'delete'
+      try {
+        await deleteMyApiKey(apiKey.id)
+        accessKeys.value = accessKeys.value.filter((item) => item.id !== apiKey.id)
+        message.success('访问密钥已删除')
+      } catch (error) {
+        message.error(error.message || '删除访问密钥失败')
+      } finally {
+        delete accessKeyBusyIds[apiKey.id]
+      }
+    }
+  })
+}
+
+async function copyAccessKey(key) {
+  try {
+    await navigator.clipboard.writeText(key)
+    message.success('访问密钥已复制')
+  } catch {
+    message.error('复制失败，请手动复制')
   }
 }
 
@@ -174,7 +241,7 @@ onMounted(async () => {
     return
   }
   applyCurrentUser()
-  await refreshMyPlugins()
+  await Promise.all([refreshMyPlugins(), refreshAccessKeys()])
   loading.value = false
 })
 </script>
@@ -199,35 +266,64 @@ onMounted(async () => {
 
     <main class="profile-content">
       <NSpin :show="loading">
-        <div class="settings-grid">
-          <ProfileAccountSection
-            v-model:github-name="formData.github_name"
-            v-model:github-token="formData.github_token"
-            v-model:refresh-interval="formData.github_refresh_interval_seconds"
-            :current-user="currentUser"
-            :saving="savingProfile"
-            @save="saveProfile"
-          />
+        <NTabs type="line" animated class="profile-tabs">
+          <NTabPane name="account" tab="账号资料" display-directive="show">
+            <div class="profile-tab-content">
+              <ProfileAccountSection
+                v-model:github-name="formData.github_name"
+                v-model:github-token="formData.github_token"
+                v-model:refresh-interval="formData.github_refresh_interval_seconds"
+                :current-user="currentUser"
+                :saving="savingProfile"
+                @save="saveProfile"
+              />
+            </div>
+          </NTabPane>
 
-          <NotificationPreferencesSection
-            v-model:notify-replies="formData.notify_replies"
-            v-model:notify-likes="formData.notify_likes"
-            :saving="savingNotifications"
-            @save="saveNotificationPreferences"
-          />
+          <NTabPane name="notifications" tab="通知偏好" display-directive="show">
+            <div class="profile-tab-content">
+              <NotificationPreferencesSection
+                v-model:notify-replies="formData.notify_replies"
+                v-model:notify-likes="formData.notify_likes"
+                :saving="savingNotifications"
+                @save="saveNotificationPreferences"
+              />
+            </div>
+          </NTabPane>
 
-          <PersonalPluginManager
-            :plugins="myPlugins"
-            :loading="loadingPlugins"
-            :busy-ids="pluginBusyIds"
-            :max-tags="maxPluginTags"
-            @refresh="refreshMyPlugins"
-            @save-tags="savePluginTags"
-            @request-list="requestListPlugin"
-            @unlist="unlistPlugin"
-            @open-plugin="openPlugin"
-          />
-        </div>
+          <NTabPane name="plugins" tab="插件管理" display-directive="show">
+            <div class="profile-tab-content">
+              <PersonalPluginManager
+                :plugins="myPlugins"
+                :loading="loadingPlugins"
+                :busy-ids="pluginBusyIds"
+                :max-tags="maxPluginTags"
+                @refresh="refreshMyPlugins"
+                @save-tags="savePluginTags"
+                @request-list="requestListPlugin"
+                @unlist="unlistPlugin"
+                @open-plugin="openPlugin"
+              />
+            </div>
+          </NTabPane>
+
+          <NTabPane name="access-keys" tab="访问密钥" display-directive="show">
+            <div class="profile-tab-content">
+              <AccessKeyManager
+                :keys="accessKeys"
+                :loading="loadingAccessKeys"
+                :creating="creatingAccessKey"
+                :busy-ids="accessKeyBusyIds"
+                :new-key="newAccessKey"
+                @refresh="refreshAccessKeys"
+                @create="createAccessKey"
+                @delete="deleteAccessKey"
+                @copy-key="copyAccessKey"
+                @clear-new-key="newAccessKey = ''"
+              />
+            </div>
+          </NTabPane>
+        </NTabs>
       </NSpin>
     </main>
   </div>
@@ -236,13 +332,18 @@ onMounted(async () => {
 <style scoped>
 .profile-page {
   min-height: 100vh;
-  background: var(--body-color);
-  color: var(--text-color-base);
+  background: var(--bg-base, var(--body-color));
+  color: var(--text-primary, var(--text-color-base));
 }
 
 .profile-header {
-  border-bottom: 1px solid var(--border-color);
-  background: var(--card-color);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  border-bottom: 1px solid var(--border-base, var(--border-color));
+  background: var(--bg-header, var(--card-color));
+  backdrop-filter: blur(18px);
+  box-shadow: var(--shadow-sm);
 }
 
 .header-content {
@@ -267,12 +368,13 @@ onMounted(async () => {
 }
 
 .eyebrow {
-  color: #0e74e4;
+  color: var(--primary-color);
   font-size: 12px;
   font-weight: 700;
 }
 
 .page-title {
+  color: var(--text-primary, var(--text-color-base));
   font-size: 24px;
   line-height: 1.25;
 }
@@ -283,7 +385,20 @@ onMounted(async () => {
   padding: 24px 20px 48px;
 }
 
-.settings-grid {
+.profile-tabs :deep(.n-tabs-nav) {
+  margin-bottom: 18px;
+  padding: 0 12px;
+  background: var(--bg-card, var(--card-color));
+  border: 1px solid var(--border-base, var(--border-color));
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+}
+
+.profile-tabs :deep(.n-tabs-tab) {
+  min-height: 46px;
+}
+
+.profile-tab-content {
   display: grid;
   gap: 18px;
 }

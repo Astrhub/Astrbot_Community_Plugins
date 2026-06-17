@@ -88,6 +88,23 @@ npm run build:web
 uv sync --project apps/api --no-dev
 ```
 
+依赖锁文件默认使用官方源。若本地网络需要镜像，不要修改提交锁文件，可只在本机命令前设置环境变量：
+
+```bash
+export npm_config_registry=https://registry.npmmirror.com
+export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+npm install --prefix apps/market-web
+uv sync --project apps/api --no-dev
+```
+
+Docker 构建同样默认使用官方源；需要镜像时通过构建变量传入：
+
+```bash
+NPM_REGISTRY=https://registry.npmmirror.com \
+PYPI_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+docker compose build
+```
+
 编辑 `/etc/astrbot-community-plugins/astrbot-community-plugins.env` 后启动：
 
 ```bash
@@ -113,6 +130,8 @@ npm run dev:web    # 启动前端开发服务器
 npm run build:web  # 构建生产前端，供 FastAPI 托管
 npm run start:api  # 生产方式启动 API，监听 0.0.0.0:8787
 ```
+
+开发环境如需镜像，同样使用本地变量，例如 `UV_DEFAULT_INDEX=... uv sync --project apps/api` 或 `npm_config_registry=... npm install --prefix apps/market-web`。
 
 本地安装推送前 Ruff hook：
 

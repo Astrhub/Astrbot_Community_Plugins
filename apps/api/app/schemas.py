@@ -160,6 +160,17 @@ class ApiKeyCreate(BaseModel):
     def strip_name(cls, value: str) -> str:
         return value.strip() or "AstrBot WebUI"
 
+    @field_validator("scopes", mode="before")
+    @classmethod
+    def clean_scopes(cls, value: list[str] | str | None) -> list[str]:
+        raw_scopes = value.replace(",", "|").split("|") if isinstance(value, str) else value
+        scopes: list[str] = []
+        for item in raw_scopes or ["market:read"]:
+            scope = str(item or "").strip()
+            if scope and scope not in scopes:
+                scopes.append(scope)
+        return scopes or ["market:read"]
+
 
 class SiteSetupConfig(BaseModel):
     name: str = "AstrBot Community Plugins"
@@ -270,6 +281,14 @@ class MarketSetupConfig(BaseModel):
     likes_enabled: bool = True
     plugin_auto_approve_enabled: bool = False
     max_plugin_tags: int = Field(default=8, ge=0, le=50)
+    api_token: str = ""
+    metadata_sync_enabled: bool = True
+    metadata_sync_interval_seconds: int = Field(default=3600, ge=300, le=86400)
+
+    @field_validator("api_token")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip()
 
 
 class SmtpSetupConfig(BaseModel):

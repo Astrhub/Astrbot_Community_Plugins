@@ -180,6 +180,7 @@ def create_app(
     app.state.settings = settings or load_settings()
     app.state.store = store or create_store(app.state.settings)
     app.state.email_daily_counter = {"date": "", "count": 0}
+    app.state.github_api_token_index = 0
 
     app.add_middleware(
         CORSMiddleware,
@@ -504,6 +505,23 @@ def register_routes(app: FastAPI) -> None:
                 user.get("github_login") or "",
             )
         }
+
+    @app.get("/v1/me/api-keys")
+    async def my_api_keys(request: Request) -> dict[str, list[dict[str, Any]]]:
+        user = await require_user(request)
+        keys = await call_store(request, "list_api_keys_for_user", user["id"])
+        return {"items": [public_api_key(key) for key in keys]}
+
+    @app.post("/v1/me/api-keys", status_code=201)
+    async def issue_my_api_key(request: Request, payload: ApiKeyCreate) -> dict[str, Any]:
+        user = await require_user(request)
+        api_key = await call_store(request, "issue_api_key", payload.name, user["id"], payload.scopes)
+        return public_api_key(api_key, include_key=True)
+
+    @app.delete("/v1/me/api-keys/{api_key_id}")
+    async def delete_my_api_key(request: Request, api_key_id: str) -> dict[str, int]:
+        user = await require_user(request)
+        return {"deleted": await call_store(request, "delete_api_key", user["id"], api_key_id)}
 
     @app.post("/v1/auth/internal/login")
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
@@ -1597,7 +1615,8 @@ async def sync_due_github_plugin_metadata_once(app: FastAPI, limit: int) -> int:
     for plugin in plugins:
         try:
             owner = await get_plugin_owner_for_sync(app.state.store, plugin)
-            await refresh_plugin_github_metadata_for_plugin(app, plugin, owner)
+            token = "" if owner and owner.get("github_token") else next_system_github_api_token(app, settings)
+            await refresh_plugin_github_metadata_for_plugin(app, plugin, owner, token=token)
         except Exception as exc:
             await update_plugin_github_sync_failure(
                 app.state.store,
@@ -2459,7 +2478,7 @@ def redact_setup_infrastructure(config: dict[str, Any]) -> dict[str, Any]:
         "site": {**config["site"]},
         "auth": {**config["auth"]},
         "github": redact_github_settings(config.get("github", {})),
-        "market": {**config["market"]},
+        "market": redact_market_settings(config.get("market", {})),
         "email": redact_email_settings(config.get("email", {})),
     }
     return redacted
@@ -2481,6 +2500,7 @@ def build_system_settings(
     if include_secrets:
         return config
     config["github"] = redact_github_settings(config["github"])
+    config["market"] = redact_market_settings(config["market"])
     config["email"] = redact_email_settings(config["email"])
     return config
 
@@ -2531,17 +2551,6 @@ def build_github_settings(settings: Settings, runtime_config: dict[str, str]) ->
         "callback_url": runtime_config.get("GITHUB_CALLBACK_URL", settings.github_callback_url),
         "scope": runtime_config.get("GITHUB_SCOPE", settings.github_scope),
         "admin_org": runtime_config.get("GITHUB_ADMIN_ORG", settings.github_admin_org),
-        "api_token": runtime_config.get("GITHUB_API_TOKEN", settings.github_api_token),
-        "metadata_sync_enabled": parse_bool(
-            runtime_config.get("GITHUB_METADATA_SYNC_ENABLED"),
-            settings.github_metadata_sync_enabled,
-        ),
-        "metadata_sync_interval_seconds": clamp_sync_interval(
-            runtime_config.get(
-                "GITHUB_METADATA_SYNC_INTERVAL_SECONDS",
-                str(settings.github_metadata_sync_interval_seconds),
-            )
-        ),
     }
 
 
@@ -2566,6 +2575,17 @@ def build_market_settings(settings: Settings, runtime_config: dict[str, str]) ->
         "max_plugin_tags": parse_int(
             runtime_config.get("MAX_PLUGIN_TAGS"),
             settings.max_plugin_tags,
+        ),
+        "api_token": runtime_config.get("GITHUB_API_TOKEN", settings.github_api_token),
+        "metadata_sync_enabled": parse_bool(
+            runtime_config.get("GITHUB_METADATA_SYNC_ENABLED"),
+            settings.github_metadata_sync_enabled,
+        ),
+        "metadata_sync_interval_seconds": clamp_sync_interval(
+            runtime_config.get(
+                "GITHUB_METADATA_SYNC_INTERVAL_SECONDS",
+                str(settings.github_metadata_sync_interval_seconds),
+            )
         ),
     }
 
@@ -2609,6 +2629,12 @@ def redact_github_settings(config: dict[str, Any]) -> dict[str, Any]:
         **config,
         "client_secret": MASKED_SECRET if config.get("client_secret") else "",
         "client_secret_configured": bool(config.get("client_secret")),
+    }
+
+
+def redact_market_settings(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **config,
         "api_token": MASKED_SECRET if config.get("api_token") else "",
         "api_token_configured": bool(config.get("api_token")),
     }
@@ -2646,30 +2672,47 @@ def runtime_values_from_system_settings(
         "GITHUB_CALLBACK_URL": payload.github.callback_url,
         "GITHUB_CLIENT_ID": payload.github.client_id,
         "GITHUB_SCOPE": payload.github.scope,
-        "GITHUB_METADATA_SYNC_ENABLED": serialize_bool(payload.github.metadata_sync_enabled),
-        "GITHUB_METADATA_SYNC_INTERVAL_SECONDS": str(payload.github.metadata_sync_interval_seconds),
-        **runtime_values_from_market_settings(payload.market),
+        **runtime_values_from_market_settings(
+            payload.market,
+            runtime_config,
+            legacy_api_token=payload.github.api_token,
+        ),
         **runtime_values_from_email_settings(payload.email, runtime_config),
     }
     if should_write_secret(payload.github.client_secret):
         values["GITHUB_CLIENT_SECRET"] = payload.github.client_secret
     elif "GITHUB_CLIENT_SECRET" in runtime_config:
         values["GITHUB_CLIENT_SECRET"] = runtime_config["GITHUB_CLIENT_SECRET"]
-    if should_write_secret(payload.github.api_token):
-        values["GITHUB_API_TOKEN"] = payload.github.api_token
-    elif "GITHUB_API_TOKEN" in runtime_config:
-        values["GITHUB_API_TOKEN"] = runtime_config["GITHUB_API_TOKEN"]
     return values
 
 
-def runtime_values_from_market_settings(payload: Any) -> dict[str, str]:
-    return {
+def runtime_values_from_market_settings(
+    payload: Any,
+    runtime_config: dict[str, str] | None = None,
+    legacy_api_token: str = "",
+) -> dict[str, str]:
+    values = {
+        "GITHUB_METADATA_SYNC_ENABLED": serialize_bool(payload.metadata_sync_enabled),
+        "GITHUB_METADATA_SYNC_INTERVAL_SECONDS": str(payload.metadata_sync_interval_seconds),
         "MARKET_COMMENTS_ENABLED": serialize_bool(payload.comments_enabled),
         "MARKET_LIKES_ENABLED": serialize_bool(payload.likes_enabled),
         "MARKET_SUBMISSIONS_ENABLED": serialize_bool(payload.submissions_enabled),
         "MAX_PLUGIN_TAGS": str(payload.max_plugin_tags),
         "PLUGIN_AUTO_APPROVE_ENABLED": serialize_bool(payload.plugin_auto_approve_enabled),
     }
+    runtime_config = runtime_config or {}
+    api_token = system_github_api_token_payload(payload, legacy_api_token)
+    if should_write_secret(api_token):
+        values["GITHUB_API_TOKEN"] = api_token
+    elif "GITHUB_API_TOKEN" in runtime_config:
+        values["GITHUB_API_TOKEN"] = runtime_config["GITHUB_API_TOKEN"]
+    return values
+
+
+def system_github_api_token_payload(payload: Any, legacy_api_token: str = "") -> str:
+    if getattr(payload, "api_token", ""):
+        return payload.api_token
+    return legacy_api_token
 
 
 def runtime_values_from_email_settings(
@@ -2727,11 +2770,11 @@ def settings_from_system_settings(
         github_scope=payload.github.scope,
         github_admin_org=payload.github.admin_org,
         github_api_token=preserve_secret(
-            payload.github.api_token,
+            system_github_api_token_payload(payload.market, payload.github.api_token),
             runtime_config.get("GITHUB_API_TOKEN") or current.github_api_token,
         ),
-        github_metadata_sync_enabled=payload.github.metadata_sync_enabled,
-        github_metadata_sync_interval_seconds=payload.github.metadata_sync_interval_seconds,
+        github_metadata_sync_enabled=payload.market.metadata_sync_enabled,
+        github_metadata_sync_interval_seconds=payload.market.metadata_sync_interval_seconds,
         market_submissions_enabled=payload.market.submissions_enabled,
         market_comments_enabled=payload.market.comments_enabled,
         market_likes_enabled=payload.market.likes_enabled,
@@ -3241,6 +3284,24 @@ def github_public_headers() -> dict[str, str]:
     }
 
 
+def parse_github_api_tokens(value: str) -> list[str]:
+    return [token.strip() for token in re.split(r"[\n,;]+", value or "") if token.strip()]
+
+
+def first_github_api_token(value: str) -> str:
+    tokens = parse_github_api_tokens(value)
+    return tokens[0] if tokens else ""
+
+
+def next_system_github_api_token(app: FastAPI, settings: Settings) -> str:
+    tokens = parse_github_api_tokens(settings.github_api_token)
+    if not tokens:
+        return ""
+    index = int(getattr(app.state, "github_api_token_index", 0) or 0)
+    app.state.github_api_token_index = index + 1
+    return tokens[index % len(tokens)]
+
+
 def github_api_headers(
     user: dict[str, Any] | None = None,
     settings: Settings | None = None,
@@ -3248,7 +3309,7 @@ def github_api_headers(
 ) -> dict[str, str]:
     token = str(token or (user or {}).get("github_token") or "").strip()
     if not token and settings:
-        token = settings.github_api_token.strip()
+        token = first_github_api_token(settings.github_api_token)
     if not token:
         return github_public_headers()
     return {
@@ -3262,10 +3323,18 @@ async def all_api_keys(request: Request) -> list[ApiKey | dict[str, Any]]:
     return [*settings.api_keys, *await call_store(request, "list_api_keys")]
 
 
-def public_api_key(key: ApiKey | dict[str, Any]) -> dict[str, Any]:
+def public_api_key(key: ApiKey | dict[str, Any], include_key: bool = False) -> dict[str, Any]:
     if isinstance(key, ApiKey):
         return {"name": key.name, "scopes": list(key.scopes)}
-    return {"id": key.get("id"), "name": key.get("name"), "scopes": key.get("scopes", [])}
+    data = {
+        "id": key.get("id"),
+        "name": key.get("name"),
+        "scopes": key.get("scopes", []),
+        "created_at": key.get("created_at"),
+    }
+    if include_key:
+        data["key"] = key.get("key", "")
+    return data
 
 
 def error(status_code: int, message: str) -> HTTPException:
