@@ -142,6 +142,7 @@ def system_settings_payload() -> dict[str, object]:
             "plugin_auto_approve_enabled": False,
             "max_plugin_tags": 4,
             "api_token": "system-github-token",
+            "api_token_remove_indexes": [],
             "metadata_sync_enabled": True,
             "metadata_sync_interval_seconds": 1800,
         },
@@ -1645,6 +1646,9 @@ def test_setup_status_closes_after_initial_setup(tmp_path) -> None:
 def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_path) -> None:
     client = make_setup_client(tmp_path)
     client.post("/v1/setup", json=setup_payload())
+    client.app.state.settings = client.app.state.settings.with_updates(
+        github_client_secret="env-github-secret"
+    )
 
     client.post(
         "/v1/auth/internal/login",
@@ -1660,15 +1664,17 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert "api_token" not in settings["github"]
     assert settings["market"]["api_token"] == main_module.MASKED_SECRET
     assert settings["market"]["api_token_configured"] is True
+    assert settings["market"]["api_token_previews"] == ["s*****************n"]
     assert settings["market"]["metadata_sync_interval_seconds"] == 1800
     assert settings["email"]["cloudflare"]["api_token"] == main_module.MASKED_SECRET
     assert settings["email"]["cloudflare"]["api_token_configured"] is True
     assert client.get("/v1/site").json()["market"]["max_plugin_tags"] == 4
     stored_options = client.app.state.store.list_options()
     assert stored_options["SITE_NAME"] == "AstrHub"
-    assert stored_options["GITHUB_CLIENT_SECRET"] == "github-secret"
+    assert "GITHUB_CLIENT_SECRET" not in stored_options
     assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
     assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
+    assert client.app.state.settings.github_client_secret == "env-github-secret"
     env_file_before = (tmp_path / ".env").read_text()
 
     masked_payload = system_settings_payload()
@@ -1679,13 +1685,78 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     preserved = client.put("/v1/admin/settings", json=masked_payload)
     assert preserved.status_code == 200
     stored_options = client.app.state.store.list_options()
-    assert stored_options["GITHUB_CLIENT_SECRET"] == "github-secret"
+    assert "GITHUB_CLIENT_SECRET" not in stored_options
     assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
     assert stored_options["GITHUB_METADATA_SYNC_INTERVAL_SECONDS"] == "1800"
     assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
     assert stored_options["SITE_NAME"] == "AstrHub Updated"
     assert stored_options["WEB_URL"] == "https://market.example.com"
     assert (tmp_path / ".env").read_text() == env_file_before
+
+
+def test_runtime_settings_ignore_database_github_client_secret() -> None:
+    settings = load_settings(
+        {
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "GITHUB_CLIENT_SECRET": "env-github-secret",
+        }
+    )
+    store = InMemoryMarketStore(
+        {
+            "options": {
+                "GITHUB_CLIENT_SECRET": "database-github-secret",
+            }
+        }
+    )
+    app = main_module.create_app(settings=settings, store=store)
+
+    effective = asyncio.run(main_module.runtime_settings_for_app(app))
+    system_settings = main_module.build_system_settings(
+        settings,
+        store.list_options(),
+        include_secrets=True,
+    )
+
+    assert effective.github_client_secret == "env-github-secret"
+    assert system_settings["github"]["client_secret"] == "env-github-secret"
+
+
+def test_core_admin_can_append_and_remove_system_github_api_tokens(tmp_path) -> None:
+    client = make_setup_client(tmp_path)
+    client.post("/v1/setup", json=setup_payload())
+    client.app.state.settings = client.app.state.settings.with_updates(
+        github_client_secret="env-github-secret"
+    )
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+    payload = system_settings_payload()
+    payload["market"]["api_token"] = "token-a\ntoken-b"
+
+    saved = client.put("/v1/admin/settings", json=payload)
+
+    assert saved.status_code == 200
+    assert client.app.state.store.list_options()["GITHUB_API_TOKEN"] == "token-a\ntoken-b"
+    assert saved.json()["settings"]["market"]["api_token_previews"] == [
+        "t*****a",
+        "t*****b",
+    ]
+
+    updated_payload = system_settings_payload()
+    updated_payload["github"]["client_secret"] = ""
+    updated_payload["market"]["api_token"] = "token-c,token-b"
+    updated_payload["market"]["api_token_remove_indexes"] = [0]
+
+    updated = client.put("/v1/admin/settings", json=updated_payload)
+
+    assert updated.status_code == 200
+    assert client.app.state.store.list_options()["GITHUB_API_TOKEN"] == "token-b\ntoken-c"
+    assert updated.json()["settings"]["market"]["api_token_previews"] == [
+        "t*****b",
+        "t*****c",
+    ]
 
 
 def test_system_github_api_tokens_are_rotated() -> None:
@@ -1706,6 +1777,14 @@ def test_system_github_api_tokens_are_rotated() -> None:
     assert main_module.next_system_github_api_token(app, settings) == "token-b"
     assert main_module.next_system_github_api_token(app, settings) == "token-c"
     assert main_module.next_system_github_api_token(app, settings) == "token-a"
+
+
+def test_redact_token_previews_masks_each_token_individually() -> None:
+    assert main_module.redact_token_previews("token-a\ntoken-b, token-c") == [
+        "t*****a",
+        "t*****b",
+        "t*****c",
+    ]
 
 
 def test_system_settings_reject_local_oauth_callback_when_enabled(tmp_path) -> None:

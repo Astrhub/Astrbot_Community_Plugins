@@ -282,6 +282,7 @@ class MarketSetupConfig(BaseModel):
     plugin_auto_approve_enabled: bool = False
     max_plugin_tags: int = Field(default=8, ge=0, le=50)
     api_token: str = ""
+    api_token_remove_indexes: list[int] = Field(default_factory=list)
     metadata_sync_enabled: bool = True
     metadata_sync_interval_seconds: int = Field(default=3600, ge=300, le=86400)
 
@@ -289,6 +290,13 @@ class MarketSetupConfig(BaseModel):
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("api_token_remove_indexes")
+    @classmethod
+    def validate_token_remove_indexes(cls, value: list[int]) -> list[int]:
+        if any(index < 0 for index in value):
+            raise ValueError("token indexes must be non-negative")
+        return sorted(set(value))
 
 
 class SmtpSetupConfig(BaseModel):

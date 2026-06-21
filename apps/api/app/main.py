@@ -116,7 +116,6 @@ SYSTEM_OPTION_KEYS = {
     "GITHUB_API_TOKEN",
     "GITHUB_CALLBACK_URL",
     "GITHUB_CLIENT_ID",
-    "GITHUB_CLIENT_SECRET",
     "GITHUB_LOGIN_ENABLED",
     "GITHUB_METADATA_SYNC_ENABLED",
     "GITHUB_METADATA_SYNC_INTERVAL_SECONDS",
@@ -1187,10 +1186,7 @@ def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, s
         ),
         site_docs_url=runtime_config.get("SITE_DOCS_URL", settings.site_docs_url),
         github_client_id=runtime_config.get("GITHUB_CLIENT_ID", settings.github_client_id),
-        github_client_secret=runtime_config.get(
-            "GITHUB_CLIENT_SECRET",
-            settings.github_client_secret,
-        ),
+        github_client_secret=settings.github_client_secret,
         github_callback_url=runtime_config.get(
             "GITHUB_CALLBACK_URL",
             settings.github_callback_url,
@@ -2236,17 +2232,17 @@ def validate_system_settings_payload(
     if payload.auth.github_login_enabled:
         if not payload.github.client_id:
             raise error(400, "GitHub OAuth client ID is required when GitHub login is enabled")
-        existing_github_secret = runtime_config.get("GITHUB_CLIENT_SECRET") or (
-            settings.github_client_secret if settings else ""
-        )
-        if not has_secret_value(payload.github.client_secret, existing_github_secret):
-            raise error(400, "GitHub OAuth client secret is required when GitHub login is enabled")
         if not payload.github.callback_url or not is_valid_public_url(payload.github.callback_url):
             raise error(400, "GitHub callback URL must be http(s)")
         if is_local_url(payload.github.callback_url):
             raise error(400, "GitHub callback URL must use a public host")
         if is_local_url(payload.site.web_url):
             raise error(400, "Web URL must use a public host when GitHub login is enabled")
+        if not settings or not settings.github_client_secret:
+            raise error(
+                400,
+                "GitHub OAuth client secret must be configured in the deployment environment",
+            )
     if payload.email.provider == "smtp":
         if not payload.email.smtp.host:
             raise error(400, "SMTP host is required when SMTP email is enabled")
@@ -2557,7 +2553,7 @@ def build_auth_settings(settings: Settings, runtime_config: dict[str, str]) -> d
 def build_github_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, Any]:
     return {
         "client_id": runtime_config.get("GITHUB_CLIENT_ID", settings.github_client_id),
-        "client_secret": runtime_config.get("GITHUB_CLIENT_SECRET", settings.github_client_secret),
+        "client_secret": settings.github_client_secret,
         "callback_url": runtime_config.get("GITHUB_CALLBACK_URL", settings.github_callback_url),
         "scope": runtime_config.get("GITHUB_SCOPE", settings.github_scope),
         "admin_org": runtime_config.get("GITHUB_ADMIN_ORG", settings.github_admin_org),
@@ -2643,21 +2639,41 @@ def redact_github_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def redact_market_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw_api_token = str(config.get("api_token", "") or "")
     return {
         **config,
-        "api_token": MASKED_SECRET if config.get("api_token") else "",
-        "api_token_configured": bool(config.get("api_token")),
+        "api_token": MASKED_SECRET if raw_api_token else "",
+        "api_token_configured": bool(raw_api_token),
+        "api_token_previews": redact_token_previews(raw_api_token),
     }
 
 
 def redact_email_settings(config: dict[str, Any]) -> dict[str, Any]:
     smtp = {**config.get("smtp", {})}
     cloudflare = {**config.get("cloudflare", {})}
+    raw_api_token = str(cloudflare.get("api_token", "") or "")
     smtp["password_configured"] = bool(smtp.get("password"))
     smtp["password"] = MASKED_SECRET if smtp.get("password") else ""
-    cloudflare["api_token_configured"] = bool(cloudflare.get("api_token"))
-    cloudflare["api_token"] = MASKED_SECRET if cloudflare.get("api_token") else ""
+    cloudflare["api_token_configured"] = bool(raw_api_token)
+    cloudflare["api_token"] = MASKED_SECRET if raw_api_token else ""
+    cloudflare["api_token_previews"] = redact_token_previews(raw_api_token)
     return {**config, "smtp": smtp, "cloudflare": cloudflare}
+
+
+def redact_token_previews(value: str) -> list[str]:
+    tokens = parse_github_api_tokens(value)
+    if not tokens:
+        return []
+    return [redact_token_preview(token) for token in tokens]
+
+
+def redact_token_preview(value: str) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    if len(token) <= 2:
+        return token[0] + "*" * max(len(token) - 1, 0)
+    return f"{token[0]}{'*' * max(len(token) - 2, 0)}{token[-1]}"
 
 
 def runtime_values_from_system_settings(
@@ -2689,10 +2705,6 @@ def runtime_values_from_system_settings(
         ),
         **runtime_values_from_email_settings(payload.email, runtime_config),
     }
-    if should_write_secret(payload.github.client_secret):
-        values["GITHUB_CLIENT_SECRET"] = payload.github.client_secret
-    elif "GITHUB_CLIENT_SECRET" in runtime_config:
-        values["GITHUB_CLIENT_SECRET"] = runtime_config["GITHUB_CLIENT_SECRET"]
     return values
 
 
@@ -2712,8 +2724,13 @@ def runtime_values_from_market_settings(
     }
     runtime_config = runtime_config or {}
     api_token = system_github_api_token_payload(payload, legacy_api_token)
-    if should_write_secret(api_token):
-        values["GITHUB_API_TOKEN"] = api_token
+    remove_indexes = getattr(payload, "api_token_remove_indexes", []) or []
+    if should_write_secret(api_token) or remove_indexes:
+        values["GITHUB_API_TOKEN"] = merge_github_api_token_pool(
+            runtime_config.get("GITHUB_API_TOKEN", ""),
+            api_token,
+            remove_indexes,
+        )
     elif "GITHUB_API_TOKEN" in runtime_config:
         values["GITHUB_API_TOKEN"] = runtime_config["GITHUB_API_TOKEN"]
     return values
@@ -2723,6 +2740,31 @@ def system_github_api_token_payload(payload: Any, legacy_api_token: str = "") ->
     if getattr(payload, "api_token", ""):
         return payload.api_token
     return legacy_api_token
+
+
+def merge_github_api_token_pool(
+    existing_value: str,
+    incoming_value: str,
+    remove_indexes: list[int],
+) -> str:
+    existing_tokens = parse_github_api_tokens(existing_value)
+    remove_set = set(remove_indexes or [])
+    kept_tokens = [token for index, token in enumerate(existing_tokens) if index not in remove_set]
+    incoming_tokens = (
+        parse_github_api_tokens(incoming_value) if should_write_secret(incoming_value) else []
+    )
+    return "\n".join(dedupe_tokens([*kept_tokens, *incoming_tokens]))
+
+
+def dedupe_tokens(tokens: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        result.append(token)
+    return result
 
 
 def runtime_values_from_email_settings(
@@ -2772,16 +2814,14 @@ def settings_from_system_settings(
         service_terms_enabled=payload.auth.service_terms_enabled,
         service_terms_text=payload.auth.service_terms_text,
         github_client_id=payload.github.client_id,
-        github_client_secret=preserve_secret(
-            payload.github.client_secret,
-            runtime_config.get("GITHUB_CLIENT_SECRET") or current.github_client_secret,
-        ),
+        github_client_secret=current.github_client_secret,
         github_callback_url=payload.github.callback_url,
         github_scope=payload.github.scope,
         github_admin_org=payload.github.admin_org,
-        github_api_token=preserve_secret(
-            system_github_api_token_payload(payload.market, payload.github.api_token),
+        github_api_token=merge_github_api_token_pool(
             runtime_config.get("GITHUB_API_TOKEN") or current.github_api_token,
+            system_github_api_token_payload(payload.market, payload.github.api_token),
+            payload.market.api_token_remove_indexes,
         ),
         github_metadata_sync_enabled=payload.market.metadata_sync_enabled,
         github_metadata_sync_interval_seconds=payload.market.metadata_sync_interval_seconds,

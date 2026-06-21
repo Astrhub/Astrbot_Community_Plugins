@@ -132,13 +132,13 @@
                     <n-form-item label="Client ID" path="github.client_id">
                       <n-input v-model:value="formData.github.client_id" />
                     </n-form-item>
-                    <n-form-item label="Client Secret" path="github.client_secret">
-                      <n-input
-                        v-model:value="formData.github.client_secret"
-                        type="password"
-                        show-password-on="click"
-                        :placeholder="formData.github.client_secret_configured ? '留空或保持遮蔽值表示不更新' : 'GitHub OAuth App Secret'"
-                      />
+                    <n-form-item label="Client Secret">
+                      <div class="secret-status">
+                        <n-tag :type="formData.github.client_secret_configured ? 'success' : 'warning'" :bordered="false">
+                          {{ formData.github.client_secret_configured ? '已配置' : '未配置' }}
+                        </n-tag>
+                        <span class="secret-status-text">由部署环境变量 GITHUB_CLIENT_SECRET 管理</span>
+                      </div>
                     </n-form-item>
                     <n-form-item label="回调地址" path="github.callback_url">
                       <n-input v-model:value="formData.github.callback_url" placeholder="https://your-domain/v1/auth/github/callback" />
@@ -188,15 +188,35 @@
                     />
                   </div>
                   <div class="form-grid">
-                    <n-form-item label="GitHub API Token（轮询）" path="market.api_token" class="form-row-full">
+                    <n-form-item label="新增 GitHub API Token" path="market.api_token" class="form-row-full">
                       <n-input
                         v-model:value="formData.market.api_token"
                         type="textarea"
                         :autosize="{ minRows: 3, maxRows: 7 }"
-                        :placeholder="formData.market.api_token_configured ? '已配置，留空或保持遮蔽值表示不更新；每行一个 Token，也可用逗号分隔' : '每行一个只读 Token，也可用逗号分隔'"
+                        placeholder="每行一个只读 Token，也可用逗号或分号分隔；保存后追加到现有池"
                       />
                       <template #feedback>
-                        {{ formData.market.api_token_configured ? '当前已配置系统 Token 池' : '当前未配置系统 Token，未登录用户同步会使用 GitHub 公共限额' }}
+                        <div class="token-feedback">
+                          <span>{{ formData.market.api_token_configured ? '当前已配置系统 Token 池' : '当前未配置系统 Token，未登录用户同步会使用 GitHub 公共限额' }}</span>
+                          <div v-if="marketTokenPreviewRows.length" class="token-preview-list">
+                            <div
+                              v-for="item in marketTokenPreviewRows"
+                              :key="`${item.index}-${item.token}`"
+                              class="token-preview-item"
+                              :class="{ 'token-preview-item--removing': item.removing }"
+                            >
+                              <span>Token {{ item.index + 1 }}: {{ item.token }}</span>
+                              <n-button
+                                tertiary
+                                size="tiny"
+                                :type="item.removing ? 'default' : 'error'"
+                                @click="toggleMarketTokenRemoval(item.index)"
+                              >
+                                {{ item.removing ? '撤销' : '移除' }}
+                              </n-button>
+                            </div>
+                          </div>
+                        </div>
                       </template>
                     </n-form-item>
                     <n-form-item label="默认同步间隔（秒）" path="market.metadata_sync_interval_seconds">
@@ -412,6 +432,14 @@ const testEmail = reactive({ to: '' })
 const announcementForm = reactive({ title: '', body: '' })
 
 const formData = reactive(createSettingsForm())
+const marketTokenPreviewRows = computed(() => {
+  const removeIndexes = new Set(formData.market.api_token_remove_indexes || [])
+  return (formData.market.api_token_previews || []).map((token, index) => ({
+    token,
+    index,
+    removing: removeIndexes.has(index)
+  }))
+})
 
 const emailProviderOptions = [
   { label: '关闭邮件', value: 'disabled' },
@@ -486,13 +514,6 @@ const rules = {
     {
       validator: () => !formData.auth.github_login_enabled || Boolean(formData.github.client_id.trim()),
       message: '启用 GitHub 登录后必须填写 Client ID',
-      trigger: 'blur'
-    }
-  ],
-  'github.client_secret': [
-    {
-      validator: () => !formData.auth.github_login_enabled || Boolean(formData.github.client_secret.trim()),
-      message: '启用 GitHub 登录后必须填写 Client Secret',
       trigger: 'blur'
     }
   ],
@@ -578,6 +599,8 @@ function createSettingsForm() {
       max_plugin_tags: 8,
       api_token: '',
       api_token_configured: false,
+      api_token_previews: [],
+      api_token_remove_indexes: [],
       metadata_sync_enabled: true,
       metadata_sync_interval_seconds: 3600
     },
@@ -609,8 +632,9 @@ function applySettings(config = {}) {
   Object.assign(formData.auth, config.auth || {})
   Object.assign(formData.github, config.github || {})
   Object.assign(formData.market, config.market || {})
+  formData.market.api_token = ''
+  formData.market.api_token_remove_indexes = []
   if (!config.market?.api_token && config.github?.api_token) {
-    formData.market.api_token = config.github.api_token
     formData.market.api_token_configured = Boolean(config.github.api_token_configured)
   }
   if (!config.market?.metadata_sync_interval_seconds && config.github?.metadata_sync_interval_seconds) {
@@ -634,7 +658,23 @@ function normalizeNumberFields() {
 
 function settingsPayload() {
   normalizeNumberFields()
-  return JSON.parse(JSON.stringify(formData))
+  const payload = JSON.parse(JSON.stringify(formData))
+  delete payload.github.client_secret
+  delete payload.github.client_secret_configured
+  if (payload.market.api_token === '********') {
+    payload.market.api_token = ''
+  }
+  return payload
+}
+
+function toggleMarketTokenRemoval(index) {
+  const indexes = new Set(formData.market.api_token_remove_indexes || [])
+  if (indexes.has(index)) {
+    indexes.delete(index)
+  } else {
+    indexes.add(index)
+  }
+  formData.market.api_token_remove_indexes = Array.from(indexes).sort((a, b) => a - b)
 }
 
 async function loadSettings() {
@@ -993,6 +1033,54 @@ h1 {
   display: flex;
   justify-content: flex-end;
   margin-top: 10px;
+}
+
+.token-feedback {
+  display: grid;
+  gap: 8px;
+}
+
+.token-preview-list {
+  display: grid;
+  gap: 6px;
+}
+
+.token-preview-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.token-preview-item--removing {
+  color: var(--text-tertiary);
+  opacity: 0.7;
+}
+
+.token-preview-item--removing span {
+  text-decoration: line-through;
+}
+
+.secret-status {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.secret-status-text {
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 760px) {
