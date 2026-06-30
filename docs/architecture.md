@@ -267,13 +267,15 @@ create_app(settings, store)
 
 ## 前端架构
 
-`apps/market-web` 为 Vue 3 + Vite SPA，使用 `<script setup>` 与 Composition API。
+`apps/market-web` 为 Vue 3 + Vite+（Vite Plus）SPA，使用 TypeScript + `<script setup>` 与 Composition API。
 
 | 层 | 选型 |
 |---|---|
+| 构建工具 | Vite+（Vite Plus）— `vp dev` / `vp build` / `vp staged`，配置见 `vite.config.ts` |
+| 语言 | TypeScript（strict），类型定义见 `src/types/index.ts` |
 | UI 库 | Naive UI 2.43（`NConfigProvider` / `NLayout` / `NForm` / `NDialog` 等） |
 | 路由 | Vue Router 4，`createWebHistory` |
-| 状态管理 | Pinia 3，单一 `stores/plugins.js`（composition API 风格） |
+| 状态管理 | Pinia 3，单一 `stores/plugins.ts`（composition API 风格） |
 | HTTP | 原生 `fetch`，统一 `credentials: 'include'` |
 | Markdown | `marked` + `DOMPurify` + `highlight.js` |
 | 评论 | `@giscus/vue` |
@@ -291,23 +293,23 @@ create_app(settings, store)
 | `/admin/plugins` | `AdminPlugins.vue` | 插件审核（admin） |
 | `/settings/personal` | `PersonalSettings.vue` | 个人设置 |
 | `/notifications` | `Notifications.vue` | 通知中心 |
+| `/docs/rest` | `RestDocs.vue` | REST API 文档（Vue + Naive UI） |
 
 **权限控制不在路由层**——没有 `beforeEach` 或 `meta` 守卫。`App.vue` 的 `onMounted` 检查 `setupStatus.required`，需要初始化时跳转 `/setup`。页面级权限在各组件内用 `computed` 判定角色（如 `Settings.vue` 校验 `core_admin`、`AdminPlugins.vue` 校验 `core_admin`/`admin`），后端端点本身强制角色。
 
-### 状态与 API 层
 
-所有 API 调用内嵌在单一 `stores/plugins.js`（无独立 `api/` 目录）。Base URL 解析优先级：`VITE_API_BASE_URL` > `VITE_BASE_URL`（非回环地址时）> `window.location.origin`；`VITE_BASE_URL` 为回环地址且前端也在本地时会被忽略，避免开发环境指向错误。
+所有 API 调用内嵌在单一 `stores/plugins.ts`（无独立 `api/` 目录）。Base URL 解析优先级：`VITE_API_BASE_URL` > `VITE_BASE_URL`（非回环地址时）> `window.location.origin`；`VITE_BASE_URL` 为回环地址且前端也在本地时会被忽略，避免开发环境指向错误。
 
 store 管理的状态与 action 按域分组：插件 CRUD、评论、点赞、管理员操作、个人 Key、通知、认证、系统配置、公告、主题、搜索过滤。
 
 ### 关键组件
 
-- 通用：`AppHeader`、`AppFooter`、`PluginCard`、`PluginDetails`、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`（页面切换动画）。
+- 通用：`AppHeader`、`AppFooter`、`PluginCard`、`PluginDetails`（含站内 README 浏览与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`（页面切换动画）。
 - `components/settings/`：`AccessKeyManager`、`AdminUserManagement`、`NotificationPreferencesSection`、`PersonalPluginManager`、`ProfileAccountSection`。
 
 ### 构建
 
-根 `package.json` 暴露工作区脚本：`dev:web`、`build:web`、`dev:api`、`start:api`、`test`。设置 `VITE_BASE_URL` 时构建自动生成 `sitemap.xml` 与 `robots.txt`（`vite-plugin-sitemap`）。
+根 `package.json` 暴露工作区脚本：`dev:web`、`build:web`、`dev:api`、`start:api`、`test`。前端使用 Vite+ CLI（`vp dev` / `vp build`），配置见 `vite.config.ts`（`defineConfig` 来自 `vite-plus`）。设置 `VITE_BASE_URL` 时构建自动生成 `sitemap.xml` 与 `robots.txt`（`vite-plugin-sitemap`）。Vite+ pre-commit hook（`.vite-hooks/pre-commit`）在暂存前端文件时自动执行 `vp staged`（`vp check --fix`）。
 
 ## 部署架构
 

@@ -7,7 +7,7 @@
 
 ## 功能特性
 
-- **浏览与检索**：插件卡片网格、关键词搜索、标签/分类筛选、多种排序（更新时间/星标/点赞/评论/随机）、模糊搜索、分页。
+- **浏览与检索**：插件卡片网格、关键词搜索、标签/分类筛选、多种排序（更新时间/星标/点赞/评论/随机）、模糊搜索、分页；插件详情弹窗内浏览 README 及仓库文件（Markdown 渲染、图片预览、目录导航、文本文件查看）。
 - **提交与审核**：插件通过网页表单提交，进入待审核队列；管理员审核上架/下架，下架需填写理由并通知所有者。
 - **GitHub 元数据同步**：后台 worker 周期性抓取仓库 stars、README、版本等信息；支持多 API token 轮转应对速率限制；所有者与管理员可手动触发刷新。
 - **社区互动**：嵌套评论（支持 Markdown + 语法高亮）、插件与评论点赞、Giscus 评论集成；回复与点赞触发站内通知。
@@ -22,22 +22,21 @@
 - **主题**：亮色/暗色/跟随系统，页面切换动画。
 
 ## 技术栈
-
 | 层 | 技术 |
 |---|---|
-| 前端 | Vue 3.5 + Vite + Naive UI + Pinia + Vue Router 4；`marked` + `DOMPurify` + `highlight.js` 渲染 Markdown；`@giscus/vue` 评论 |
+| 前端 | Vue 3.5 + Vite+（Vite Plus）+ TypeScript + Naive UI + Pinia 3 + Vue Router 4；`marked` + `DOMPurify` + `highlight.js` 渲染 Markdown；`@giscus/vue` 评论 |
 | 后端 | Python 3.11+ · FastAPI · uvicorn · Pydantic 2 · asyncpg · redis-py（异步）· httpx |
 | 存储 | PostgreSQL（持久化业务数据，10 张表）· Redis（登录会话，TTL 自动过期） |
 | 部署 | Docker Compose · systemd · uv（Python 包管理）· npm（前端） |
-
-> 前端 API 调用使用原生 `fetch`（`credentials: 'include'` cookie session）。`axios` 仅作为历史依赖保留，当前未被引用。
+> 前端使用 TypeScript（`<script setup lang="ts">`），类型定义见 `apps/market-web/src/types/index.ts`。API 调用使用原生 `fetch`（`credentials: 'include'` cookie session）；`axios` 仅作为历史依赖保留，当前未被引用。
 
 ## 项目结构
 
 ```
 .
+├── .vite-hooks/         # Vite+ pre-commit（前端检查）与 pre-push（后端 ruff）钩子
 ├── apps/
-│   ├── market-web/      # Vue 3 + Vite 前端 SPA
+│   ├── market-web/      # Vue 3 + Vite+ + TypeScript 前端 SPA
 │   └── api/             # FastAPI 后端（路由 / schemas / auth / store / tests）
 ├── deploy/systemd/      # 裸机部署的 systemd service 与 env 模板
 ├── docs/                # 架构、安全、OpenAPI 文档
@@ -57,7 +56,7 @@ npm install --prefix apps/market-web
 
 # 分别启动（两个终端）
 npm run dev:api    # FastAPI + uvicorn --reload，监听 127.0.0.1:8787
-npm run dev:web    # Vite 开发服务器，监听 0.0.0.0:3000
+npm run dev:web    # Vite+ 开发服务器（vp dev），监听 0.0.0.0:3000
 ```
 
 开发态前后端分属不同端口（前端 `3000`，后端 `8787`）。前端需通过环境变量指向后端，否则请求会打到前端自身域名：
@@ -69,10 +68,9 @@ VITE_API_BASE_URL=http://127.0.0.1:8787
 
 后端默认允许的 CORS 来源为 `http://127.0.0.1:3000,http://localhost:3000`（见 `apps/api/.env.example` 的 `CORS_ORIGIN`）。未配置 `DATABASE_URL`/`REDIS_URL` 时后端回退到内存存储，可直接启动；生产持久化存储请通过 `/setup` 或环境变量配置 PostgreSQL + Redis。
 
-构建与测试：
 
 ```bash
-npm run build:web   # 构建前端到 apps/market-web/dist，供 FastAPI 托管
+npm run build:web   # Vite+ 生产构建（vp build），输出到 apps/market-web/dist，供 FastAPI 托管
 npm test            # 运行后端 pytest（使用内存存储，无需真实 PG/Redis）
 ```
 
@@ -260,13 +258,18 @@ uv run pytest
 # 前端
 cd apps/market-web
 npm install
-npm run dev      # Vite 开发服务器
-npm run build    # 生产构建
+npm run dev      # Vite+ 开发服务器（vp dev）
+npm run build    # Vite+ 生产构建（vp build）
 ```
 
-安装推送前的 Ruff hook：
+安装 Git hooks：
 
 ```bash
+# 前端 Vite+ pre-commit hook（暂存文件自动 vp check --fix）
+# hook 脚本位于 .vite-hooks/pre-commit，手动创建符号链接激活：
+ln -sf ../../.vite-hooks/pre-commit .git/hooks/pre-commit
+
+# 后端 Ruff pre-push hook（推送前检查 Python 文件）
 uv sync --project apps/api
 uv run --project apps/api --directory apps/api pre-commit install --hook-type pre-push
 ```
