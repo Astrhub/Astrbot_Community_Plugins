@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Vite+ pre-commit hook (前端 apps/market-web)
+# 仅当有前端文件被暂存时，才在 apps/market-web 下运行 `vp staged`（vp check --fix）。
+set -uo pipefail
+
+if ! git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
+  | grep -qE '^apps/market-web/.*\.(js|ts|tsx|vue|svelte|css|md)$'; then
+  exit 0
+fi
+
+VP_BIN="$(command -v vp 2>/dev/null || true)"
+if [ -z "$VP_BIN" ]; then
+  VP_BIN="$HOME/.vite-plus/bin/vp"
+fi
+if [ ! -x "$VP_BIN" ] && [ ! -L "$VP_BIN" ]; then
+  echo "vp (Vite+) 未找到：请先安装 (curl -fsSL https://vite.plus | bash)" >&2
+  exit 1
+fi
+
+# vp staged 读取 apps/market-web/vite.config.ts 的 staged 块
+cd apps/market-web || exit 1
+exec "$VP_BIN" staged
