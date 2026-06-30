@@ -1,14 +1,6 @@
-<script setup>
-import { computed, reactive, watch } from 'vue'
-import {
-  NButton,
-  NEmpty,
-  NIcon,
-  NSelect,
-  NSpace,
-  NSpin,
-  NTag
-} from 'naive-ui'
+<script setup lang="ts">
+import { computed, reactive, watch } from "vue";
+import { NButton, NEmpty, NIcon, NSelect, NSpace, NSpin, NTag } from "naive-ui";
 import {
   AppsOutline,
   ArchiveOutline,
@@ -16,97 +8,95 @@ import {
   OpenOutline,
   PricetagOutline,
   RefreshOutline,
-  SaveOutline
-} from '@vicons/ionicons5'
+  SaveOutline,
+} from "@vicons/ionicons5";
 
 const props = defineProps({
   plugins: {
     type: Array,
-    default: () => []
+    default: () => [],
   },
   loading: {
     type: Boolean,
-    default: false
+    default: false,
   },
   busyIds: {
     type: Object,
-    default: () => ({})
+    default: () => ({}),
   },
   maxTags: {
     type: Number,
-    default: 8
-  }
-})
+    default: 8,
+  },
+});
 
-const emit = defineEmits(['refresh', 'save-tags', 'request-list', 'unlist', 'open-plugin'])
+const emit = defineEmits(["refresh", "save-tags", "request-list", "unlist", "open-plugin"]);
 
-const tagDrafts = reactive({})
+const tagDrafts = reactive({});
 
 const statusMeta = Object.freeze({
-  listed: { label: '已上架', type: 'success' },
-  pending: { label: '待审核', type: 'info' },
-  unlisted: { label: '已下架', type: 'warning' }
-})
+  listed: { label: "已上架", type: "success" },
+  pending: { label: "待审核", type: "info" },
+  unlisted: { label: "已下架", type: "warning" },
+});
 
 watch(
   () => props.plugins,
   (plugins) => {
-    const activeIds = new Set()
+    const activeIds = new Set();
     plugins.forEach((plugin) => {
-      activeIds.add(plugin.id)
-      tagDrafts[plugin.id] = [...(plugin.tags || [])]
-    })
+      activeIds.add(plugin.id);
+      tagDrafts[plugin.id] = [...(plugin.tags || [])];
+    });
     Object.keys(tagDrafts).forEach((pluginId) => {
-      if (!activeIds.has(pluginId)) delete tagDrafts[pluginId]
-    })
+      if (!activeIds.has(pluginId)) delete tagDrafts[pluginId];
+    });
   },
-  { immediate: true }
-)
+  { immediate: true },
+);
 
 const tagOptions = computed(() => {
-  const tags = new Set()
+  const tags = new Set();
   props.plugins.forEach((plugin) => {
-    ;(plugin.tags || []).forEach((tag) => tags.add(tag))
-  })
+    (plugin.tags || []).forEach((tag) => tags.add(tag));
+  });
   Object.values(tagDrafts).forEach((draft) => {
-    ;(draft || []).forEach((tag) => tags.add(tag))
-  })
+    (draft || []).forEach((tag) => tags.add(tag));
+  });
   return Array.from(tags)
     .sort()
-    .map((tag) => ({ label: tag, value: tag }))
-})
+    .map((tag) => ({ label: tag, value: tag }));
+});
 
 function pluginTitle(plugin) {
-  return plugin.display_name || plugin.name || plugin.id
+  return plugin.display_name || plugin.name || plugin.id;
 }
 
 function pluginStatus(plugin) {
-  return statusMeta[plugin.status] || { label: plugin.status || '未知', type: 'default' }
+  return statusMeta[plugin.status] || { label: plugin.status || "未知", type: "default" };
 }
 
 function cleanTags(tags) {
-  return Array.from(
-    new Set((tags || []).map((tag) => String(tag || '').trim()).filter(Boolean))
-  )
+  return Array.from(new Set((tags || []).map((tag) => String(tag || "").trim()).filter(Boolean)));
 }
 
 function draftTags(plugin) {
-  return cleanTags(tagDrafts[plugin.id] || [])
+  return cleanTags(tagDrafts[plugin.id] || []);
 }
 
 function tagsChanged(plugin) {
-  return draftTags(plugin).join('\n') !== cleanTags(plugin.tags).join('\n')
+  return draftTags(plugin).join("\n") !== cleanTags(plugin.tags).join("\n");
 }
 
 function isBusy(plugin) {
-  return Boolean(props.busyIds?.[plugin.id])
+  return Boolean(props.busyIds?.[plugin.id]);
 }
 
 function saveTags(plugin) {
-  emit('save-tags', {
+  emit("save-tags", {
     plugin,
-    tags: draftTags(plugin).slice(0, props.maxTags)
-  })
+    tags: draftTags(plugin).slice(0, props.maxTags),
+  });
 }
 </script>
 
@@ -194,9 +184,7 @@ function saveTags(plugin) {
               下架
             </NButton>
 
-            <NButton v-else-if="plugin.status === 'pending'" secondary disabled>
-              待审核
-            </NButton>
+            <NButton v-else-if="plugin.status === 'pending'" secondary disabled> 待审核 </NButton>
 
             <NButton
               v-else

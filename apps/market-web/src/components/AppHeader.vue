@@ -2,7 +2,7 @@
   <header ref="fullHeader" class="app-header">
     <nav class="top-nav" aria-label="主导航">
       <div class="brand">
-        <img :src="siteIconUrl" :alt="siteName" class="brand-logo" width="40" height="40">
+        <img :src="siteIconUrl" :alt="siteName" class="brand-logo" width="40" height="40" />
         <span class="brand-name">{{ siteName }}</span>
       </div>
       <div class="nav-actions">
@@ -82,8 +82,10 @@
   >
     <div class="sticky-header-content">
       <div class="sticky-header-left">
-        <img :src="siteIconUrl" :alt="siteName" class="sticky-logo" width="32" height="32">
-        <h2 class="sticky-title" :class="{ 'hidden-on-search': isMobileSearchOpen }">{{ siteName }}</h2>
+        <img :src="siteIconUrl" :alt="siteName" class="sticky-logo" width="32" height="32" />
+        <h2 class="sticky-title" :class="{ 'hidden-on-search': isMobileSearchOpen }">
+          {{ siteName }}
+        </h2>
       </div>
       <div class="sticky-header-center">
         <search-toolbar
@@ -116,7 +118,7 @@
             :input-props="{
               name: 'mobile-plugin-search',
               autocomplete: 'off',
-              spellcheck: 'false'
+              spellcheck: 'false',
             }"
             clearable
           />
@@ -142,11 +144,7 @@
         >
           <span class="notification-icon-wrapper">
             <n-icon><notifications-outline /></n-icon>
-            <span
-              v-if="hasUnreadNotifications"
-              class="notification-dot"
-              aria-hidden="true"
-            ></span>
+            <span v-if="hasUnreadNotifications" class="notification-dot" aria-hidden="true"></span>
           </span>
         </n-button>
         <n-button
@@ -228,11 +226,11 @@
   </n-modal>
 </template>
 
-<script setup>
-import { computed, h, onMounted, ref, onUnmounted } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useRouter } from 'vue-router'
-import { NAlert, NCheckbox, NDropdown, NIcon, NButton, NInput, NModal, useMessage } from 'naive-ui'
+<script setup lang="ts">
+import { computed, h, onMounted, ref, onUnmounted } from "vue";
+import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
+import { NAlert, NCheckbox, NDropdown, NIcon, NButton, NInput, NModal, useMessage } from "naive-ui";
 import {
   CloseOutline,
   LinkOutline,
@@ -244,10 +242,10 @@ import {
   SearchOutline,
   SettingsOutline,
   ShieldCheckmarkOutline,
-} from '@vicons/ionicons5'
-import SearchToolbar from './SearchToolbar.vue'
-import ThemeModeButton from './ThemeModeButton.vue'
-import { usePluginStore } from '../stores/plugins'
+} from "@vicons/ionicons5";
+import SearchToolbar from "./SearchToolbar.vue";
+import ThemeModeButton from "./ThemeModeButton.vue";
+import { usePluginStore } from "../stores/plugins";
 
 defineProps({
   searchQuery: String,
@@ -259,197 +257,198 @@ defineProps({
   selectedCategory: String,
   categoryOptions: Array,
   selectedTag: String,
-  tagOptions: Array
-})
+  tagOptions: Array,
+});
 
 const emit = defineEmits([
-  'update:searchQuery',
-  'update:currentPage',
-  'update:sortBy',
-  'update:sortDirection',
-  'update:fuzzySearchEnabled',
-  'update:selectedCategory',
-  'update:selectedTag'
-])
+  "update:searchQuery",
+  "update:currentPage",
+  "update:sortBy",
+  "update:sortDirection",
+  "update:fuzzySearchEnabled",
+  "update:selectedCategory",
+  "update:selectedTag",
+]);
 
-const router = useRouter()
-const message = useMessage()
-const store = usePluginStore()
-const { currentUser, siteConfig, unreadNotificationCount } = storeToRefs(store)
-const { loginWithGithub, logout } = store
+const router = useRouter();
+const message = useMessage();
+const store = usePluginStore();
+const { currentUser, siteConfig, unreadNotificationCount } = storeToRefs(store);
+const { loginWithGithub, logout } = store;
 
-const fullHeader = ref(null)
-const showStickyHeader = ref(false)
-const isMobileSearchOpen = ref(false)
-const isLoginModalOpen = ref(false)
-const agreementAccepted = ref(false)
-const pluginSourceUrl = computed(() => store.pluginSourceUrl)
-const siteName = computed(() => siteConfig.value.name)
-const siteIconUrl = computed(() => siteConfig.value.icon_url)
-const siteSubtitle = computed(() => siteConfig.value.subtitle)
-const siteDescription = computed(() => siteConfig.value.description)
-const isCoreAdmin = computed(() => currentUser.value?.role === 'core_admin')
-const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
-const hasUnreadNotifications = computed(() => unreadNotificationCount.value > 0)
+const fullHeader = ref(null);
+const showStickyHeader = ref(false);
+const isMobileSearchOpen = ref(false);
+const isLoginModalOpen = ref(false);
+const agreementAccepted = ref(false);
+const pluginSourceUrl = computed(() => store.pluginSourceUrl);
+const siteName = computed(() => siteConfig.value.name);
+const siteIconUrl = computed(() => siteConfig.value.icon_url);
+const siteSubtitle = computed(() => siteConfig.value.subtitle);
+const siteDescription = computed(() => siteConfig.value.description);
+const isCoreAdmin = computed(() => currentUser.value?.role === "core_admin");
+const isAdminUser = computed(() => ["core_admin", "admin"].includes(currentUser.value?.role));
+const hasUnreadNotifications = computed(() => unreadNotificationCount.value > 0);
 const notificationButtonLabel = computed(() =>
-  hasUnreadNotifications.value ? `消息，${unreadNotificationCount.value} 条未读` : '消息'
-)
-const displayUserName = computed(() => (
-  currentUser.value?.github_login ||
-  currentUser.value?.internal_username ||
-  currentUser.value?.login ||
-  '已登录'
-))
+  hasUnreadNotifications.value ? `消息，${unreadNotificationCount.value} 条未读` : "消息",
+);
+const displayUserName = computed(
+  () =>
+    currentUser.value?.github_login ||
+    currentUser.value?.internal_username ||
+    currentUser.value?.login ||
+    "已登录",
+);
 const userMenuOptions = computed(() => [
   {
-    key: 'profile',
-    label: '个人设置',
-    icon: renderIcon(PersonOutline)
+    key: "profile",
+    label: "个人设置",
+    icon: renderIcon(PersonOutline),
   },
   {
-    key: 'settings',
-    label: '系统设置',
+    key: "settings",
+    label: "系统设置",
     icon: renderIcon(SettingsOutline),
-    disabled: !isCoreAdmin.value
+    disabled: !isCoreAdmin.value,
   },
   {
-    key: 'divider',
-    type: 'divider'
+    key: "divider",
+    type: "divider",
   },
   {
-    key: 'logout',
-    label: '退出登录',
-    icon: renderIcon(LogOutOutline)
-  }
-])
+    key: "logout",
+    label: "退出登录",
+    icon: renderIcon(LogOutOutline),
+  },
+]);
 const agreementText = computed(() => {
-  const auth = siteConfig.value.auth || {}
-  const parts = []
+  const auth = siteConfig.value.auth || {};
+  const parts = [];
   if (auth.login_agreement_enabled && auth.login_agreement_text) {
-    parts.push(auth.login_agreement_text)
+    parts.push(auth.login_agreement_text);
   }
   if (auth.service_terms_enabled && auth.service_terms_text) {
-    parts.push(auth.service_terms_text)
+    parts.push(auth.service_terms_text);
   }
-  return parts.join('\n\n')
-})
-const canSubmitLogin = computed(() => !agreementText.value || agreementAccepted.value)
+  return parts.join("\n\n");
+});
+const canSubmitLogin = computed(() => !agreementText.value || agreementAccepted.value);
 
 const handleSearchQueryChange = (value) => {
-  emit('update:searchQuery', value)
-}
+  emit("update:searchQuery", value);
+};
 
 const handleCurrentPageChange = (value) => {
-  emit('update:currentPage', value)
-}
+  emit("update:currentPage", value);
+};
 
 const handleSortByChange = (value) => {
-  emit('update:sortBy', value)
-}
+  emit("update:sortBy", value);
+};
 
 const handleSortDirectionChange = (value) => {
-  emit('update:sortDirection', value)
-}
+  emit("update:sortDirection", value);
+};
 
 const handleFuzzySearchEnabledChange = (value) => {
-  emit('update:fuzzySearchEnabled', value)
-}
+  emit("update:fuzzySearchEnabled", value);
+};
 
 const handleSelectedCategoryChange = (value) => {
-  emit('update:selectedCategory', value)
-}
+  emit("update:selectedCategory", value);
+};
 
 const handleSelectedTagChange = (value) => {
-  emit('update:selectedTag', value)
-}
+  emit("update:selectedTag", value);
+};
 
 const goSettings = () => {
-  router.push('/admin/settings')
-}
+  router.push("/admin/settings");
+};
 
 const goAdminPlugins = () => {
-  router.push('/admin/plugins')
-}
+  router.push("/admin/plugins");
+};
 
 const goNotifications = () => {
-  router.push('/notifications')
-}
+  router.push("/notifications");
+};
 
 function renderIcon(icon) {
-  return () => h(NIcon, null, { default: () => h(icon) })
+  return () => h(NIcon, null, { default: () => h(icon) });
 }
 
 async function handleUserMenuSelect(key) {
-  if (key === 'profile') {
-    router.push('/settings/personal')
-    return
+  if (key === "profile") {
+    router.push("/settings/personal");
+    return;
   }
-  if (key === 'settings') {
-    goSettings()
-    return
+  if (key === "settings") {
+    goSettings();
+    return;
   }
-  if (key === 'logout') {
+  if (key === "logout") {
     try {
-      await logout()
-      message.success('已退出登录')
-      router.push('/')
+      await logout();
+      message.success("已退出登录");
+      router.push("/");
     } catch (error) {
-      message.error(error.message || '退出失败')
+      message.error(error.message || "退出失败");
     }
   }
 }
 
 const openLoginModal = () => {
-  isLoginModalOpen.value = true
-}
+  isLoginModalOpen.value = true;
+};
 
 const copyPluginSource = async () => {
   try {
-    await writeClipboard(pluginSourceUrl.value)
-    message.success('插件源已复制')
+    await writeClipboard(pluginSourceUrl.value);
+    message.success("插件源已复制");
   } catch {
-    message.error(`复制失败，请手动复制：${pluginSourceUrl.value}`)
+    message.error(`复制失败，请手动复制：${pluginSourceUrl.value}`);
   }
-}
+};
 
 const writeClipboard = async (value) => {
   if (navigator.clipboard?.writeText && window.isSecureContext) {
-    await navigator.clipboard.writeText(value)
-    return
+    await navigator.clipboard.writeText(value);
+    return;
   }
-  const textarea = document.createElement('textarea')
-  textarea.value = value
-  textarea.setAttribute('readonly', '')
-  textarea.style.position = 'fixed'
-  textarea.style.top = '-9999px'
-  document.body.appendChild(textarea)
-  textarea.select()
-  const copied = document.execCommand('copy')
-  document.body.removeChild(textarea)
-  if (!copied) throw new Error('copy failed')
-}
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error("copy failed");
+};
 
 const toggleMobileSearch = () => {
-  isMobileSearchOpen.value = !isMobileSearchOpen.value
-}
+  isMobileSearchOpen.value = !isMobileSearchOpen.value;
+};
 
 const handleScroll = () => {
-  if (window.matchMedia('(max-width: 768px)').matches) {
-    showStickyHeader.value = true
-    return
+  if (window.matchMedia("(max-width: 768px)").matches) {
+    showStickyHeader.value = true;
+    return;
   }
-  if (!fullHeader.value) return
-  showStickyHeader.value = fullHeader.value.getBoundingClientRect().bottom <= 0
-}
+  if (!fullHeader.value) return;
+  showStickyHeader.value = fullHeader.value.getBoundingClientRect().bottom <= 0;
+};
 
 onMounted(() => {
-  window.addEventListener('scroll', handleScroll, { passive: true })
-  handleScroll()
-})
+  window.addEventListener("scroll", handleScroll, { passive: true });
+  handleScroll();
+});
 
 onUnmounted(() => {
-  window.removeEventListener('scroll', handleScroll)
-})
+  window.removeEventListener("scroll", handleScroll);
+});
 </script>
 
 <style scoped>
@@ -463,7 +462,7 @@ onUnmounted(() => {
 }
 
 .app-header::before {
-  content: '';
+  content: "";
   position: absolute;
   inset: 0;
   background: var(--header-overlay);
@@ -591,7 +590,9 @@ onUnmounted(() => {
   z-index: 1000;
   transform: translateY(-100%);
   opacity: 0;
-  transition: transform 0.22s ease, opacity 0.22s ease;
+  transition:
+    transform 0.22s ease,
+    opacity 0.22s ease;
   pointer-events: none;
   backdrop-filter: blur(22px) saturate(140%);
   background: var(--sticky-bg);
@@ -736,7 +737,9 @@ onUnmounted(() => {
     transform: translateY(-50%) scaleY(0.96);
     opacity: 0;
     pointer-events: none;
-    transition: transform 0.18s ease, opacity 0.18s ease;
+    transition:
+      transform 0.18s ease,
+      opacity 0.18s ease;
   }
 
   .mobile-inline-search.is-open {

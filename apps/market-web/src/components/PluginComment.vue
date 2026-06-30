@@ -29,22 +29,35 @@
         <div class="comment-body">
           <div class="comment-meta">
             <div class="comment-user">
-              <span class="comment-floor">#{{ comment.floor || '-' }}</span>
+              <span class="comment-floor">#{{ comment.floor || "-" }}</span>
               <span>{{ displayUser(comment) }}</span>
               <span v-if="comment.is_admin" class="comment-badge comment-badge--admin">管理</span>
-              <span v-if="comment.is_plugin_author" class="comment-badge comment-badge--author">作者</span>
+              <span v-if="comment.is_plugin_author" class="comment-badge comment-badge--author"
+                >作者</span
+              >
             </div>
             <time>{{ formatTime(comment.created_at) }}</time>
           </div>
           <p>{{ comment.body }}</p>
           <div class="comment-actions">
             <n-button v-if="likesEnabled" text size="small" @click="toggleLike(comment)">
-              {{ comment.liked ? '取消点赞' : '点赞' }} {{ comment.likes || 0 }}
+              {{ comment.liked ? "取消点赞" : "点赞" }} {{ comment.likes || 0 }}
             </n-button>
-            <n-button text size="small" :disabled="!commentsEnabled" @click="toggleReply(comment.id)">
+            <n-button
+              text
+              size="small"
+              :disabled="!commentsEnabled"
+              @click="toggleReply(comment.id)"
+            >
               回复
             </n-button>
-            <n-button v-if="comment.can_delete" text size="small" type="error" @click="deleteComment(comment)">
+            <n-button
+              v-if="comment.can_delete"
+              text
+              size="small"
+              type="error"
+              @click="deleteComment(comment)"
+            >
               删除
             </n-button>
           </div>
@@ -69,19 +82,27 @@
           <article v-for="reply in repliesByParent[comment.id]" :key="reply.id" class="reply-item">
             <div class="comment-meta">
               <div class="comment-user">
-                <span class="comment-floor">#{{ reply.floor || '-' }}</span>
+                <span class="comment-floor">#{{ reply.floor || "-" }}</span>
                 <span>{{ displayUser(reply) }}</span>
                 <span v-if="reply.is_admin" class="comment-badge comment-badge--admin">管理</span>
-                <span v-if="reply.is_plugin_author" class="comment-badge comment-badge--author">作者</span>
+                <span v-if="reply.is_plugin_author" class="comment-badge comment-badge--author"
+                  >作者</span
+                >
               </div>
               <time>{{ formatTime(reply.created_at) }}</time>
             </div>
             <p>{{ reply.body }}</p>
             <div class="comment-actions">
               <n-button v-if="likesEnabled" text size="small" @click="toggleLike(reply)">
-                {{ reply.liked ? '取消点赞' : '点赞' }} {{ reply.likes || 0 }}
+                {{ reply.liked ? "取消点赞" : "点赞" }} {{ reply.likes || 0 }}
               </n-button>
-              <n-button v-if="reply.can_delete" text size="small" type="error" @click="deleteComment(reply)">
+              <n-button
+                v-if="reply.can_delete"
+                text
+                size="small"
+                type="error"
+                @click="deleteComment(reply)"
+              >
                 删除
               </n-button>
             </div>
@@ -92,96 +113,98 @@
   </section>
 </template>
 
-<script setup>
-import { computed, ref } from 'vue'
-import { NAlert, NButton, NEmpty, NInput, useMessage } from 'naive-ui'
+<script setup lang="ts">
+import { computed, ref } from "vue";
+import { NAlert, NButton, NEmpty, NInput, useMessage } from "naive-ui";
 
 const props = defineProps({
   comments: {
     type: Array,
-    default: () => []
+    default: () => [],
   },
   commentsEnabled: {
     type: Boolean,
-    default: true
+    default: true,
   },
   likesEnabled: {
     type: Boolean,
-    default: true
-  }
-})
+    default: true,
+  },
+});
 
-const emit = defineEmits(['submit', 'delete', 'like'])
-const message = useMessage()
-const draft = ref('')
-const replyDraft = ref('')
-const replyingTo = ref('')
-const submitting = ref(false)
+const emit = defineEmits(["submit", "delete", "like"]);
+const message = useMessage();
+const draft = ref("");
+const replyDraft = ref("");
+const replyingTo = ref("");
+const submitting = ref(false);
 
-const rootComments = computed(() => props.comments.filter((comment) => !comment.parent_id))
-const repliesByParent = computed(() => props.comments.reduce((groups, comment) => {
-  if (comment.parent_id) {
-    groups[comment.parent_id] ||= []
-    groups[comment.parent_id].push(comment)
-  }
-  return groups
-}, {}))
+const rootComments = computed(() => props.comments.filter((comment) => !comment.parent_id));
+const repliesByParent = computed(() =>
+  props.comments.reduce((groups, comment) => {
+    if (comment.parent_id) {
+      groups[comment.parent_id] ||= [];
+      groups[comment.parent_id].push(comment);
+    }
+    return groups;
+  }, {}),
+);
 
 function displayUser(comment) {
-  return comment.github_login || comment.github_name || comment.user_id || '用户'
+  return comment.github_login || comment.github_name || comment.user_id || "用户";
 }
 
 function formatTime(value) {
-  if (!value) return ''
-  return new Date(value).toLocaleString()
+  if (!value) return "";
+  return new Date(value).toLocaleString();
 }
 
 function toggleReply(commentId) {
-  replyingTo.value = replyingTo.value === commentId ? '' : commentId
-  replyDraft.value = ''
+  replyingTo.value = replyingTo.value === commentId ? "" : commentId;
+  replyDraft.value = "";
 }
 
 function cancelReply() {
-  replyingTo.value = ''
-  replyDraft.value = ''
+  replyingTo.value = "";
+  replyDraft.value = "";
 }
 
 function toggleLike(comment) {
-  emit('like', {
+  emit("like", {
     comment,
-    liked: !comment.liked
-  })
+    liked: !comment.liked,
+  });
 }
 
 function deleteComment(comment) {
-  emit('delete', comment)
+  emit("delete", comment);
 }
 
 async function submitComment(parentId) {
-  const body = (parentId ? replyDraft.value : draft.value).trim()
+  const body = (parentId ? replyDraft.value : draft.value).trim();
   if (!body) {
-    message.warning('请输入内容')
-    return
+    message.warning("请输入内容");
+    return;
   }
-  submitting.value = true
-  emit('submit', {
+  submitting.value = true;
+  emit("submit", {
     body,
     parent_id: parentId,
     done: () => {
       if (parentId) {
-        cancelReply()
+        cancelReply();
       } else {
-        draft.value = ''
+        draft.value = "";
       }
-      submitting.value = false
+      submitting.value = false;
     },
     fail: () => {
-      submitting.value = false
-    }
-  })
+      submitting.value = false;
+    },
+  });
   setTimeout(() => {
-    submitting.value = false
-  }, 10000)
+    submitting.value = false;
+  }, 10000);
 }
 </script>
 

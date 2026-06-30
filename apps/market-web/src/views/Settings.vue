@@ -48,10 +48,16 @@
                       <n-input v-model:value="formData.site.name" />
                     </n-form-item>
                     <n-form-item label="站点图标 URL" path="site.icon_url">
-                      <n-input v-model:value="formData.site.icon_url" placeholder="/logo.webp 或 https://..." />
+                      <n-input
+                        v-model:value="formData.site.icon_url"
+                        placeholder="/logo.webp 或 https://..."
+                      />
                     </n-form-item>
                     <n-form-item label="站点访问地址" path="site.web_url">
-                      <n-input v-model:value="formData.site.web_url" placeholder="https://plugins.example.com" />
+                      <n-input
+                        v-model:value="formData.site.web_url"
+                        placeholder="https://plugins.example.com"
+                      />
                     </n-form-item>
                     <n-form-item label="副标题" path="site.subtitle">
                       <n-input v-model:value="formData.site.subtitle" />
@@ -63,7 +69,10 @@
                       <n-input v-model:value="formData.site.contact_email" placeholder="可选" />
                     </n-form-item>
                     <n-form-item label="文档地址" path="site.docs_url">
-                      <n-input v-model:value="formData.site.docs_url" placeholder="https://docs.astrbot.app/..." />
+                      <n-input
+                        v-model:value="formData.site.docs_url"
+                        placeholder="https://docs.astrbot.app/..."
+                      />
                     </n-form-item>
                   </div>
                 </section>
@@ -94,7 +103,11 @@
                     </n-form-item>
                   </div>
                   <div class="announcement-actions">
-                    <n-button type="primary" :loading="publishingAnnouncement" @click="publishSiteAnnouncement">
+                    <n-button
+                      type="primary"
+                      :loading="publishingAnnouncement"
+                      @click="publishSiteAnnouncement"
+                    >
                       发布公告
                     </n-button>
                   </div>
@@ -110,16 +123,52 @@
                     <p>控制后台内部登录、GitHub OAuth，以及登录前必须确认的条款。</p>
                   </div>
                   <div class="switch-grid">
-                    <setting-switch v-model="formData.auth.public_login_enabled" label="内部账号登录" enabled="允许 /admin 内部账号登录" disabled="仅保留已登录会话" />
-                    <setting-switch v-model="formData.auth.github_login_enabled" label="GitHub OAuth" enabled="允许 GitHub 登录 / 注册" disabled="关闭 GitHub 登录 / 注册" />
-                    <setting-switch v-model="formData.auth.login_agreement_enabled" label="登录条款" enabled="登录前确认" disabled="不显示" />
-                    <setting-switch v-model="formData.auth.service_terms_enabled" label="服务条款" enabled="显示服务条款" disabled="不显示" />
+                    <setting-switch
+                      v-model="formData.auth.public_login_enabled"
+                      label="内部账号登录"
+                      enabled="允许 /admin 内部账号登录"
+                      disabled="仅保留已登录会话"
+                    />
+                    <setting-switch
+                      v-model="formData.auth.github_login_enabled"
+                      label="GitHub OAuth"
+                      enabled="允许 GitHub 登录 / 注册"
+                      disabled="关闭 GitHub 登录 / 注册"
+                    />
+                    <setting-switch
+                      v-model="formData.auth.login_agreement_enabled"
+                      label="登录条款"
+                      enabled="登录前确认"
+                      disabled="不显示"
+                    />
+                    <setting-switch
+                      v-model="formData.auth.service_terms_enabled"
+                      label="服务条款"
+                      enabled="显示服务条款"
+                      disabled="不显示"
+                    />
                   </div>
-                  <n-form-item v-if="formData.auth.login_agreement_enabled" label="登录条款内容" path="auth.login_agreement_text">
-                    <n-input v-model:value="formData.auth.login_agreement_text" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
+                  <n-form-item
+                    v-if="formData.auth.login_agreement_enabled"
+                    label="登录条款内容"
+                    path="auth.login_agreement_text"
+                  >
+                    <n-input
+                      v-model:value="formData.auth.login_agreement_text"
+                      type="textarea"
+                      :autosize="{ minRows: 3, maxRows: 8 }"
+                    />
                   </n-form-item>
-                  <n-form-item v-if="formData.auth.service_terms_enabled" label="服务条款内容" path="auth.service_terms_text">
-                    <n-input v-model:value="formData.auth.service_terms_text" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" />
+                  <n-form-item
+                    v-if="formData.auth.service_terms_enabled"
+                    label="服务条款内容"
+                    path="auth.service_terms_text"
+                  >
+                    <n-input
+                      v-model:value="formData.auth.service_terms_text"
+                      type="textarea"
+                      :autosize="{ minRows: 3, maxRows: 8 }"
+                    />
                   </n-form-item>
                 </section>
 
@@ -134,20 +183,34 @@
                     </n-form-item>
                     <n-form-item label="Client Secret">
                       <div class="secret-status">
-                        <n-tag :type="formData.github.client_secret_configured ? 'success' : 'warning'" :bordered="false">
-                          {{ formData.github.client_secret_configured ? '已配置' : '未配置' }}
+                        <n-tag
+                          :type="formData.github.client_secret_configured ? 'success' : 'warning'"
+                          :bordered="false"
+                        >
+                          {{ formData.github.client_secret_configured ? "已配置" : "未配置" }}
                         </n-tag>
-                        <span class="secret-status-text">由部署环境变量 GITHUB_CLIENT_SECRET 管理</span>
+                        <span class="secret-status-text"
+                          >由部署环境变量 GITHUB_CLIENT_SECRET 管理</span
+                        >
                       </div>
                     </n-form-item>
                     <n-form-item label="回调地址" path="github.callback_url">
-                      <n-input v-model:value="formData.github.callback_url" placeholder="https://your-domain/v1/auth/github/callback" />
+                      <n-input
+                        v-model:value="formData.github.callback_url"
+                        placeholder="https://your-domain/v1/auth/github/callback"
+                      />
                     </n-form-item>
                     <n-form-item label="管理员组织" path="github.admin_org">
-                      <n-input v-model:value="formData.github.admin_org" placeholder="可选，GitHub 组织名" />
+                      <n-input
+                        v-model:value="formData.github.admin_org"
+                        placeholder="可选，GitHub 组织名"
+                      />
                     </n-form-item>
                     <n-form-item label="授权范围" path="github.scope">
-                      <n-input v-model:value="formData.github.scope" placeholder="read:user user:email read:org" />
+                      <n-input
+                        v-model:value="formData.github.scope"
+                        placeholder="read:user user:email read:org"
+                      />
                     </n-form-item>
                   </div>
                 </section>
@@ -162,14 +225,38 @@
                     <p>控制插件提交、互动功能和审核策略。</p>
                   </div>
                   <div class="switch-grid">
-                    <setting-switch v-model="formData.market.submissions_enabled" label="插件提交" enabled="允许提交" disabled="暂停提交" />
-                    <setting-switch v-model="formData.market.comments_enabled" label="评论" enabled="允许评论" disabled="关闭评论" />
-                    <setting-switch v-model="formData.market.likes_enabled" label="点赞" enabled="允许点赞" disabled="关闭点赞" />
-                    <setting-switch v-model="formData.market.plugin_auto_approve_enabled" label="自动上架" enabled="提交后上架" disabled="管理员审核" />
+                    <setting-switch
+                      v-model="formData.market.submissions_enabled"
+                      label="插件提交"
+                      enabled="允许提交"
+                      disabled="暂停提交"
+                    />
+                    <setting-switch
+                      v-model="formData.market.comments_enabled"
+                      label="评论"
+                      enabled="允许评论"
+                      disabled="关闭评论"
+                    />
+                    <setting-switch
+                      v-model="formData.market.likes_enabled"
+                      label="点赞"
+                      enabled="允许点赞"
+                      disabled="关闭点赞"
+                    />
+                    <setting-switch
+                      v-model="formData.market.plugin_auto_approve_enabled"
+                      label="自动上架"
+                      enabled="提交后上架"
+                      disabled="管理员审核"
+                    />
                   </div>
                   <div class="form-grid compact-grid">
                     <n-form-item label="最多标签数" path="market.max_plugin_tags">
-                      <n-input-number v-model:value="formData.market.max_plugin_tags" :min="0" :max="50" />
+                      <n-input-number
+                        v-model:value="formData.market.max_plugin_tags"
+                        :min="0"
+                        :max="50"
+                      />
                     </n-form-item>
                   </div>
                 </section>
@@ -177,7 +264,10 @@
                 <section class="settings-section">
                   <div class="section-title">
                     <h2>GitHub 元数据同步</h2>
-                    <p>用于插件 Star、更新时间、metadata.yml 和 logo 的后台同步。多个 Token 会轮询使用。</p>
+                    <p>
+                      用于插件 Star、更新时间、metadata.yml 和 logo 的后台同步。多个 Token
+                      会轮询使用。
+                    </p>
                   </div>
                   <div class="switch-grid">
                     <setting-switch
@@ -188,7 +278,11 @@
                     />
                   </div>
                   <div class="form-grid">
-                    <n-form-item label="新增 GitHub API Token" path="market.api_token" class="form-row-full">
+                    <n-form-item
+                      label="新增 GitHub API Token"
+                      path="market.api_token"
+                      class="form-row-full"
+                    >
                       <n-input
                         v-model:value="formData.market.api_token"
                         type="textarea"
@@ -197,7 +291,11 @@
                       />
                       <template #feedback>
                         <div class="token-feedback">
-                          <span>{{ formData.market.api_token_configured ? '当前已配置系统 Token 池' : '当前未配置系统 Token，未登录用户同步会使用 GitHub 公共限额' }}</span>
+                          <span>{{
+                            formData.market.api_token_configured
+                              ? "当前已配置系统 Token 池"
+                              : "当前未配置系统 Token，未登录用户同步会使用 GitHub 公共限额"
+                          }}</span>
                           <div v-if="marketTokenPreviewRows.length" class="token-preview-list">
                             <div
                               v-for="item in marketTokenPreviewRows"
@@ -212,14 +310,17 @@
                                 :type="item.removing ? 'default' : 'error'"
                                 @click="toggleMarketTokenRemoval(item.index)"
                               >
-                                {{ item.removing ? '撤销' : '移除' }}
+                                {{ item.removing ? "撤销" : "移除" }}
                               </n-button>
                             </div>
                           </div>
                         </div>
                       </template>
                     </n-form-item>
-                    <n-form-item label="默认同步间隔（秒）" path="market.metadata_sync_interval_seconds">
+                    <n-form-item
+                      label="默认同步间隔（秒）"
+                      path="market.metadata_sync_interval_seconds"
+                    >
                       <n-input-number
                         v-model:value="formData.market.metadata_sync_interval_seconds"
                         :min="300"
@@ -241,35 +342,59 @@
                   </div>
                   <div class="form-grid compact-grid">
                     <n-form-item label="邮件服务" path="email.provider">
-                      <n-select v-model:value="formData.email.provider" :options="emailProviderOptions" />
+                      <n-select
+                        v-model:value="formData.email.provider"
+                        :options="emailProviderOptions"
+                      />
                     </n-form-item>
                     <n-form-item label="每日发送上限" path="email.daily_limit">
                       <n-input-number v-model:value="formData.email.daily_limit" :min="0" />
                     </n-form-item>
-                    <n-form-item label="单邮箱每日验证码上限" path="email.verification_daily_limit_per_user">
-                      <n-input-number v-model:value="formData.email.verification_daily_limit_per_user" :min="0" />
+                    <n-form-item
+                      label="单邮箱每日验证码上限"
+                      path="email.verification_daily_limit_per_user"
+                    >
+                      <n-input-number
+                        v-model:value="formData.email.verification_daily_limit_per_user"
+                        :min="0"
+                      />
                     </n-form-item>
                   </div>
                   <div v-if="formData.email.provider === 'smtp'" class="form-grid">
                     <n-form-item label="SMTP 主机" path="email.smtp.host">
-                      <n-input v-model:value="formData.email.smtp.host" placeholder="smtp.example.com" />
+                      <n-input
+                        v-model:value="formData.email.smtp.host"
+                        placeholder="smtp.example.com"
+                      />
                     </n-form-item>
                     <n-form-item label="SMTP 端口" path="email.smtp.port">
-                      <n-input-number v-model:value="formData.email.smtp.port" :min="1" :max="65535" />
+                      <n-input-number
+                        v-model:value="formData.email.smtp.port"
+                        :min="1"
+                        :max="65535"
+                      />
                     </n-form-item>
                     <n-form-item label="SMTP 账号" path="email.smtp.username">
                       <n-input v-model:value="formData.email.smtp.username" />
                     </n-form-item>
                     <n-form-item label="SMTP 密码" path="email.smtp.password">
-                      <n-input v-model:value="formData.email.smtp.password" type="password" show-password-on="click" placeholder="留空或保持遮蔽值表示不更新" />
+                      <n-input
+                        v-model:value="formData.email.smtp.password"
+                        type="password"
+                        show-password-on="click"
+                        placeholder="留空或保持遮蔽值表示不更新"
+                      />
                     </n-form-item>
                     <n-form-item label="发件邮箱" path="email.smtp.from_address">
-                      <n-input v-model:value="formData.email.smtp.from_address" placeholder="noreply@example.com" />
+                      <n-input
+                        v-model:value="formData.email.smtp.from_address"
+                        placeholder="noreply@example.com"
+                      />
                     </n-form-item>
                     <n-form-item label="SMTP SSL" path="email.smtp.ssl">
                       <div class="switch-row">
                         <n-switch v-model:value="formData.email.smtp.ssl" />
-                        <span>{{ formData.email.smtp.ssl ? '启用 SSL' : '不启用 SSL' }}</span>
+                        <span>{{ formData.email.smtp.ssl ? "启用 SSL" : "不启用 SSL" }}</span>
                       </div>
                     </n-form-item>
                   </div>
@@ -278,16 +403,28 @@
                       <n-input v-model:value="formData.email.cloudflare.account_id" />
                     </n-form-item>
                     <n-form-item label="Cloudflare API Token" path="email.cloudflare.api_token">
-                      <n-input v-model:value="formData.email.cloudflare.api_token" type="password" show-password-on="click" placeholder="留空或保持遮蔽值表示不更新" />
+                      <n-input
+                        v-model:value="formData.email.cloudflare.api_token"
+                        type="password"
+                        show-password-on="click"
+                        placeholder="留空或保持遮蔽值表示不更新"
+                      />
                     </n-form-item>
                     <n-form-item label="发件邮箱" path="email.cloudflare.from_address">
-                      <n-input v-model:value="formData.email.cloudflare.from_address" placeholder="noreply@mail.example.com" />
+                      <n-input
+                        v-model:value="formData.email.cloudflare.from_address"
+                        placeholder="noreply@mail.example.com"
+                      />
                     </n-form-item>
                   </div>
 
                   <div class="test-email-row">
                     <n-input v-model:value="testEmail.to" placeholder="测试收件邮箱" />
-                    <n-button :loading="testingEmail" :disabled="formData.email.provider === 'disabled'" @click="sendEmailTest">
+                    <n-button
+                      :loading="testingEmail"
+                      :disabled="formData.email.provider === 'disabled'"
+                      @click="sendEmailTest"
+                    >
                       发送测试邮件
                     </n-button>
                   </div>
@@ -318,29 +455,44 @@
                 <section class="settings-section">
                   <div class="section-title">
                     <h2>基础设施</h2>
-                    <p>PostgreSQL 和 Redis 只在首次初始化向导中通过 Web 配置，后续变更请修改 .env 并重启 API。</p>
+                    <p>
+                      PostgreSQL 和 Redis 只在首次初始化向导中通过 Web 配置，后续变更请修改 .env
+                      并重启 API。
+                    </p>
                   </div>
                   <div class="infra-grid">
                     <div class="infra-item">
                       <span>PostgreSQL</span>
-                      <n-tag :type="setupStatus.database_configured ? 'success' : 'warning'" :bordered="false">
-                        {{ setupStatus.database_configured ? '已配置' : '未配置' }}
+                      <n-tag
+                        :type="setupStatus.database_configured ? 'success' : 'warning'"
+                        :bordered="false"
+                      >
+                        {{ setupStatus.database_configured ? "已配置" : "未配置" }}
                       </n-tag>
                     </div>
                     <div class="infra-item">
                       <span>Redis</span>
-                      <n-tag :type="setupStatus.redis_configured ? 'success' : 'warning'" :bordered="false">
-                        {{ setupStatus.redis_configured ? '已配置' : '未配置' }}
+                      <n-tag
+                        :type="setupStatus.redis_configured ? 'success' : 'warning'"
+                        :bordered="false"
+                      >
+                        {{ setupStatus.redis_configured ? "已配置" : "未配置" }}
                       </n-tag>
                     </div>
                     <div class="infra-item">
                       <span>重启状态</span>
-                      <n-tag :type="setupStatus.restart_required ? 'warning' : 'success'" :bordered="false">
-                        {{ setupStatus.restart_required ? '需要重启' : '当前生效' }}
+                      <n-tag
+                        :type="setupStatus.restart_required ? 'warning' : 'success'"
+                        :bordered="false"
+                      >
+                        {{ setupStatus.restart_required ? "需要重启" : "当前生效" }}
                       </n-tag>
                     </div>
                   </div>
-                  <p class="infra-note">初始化完成后 `/setup` 会关闭；数据库或 Redis 地址、账号、密码和 SSL 配置请在部署环境的 .env 中调整。</p>
+                  <p class="infra-note">
+                    初始化完成后 `/setup` 会关闭；数据库或 Redis 地址、账号、密码和 SSL
+                    配置请在部署环境的 .env 中调整。
+                  </p>
                 </section>
               </div>
             </n-tab-pane>
@@ -351,10 +503,10 @@
   </div>
 </template>
 
-<script setup>
-import { computed, h, onMounted, reactive, ref, shallowRef } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useRouter } from 'vue-router'
+<script setup lang="ts">
+import { computed, h, onMounted, reactive, ref, shallowRef } from "vue";
+import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -370,39 +522,40 @@ import {
   NTabPane,
   NTabs,
   NTag,
-  useMessage
-} from 'naive-ui'
-import { ArrowBack } from '@vicons/ionicons5'
-import { usePluginStore } from '@/stores/plugins'
-import ThemeModeButton from '@/components/ThemeModeButton.vue'
-import AdminUserManagement from '@/components/settings/AdminUserManagement.vue'
+  useMessage,
+} from "naive-ui";
+import { ArrowBack } from "@vicons/ionicons5";
+import { usePluginStore } from "@/stores/plugins";
+import ThemeModeButton from "@/components/ThemeModeButton.vue";
+import AdminUserManagement from "@/components/settings/AdminUserManagement.vue";
 
 const SettingSwitch = {
   props: {
     modelValue: Boolean,
     label: String,
     enabled: String,
-    disabled: String
+    disabled: String,
   },
-  emits: ['update:modelValue'],
+  emits: ["update:modelValue"],
   setup(props, { emit }) {
-    return () => h('div', { class: 'switch-card' }, [
-      h('span', { class: 'switch-label' }, props.label),
-      h('div', { class: 'switch-row' }, [
-        h(NSwitch, {
-          value: props.modelValue,
-          'onUpdate:value': (value) => emit('update:modelValue', value)
-        }),
-        h('span', props.modelValue ? props.enabled : props.disabled)
-      ])
-    ])
-  }
-}
+    return () =>
+      h("div", { class: "switch-card" }, [
+        h("span", { class: "switch-label" }, props.label),
+        h("div", { class: "switch-row" }, [
+          h(NSwitch, {
+            value: props.modelValue,
+            "onUpdate:value": (value) => emit("update:modelValue", value),
+          }),
+          h("span", props.modelValue ? props.enabled : props.disabled),
+        ]),
+      ]);
+  },
+};
 
-const router = useRouter()
-const message = useMessage()
-const store = usePluginStore()
-const { currentUser, setupStatus } = storeToRefs(store)
+const router = useRouter();
+const message = useMessage();
+const store = usePluginStore();
+const { currentUser, setupStatus } = storeToRefs(store);
 const {
   loadCurrentUser,
   loadAdminSetupStatus,
@@ -415,181 +568,195 @@ const {
   updateAdminUserRole,
   muteAdminUser,
   unmuteAdminUser,
-  deleteAdminUser
-} = store
+  deleteAdminUser,
+} = store;
 
-const formRef = ref(null)
-const loading = ref(true)
-const saving = ref(false)
-const testingEmail = ref(false)
-const publishingAnnouncement = ref(false)
-const loadingUsers = shallowRef(false)
-const creatingUser = shallowRef(false)
-const adminUsers = shallowRef([])
-const userBusyIds = reactive({})
-const isCoreAdmin = computed(() => currentUser.value?.role === 'core_admin')
-const testEmail = reactive({ to: '' })
-const announcementForm = reactive({ title: '', body: '' })
+const formRef = ref(null);
+const loading = ref(true);
+const saving = ref(false);
+const testingEmail = ref(false);
+const publishingAnnouncement = ref(false);
+const loadingUsers = shallowRef(false);
+const creatingUser = shallowRef(false);
+const adminUsers = shallowRef([]);
+const userBusyIds = reactive({});
+const isCoreAdmin = computed(() => currentUser.value?.role === "core_admin");
+const testEmail = reactive({ to: "" });
+const announcementForm = reactive({ title: "", body: "" });
 
-const formData = reactive(createSettingsForm())
+const formData = reactive(createSettingsForm());
 const marketTokenPreviewRows = computed(() => {
-  const removeIndexes = new Set(formData.market.api_token_remove_indexes || [])
+  const removeIndexes = new Set(formData.market.api_token_remove_indexes || []);
   return (formData.market.api_token_previews || []).map((token, index) => ({
     token,
     index,
-    removing: removeIndexes.has(index)
-  }))
-})
+    removing: removeIndexes.has(index),
+  }));
+});
 
 const emailProviderOptions = [
-  { label: '关闭邮件', value: 'disabled' },
-  { label: 'SMTP', value: 'smtp' },
-  { label: 'Cloudflare Email Service', value: 'cloudflare' }
-]
+  { label: "关闭邮件", value: "disabled" },
+  { label: "SMTP", value: "smtp" },
+  { label: "Cloudflare Email Service", value: "cloudflare" },
+];
 
-const requiredText = (text) => ({ required: true, message: text, trigger: 'blur' })
-const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const requiredText = (text) => ({ required: true, message: text, trigger: "blur" });
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function isPublicHttpUrl(value) {
   try {
-    const url = new URL(value)
-    const hostname = url.hostname.toLowerCase()
-    return ['http:', 'https:'].includes(url.protocol) &&
-      !['localhost', '0.0.0.0', '::1'].includes(hostname) &&
-      !hostname.startsWith('127.')
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    return (
+      ["http:", "https:"].includes(url.protocol) &&
+      !["localhost", "0.0.0.0", "::1"].includes(hostname) &&
+      !hostname.startsWith("127.")
+    );
   } catch {
-    return false
+    return false;
   }
 }
 const rules = {
-  'site.name': [requiredText('请输入站点名称')],
-  'site.icon_url': [
-    requiredText('请输入站点图标 URL'),
+  "site.name": [requiredText("请输入站点名称")],
+  "site.icon_url": [
+    requiredText("请输入站点图标 URL"),
     {
-      validator: (_, value) => String(value || '').startsWith('/') || /^https?:\/\//.test(value),
-      message: '请输入 / 开头路径或 http(s) URL',
-      trigger: 'blur'
-    }
+      validator: (_, value) => String(value || "").startsWith("/") || /^https?:\/\//.test(value),
+      message: "请输入 / 开头路径或 http(s) URL",
+      trigger: "blur",
+    },
   ],
-  'site.web_url': [
+  "site.web_url": [
     {
-      validator: (_, value) => /^https?:\/\//.test(value || ''),
-      message: '请输入 http(s) 站点访问地址',
-      trigger: 'blur'
+      validator: (_, value) => /^https?:\/\//.test(value || ""),
+      message: "请输入 http(s) 站点访问地址",
+      trigger: "blur",
     },
     {
       validator: (_, value) => !formData.auth.github_login_enabled || isPublicHttpUrl(value),
-      message: '启用 GitHub 登录后必须填写公网站点访问地址',
-      trigger: 'blur'
-    }
+      message: "启用 GitHub 登录后必须填写公网站点访问地址",
+      trigger: "blur",
+    },
   ],
-  'site.contact_email': [
+  "site.contact_email": [
     {
       validator: (_, value) => !value || emailPattern.test(value),
-      message: '请输入有效邮箱',
-      trigger: 'blur'
-    }
+      message: "请输入有效邮箱",
+      trigger: "blur",
+    },
   ],
-  'site.docs_url': [
+  "site.docs_url": [
     {
       validator: (_, value) => !value || /^https?:\/\//.test(value),
-      message: '请输入 http(s) URL',
-      trigger: 'blur'
-    }
+      message: "请输入 http(s) URL",
+      trigger: "blur",
+    },
   ],
-  'auth.login_agreement_text': [
+  "auth.login_agreement_text": [
     {
-      validator: () => !formData.auth.login_agreement_enabled || Boolean(formData.auth.login_agreement_text.trim()),
-      message: '启用登录条款后必须填写内容',
-      trigger: 'blur'
-    }
+      validator: () =>
+        !formData.auth.login_agreement_enabled ||
+        Boolean(formData.auth.login_agreement_text.trim()),
+      message: "启用登录条款后必须填写内容",
+      trigger: "blur",
+    },
   ],
-  'auth.service_terms_text': [
+  "auth.service_terms_text": [
     {
-      validator: () => !formData.auth.service_terms_enabled || Boolean(formData.auth.service_terms_text.trim()),
-      message: '启用服务条款后必须填写内容',
-      trigger: 'blur'
-    }
+      validator: () =>
+        !formData.auth.service_terms_enabled || Boolean(formData.auth.service_terms_text.trim()),
+      message: "启用服务条款后必须填写内容",
+      trigger: "blur",
+    },
   ],
-  'github.client_id': [
+  "github.client_id": [
     {
-      validator: () => !formData.auth.github_login_enabled || Boolean(formData.github.client_id.trim()),
-      message: '启用 GitHub 登录后必须填写 Client ID',
-      trigger: 'blur'
-    }
+      validator: () =>
+        !formData.auth.github_login_enabled || Boolean(formData.github.client_id.trim()),
+      message: "启用 GitHub 登录后必须填写 Client ID",
+      trigger: "blur",
+    },
   ],
-  'github.callback_url': [
+  "github.callback_url": [
     {
       validator: (_, value) => {
-        if (!formData.auth.github_login_enabled) return true
-        return isPublicHttpUrl(value)
+        if (!formData.auth.github_login_enabled) return true;
+        return isPublicHttpUrl(value);
       },
-      message: '启用 GitHub 登录后必须填写公网 http(s) 回调地址',
-      trigger: 'blur'
-    }
+      message: "启用 GitHub 登录后必须填写公网 http(s) 回调地址",
+      trigger: "blur",
+    },
   ],
-  'email.smtp.host': [
+  "email.smtp.host": [
     {
-      validator: () => formData.email.provider !== 'smtp' || Boolean(formData.email.smtp.host.trim()),
-      message: '启用 SMTP 后必须填写主机',
-      trigger: 'blur'
-    }
+      validator: () =>
+        formData.email.provider !== "smtp" || Boolean(formData.email.smtp.host.trim()),
+      message: "启用 SMTP 后必须填写主机",
+      trigger: "blur",
+    },
   ],
-  'email.smtp.from_address': [
+  "email.smtp.from_address": [
     {
-      validator: () => formData.email.provider !== 'smtp' || emailPattern.test(formData.email.smtp.from_address),
-      message: '请输入有效发件邮箱',
-      trigger: 'blur'
-    }
+      validator: () =>
+        formData.email.provider !== "smtp" || emailPattern.test(formData.email.smtp.from_address),
+      message: "请输入有效发件邮箱",
+      trigger: "blur",
+    },
   ],
-  'email.cloudflare.account_id': [
+  "email.cloudflare.account_id": [
     {
-      validator: () => formData.email.provider !== 'cloudflare' || Boolean(formData.email.cloudflare.account_id.trim()),
-      message: '启用 Cloudflare 后必须填写 Account ID',
-      trigger: 'blur'
-    }
+      validator: () =>
+        formData.email.provider !== "cloudflare" ||
+        Boolean(formData.email.cloudflare.account_id.trim()),
+      message: "启用 Cloudflare 后必须填写 Account ID",
+      trigger: "blur",
+    },
   ],
-  'email.cloudflare.api_token': [
+  "email.cloudflare.api_token": [
     {
-      validator: () => formData.email.provider !== 'cloudflare' || Boolean(formData.email.cloudflare.api_token.trim()),
-      message: '启用 Cloudflare 后必须填写 API Token',
-      trigger: 'blur'
-    }
+      validator: () =>
+        formData.email.provider !== "cloudflare" ||
+        Boolean(formData.email.cloudflare.api_token.trim()),
+      message: "启用 Cloudflare 后必须填写 API Token",
+      trigger: "blur",
+    },
   ],
-  'email.cloudflare.from_address': [
+  "email.cloudflare.from_address": [
     {
-      validator: () => formData.email.provider !== 'cloudflare' || emailPattern.test(formData.email.cloudflare.from_address),
-      message: '请输入有效发件邮箱',
-      trigger: 'blur'
-    }
-  ]
-}
+      validator: () =>
+        formData.email.provider !== "cloudflare" ||
+        emailPattern.test(formData.email.cloudflare.from_address),
+      message: "请输入有效发件邮箱",
+      trigger: "blur",
+    },
+  ],
+};
 
 function createSettingsForm() {
   return {
     site: {
-      name: '',
-      icon_url: '',
+      name: "",
+      icon_url: "",
       web_url: window.location.origin,
-      subtitle: '',
-      description: '',
-      contact_email: '',
-      docs_url: ''
+      subtitle: "",
+      description: "",
+      contact_email: "",
+      docs_url: "",
     },
     auth: {
       github_login_enabled: false,
       public_login_enabled: true,
       login_agreement_enabled: false,
-      login_agreement_text: '',
+      login_agreement_text: "",
       service_terms_enabled: false,
-      service_terms_text: ''
+      service_terms_text: "",
     },
     github: {
-      client_id: '',
-      client_secret: '',
+      client_id: "",
+      client_secret: "",
       client_secret_configured: false,
-      callback_url: '',
-      scope: 'read:user user:email read:org',
-      admin_org: ''
+      callback_url: "",
+      scope: "read:user user:email read:org",
+      admin_org: "",
     },
     market: {
       submissions_enabled: true,
@@ -597,258 +764,270 @@ function createSettingsForm() {
       likes_enabled: true,
       plugin_auto_approve_enabled: false,
       max_plugin_tags: 8,
-      api_token: '',
+      api_token: "",
       api_token_configured: false,
       api_token_previews: [],
       api_token_remove_indexes: [],
       metadata_sync_enabled: true,
-      metadata_sync_interval_seconds: 3600
+      metadata_sync_interval_seconds: 3600,
     },
     email: {
-      provider: 'disabled',
+      provider: "disabled",
       smtp: {
-        host: '',
+        host: "",
         port: 587,
-        username: '',
-        password: '',
+        username: "",
+        password: "",
         password_configured: false,
-        from_address: '',
-        ssl: false
+        from_address: "",
+        ssl: false,
       },
       cloudflare: {
-        account_id: '',
-        api_token: '',
+        account_id: "",
+        api_token: "",
         api_token_configured: false,
-        from_address: ''
+        from_address: "",
       },
       daily_limit: 0,
-      verification_daily_limit_per_user: 5
-    }
-  }
+      verification_daily_limit_per_user: 5,
+    },
+  };
 }
 
 function applySettings(config = {}) {
-  Object.assign(formData.site, config.site || {})
-  Object.assign(formData.auth, config.auth || {})
-  Object.assign(formData.github, config.github || {})
-  Object.assign(formData.market, config.market || {})
-  formData.market.api_token = ''
-  formData.market.api_token_remove_indexes = []
+  Object.assign(formData.site, config.site || {});
+  Object.assign(formData.auth, config.auth || {});
+  Object.assign(formData.github, config.github || {});
+  Object.assign(formData.market, config.market || {});
+  formData.market.api_token = "";
+  formData.market.api_token_remove_indexes = [];
   if (!config.market?.api_token && config.github?.api_token) {
-    formData.market.api_token_configured = Boolean(config.github.api_token_configured)
+    formData.market.api_token_configured = Boolean(config.github.api_token_configured);
   }
-  if (!config.market?.metadata_sync_interval_seconds && config.github?.metadata_sync_interval_seconds) {
-    formData.market.metadata_sync_interval_seconds = config.github.metadata_sync_interval_seconds
+  if (
+    !config.market?.metadata_sync_interval_seconds &&
+    config.github?.metadata_sync_interval_seconds
+  ) {
+    formData.market.metadata_sync_interval_seconds = config.github.metadata_sync_interval_seconds;
   }
-  if (config.market?.metadata_sync_enabled === undefined && config.github?.metadata_sync_enabled !== undefined) {
-    formData.market.metadata_sync_enabled = config.github.metadata_sync_enabled
+  if (
+    config.market?.metadata_sync_enabled === undefined &&
+    config.github?.metadata_sync_enabled !== undefined
+  ) {
+    formData.market.metadata_sync_enabled = config.github.metadata_sync_enabled;
   }
-  Object.assign(formData.email, config.email || {})
-  Object.assign(formData.email.smtp, config.email?.smtp || {})
-  Object.assign(formData.email.cloudflare, config.email?.cloudflare || {})
+  Object.assign(formData.email, config.email || {});
+  Object.assign(formData.email.smtp, config.email?.smtp || {});
+  Object.assign(formData.email.cloudflare, config.email?.cloudflare || {});
 }
 
 function normalizeNumberFields() {
-  formData.market.max_plugin_tags = Number(formData.market.max_plugin_tags || 0)
-  formData.market.metadata_sync_interval_seconds = Number(formData.market.metadata_sync_interval_seconds || 3600)
-  formData.email.smtp.port = Number(formData.email.smtp.port || 587)
-  formData.email.daily_limit = Number(formData.email.daily_limit || 0)
-  formData.email.verification_daily_limit_per_user = Number(formData.email.verification_daily_limit_per_user || 0)
+  formData.market.max_plugin_tags = Number(formData.market.max_plugin_tags || 0);
+  formData.market.metadata_sync_interval_seconds = Number(
+    formData.market.metadata_sync_interval_seconds || 3600,
+  );
+  formData.email.smtp.port = Number(formData.email.smtp.port || 587);
+  formData.email.daily_limit = Number(formData.email.daily_limit || 0);
+  formData.email.verification_daily_limit_per_user = Number(
+    formData.email.verification_daily_limit_per_user || 0,
+  );
 }
 
 function settingsPayload() {
-  normalizeNumberFields()
-  const payload = JSON.parse(JSON.stringify(formData))
-  delete payload.github.client_secret
-  delete payload.github.client_secret_configured
-  if (payload.market.api_token === '********') {
-    payload.market.api_token = ''
+  normalizeNumberFields();
+  const payload = JSON.parse(JSON.stringify(formData));
+  delete payload.github.client_secret;
+  delete payload.github.client_secret_configured;
+  if (payload.market.api_token === "********") {
+    payload.market.api_token = "";
   }
-  return payload
+  return payload;
 }
 
 function toggleMarketTokenRemoval(index) {
-  const indexes = new Set(formData.market.api_token_remove_indexes || [])
+  const indexes = new Set(formData.market.api_token_remove_indexes || []);
   if (indexes.has(index)) {
-    indexes.delete(index)
+    indexes.delete(index);
   } else {
-    indexes.add(index)
+    indexes.add(index);
   }
-  formData.market.api_token_remove_indexes = Array.from(indexes).sort((a, b) => a - b)
+  formData.market.api_token_remove_indexes = Array.from(indexes).sort((a, b) => a - b);
 }
 
 async function loadSettings() {
-  loading.value = true
+  loading.value = true;
   try {
-    await loadCurrentUser()
+    await loadCurrentUser();
     if (!isCoreAdmin.value) {
-      router.replace('/admin')
-      return
+      router.replace("/admin");
+      return;
     }
-    await loadAdminSetupStatus()
-    applySettings(await loadSystemSettings())
-    await refreshAdminUsers()
+    await loadAdminSetupStatus();
+    applySettings(await loadSystemSettings());
+    await refreshAdminUsers();
   } catch (error) {
-    message.error(error.message || '加载设置失败')
+    message.error(error.message || "加载设置失败");
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
 async function refreshAdminUsers() {
-  if (!isCoreAdmin.value) return
-  loadingUsers.value = true
+  if (!isCoreAdmin.value) return;
+  loadingUsers.value = true;
   try {
-    adminUsers.value = await loadAdminUsers()
+    adminUsers.value = await loadAdminUsers();
   } catch (error) {
-    message.error(error.message || '加载用户失败')
+    message.error(error.message || "加载用户失败");
   } finally {
-    loadingUsers.value = false
+    loadingUsers.value = false;
   }
 }
 
 function replaceUser(updatedUser) {
   adminUsers.value = adminUsers.value.map((user) =>
-    user.id === updatedUser.id ? { ...user, ...updatedUser } : user
-  )
+    user.id === updatedUser.id ? { ...user, ...updatedUser } : user,
+  );
 }
 
 async function withUserBusy(user, action, task) {
-  userBusyIds[user.id] = action
+  userBusyIds[user.id] = action;
   try {
-    return await task()
+    return await task();
   } finally {
-    delete userBusyIds[user.id]
+    delete userBusyIds[user.id];
   }
 }
 
 async function createUser(payload) {
-  creatingUser.value = true
+  creatingUser.value = true;
   try {
-    const created = await createInternalUser(payload)
-    adminUsers.value = [created, ...adminUsers.value]
-    message.success('用户已添加')
+    const created = await createInternalUser(payload);
+    adminUsers.value = [created, ...adminUsers.value];
+    message.success("用户已添加");
   } catch (error) {
-    message.error(error.message || '创建用户失败')
+    message.error(error.message || "创建用户失败");
   } finally {
-    creatingUser.value = false
+    creatingUser.value = false;
   }
 }
 
 async function updateUserRole({ user, role }) {
   try {
-    const updated = await withUserBusy(user, 'role', () => updateAdminUserRole(user.id, role))
-    replaceUser(updated)
-    message.success('用户角色已更新')
+    const updated = await withUserBusy(user, "role", () => updateAdminUserRole(user.id, role));
+    replaceUser(updated);
+    message.success("用户角色已更新");
   } catch (error) {
-    message.error(error.message || '更新角色失败')
+    message.error(error.message || "更新角色失败");
   }
 }
 
 async function muteUser({ user, muted_until, reason }) {
   try {
-    const updated = await withUserBusy(user, 'mute', () =>
-      muteAdminUser(user.id, { muted_until, reason })
-    )
-    replaceUser(updated)
-    message.success('用户已封禁')
+    const updated = await withUserBusy(user, "mute", () =>
+      muteAdminUser(user.id, { muted_until, reason }),
+    );
+    replaceUser(updated);
+    message.success("用户已封禁");
   } catch (error) {
-    message.error(error.message || '封禁失败')
+    message.error(error.message || "封禁失败");
   }
 }
 
 async function unmuteUser(user) {
   try {
-    const updated = await withUserBusy(user, 'unmute', () => unmuteAdminUser(user.id))
-    replaceUser(updated)
-    message.success('封禁已解除')
+    const updated = await withUserBusy(user, "unmute", () => unmuteAdminUser(user.id));
+    replaceUser(updated);
+    message.success("封禁已解除");
   } catch (error) {
-    message.error(error.message || '解除封禁失败')
+    message.error(error.message || "解除封禁失败");
   }
 }
 
 async function deleteUser(user) {
   try {
-    await withUserBusy(user, 'delete', () => deleteAdminUser(user.id))
-    adminUsers.value = adminUsers.value.filter((item) => item.id !== user.id)
-    message.success('用户已删除')
+    await withUserBusy(user, "delete", () => deleteAdminUser(user.id));
+    adminUsers.value = adminUsers.value.filter((item) => item.id !== user.id);
+    message.success("用户已删除");
   } catch (error) {
-    message.error(error.message || '删除用户失败')
+    message.error(error.message || "删除用户失败");
   }
 }
 
 function save() {
   if (!isCoreAdmin.value) {
-    message.warning('只有核心管理员可以保存设置')
-    return
+    message.warning("只有核心管理员可以保存设置");
+    return;
   }
   formRef.value?.validate(async (errors) => {
     if (errors) {
-      message.error('请完善设置项')
-      return
+      message.error("请完善设置项");
+      return;
     }
-    saving.value = true
+    saving.value = true;
     try {
-      const result = await saveSystemSettings(settingsPayload())
-      applySettings(result.settings)
-      message.success(result.restart_required ? '设置已保存，数据库或 Redis 变更需重启生效' : '设置已保存')
+      const result = await saveSystemSettings(settingsPayload());
+      applySettings(result.settings);
+      message.success(
+        result.restart_required ? "设置已保存，数据库或 Redis 变更需重启生效" : "设置已保存",
+      );
     } catch (error) {
-      message.error(error.message || '保存失败')
+      message.error(error.message || "保存失败");
     } finally {
-      saving.value = false
+      saving.value = false;
     }
-  })
+  });
 }
 
 async function publishSiteAnnouncement() {
   if (!isCoreAdmin.value) {
-    message.warning('只有核心管理员可以发布公告')
-    return
+    message.warning("只有核心管理员可以发布公告");
+    return;
   }
-  const title = announcementForm.title.trim()
-  const body = announcementForm.body.trim()
+  const title = announcementForm.title.trim();
+  const body = announcementForm.body.trim();
   if (!title || !body) {
-    message.warning('请填写公告标题和内容')
-    return
+    message.warning("请填写公告标题和内容");
+    return;
   }
-  publishingAnnouncement.value = true
+  publishingAnnouncement.value = true;
   try {
-    await publishAnnouncement({ title, body })
-    announcementForm.title = ''
-    announcementForm.body = ''
-    message.success('公告已发布')
+    await publishAnnouncement({ title, body });
+    announcementForm.title = "";
+    announcementForm.body = "";
+    message.success("公告已发布");
   } catch (error) {
-    message.error(error.message || '发布公告失败')
+    message.error(error.message || "发布公告失败");
   } finally {
-    publishingAnnouncement.value = false
+    publishingAnnouncement.value = false;
   }
 }
 
 async function sendEmailTest() {
   if (!emailPattern.test(testEmail.to)) {
-    message.warning('请输入有效的测试收件邮箱')
-    return
+    message.warning("请输入有效的测试收件邮箱");
+    return;
   }
-  testingEmail.value = true
+  testingEmail.value = true;
   try {
     await sendTestEmail({
       to: testEmail.to,
-      subject: `${formData.site.name || 'AstrBot Community Plugins'} 测试邮件`,
-      body: '这是一封来自 AstrBot 社区插件市场的测试邮件。'
-    })
-    message.success('测试邮件已发送')
+      subject: `${formData.site.name || "AstrBot Community Plugins"} 测试邮件`,
+      body: "这是一封来自 AstrBot 社区插件市场的测试邮件。",
+    });
+    message.success("测试邮件已发送");
   } catch (error) {
-    message.error(error.message || '测试邮件发送失败')
+    message.error(error.message || "测试邮件发送失败");
   } finally {
-    testingEmail.value = false
+    testingEmail.value = false;
   }
 }
 
 function goBack() {
-  router.push('/')
+  router.push("/");
 }
 
-onMounted(loadSettings)
+onMounted(loadSettings);
 </script>
 
 <style scoped>

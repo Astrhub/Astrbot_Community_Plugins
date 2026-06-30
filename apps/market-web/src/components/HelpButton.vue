@@ -23,10 +23,10 @@
       </div>
     </transition>
 
-    <n-modal 
-      v-model:show="showHelp" 
-      :mask-closable="true" 
-      preset="card" 
+    <n-modal
+      v-model:show="showHelp"
+      :mask-closable="true"
+      preset="card"
       class="help-modal"
       :class="{ 'help-modal--mobile': isMobile }"
       :style="modalStyle"
@@ -44,11 +44,7 @@
           </div>
         </template>
         <n-space vertical size="large" class="help-modal__content">
-          <div 
-            v-for="section in renderedSections"
-            :key="section.title"
-            class="help-section"
-          >
+          <div v-for="section in renderedSections" :key="section.title" class="help-section">
             <div class="help-section__header">
               <n-h3>{{ section.title }}</n-h3>
             </div>
@@ -67,12 +63,7 @@
                     placeholder="例如：demo.astrbot.app…"
                     class="panel-input"
                   />
-                  <n-button
-                    secondary
-                    type="primary"
-                    @click="openPanelUrl"
-                    :disabled="!panelUrl"
-                  >
+                  <n-button secondary type="primary" @click="openPanelUrl" :disabled="!panelUrl">
                     <template #icon>
                       <n-icon><open-outline /></n-icon>
                     </template>
@@ -80,11 +71,7 @@
                   </n-button>
                 </div>
               </div>
-              <n-button
-                type="primary"
-                @click="showHelp = false"
-                class="help-modal__close-btn"
-              >
+              <n-button type="primary" @click="showHelp = false" class="help-modal__close-btn">
                 我知道了
               </n-button>
             </div>
@@ -95,75 +82,77 @@
   </div>
 </template>
 
-<script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import DOMPurify from 'dompurify'
-import { NIcon, NModal, NCard, NSpace, NH2, NH3, NText, NButton, NInput } from 'naive-ui'
-import { HelpCircle, OpenOutline } from '@vicons/ionicons5'
-import { helpContent } from '../config/helpContent'
-import { marked } from 'marked'
+<script setup lang="ts">
+import { ref, computed, onMounted, onUnmounted } from "vue";
+import DOMPurify from "dompurify";
+import { NIcon, NModal, NCard, NSpace, NH2, NH3, NText, NButton, NInput } from "naive-ui";
+import { HelpCircle, OpenOutline } from "@vicons/ionicons5";
+import { helpContent } from "../config/helpContent";
+import { marked } from "marked";
 
-const isMobile = ref(window.innerWidth <= 768)
-let helpTextTimer = null
+const isMobile = ref(window.innerWidth <= 768);
+let helpTextTimer = null;
 
 const updateIsMobile = () => {
-  isMobile.value = window.innerWidth <= 768
-}
+  isMobile.value = window.innerWidth <= 768;
+};
 
-const renderedSections = computed(() => helpContent.sections.map((section) => ({
-  ...section,
-  html: DOMPurify.sanitize(marked(section.content), {
-    USE_PROFILES: { html: true }
-  })
-})))
+const renderedSections = computed(() =>
+  helpContent.sections.map((section) => ({
+    ...section,
+    html: DOMPurify.sanitize(marked(section.content), {
+      USE_PROFILES: { html: true },
+    }),
+  })),
+);
 
 const modalStyle = computed(() => {
   if (isMobile.value) {
     return {
-      width: '100%',
-      maxWidth: 'none'
-    }
+      width: "100%",
+      maxWidth: "none",
+    };
   }
   return {
-    width: '90%',
-    maxWidth: '600px'
-  }
-})
+    width: "90%",
+    maxWidth: "600px",
+  };
+});
 
 marked.setOptions({
   gfm: true,
-  breaks: true
-})
+  breaks: true,
+});
 
-const showHelp = ref(false)
-const showHelpText = ref(false)
-const panelUrl = ref('')
+const showHelp = ref(false);
+const showHelpText = ref(false);
+const panelUrl = ref("");
 
 const toggleHelp = () => {
-  showHelp.value = !showHelp.value
-}
+  showHelp.value = !showHelp.value;
+};
 
 onMounted(() => {
-  window.addEventListener('resize', updateIsMobile)
+  window.addEventListener("resize", updateIsMobile);
   helpTextTimer = window.setInterval(() => {
-    showHelpText.value = !showHelpText.value
-  }, 3000)
-})
+    showHelpText.value = !showHelpText.value;
+  }, 3000);
+});
 
 onUnmounted(() => {
-  window.removeEventListener('resize', updateIsMobile)
-  if (helpTextTimer) window.clearInterval(helpTextTimer)
-})
+  window.removeEventListener("resize", updateIsMobile);
+  if (helpTextTimer) window.clearInterval(helpTextTimer);
+});
 
 const openPanelUrl = () => {
   if (panelUrl.value) {
-    let url = panelUrl.value
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = 'https://' + url
+    let url = panelUrl.value;
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      url = "https://" + url;
     }
-    window.open(url, '_blank', 'noopener,noreferrer')
+    window.open(url, "_blank", "noopener,noreferrer");
   }
-}
+};
 </script>
 
 <style scoped>
@@ -196,8 +185,14 @@ const openPanelUrl = () => {
   align-items: center;
   justify-content: center;
   color: white;
-  box-shadow: var(--n-box-shadow-2, 0 3px 6px -4px rgba(0, 0, 0, 0.12), 0 6px 16px 0 rgba(0, 0, 0, 0.08), 0 9px 28px 8px rgba(0, 0, 0, 0.05));
-  transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+  box-shadow: var(
+    --n-box-shadow-2,
+    0 3px 6px -4px rgba(0, 0, 0, 0.12),
+    0 6px 16px 0 rgba(0, 0, 0, 0.08),
+    0 9px 28px 8px rgba(0, 0, 0, 0.05)
+  );
+  transition:
+    background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1),
     box-shadow 0.4s cubic-bezier(0.4, 0, 0.2, 1),
     transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
@@ -255,12 +250,14 @@ const openPanelUrl = () => {
 }
 
 .float-button-fade-enter-active {
-  transition: opacity 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55),
+  transition:
+    opacity 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55),
     transform 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
 }
 
 .float-button-fade-leave-active {
-  transition: opacity 0.3s cubic-bezier(0.4, 0, 1, 1),
+  transition:
+    opacity 0.3s cubic-bezier(0.4, 0, 1, 1),
     transform 0.3s cubic-bezier(0.4, 0, 1, 1);
 }
 
@@ -301,7 +298,8 @@ const openPanelUrl = () => {
   margin-right: -56px;
   transform: translateX(100%);
   opacity: 0;
-  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+  transition:
+    opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1),
     transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--shadow-sm);
   background-clip: padding-box;
@@ -309,7 +307,7 @@ const openPanelUrl = () => {
 }
 
 .help-text::before {
-  content: '';
+  content: "";
   position: absolute;
   top: -2px;
   right: -2px;
@@ -451,7 +449,7 @@ const openPanelUrl = () => {
   font-size: 0.95em;
 }
 
-.markdown-content :deep(ul), 
+.markdown-content :deep(ul),
 .markdown-content :deep(ol) {
   margin: 8px 0;
   padding-left: 24px;
@@ -520,15 +518,15 @@ const openPanelUrl = () => {
   margin: 0 calc(-1 * var(--modal-padding));
   margin-top: calc(-1 * var(--modal-padding));
   display: flex;
-  justify-content: center; 
+  justify-content: center;
 }
 
 .help-modal__footer-content {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  width: 100%;  
-  max-width: 600px;  
+  width: 100%;
+  max-width: 600px;
 }
 
 .panel-link {
@@ -546,8 +544,8 @@ const openPanelUrl = () => {
   align-items: center;
   gap: 12px;
   width: 100%;
-  min-width: 0; 
-  flex-wrap: wrap; 
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .panel-input {
@@ -558,16 +556,16 @@ const openPanelUrl = () => {
 @media (max-width: 480px) {
   .panel-input-group {
     flex-direction: column;
-    align-items: flex-end;  
+    align-items: flex-end;
   }
-  
+
   .panel-input {
     width: 100%;
   }
 
   .panel-input-group .n-button {
     width: auto;
-    min-width: 120px;  
+    min-width: 120px;
   }
 }
 
@@ -583,7 +581,7 @@ const openPanelUrl = () => {
     width: 48px;
     height: 48px;
   }
-  
+
   .float-button__icon {
     font-size: 18px;
   }
@@ -605,7 +603,7 @@ const openPanelUrl = () => {
     animation: none !important;
     transition: none !important;
   }
-  
+
   .float-button__ripple {
     display: none;
   }

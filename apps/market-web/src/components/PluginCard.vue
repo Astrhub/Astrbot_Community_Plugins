@@ -1,8 +1,8 @@
 <template>
-  <n-card 
-    class="plugin-card" 
-    :bordered="false" 
-    :style="{ borderRadius: '8px', '--card-index': String(index) }" 
+  <n-card
+    class="plugin-card"
+    :bordered="false"
+    :style="{ borderRadius: '8px', '--card-index': String(index) }"
     :content-style="{ padding: '8px 16px' }"
     @click="showDetails"
     role="article"
@@ -14,39 +14,33 @@
     @keydown="handleCardKeydown"
   >
     <template #header>
-      <div 
-        class="card-header" 
-        role="banner" 
-        :aria-labelledby="headerId"
-      >
-        <div 
+      <div class="card-header" role="banner" :aria-labelledby="headerId">
+        <div
           :id="headerId"
-          class="plugin-name-container" 
-          ref="nameContainer" 
-          role="heading" 
+          class="plugin-name-container"
+          ref="nameContainer"
+          role="heading"
           aria-level="2"
           aria-label="插件卡片标题区域"
         >
-          <h3 
-            class="plugin-name" 
-            :class="{ 'marquee': isTextOverflow }"
+          <h3
+            class="plugin-name"
+            :class="{ marquee: isTextOverflow }"
             ref="pluginNameEl"
             role="heading"
             aria-level="3"
             :aria-label="plugin.name"
             :aria-description="`插件：${plugin.name}，版本 ${pluginVersion}`"
           >
-            <span 
-              class="plugin-name-text" 
-              ref="nameTextEl"
-              :aria-hidden="isTextOverflow"
-            >{{ plugin.name }}</span>
+            <span class="plugin-name-text" ref="nameTextEl" :aria-hidden="isTextOverflow">{{
+              plugin.name
+            }}</span>
           </h3>
         </div>
-        <n-tag 
-          type="success" 
-          size="small" 
-          :bordered="false" 
+        <n-tag
+          type="success"
+          size="small"
+          :bordered="false"
           class="version-tag"
           role="text"
           :aria-label="`版本号：${formattedVersion}`"
@@ -55,12 +49,12 @@
         </n-tag>
       </div>
     </template>
-    
+
     <div class="card-content-wrapper">
       <!-- Logo 显示区域 -->
       <div class="plugin-logo-container">
-        <img 
-          :src="getLogoUrl()" 
+        <img
+          :src="getLogoUrl()"
           :alt="`${plugin.name} logo`"
           class="plugin-logo"
           width="60"
@@ -69,15 +63,11 @@
           @error="handleLogoError"
         />
       </div>
-      
+
       <div class="card-main-content">
         <n-space vertical class="card-content">
           <p class="description" role="contentinfo" aria-label="插件描述">{{ plugin.desc }}</p>
-          <div 
-            class="tags-container" 
-            role="region" 
-            aria-label="插件标签区域"
-          >
+          <div class="tags-container" role="region" aria-label="插件标签区域">
             <n-space class="tags-space" role="list" aria-label="标签列表">
               <n-tag
                 v-for="tag in plugin.tags"
@@ -111,7 +101,11 @@
                 <n-icon aria-hidden="true"><heart-outline /></n-icon>
                 {{ plugin.likes || 0 }}
               </span>
-              <span class="metric-item" role="text" :aria-label="`评论数：${plugin.comments_count || 0}`">
+              <span
+                class="metric-item"
+                role="text"
+                :aria-label="`评论数：${plugin.comments_count || 0}`"
+              >
                 <n-icon aria-hidden="true"><chatbubble-ellipses-outline /></n-icon>
                 {{ plugin.comments_count || 0 }}
               </span>
@@ -141,7 +135,7 @@
                       size="small"
                       circle
                       @click="copyRepoUrl"
-                    :aria-label="`复制 ${plugin.name} 的仓库链接`"
+                      :aria-label="`复制 ${plugin.name} 的仓库链接`"
                       :aria-pressed="isCopied"
                       aria-live="polite"
                     >
@@ -155,7 +149,7 @@
                       </n-icon>
                     </n-button>
                   </template>
-                  <span role="tooltip">{{ isCopied ? '已复制链接！' : '复制仓库链接' }}</span>
+                  <span role="tooltip">{{ isCopied ? "已复制链接！" : "复制仓库链接" }}</span>
                 </n-tooltip>
                 <n-tooltip v-if="plugin.social_link" placement="top" trigger="hover">
                   <template #trigger>
@@ -203,10 +197,7 @@
   </n-card>
 
   <!-- 插件详情模态框 -->
-  <plugin-details
-    v-model:show="showPluginDetails"
-    :plugin="plugin"
-  />
+  <plugin-details v-model:show="showPluginDetails" :plugin="plugin" />
 
   <n-modal
     v-model:show="showUnlistModal"
@@ -225,16 +216,14 @@
     <template #footer>
       <div class="unlist-modal-actions">
         <n-button tertiary @click="showUnlistModal = false">取消</n-button>
-        <n-button type="warning" :loading="isUnlisting" @click="unlistPlugin">
-          确认下架
-        </n-button>
+        <n-button type="warning" :loading="isUnlisting" @click="unlistPlugin"> 确认下架 </n-button>
       </div>
     </template>
   </n-modal>
 </template>
 
-<script setup>
-import { computed, ref, onMounted, nextTick, onUnmounted, watch } from 'vue'
+<script setup lang="ts">
+import { computed, ref, onMounted, nextTick, onUnmounted, watch } from "vue";
 import {
   NCard,
   NSpace,
@@ -245,8 +234,8 @@ import {
   NModal,
   useDialog,
   useMessage,
-  NTooltip
-} from 'naive-ui'
+  NTooltip,
+} from "naive-ui";
 import {
   CloudOfflineOutline,
   StarSharp,
@@ -254,188 +243,191 @@ import {
   ChatbubbleEllipsesOutline,
   LinkOutline,
   PersonOutline,
-  CheckmarkOutline
-} from '@vicons/ionicons5'
-import { defineAsyncComponent } from 'vue'
-import { storeToRefs } from 'pinia'
-import { usePluginStore } from '@/stores/plugins'
-const PluginDetails = defineAsyncComponent(() => import('./PluginDetails.vue'))
+  CheckmarkOutline,
+} from "@vicons/ionicons5";
+import { defineAsyncComponent } from "vue";
+import { storeToRefs } from "pinia";
+import { usePluginStore } from "@/stores/plugins";
+const PluginDetails = defineAsyncComponent(() => import("./PluginDetails.vue"));
 
-const showPluginDetails = ref(false)
+const showPluginDetails = ref(false);
 const props = defineProps({
   plugin: {
     type: Object,
-    required: true
+    required: true,
   },
   index: {
     type: Number,
-    default: 0
+    default: 0,
   },
   seed: {
     type: [Number, String],
-    default: 0
-  }
-})
+    default: 0,
+  },
+});
 
-const isTextOverflow = ref(false)
-const nameContainer = ref(null)
-const nameTextEl = ref(null)
-const pluginNameEl = ref(null)
-const cardRef = ref(null)
-const resizeObserver = ref(null)
-const isUnlisting = ref(false)
-const showUnlistModal = ref(false)
-const unlistReason = ref('')
-const store = usePluginStore()
-const { currentUser } = storeToRefs(store)
-const { loadPlugins, setCurrentPage, setSearchQuery, updatePluginListing } = store
-const isAdminUser = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
-const pluginVersion = computed(() => String(props.plugin.version || '1.0.0'))
+const isTextOverflow = ref(false);
+const nameContainer = ref(null);
+const nameTextEl = ref(null);
+const pluginNameEl = ref(null);
+const cardRef = ref(null);
+const resizeObserver = ref(null);
+const isUnlisting = ref(false);
+const showUnlistModal = ref(false);
+const unlistReason = ref("");
+const store = usePluginStore();
+const { currentUser } = storeToRefs(store);
+const { loadPlugins, setCurrentPage, setSearchQuery, updatePluginListing } = store;
+const isAdminUser = computed(() => ["core_admin", "admin"].includes(currentUser.value?.role));
+const pluginVersion = computed(() => String(props.plugin.version || "1.0.0"));
 const formattedVersion = computed(() => {
-  return pluginVersion.value.startsWith('v') ? pluginVersion.value : `v${pluginVersion.value}`
-})
+  return pluginVersion.value.startsWith("v") ? pluginVersion.value : `v${pluginVersion.value}`;
+});
 const headerId = computed(() => {
-  const rawId = String(props.plugin.id || props.plugin.name || `plugin-${props.index}`)
-  const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, '-')
-  return `plugin-header-${safeId}`
-})
+  const rawId = String(props.plugin.id || props.plugin.name || `plugin-${props.index}`);
+  const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, "-");
+  return `plugin-header-${safeId}`;
+});
 
 const checkTextOverflow = () => {
   nextTick(() => {
     if (nameContainer.value && nameTextEl.value) {
-      const containerWidth = nameContainer.value.clientWidth
-      const textWidth = nameTextEl.value.scrollWidth
-      const wasOverflow = isTextOverflow.value
-      
-      isTextOverflow.value = textWidth > containerWidth
+      const containerWidth = nameContainer.value.clientWidth;
+      const textWidth = nameTextEl.value.scrollWidth;
+      const wasOverflow = isTextOverflow.value;
 
-      if (isTextOverflow.value && (wasOverflow !== isTextOverflow.value)) {
-        updateMarqueeAnimation(containerWidth, textWidth)
+      isTextOverflow.value = textWidth > containerWidth;
+
+      if (isTextOverflow.value && wasOverflow !== isTextOverflow.value) {
+        updateMarqueeAnimation(containerWidth, textWidth);
       }
     }
-  })
-}
+  });
+};
 
 const updateMarqueeAnimation = (containerWidth, textWidth) => {
   if (pluginNameEl.value) {
-    const translateDistance = textWidth - containerWidth + 20
-    pluginNameEl.value.style.setProperty('--translate-distance', `-${translateDistance}px`)
+    const translateDistance = textWidth - containerWidth + 20;
+    pluginNameEl.value.style.setProperty("--translate-distance", `-${translateDistance}px`);
   }
-}
+};
 
 function replayCardAppearAnimation() {
-  const el = cardRef.value && (cardRef.value.$el || cardRef.value)
-  if (!el) return
-  el.style.animation = 'none'
-  void el.offsetWidth
-  el.style.animation = ''
+  const el = cardRef.value && (cardRef.value.$el || cardRef.value);
+  if (!el) return;
+  el.style.animation = "none";
+  void el.offsetWidth;
+  el.style.animation = "";
 }
 
 onMounted(() => {
-  checkTextOverflow()
+  checkTextOverflow();
   if (nameContainer.value && window.ResizeObserver) {
     resizeObserver.value = new ResizeObserver(() => {
-      checkTextOverflow()
-    })
-    resizeObserver.value.observe(nameContainer.value)
+      checkTextOverflow();
+    });
+    resizeObserver.value.observe(nameContainer.value);
   } else {
-    window.addEventListener('resize', checkTextOverflow)
+    window.addEventListener("resize", checkTextOverflow);
   }
-})
+});
 
-watch([
-  () => props.index,
-  () => props.seed
-], () => {
-  replayCardAppearAnimation()
-}, { immediate: true })
+watch(
+  [() => props.index, () => props.seed],
+  () => {
+    replayCardAppearAnimation();
+  },
+  { immediate: true },
+);
 
 onUnmounted(() => {
   if (resizeObserver.value) {
-    resizeObserver.value.disconnect()
+    resizeObserver.value.disconnect();
   } else {
-    window.removeEventListener('resize', checkTextOverflow)
+    window.removeEventListener("resize", checkTextOverflow);
   }
-})
+});
 
-const message = useMessage()
-const dialog = useDialog()
-const isCopied = ref(false)
+const message = useMessage();
+const dialog = useDialog();
+const isCopied = ref(false);
 
 const copyRepoUrl = async (e) => {
-  e.stopPropagation()
+  e.stopPropagation();
   if (props.plugin.repo) {
     try {
-      await navigator.clipboard.writeText(props.plugin.repo)
-      isCopied.value = true
+      await navigator.clipboard.writeText(props.plugin.repo);
+      isCopied.value = true;
       setTimeout(() => {
-        isCopied.value = false
-      }, 2000) 
+        isCopied.value = false;
+      }, 2000);
     } catch (err) {
-      message.error('复制失败，请手动复制')
+      message.error("复制失败，请手动复制");
     }
   }
-}
+};
 
 const openUrl = (url, e) => {
-  e?.stopPropagation() 
+  e?.stopPropagation();
   if (url) {
     dialog.info({
-      title: '即将打开外链',
+      title: "即将打开外链",
       content: `将跳转到：${url}`,
-      positiveText: '继续打开',
-      negativeText: '取消',
+      positiveText: "继续打开",
+      negativeText: "取消",
       onPositiveClick: () => {
-        window.open(url, '_blank', 'noopener,noreferrer')
-      }
-    })
+        window.open(url, "_blank", "noopener,noreferrer");
+      },
+    });
   }
-}
+};
 
 const showDetails = () => {
-  showPluginDetails.value = true
-}
+  showPluginDetails.value = true;
+};
 
 function handleCardKeydown(event) {
-  if (!['Enter', ' '].includes(event.key)) return
-  const target = event.target
-  if (target instanceof Element &&
-    target.closest('button, a, input, textarea, select, [role="button"], [role="link"]')) {
-    return
+  if (!["Enter", " "].includes(event.key)) return;
+  const target = event.target;
+  if (
+    target instanceof Element &&
+    target.closest('button, a, input, textarea, select, [role="button"], [role="link"]')
+  ) {
+    return;
   }
-  event.preventDefault()
-  showDetails()
+  event.preventDefault();
+  showDetails();
 }
 
 function searchAuthor(event) {
-  event.stopPropagation()
-  const author = String(props.plugin.author || '').trim()
-  if (!author) return
-  setSearchQuery(author)
-  setCurrentPage(1)
+  event.stopPropagation();
+  const author = String(props.plugin.author || "").trim();
+  if (!author) return;
+  setSearchQuery(author);
+  setCurrentPage(1);
 }
 
 function openUnlistModal() {
-  unlistReason.value = ''
-  showUnlistModal.value = true
+  unlistReason.value = "";
+  showUnlistModal.value = true;
 }
 
 async function unlistPlugin() {
-  const reason = unlistReason.value.trim()
+  const reason = unlistReason.value.trim();
   if (!reason) {
-    message.warning('请填写下架原因')
-    return
+    message.warning("请填写下架原因");
+    return;
   }
-  isUnlisting.value = true
+  isUnlisting.value = true;
   try {
-    await updatePluginListing(props.plugin.id, 'unlist', { reason })
-    await loadPlugins({ force: true })
-    showUnlistModal.value = false
-    message.success('插件已下架')
+    await updatePluginListing(props.plugin.id, "unlist", { reason });
+    await loadPlugins({ force: true });
+    showUnlistModal.value = false;
+    message.success("插件已下架");
   } catch (error) {
-    message.error(error.message || '下架失败')
+    message.error(error.message || "下架失败");
   } finally {
-    isUnlisting.value = false
+    isUnlisting.value = false;
   }
 }
 
@@ -443,29 +435,29 @@ async function unlistPlugin() {
 const getLogoUrl = () => {
   // 如果插件有logo字段，直接使用
   if (props.plugin.logo) {
-    return props.plugin.logo
+    return props.plugin.logo;
   }
-  
+
   // 如果没有logo但有repo，尝试从GitHub仓库获取logo
   if (props.plugin.repo) {
-    const githubRepoPattern = /github\.com\/([^\/]+)\/([^\/]+)/
-    const match = props.plugin.repo.match(githubRepoPattern)
-    
+    const githubRepoPattern = /github\.com\/([^/]+)\/([^/]+)/;
+    const match = props.plugin.repo.match(githubRepoPattern);
+
     if (match) {
-      const [, owner, repo] = match
-      return `https://raw.githubusercontent.com/${owner}/${repo}/refs/heads/master/logo.png`
+      const [, owner, repo] = match;
+      return `https://raw.githubusercontent.com/${owner}/${repo}/refs/heads/master/logo.png`;
     }
   }
-  
+
   // 默认返回占位符logo
-  return '/plugin_default.png'
-}
+  return "/plugin_default.png";
+};
 
 // 处理logo加载错误
 const handleLogoError = (event) => {
   // 如果logo加载失败，使用默认logo
-  event.target.src = '/plugin_default.png'
-}
+  event.target.src = "/plugin_default.png";
+};
 </script>
 
 <style scoped>
@@ -484,7 +476,10 @@ const handleLogoError = (event) => {
   position: relative;
   overflow: visible;
   contain: content;
-  transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+  transition:
+    transform 0.3s ease,
+    border-color 0.3s ease,
+    box-shadow 0.3s ease;
   border: 2px solid var(--border-base);
   box-shadow: var(--shadow-sm);
   background-color: var(--bg-card);
@@ -538,16 +533,20 @@ const handleLogoError = (event) => {
 }
 
 .plugin-name-container:has(.plugin-name.marquee) {
-  mask: linear-gradient(to right, 
-    transparent 0%, 
-    black 10px, 
-    black calc(100% - 10px), 
-    transparent 100%);
-  -webkit-mask: linear-gradient(to right, 
-    transparent 0%, 
-    black 10px, 
-    black calc(100% - 10px), 
-    transparent 100%);
+  mask: linear-gradient(
+    to right,
+    transparent 0%,
+    black 10px,
+    black calc(100% - 10px),
+    transparent 100%
+  );
+  -webkit-mask: linear-gradient(
+    to right,
+    transparent 0%,
+    black 10px,
+    black calc(100% - 10px),
+    transparent 100%
+  );
 }
 
 .card-header h3 {
@@ -556,7 +555,13 @@ const handleLogoError = (event) => {
   font-weight: 700;
   color: var(--primary-color);
   letter-spacing: -0.3px;
-  font-family: 'Lexend', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family:
+    "Lexend",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
   white-space: nowrap;
   --translate-distance: 0px;
 }
@@ -596,7 +601,7 @@ const handleLogoError = (event) => {
   .plugin-name-container {
     max-width: 70%;
   }
-  
+
   @keyframes marqueeSlide {
     0% {
       transform: translateX(0);
@@ -620,7 +625,7 @@ const handleLogoError = (event) => {
   .plugin-name-container {
     max-width: 65%;
   }
-  
+
   .card-header h3 {
     font-size: 1.1em;
   }
@@ -678,7 +683,7 @@ const handleLogoError = (event) => {
   margin: 4px 0;
   line-height: 1.5;
   font-size: 0.9em;
-  height: 3em; 
+  height: 3em;
   overflow: hidden;
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -698,13 +703,13 @@ const handleLogoError = (event) => {
 }
 
 .tags-container::after {
-  content: '';
+  content: "";
   position: absolute;
   right: 0;
   top: 0;
   width: 28px;
   height: 100%;
-  background: linear-gradient(to right, rgba(0,0,0,0), var(--bg-card));
+  background: linear-gradient(to right, rgba(0, 0, 0, 0), var(--bg-card));
   pointer-events: none;
 }
 
@@ -716,7 +721,11 @@ const handleLogoError = (event) => {
 }
 
 .plugin-tag {
-  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
   margin-bottom: 2px;
   background-color: rgba(37, 99, 235, 0.12) !important;
   color: var(--primary-color) !important;
@@ -833,7 +842,12 @@ const handleLogoError = (event) => {
   color: var(--text-secondary);
   background-color: rgba(37, 99, 235, 0.08);
   border: 1px solid var(--primary-color);
-  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, transform 0.2s ease;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s ease;
   border-radius: 4px;
 }
 
@@ -850,20 +864,20 @@ const handleLogoError = (event) => {
     font-size: 0.9em;
     height: 28px;
   }
-  
+
   .button-group :deep(.main-button) {
     padding: 0 12px;
   }
-  
+
   .icon-buttons :deep(.n-button) {
     width: 28px;
     height: 28px;
   }
-  
+
   .icon-buttons :deep(.n-button .n-icon) {
     font-size: 16px;
   }
-  
+
   .plugin-logo-container {
     width: 50px;
     height: 50px;
@@ -881,7 +895,7 @@ const handleLogoError = (event) => {
 }
 
 .tags-container:empty::before {
-  content: '';
+  content: "";
   display: block;
   height: 28px;
 }

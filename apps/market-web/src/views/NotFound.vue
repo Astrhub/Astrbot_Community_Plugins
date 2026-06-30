@@ -1,10 +1,6 @@
 <template>
   <main class="not-found-page">
-    <n-result
-      status="404"
-      title="404"
-      description="这个页面不存在或已被移除。"
-    >
+    <n-result status="404" title="404" description="这个页面不存在或已被移除。">
       <template #footer>
         <n-button type="primary" @click="goHome">
           <template #icon>
@@ -17,15 +13,15 @@
   </main>
 </template>
 
-<script setup>
-import { NButton, NIcon, NResult } from 'naive-ui'
-import { HomeOutline } from '@vicons/ionicons5'
-import { useRouter } from 'vue-router'
+<script setup lang="ts">
+import { NButton, NIcon, NResult } from "naive-ui";
+import { HomeOutline } from "@vicons/ionicons5";
+import { useRouter } from "vue-router";
 
-const router = useRouter()
+const router = useRouter();
 
 function goHome() {
-  router.push('/')
+  router.push("/");
 }
 </script>
 

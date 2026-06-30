@@ -4,21 +4,21 @@
     :class="{
       'search-container--compact': compact,
       'search-container--header': onHeader,
-      'search-container--mobile': mobile
+      'search-container--mobile': mobile,
     }"
   >
     <div
       class="search-wrapper"
       :class="{
         'search-wrapper--compact': compact,
-        'search-wrapper--mobile': mobile
+        'search-wrapper--mobile': mobile,
       }"
     >
       <div
         class="custom-search-box"
         :class="{
           'custom-search-box--compact': compact,
-          'custom-search-box--mobile': mobile
+          'custom-search-box--mobile': mobile,
         }"
       >
         <n-icon class="search-icon"><search /></n-icon>
@@ -56,7 +56,7 @@
         class="sort-select category-select"
         :class="{
           'sort-select--compact': compact,
-          'category-select--compact': compact
+          'category-select--compact': compact,
         }"
       />
       <n-select
@@ -73,7 +73,7 @@
         class="sort-select tag-select"
         :class="{
           'sort-select--compact': compact,
-          'tag-select--compact': compact
+          'tag-select--compact': compact,
         }"
       />
       <n-switch
@@ -93,10 +93,12 @@
         :type="fuzzySearchEnabled ? 'primary' : 'default'"
         :size="controlSize"
         class="mobile-mode-button"
-        :aria-label="fuzzySearchEnabled ? '当前模糊搜索，点击切换精确搜索' : '当前精确搜索，点击切换模糊搜索'"
+        :aria-label="
+          fuzzySearchEnabled ? '当前模糊搜索，点击切换精确搜索' : '当前精确搜索，点击切换模糊搜索'
+        "
         @click="handleFuzzySearchChange(!fuzzySearchEnabled)"
       >
-        {{ fuzzySearchEnabled ? '模糊' : '精确' }}
+        {{ fuzzySearchEnabled ? "模糊" : "精确" }}
       </n-button>
       <n-select
         :value="props.sortBy"
@@ -114,16 +116,16 @@
         :aria-label="sortDirection === 'asc' ? '当前正序，点击切换倒序' : '当前倒序，点击切换正序'"
         @click="toggleSortDirection"
       >
-        {{ sortDirection === 'asc' ? '正序' : '倒序' }}
+        {{ sortDirection === "asc" ? "正序" : "倒序" }}
       </n-button>
     </div>
   </div>
 </template>
 
-<script setup>
-import { computed } from 'vue'
-import { NButton, NSelect, NIcon, NSwitch } from 'naive-ui'
-import { Search, CloseCircle } from '@vicons/ionicons5'
+<script setup lang="ts">
+import { computed } from "vue";
+import { NButton, NSelect, NIcon, NSwitch } from "naive-ui";
+import { Search, CloseCircle } from "@vicons/ionicons5";
 
 const props = defineProps({
   searchQuery: String,
@@ -131,134 +133,134 @@ const props = defineProps({
   sortBy: String,
   sortDirection: {
     type: String,
-    default: 'desc'
+    default: "desc",
   },
   fuzzySearchEnabled: {
     type: Boolean,
-    default: false
+    default: false,
   },
   selectedCategory: {
     type: String,
-    default: 'all'
+    default: "all",
   },
   categoryOptions: {
     type: Array,
-    default: () => []
+    default: () => [],
   },
   selectedTag: {
     type: String,
-    default: null
+    default: null,
   },
   tagOptions: {
     type: Array,
-    default: () => []
+    default: () => [],
   },
   compact: {
     type: Boolean,
-    default: false
+    default: false,
   },
   onHeader: {
     type: Boolean,
-    default: false
+    default: false,
   },
   mobile: {
     type: Boolean,
-    default: false
+    default: false,
   },
   showCategoryFilter: {
     type: Boolean,
-    default: true
-  }
-})
+    default: true,
+  },
+});
 
 const emit = defineEmits([
-  'update:searchQuery',
-  'update:currentPage',
-  'update:sortBy',
-  'update:sortDirection',
-  'update:fuzzySearchEnabled',
-  'update:selectedCategory',
-  'update:selectedTag'
-])
+  "update:searchQuery",
+  "update:currentPage",
+  "update:sortBy",
+  "update:sortDirection",
+  "update:fuzzySearchEnabled",
+  "update:selectedCategory",
+  "update:selectedTag",
+]);
 
 const hasCategoryFilters = computed(() =>
-  props.categoryOptions.some((option) => option.value !== 'all' && option.value !== 'other')
-)
+  props.categoryOptions.some((option) => option.value !== "all" && option.value !== "other"),
+);
 
-const dense = computed(() => props.compact || props.mobile)
-const controlSize = computed(() => dense.value ? 'small' : 'medium')
+const dense = computed(() => props.compact || props.mobile);
+const controlSize = computed(() => (dense.value ? "small" : "medium"));
 const searchPlaceholder = computed(() => {
-  if (props.mobile) return '搜索插件'
-  return props.compact ? '搜索…' : '搜索插件…'
-})
+  if (props.mobile) return "搜索插件";
+  return props.compact ? "搜索…" : "搜索插件…";
+});
 
 const sortOptions = [
-  { label: '默认排序', value: 'default' },
-  { label: '随机推荐', value: 'random' },
-  { label: '按更新时间', value: 'updated' },
-  { label: '按 Star 数量', value: 'stars' },
-  { label: '按点赞数量', value: 'likes' },
-  { label: '按评论数量', value: 'comments' }
-]
+  { label: "默认排序", value: "default" },
+  { label: "随机推荐", value: "random" },
+  { label: "按更新时间", value: "updated" },
+  { label: "按 Star 数量", value: "stars" },
+  { label: "按点赞数量", value: "likes" },
+  { label: "按评论数量", value: "comments" },
+];
 
 const compactSortOptions = [
-  { label: '默认', value: 'default' },
-  { label: '随机', value: 'random' },
-  { label: '时间', value: 'updated' },
-  { label: 'Star', value: 'stars' },
-  { label: '点赞', value: 'likes' },
-  { label: '评论', value: 'comments' }
-]
+  { label: "默认", value: "default" },
+  { label: "随机", value: "random" },
+  { label: "时间", value: "updated" },
+  { label: "Star", value: "stars" },
+  { label: "点赞", value: "likes" },
+  { label: "评论", value: "comments" },
+];
 
 const handleSortChange = (value) => {
-  emit('update:sortBy', value)
+  emit("update:sortBy", value);
   if (props.currentPage > 1) {
-    emit('update:currentPage', 1)
+    emit("update:currentPage", 1);
   }
-}
+};
 
 const toggleSortDirection = () => {
-  emit('update:sortDirection', props.sortDirection === 'asc' ? 'desc' : 'asc')
+  emit("update:sortDirection", props.sortDirection === "asc" ? "desc" : "asc");
   if (props.currentPage > 1) {
-    emit('update:currentPage', 1)
+    emit("update:currentPage", 1);
   }
-}
+};
 
 const handleFuzzySearchChange = (value) => {
-  emit('update:fuzzySearchEnabled', value)
+  emit("update:fuzzySearchEnabled", value);
   if (props.currentPage > 1) {
-    emit('update:currentPage', 1)
+    emit("update:currentPage", 1);
   }
-}
+};
 
 const handleCategoryChange = (value) => {
-  emit('update:selectedCategory', value || 'all')
+  emit("update:selectedCategory", value || "all");
   if (props.currentPage > 1) {
-    emit('update:currentPage', 1)
+    emit("update:currentPage", 1);
   }
-}
+};
 
 const handleTagChange = (value) => {
-  emit('update:selectedTag', value || null)
+  emit("update:selectedTag", value || null);
   if (props.currentPage > 1) {
-    emit('update:currentPage', 1)
+    emit("update:currentPage", 1);
   }
-}
+};
 
 const handleSearchInput = (e) => {
-  const value = e.target.value
-  emit('update:searchQuery', value)
+  const value = e.target.value;
+  emit("update:searchQuery", value);
   if (props.currentPage > 1) {
-    emit('update:currentPage', 1)
+    emit("update:currentPage", 1);
   }
-}
+};
 
 const handleClearSearch = () => {
-  emit('update:searchQuery', '')
+  emit("update:searchQuery", "");
   if (props.currentPage > 1) {
-    emit('update:currentPage', 1)
+    emit("update:currentPage", 1);
   }
-}
+};
 </script>
 
 <style scoped>
@@ -305,7 +307,10 @@ const handleClearSearch = () => {
 :deep(.sort-select .n-base-selection) {
   background: transparent !important;
   border: 0px solid rgba(0, 0, 0, 0.08) !important;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease !important;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background-color 0.2s ease !important;
   height: 44px !important;
   border-radius: 12px !important;
   padding: 0 0px !important;
@@ -315,7 +320,9 @@ const handleClearSearch = () => {
   background: var(--input-bg) !important;
   border-radius: 12px !important;
   box-shadow: var(--shadow-sm) !important;
-  transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+  transition:
+    background-color 0.3s ease,
+    box-shadow 0.3s ease !important;
 }
 
 :deep(.sort-select .n-base-selection-overlay:hover) {
@@ -325,7 +332,9 @@ const handleClearSearch = () => {
 
 :deep(.sort-select .n-base-selection:focus-within .n-base-selection-overlay) {
   background: var(--input-bg-focus) !important;
-  box-shadow: var(--shadow-md), 0 0 0 3px rgba(96, 165, 250, 0.2) !important;
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 3px rgba(96, 165, 250, 0.2) !important;
 }
 
 :deep(.sort-select .n-base-selection-label) {
@@ -336,7 +345,9 @@ const handleClearSearch = () => {
   align-items: center !important;
   padding: 0 12px !important;
   font-weight: 500 !important;
-  transition: background-color 0.2s ease, color 0.2s ease !important;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease !important;
 }
 
 :deep(.sort-select .n-base-selection:hover .n-base-selection-label) {
@@ -382,7 +393,9 @@ const handleClearSearch = () => {
   border-radius: 12px !important;
   margin: 2px 0 !important;
   padding: 8px 12px !important;
-  transition: background-color 0.2s ease, color 0.2s ease !important;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease !important;
   color: var(--input-text) !important;
 }
 
@@ -399,7 +412,10 @@ const handleClearSearch = () => {
   background: var(--input-bg, rgba(0, 0, 0, 0.03));
   border: 2px solid rgba(0, 0, 0, 0.08);
   border-radius: 12px;
-  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
   overflow: hidden;
   padding: 0 16px;
   gap: 12px;
@@ -442,7 +458,10 @@ const handleClearSearch = () => {
   background: transparent;
   cursor: pointer;
   opacity: 0.5;
-  transition: opacity 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease,
+    background-color 0.2s ease;
 }
 
 .clear-button:hover,
@@ -524,17 +543,17 @@ const handleClearSearch = () => {
     padding: 0 8px;
     margin-bottom: 12px;
   }
-  
+
   .custom-search-box {
     height: 40px;
     padding: 0 14px;
     gap: 10px;
   }
-  
+
   .search-icon {
     font-size: 16px;
   }
-  
+
   .search-input {
     font-size: 15px;
   }
@@ -544,17 +563,17 @@ const handleClearSearch = () => {
   .search-container {
     max-width: 80%;
   }
-  
+
   .custom-search-box {
     height: 36px;
     padding: 0 10px;
     gap: 8px;
   }
-  
+
   .search-icon {
     font-size: 15px;
   }
-  
+
   .search-input {
     font-size: 13px;
   }
@@ -675,7 +694,8 @@ const handleClearSearch = () => {
 .search-container--header :deep(.sort-select .n-base-selection-overlay:hover) {
   background: var(--input-bg-hover) !important;
 }
-.search-container--header :deep(.sort-select .n-base-selection:focus-within .n-base-selection-overlay) {
+.search-container--header
+  :deep(.sort-select .n-base-selection:focus-within .n-base-selection-overlay) {
   background: var(--input-bg-focus) !important;
 }
 
@@ -687,7 +707,8 @@ const handleClearSearch = () => {
   background: var(--input-bg-hover) !important;
   color: var(--input-text) !important;
 }
-.search-container--header :deep(.sort-select .n-base-selection:focus-within .n-base-selection-label) {
+.search-container--header
+  :deep(.sort-select .n-base-selection:focus-within .n-base-selection-label) {
   background: var(--input-bg-focus) !important;
 }
 .search-container--header :deep(.sort-select .n-base-selection-input__content) {

@@ -1,27 +1,23 @@
-<script setup>
-import {
-  NButton,
-  NIcon,
-  NSwitch
-} from 'naive-ui'
+<script setup lang="ts">
+import { NButton, NIcon, NSwitch } from "naive-ui";
 import {
   ChatbubbleEllipsesOutline,
   HeartOutline,
   NotificationsOutline,
-  SaveOutline
-} from '@vicons/ionicons5'
+  SaveOutline,
+} from "@vicons/ionicons5";
 
-const notifyReplies = defineModel('notifyReplies', { type: Boolean, default: true })
-const notifyLikes = defineModel('notifyLikes', { type: Boolean, default: true })
+const notifyReplies = defineModel("notifyReplies", { type: Boolean, default: true });
+const notifyLikes = defineModel("notifyLikes", { type: Boolean, default: true });
 
 defineProps({
   saving: {
     type: Boolean,
-    default: false
-  }
-})
+    default: false,
+  },
+});
 
-const emit = defineEmits(['save'])
+const emit = defineEmits(["save"]);
 </script>
 
 <template>

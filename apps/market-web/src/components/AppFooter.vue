@@ -15,7 +15,11 @@
         </div>
         <div class="links-group">
           <h4>开发相关</h4>
-          <a href="https://docs.astrbot.app/dev/star/plugin-new.html" target="_blank" class="footer-link">
+          <a
+            href="https://docs.astrbot.app/dev/star/plugin-new.html"
+            target="_blank"
+            class="footer-link"
+          >
             <n-icon><document-text /></n-icon>
             插件开发文档
           </a>
@@ -37,24 +41,18 @@
   </footer>
 </template>
 
-<script setup>
-import { computed } from 'vue'
-import { NIcon } from 'naive-ui'
-import { storeToRefs } from 'pinia'
-import { 
-  LogoGithub, 
-  DocumentText, 
-  CodeSlash,
-  Heart,
-  StarOutline
-} from '@vicons/ionicons5'
-import { usePluginStore } from '../stores/plugins'
+<script setup lang="ts">
+import { computed } from "vue";
+import { NIcon } from "naive-ui";
+import { storeToRefs } from "pinia";
+import { LogoGithub, DocumentText, CodeSlash, Heart, StarOutline } from "@vicons/ionicons5";
+import { usePluginStore } from "../stores/plugins";
 
-const store = usePluginStore()
-const { siteConfig } = storeToRefs(store)
-const currentYear = computed(() => new Date().getFullYear())
-const siteName = computed(() => siteConfig.value.name)
-const communityRepoUrl = computed(() => store.communityRepoUrl)
+const store = usePluginStore();
+const { siteConfig } = storeToRefs(store);
+const currentYear = computed(() => new Date().getFullYear());
+const siteName = computed(() => siteConfig.value.name);
+const communityRepoUrl = computed(() => store.communityRepoUrl);
 </script>
 
 <style scoped>
@@ -153,7 +151,7 @@ const communityRepoUrl = computed(() => store.communityRepoUrl)
     padding: 0 20px;
     gap: 36px;
   }
-  
+
   .footer-links {
     gap: 28px;
   }

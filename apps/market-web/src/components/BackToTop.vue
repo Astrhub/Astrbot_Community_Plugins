@@ -2,8 +2,8 @@
   <div class="float-buttons">
     <!-- 返回顶部按钮 -->
     <transition name="back-to-top-fade">
-      <div 
-        v-show="show" 
+      <div
+        v-show="show"
         class="float-button back-to-top"
         @click="scrollToTop"
         role="button"
@@ -22,50 +22,49 @@
   </div>
 </template>
 
-<script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
-import { NIcon } from 'naive-ui'
-import { ChevronUp } from '@vicons/ionicons5'
-import HelpButton from './HelpButton.vue'
-import SubmitPluginButton from './SubmitPluginButton.vue'
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted } from "vue";
+import { NIcon } from "naive-ui";
+import { ChevronUp } from "@vicons/ionicons5";
+import HelpButton from "./HelpButton.vue";
+import SubmitPluginButton from "./SubmitPluginButton.vue";
 
-const show = ref(false)
-const scrollThreshold = 300
+const show = ref(false);
+const scrollThreshold = 300;
 
 const checkScroll = () => {
-  show.value = window.pageYOffset > scrollThreshold
-}
+  show.value = window.pageYOffset > scrollThreshold;
+};
 
 const scrollToTop = () => {
-  const currentPosition = window.pageYOffset
-  const duration = 500 
-  const startTime = performance.now()
+  const currentPosition = window.pageYOffset;
+  const duration = 500;
+  const startTime = performance.now();
 
   function animation(currentTime) {
-    const timeElapsed = currentTime - startTime
-    const progress = Math.min(timeElapsed / duration, 1)
-    const easing = progress => progress < 0.5
-      ? 2 * progress * progress
-      : 1 - Math.pow(-2 * progress + 2, 2) / 2
+    const timeElapsed = currentTime - startTime;
+    const progress = Math.min(timeElapsed / duration, 1);
+    const easing = (progress) =>
+      progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
 
-    window.scrollTo(0, currentPosition * (1 - easing(progress)))
+    window.scrollTo(0, currentPosition * (1 - easing(progress)));
 
     if (progress < 1) {
-      requestAnimationFrame(animation)
+      requestAnimationFrame(animation);
     }
   }
 
-  requestAnimationFrame(animation)
-}
+  requestAnimationFrame(animation);
+};
 
 onMounted(() => {
-  window.addEventListener('scroll', checkScroll, { passive: true })
-  checkScroll() 
-})
+  window.addEventListener("scroll", checkScroll, { passive: true });
+  checkScroll();
+});
 
 onUnmounted(() => {
-  window.removeEventListener('scroll', checkScroll)
-})
+  window.removeEventListener("scroll", checkScroll);
+});
 </script>
 
 <style scoped>
@@ -153,7 +152,8 @@ onUnmounted(() => {
 }
 
 @keyframes float {
-  0%, 100% {
+  0%,
+  100% {
     transform: translateY(0px);
   }
   50% {
@@ -209,12 +209,12 @@ onUnmounted(() => {
     bottom: 20px;
     gap: 12px;
   }
-  
+
   .float-button {
     width: 48px;
     height: 48px;
   }
-  
+
   .float-button__icon {
     font-size: 18px;
   }
@@ -241,13 +241,14 @@ onUnmounted(() => {
   .back-to-top-fade-leave-active {
     transition-duration: 0.1s;
   }
-  
+
   .back-to-top__ripple {
     display: none;
   }
-  
+
   @keyframes float {
-    0%, 100% {
+    0%,
+    100% {
       transform: none;
     }
   }

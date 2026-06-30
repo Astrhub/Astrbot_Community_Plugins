@@ -1,40 +1,27 @@
-<script setup>
-import { computed } from 'vue'
-import {
-  NButton,
-  NForm,
-  NFormItem,
-  NIcon,
-  NInput,
-  NInputNumber,
-  NTag
-} from 'naive-ui'
-import {
-  KeyOutline,
-  LogoGithub,
-  PersonCircleOutline,
-  SaveOutline
-} from '@vicons/ionicons5'
+<script setup lang="ts">
+import { computed } from "vue";
+import { NButton, NForm, NFormItem, NIcon, NInput, NInputNumber, NTag } from "naive-ui";
+import { KeyOutline, LogoGithub, PersonCircleOutline, SaveOutline } from "@vicons/ionicons5";
 
-const githubName = defineModel('githubName', { type: String, default: '' })
-const githubToken = defineModel('githubToken', { type: String, default: '' })
-const refreshInterval = defineModel('refreshInterval', { type: Number, default: 3600 })
+const githubName = defineModel("githubName", { type: String, default: "" });
+const githubToken = defineModel("githubToken", { type: String, default: "" });
+const refreshInterval = defineModel("refreshInterval", { type: Number, default: 3600 });
 
 const props = defineProps({
   currentUser: {
     type: Object,
-    default: null
+    default: null,
   },
   saving: {
     type: Boolean,
-    default: false
-  }
-})
+    default: false,
+  },
+});
 
-const emit = defineEmits(['save'])
+const emit = defineEmits(["save"]);
 
-const githubLogin = computed(() => props.currentUser?.github_login || '')
-const hasGithubToken = computed(() => Boolean(props.currentUser?.has_github_token))
+const githubLogin = computed(() => props.currentUser?.github_login || "");
+const hasGithubToken = computed(() => Boolean(props.currentUser?.has_github_token));
 </script>
 
 <template>
@@ -54,11 +41,11 @@ const hasGithubToken = computed(() => Boolean(props.currentUser?.has_github_toke
         <NIcon class="github-icon"><LogoGithub /></NIcon>
         <div class="github-copy">
           <span class="summary-label">GitHub 登录账号</span>
-          <strong>{{ githubLogin || '未连接' }}</strong>
+          <strong>{{ githubLogin || "未连接" }}</strong>
         </div>
       </div>
       <NTag :type="githubLogin ? 'success' : 'warning'" size="small" round>
-        {{ githubLogin ? '已连接' : '未连接' }}
+        {{ githubLogin ? "已连接" : "未连接" }}
       </NTag>
     </div>
 
@@ -80,7 +67,7 @@ const hasGithubToken = computed(() => Boolean(props.currentUser?.has_github_toke
             </template>
           </NInput>
           <template #feedback>
-            {{ hasGithubToken ? '当前已配置 Token' : '当前未配置 Token' }}
+            {{ hasGithubToken ? "当前已配置 Token" : "当前未配置 Token" }}
           </template>
         </NFormItem>
 

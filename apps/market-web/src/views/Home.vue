@@ -47,7 +47,7 @@
         <span class="toolbar-tip">随机推荐</span>
         <n-button size="small" tertiary @click="refreshRandomOrder">
           <template #icon>
-                         <n-icon><sync-outline /></n-icon>
+            <n-icon><sync-outline /></n-icon>
           </template>
           换一换
         </n-button>
@@ -66,7 +66,7 @@
           <div class="loading-text">正在加载插件数据</div>
         </div>
       </div>
-      
+
       <!-- 空状态提示 -->
       <div v-else-if="!isLoading && filteredPlugins.length === 0" class="empty-state">
         <div class="empty-icon">
@@ -77,12 +77,10 @@
           <span v-if="searchQuery || selectedTag || selectedCategory !== 'all'">
             试试调整搜索内容呢
           </span>
-          <span v-else>
-            当前没有可用的插件数据
-          </span>
+          <span v-else> 当前没有可用的插件数据 </span>
         </p>
       </div>
-      
+
       <!-- 插件卡片 -->
       <template v-else>
         <plugin-card
@@ -95,32 +93,28 @@
       </template>
     </main>
     <div class="bottom-pagination-wrapper">
-      <app-pagination
-        v-if="totalPages > 1"
-        v-model="currentPage"
-        :total-pages="totalPages"
-      />
+      <app-pagination v-if="totalPages > 1" v-model="currentPage" :total-pages="totalPages" />
     </div>
     <app-footer />
   </n-layout>
 </template>
 
-<script setup>
-import { computed, onMounted, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { storeToRefs } from 'pinia'
-import { NLayout, NIcon, NButton } from 'naive-ui'
-import { MegaphoneOutline, SearchOutline, SyncOutline } from '@vicons/ionicons5'
-import AppHeader from '../components/AppHeader.vue'
-import PluginCard from '../components/PluginCard.vue'
-import AppPagination from '../components/AppPagination.vue'
-import AppFooter from '../components/AppFooter.vue'
-import SearchToolbar from '../components/SearchToolbar.vue'
-import { normalizePluginCategory, usePluginStore } from '../stores/plugins'
+<script setup lang="ts">
+import { computed, onMounted, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { storeToRefs } from "pinia";
+import { NLayout, NIcon, NButton } from "naive-ui";
+import { MegaphoneOutline, SearchOutline, SyncOutline } from "@vicons/ionicons5";
+import AppHeader from "../components/AppHeader.vue";
+import PluginCard from "../components/PluginCard.vue";
+import AppPagination from "../components/AppPagination.vue";
+import AppFooter from "../components/AppFooter.vue";
+import SearchToolbar from "../components/SearchToolbar.vue";
+import { normalizePluginCategory, usePluginStore } from "../stores/plugins";
 
-const store = usePluginStore()
-const route = useRoute()
-const router = useRouter()
+const store = usePluginStore();
+const route = useRoute();
+const router = useRouter();
 const {
   searchQuery,
   selectedTag,
@@ -136,120 +130,128 @@ const {
   isLoading,
   filteredPlugins,
   randomSeed,
-  announcements
-} = storeToRefs(store)
+  announcements,
+} = storeToRefs(store);
 
-const visibleAnnouncements = computed(() => announcements.value.slice(0, 2))
+const visibleAnnouncements = computed(() => announcements.value.slice(0, 2));
 
-const { refreshRandomOrder } = store
-const FILTER_QUERY_KEYS = ['q', 'tag', 'category', 'page', 'sort', 'direction', 'fuzzy']
-const SORT_VALUES = new Set(['default', 'random', 'updated', 'stars', 'likes', 'comments'])
-let applyingRouteQuery = false
+const { refreshRandomOrder } = store;
+const FILTER_QUERY_KEYS = ["q", "tag", "category", "page", "sort", "direction", "fuzzy"];
+const SORT_VALUES = new Set(["default", "random", "updated", "stars", "likes", "comments"]);
+let applyingRouteQuery = false;
 
-watch(() => route.query, applyQueryState, { immediate: true })
+watch(() => route.query, applyQueryState, { immediate: true });
 
-watch([
-  searchQuery,
-  selectedTag,
-  selectedCategory,
-  currentPage,
-  sortBy,
-  sortDirection,
-  fuzzySearchEnabled
-], syncRouteQuery)
+watch(
+  [
+    searchQuery,
+    selectedTag,
+    selectedCategory,
+    currentPage,
+    sortBy,
+    sortDirection,
+    fuzzySearchEnabled,
+  ],
+  syncRouteQuery,
+);
 
-watch(totalPages, (pages) => {
-  if (pages > 0 && currentPage.value > pages) {
-    currentPage.value = pages
-  }
-}, { immediate: true })
+watch(
+  totalPages,
+  (pages) => {
+    if (pages > 0 && currentPage.value > pages) {
+      currentPage.value = pages;
+    }
+  },
+  { immediate: true },
+);
 
 onMounted(() => {
-  store.loadPlugins()
+  store.loadPlugins();
   store.loadAnnouncements().catch((error) => {
-    console.error('Error loading announcements:', error)
-  })
-})
+    console.error("Error loading announcements:", error);
+  });
+});
 
 function formatTime(value) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleDateString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  })
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
 }
 
 function applyQueryState() {
-  applyingRouteQuery = true
-  const query = route.query
-  const sortValue = firstQueryValue(query.sort)
-  const directionValue = firstQueryValue(query.direction)
-  const categoryValue = firstQueryValue(query.category)
+  applyingRouteQuery = true;
+  const query = route.query;
+  const sortValue = firstQueryValue(query.sort);
+  const directionValue = firstQueryValue(query.direction);
+  const categoryValue = firstQueryValue(query.category);
 
-  searchQuery.value = firstQueryValue(query.q)
-  selectedTag.value = firstQueryValue(query.tag) || null
-  selectedCategory.value = categoryValue && categoryValue !== 'all'
-    ? normalizePluginCategory(categoryValue)
-    : 'all'
-  currentPage.value = parsePage(firstQueryValue(query.page))
-  sortBy.value = SORT_VALUES.has(sortValue) ? sortValue : 'default'
-  sortDirection.value = directionValue === 'desc' ? 'desc' : 'asc'
-  fuzzySearchEnabled.value = ['1', 'true'].includes(firstQueryValue(query.fuzzy))
-  applyingRouteQuery = false
+  searchQuery.value = firstQueryValue(query.q);
+  selectedTag.value = firstQueryValue(query.tag) || null;
+  selectedCategory.value =
+    categoryValue && categoryValue !== "all" ? normalizePluginCategory(categoryValue) : "all";
+  currentPage.value = parsePage(firstQueryValue(query.page));
+  sortBy.value = SORT_VALUES.has(sortValue) ? sortValue : "default";
+  sortDirection.value = directionValue === "desc" ? "desc" : "asc";
+  fuzzySearchEnabled.value = ["1", "true"].includes(firstQueryValue(query.fuzzy));
+  applyingRouteQuery = false;
 }
 
 function syncRouteQuery() {
-  if (applyingRouteQuery) return
-  const nextQuery = mergedFilterQuery()
-  if (queriesEqual(route.query, nextQuery)) return
-  router.replace({ query: nextQuery })
+  if (applyingRouteQuery) return;
+  const nextQuery = mergedFilterQuery();
+  if (queriesEqual(route.query, nextQuery)) return;
+  router.replace({ query: nextQuery });
 }
 
 function mergedFilterQuery() {
-  const query = { ...route.query }
+  const query = { ...route.query };
   FILTER_QUERY_KEYS.forEach((key) => {
-    delete query[key]
-  })
-  const filterQuery = {}
-  if (searchQuery.value.trim()) filterQuery.q = searchQuery.value.trim()
-  if (selectedTag.value) filterQuery.tag = selectedTag.value
-  if (selectedCategory.value && selectedCategory.value !== 'all') {
-    filterQuery.category = selectedCategory.value
+    delete query[key];
+  });
+  const filterQuery = {};
+  if (searchQuery.value.trim()) filterQuery.q = searchQuery.value.trim();
+  if (selectedTag.value) filterQuery.tag = selectedTag.value;
+  if (selectedCategory.value && selectedCategory.value !== "all") {
+    filterQuery.category = selectedCategory.value;
   }
-  if (currentPage.value > 1) filterQuery.page = String(currentPage.value)
-  if (sortBy.value !== 'default') filterQuery.sort = sortBy.value
-  if (sortDirection.value !== 'asc') filterQuery.direction = sortDirection.value
-  if (fuzzySearchEnabled.value) filterQuery.fuzzy = '1'
-  return { ...query, ...filterQuery }
+  if (currentPage.value > 1) filterQuery.page = String(currentPage.value);
+  if (sortBy.value !== "default") filterQuery.sort = sortBy.value;
+  if (sortDirection.value !== "asc") filterQuery.direction = sortDirection.value;
+  if (fuzzySearchEnabled.value) filterQuery.fuzzy = "1";
+  return { ...query, ...filterQuery };
 }
 
 function firstQueryValue(value) {
-  if (Array.isArray(value)) return String(value[0] || '')
-  return String(value || '')
+  if (Array.isArray(value)) return String(value[0] || "");
+  return String(value || "");
 }
 
 function parsePage(value) {
-  const page = Number.parseInt(value, 10)
-  return Number.isFinite(page) && page > 0 ? page : 1
+  const page = Number.parseInt(value, 10);
+  return Number.isFinite(page) && page > 0 ? page : 1;
 }
 
 function queriesEqual(left, right) {
-  const normalizedLeft = normalizeQuery(left)
-  const normalizedRight = normalizeQuery(right)
-  const leftKeys = Object.keys(normalizedLeft).sort()
-  const rightKeys = Object.keys(normalizedRight).sort()
-  if (leftKeys.length !== rightKeys.length) return false
-  return leftKeys.every((key, index) => (
-    key === rightKeys[index] && normalizedLeft[key] === normalizedRight[key]
-  ))
+  const normalizedLeft = normalizeQuery(left);
+  const normalizedRight = normalizeQuery(right);
+  const leftKeys = Object.keys(normalizedLeft).sort();
+  const rightKeys = Object.keys(normalizedRight).sort();
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every(
+    (key, index) => key === rightKeys[index] && normalizedLeft[key] === normalizedRight[key],
+  );
 }
 
 function normalizeQuery(query) {
-  return Object.fromEntries(Object.entries(query)
-    .map(([key, value]) => [key, firstQueryValue(value)])
-    .filter(([, value]) => value !== ''))
+  return Object.fromEntries(
+    Object.entries(query)
+      .map(([key, value]) => [key, firstQueryValue(value)])
+      .filter(([, value]) => value !== ""),
+  );
 }
 </script>
 
@@ -261,7 +263,7 @@ function normalizeQuery(query) {
 }
 
 .bottom-pagination-wrapper {
-  min-height: 48px; 
+  min-height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -335,19 +337,19 @@ function normalizeQuery(query) {
   font-size: 13px;
 }
 
-  .plugins-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-    max-width: 1400px;
-    gap: 24px;
-    padding: 20px;
-    margin: 0 auto;
-    animation: gridAppear 0.3s ease-out;
-    animation-delay: 0.7s;
-    animation-fill-mode: backwards;
-    align-content: start;  
-    align-items: start;   
-  }
+.plugins-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  max-width: 1400px;
+  gap: 24px;
+  padding: 20px;
+  margin: 0 auto;
+  animation: gridAppear 0.3s ease-out;
+  animation-delay: 0.7s;
+  animation-fill-mode: backwards;
+  align-content: start;
+  align-items: start;
+}
 
 @keyframes gridAppear {
   from {
@@ -456,7 +458,9 @@ function normalizeQuery(query) {
 }
 
 @keyframes dotPulse {
-  0%, 80%, 100% {
+  0%,
+  80%,
+  100% {
     transform: scale(0.6);
     opacity: 0.4;
   }
@@ -475,7 +479,8 @@ function normalizeQuery(query) {
 }
 
 @keyframes fadeInOut {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 0.5;
   }
   50% {
@@ -485,14 +490,14 @@ function normalizeQuery(query) {
 
 .loading-container :deep(.n-spin) {
   will-change: transform;
-  transform: translateZ(0); 
+  transform: translateZ(0);
 }
 
 .loading-container :deep(.n-spin-icon) {
   animation-timing-function: linear !important;
-  animation-duration: 1s !important; 
+  animation-duration: 1s !important;
   will-change: transform;
-  transform: translateZ(0); 
+  transform: translateZ(0);
 }
 
 .loading-container :deep(.n-spin-body) {

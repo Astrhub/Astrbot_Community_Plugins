@@ -33,7 +33,9 @@
       <section class="submit-aside">
         <n-card :bordered="false" class="info-panel">
           <h2>上架规则</h2>
-          <p v-if="siteConfig.market.submissions_enabled">提交插件需要使用 GitHub OAuth 登录，用于校验仓库归属。</p>
+          <p v-if="siteConfig.market.submissions_enabled">
+            提交插件需要使用 GitHub OAuth 登录，用于校验仓库归属。
+          </p>
           <p v-else>当前站点已暂停插件提交。</p>
           <ul>
             <li>仓库必须是公开 GitHub 仓库。</li>
@@ -50,7 +52,12 @@
               <n-tag v-if="currentUser" type="success" :bordered="false">
                 已登录：{{ currentUser.github_login || currentUser.login }}
               </n-tag>
-              <n-tag v-else-if="!siteConfig.auth.github_login_enabled" type="warning" :bordered="false">GitHub 登录未开启</n-tag>
+              <n-tag
+                v-else-if="!siteConfig.auth.github_login_enabled"
+                type="warning"
+                :bordered="false"
+                >GitHub 登录未开启</n-tag
+              >
               <n-tag v-else type="warning" :bordered="false">需要 GitHub 登录</n-tag>
             </div>
           </template>
@@ -65,7 +72,7 @@
                     :input-props="{
                       name: 'plugin-name',
                       autocomplete: 'off',
-                      spellcheck: 'false'
+                      spellcheck: 'false',
                     }"
                   />
                 </n-form-item>
@@ -77,7 +84,7 @@
                     placeholder="给用户看的名称…"
                     :input-props="{
                       name: 'plugin-display-name',
-                      autocomplete: 'off'
+                      autocomplete: 'off',
                     }"
                   />
                 </n-form-item>
@@ -92,7 +99,7 @@
                       name: 'plugin-repo',
                       autocomplete: 'off',
                       inputmode: 'url',
-                      spellcheck: 'false'
+                      spellcheck: 'false',
                     }"
                   />
                 </n-form-item>
@@ -105,7 +112,7 @@
                     placeholder="一句话说明插件能做什么…"
                     :input-props="{
                       name: 'plugin-description',
-                      autocomplete: 'off'
+                      autocomplete: 'off',
                     }"
                     :maxlength="120"
                     :show-count="true"
@@ -122,7 +129,7 @@
                     :input-props="{
                       name: 'plugin-author',
                       autocomplete: 'off',
-                      spellcheck: 'false'
+                      spellcheck: 'false',
                     }"
                   />
                 </n-form-item>
@@ -147,7 +154,7 @@
                       name: 'plugin-social-link',
                       autocomplete: 'off',
                       inputmode: 'url',
-                      spellcheck: 'false'
+                      spellcheck: 'false',
                     }"
                   />
                 </n-form-item>
@@ -179,10 +186,10 @@
   </div>
 </template>
 
-<script setup>
-import { computed, reactive, ref } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useRouter } from 'vue-router'
+<script setup lang="ts">
+import { computed, reactive, ref } from "vue";
+import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
 import {
   NButton,
   NCard,
@@ -196,101 +203,109 @@ import {
   NLayoutHeader,
   NSelect,
   NTag,
-  useMessage
-} from 'naive-ui'
-import { ArrowBack, LogoGithub } from '@vicons/ionicons5'
-import { PLUGIN_CATEGORY_OPTIONS, usePluginStore } from '@/stores/plugins'
-import ThemeModeButton from '@/components/ThemeModeButton.vue'
+  useMessage,
+} from "naive-ui";
+import { ArrowBack, LogoGithub } from "@vicons/ionicons5";
+import { PLUGIN_CATEGORY_OPTIONS, usePluginStore } from "@/stores/plugins";
+import ThemeModeButton from "@/components/ThemeModeButton.vue";
 
-const router = useRouter()
-const message = useMessage()
-const store = usePluginStore()
-const { currentUser, siteConfig } = storeToRefs(store)
-const { loginWithGithub } = store
-const formRef = ref(null)
-const submitting = ref(false)
-const maxPluginTags = computed(() => siteConfig.value.market?.max_plugin_tags || 8)
-const pluginCategoryOptions = PLUGIN_CATEGORY_OPTIONS
+const router = useRouter();
+const message = useMessage();
+const store = usePluginStore();
+const { currentUser, siteConfig } = storeToRefs(store);
+const { loginWithGithub } = store;
+const formRef = ref(null);
+const submitting = ref(false);
+const maxPluginTags = computed(() => siteConfig.value.market?.max_plugin_tags || 8);
+const pluginCategoryOptions = PLUGIN_CATEGORY_OPTIONS;
 
 const formData = reactive({
-  name: '',
-  display_name: '',
-  desc: '',
-  author: '',
-  repo: '',
-  category: '',
+  name: "",
+  display_name: "",
+  desc: "",
+  author: "",
+  repo: "",
+  category: "",
   tags: [],
-  social_link: ''
-})
+  social_link: "",
+});
 
 const rules = {
   name: [
-    { required: true, message: '请输入插件名', trigger: 'blur' },
-    { pattern: /^astrbot_plugin_[a-z0-9_-]+$/i, message: '插件名必须以 astrbot_plugin_ 开头，仅含字母、数字、下划线、短横线', trigger: 'blur' }
+    { required: true, message: "请输入插件名", trigger: "blur" },
+    {
+      pattern: /^astrbot_plugin_[a-z0-9_-]+$/i,
+      message: "插件名必须以 astrbot_plugin_ 开头，仅含字母、数字、下划线、短横线",
+      trigger: "blur",
+    },
   ],
   display_name: {
     required: true,
-    message: '请输入展示名称',
-    trigger: 'blur'
+    message: "请输入展示名称",
+    trigger: "blur",
   },
   desc: [
-    { required: true, message: '请输入插件简介', trigger: 'blur' },
+    { required: true, message: "请输入插件简介", trigger: "blur" },
     {
-      validator: (_, value) => Array.from((value || '').toString()).length <= 120,
-      message: '插件简介最多 120 字',
-      trigger: ['input', 'blur']
-    }
+      validator: (_, value) => Array.from((value || "").toString()).length <= 120,
+      message: "插件简介最多 120 字",
+      trigger: ["input", "blur"],
+    },
   ],
   author: {
     required: true,
-    message: '请输入作者显示名',
-    trigger: 'blur'
+    message: "请输入作者显示名",
+    trigger: "blur",
   },
   repo: [
-    { required: true, message: '请输入 GitHub 仓库地址', trigger: 'blur' },
-    { pattern: /^https:\/\/github\.com\/[\w-]+\/[\w.-]+\/?$/, message: '请输入有效的 GitHub 仓库地址', trigger: 'blur' }
+    { required: true, message: "请输入 GitHub 仓库地址", trigger: "blur" },
+    {
+      pattern: /^https:\/\/github\.com\/[\w-]+\/[\w.-]+\/?$/,
+      message: "请输入有效的 GitHub 仓库地址",
+      trigger: "blur",
+    },
   ],
   category: {
     required: true,
-    message: '请选择官方分类',
-    trigger: ['change', 'blur']
+    message: "请选择官方分类",
+    trigger: ["change", "blur"],
   },
   tags: [
     {
       validator: (_, value) => !Array.isArray(value) || value.length <= maxPluginTags.value,
       message: () => `标签最多 ${maxPluginTags.value} 个`,
-      trigger: ['change', 'blur']
-    }
-  ]
-}
+      trigger: ["change", "blur"],
+    },
+  ],
+};
 
 const goBack = () => {
-  router.back()
-}
+  router.back();
+};
 
 const handleSubmit = () => {
   if (!siteConfig.value.market?.submissions_enabled) {
-    message.warning('当前站点已暂停插件提交')
-    return
+    message.warning("当前站点已暂停插件提交");
+    return;
   }
   formRef.value?.validate(async (errors) => {
     if (errors) {
-      message.error('请完善必填信息')
-      return
+      message.error("请完善必填信息");
+      return;
     }
 
-    submitting.value = true
+    submitting.value = true;
     try {
-      await store.submitPlugin({ ...formData })
-      message.success('已提交审核')
-      router.push('/')
+      await store.submitPlugin({ ...formData });
+      message.success("已提交审核");
+      router.push("/");
     } catch (error) {
-      message.error(error.message || '提交失败')
+      message.error(error.message || "提交失败");
     } finally {
-      submitting.value = false
+      submitting.value = false;
     }
-  })
-}
+  });
+};
 </script>
 
 <style scoped>

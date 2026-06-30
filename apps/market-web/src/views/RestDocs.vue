@@ -1,6 +1,6 @@
-<script setup>
-import { computed, onMounted, shallowRef, watch } from 'vue'
-import { useRouter } from 'vue-router'
+<script setup lang="ts">
+import { computed, onMounted, shallowRef, watch } from "vue";
+import { useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -11,116 +11,122 @@ import {
   NSkeleton,
   NSpin,
   NTag,
-  useMessage
-} from 'naive-ui'
+  useMessage,
+} from "naive-ui";
 import {
   ArrowBackOutline,
   CopyOutline,
   DocumentTextOutline,
   OpenOutline,
   RefreshOutline,
-  SearchOutline
-} from '@vicons/ionicons5'
-import { storeToRefs } from 'pinia'
-import ThemeModeButton from '../components/ThemeModeButton.vue'
-import { usePluginStore } from '../stores/plugins'
+  SearchOutline,
+} from "@vicons/ionicons5";
+import { storeToRefs } from "pinia";
+import ThemeModeButton from "../components/ThemeModeButton.vue";
+import { usePluginStore } from "../stores/plugins";
 
-const METHODS = ['get', 'post', 'put', 'patch', 'delete']
+const METHODS = ["get", "post", "put", "patch", "delete"];
 const METHOD_LABELS = {
-  get: 'GET',
-  post: 'POST',
-  put: 'PUT',
-  patch: 'PATCH',
-  delete: 'DELETE'
-}
+  get: "GET",
+  post: "POST",
+  put: "PUT",
+  patch: "PATCH",
+  delete: "DELETE",
+};
 const METHOD_TAG_TYPES = {
-  get: 'info',
-  post: 'success',
-  put: 'warning',
-  patch: 'warning',
-  delete: 'error'
-}
+  get: "info",
+  post: "success",
+  put: "warning",
+  patch: "warning",
+  delete: "error",
+};
 
-const router = useRouter()
-const message = useMessage()
-const store = usePluginStore()
-const { siteConfig } = storeToRefs(store)
+const router = useRouter();
+const message = useMessage();
+const store = usePluginStore();
+const { siteConfig } = storeToRefs(store);
 
-const spec = shallowRef(null)
-const loading = shallowRef(true)
-const errorMessage = shallowRef('')
-const searchText = shallowRef('')
-const selectedMethod = shallowRef('all')
-const selectedTag = shallowRef('all')
-const selectedKey = shallowRef('')
+const spec = shallowRef(null);
+const loading = shallowRef(true);
+const errorMessage = shallowRef("");
+const searchText = shallowRef("");
+const selectedMethod = shallowRef("all");
+const selectedTag = shallowRef("all");
+const selectedKey = shallowRef("");
 
-const openapiUrl = computed(() => `${store.apiBaseUrl || ''}/openapi.json`)
-const apiTitle = computed(() => spec.value?.info?.title || 'AstrBot Community Plugins API')
-const apiVersion = computed(() => spec.value?.info?.version || '0.1.0')
-const openapiVersion = computed(() => spec.value?.openapi || '3.x')
+const openapiUrl = computed(() => `${store.apiBaseUrl || ""}/openapi.json`);
+const apiTitle = computed(() => spec.value?.info?.title || "AstrBot Community Plugins API");
+const apiVersion = computed(() => spec.value?.info?.version || "0.1.0");
+const openapiVersion = computed(() => spec.value?.openapi || "3.x");
 const operations = computed(() => {
-  const paths = spec.value?.paths || {}
+  const paths = spec.value?.paths || {};
   return Object.entries(paths).flatMap(([path, pathItem]) =>
-    METHODS
-      .filter((method) => pathItem?.[method])
-      .map((method) => normalizeOperation(path, method, pathItem[method]))
-  )
-})
+    METHODS.filter((method) => pathItem?.[method]).map((method) =>
+      normalizeOperation(path, method, pathItem[method]),
+    ),
+  );
+});
 const tags = computed(() => {
-  const values = operations.value.map((operation) => operation.tag)
-  return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b))
-})
+  const values = operations.value.map((operation) => operation.tag);
+  return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
+});
 const methodOptions = computed(() => [
-  { label: '全部方法', value: 'all' },
-  ...METHODS
-    .filter((method) => operations.value.some((operation) => operation.method === method))
-    .map((method) => ({ label: METHOD_LABELS[method], value: method }))
-])
+  { label: "全部方法", value: "all" },
+  ...METHODS.filter((method) =>
+    operations.value.some((operation) => operation.method === method),
+  ).map((method) => ({ label: METHOD_LABELS[method], value: method })),
+]);
 const tagOptions = computed(() => [
-  { label: '全部标签', value: 'all' },
-  ...tags.value.map((tag) => ({ label: tag, value: tag }))
-])
+  { label: "全部标签", value: "all" },
+  ...tags.value.map((tag) => ({ label: tag, value: tag })),
+]);
 const visibleOperations = computed(() => {
-  const keyword = searchText.value.trim().toLowerCase()
+  const keyword = searchText.value.trim().toLowerCase();
   return operations.value.filter((operation) => {
-    if (selectedMethod.value !== 'all' && operation.method !== selectedMethod.value) return false
-    if (selectedTag.value !== 'all' && operation.tag !== selectedTag.value) return false
-    if (!keyword) return true
-    return operation.search.includes(keyword)
-  })
-})
-const selectedOperation = computed(() =>
-  visibleOperations.value.find((operation) => operation.key === selectedKey.value) ||
-  visibleOperations.value[0] ||
-  null
-)
-const hasFilters = computed(() =>
-  Boolean(searchText.value.trim()) ||
-  selectedMethod.value !== 'all' ||
-  selectedTag.value !== 'all'
-)
+    if (selectedMethod.value !== "all" && operation.method !== selectedMethod.value) return false;
+    if (selectedTag.value !== "all" && operation.tag !== selectedTag.value) return false;
+    if (!keyword) return true;
+    return operation.search.includes(keyword);
+  });
+});
+const selectedOperation = computed(
+  () =>
+    visibleOperations.value.find((operation) => operation.key === selectedKey.value) ||
+    visibleOperations.value[0] ||
+    null,
+);
+const hasFilters = computed(
+  () =>
+    Boolean(searchText.value.trim()) ||
+    selectedMethod.value !== "all" ||
+    selectedTag.value !== "all",
+);
 
-watch(visibleOperations, (items) => {
-  if (!items.length) {
-    selectedKey.value = ''
-    return
-  }
-  if (!items.some((operation) => operation.key === selectedKey.value)) {
-    selectedKey.value = items[0].key
-  }
-}, { immediate: true })
+watch(
+  visibleOperations,
+  (items) => {
+    if (!items.length) {
+      selectedKey.value = "";
+      return;
+    }
+    if (!items.some((operation) => operation.key === selectedKey.value)) {
+      selectedKey.value = items[0].key;
+    }
+  },
+  { immediate: true },
+);
 
-onMounted(loadSpec)
+onMounted(loadSpec);
 
 function normalizeOperation(path, method, operation) {
-  const tag = operation.tags?.[0] || 'Default'
-  const summary = operation.summary || operation.operationId || path
-  const description = cleanDescription(operation.description || '')
-  const parameters = Array.isArray(operation.parameters) ? operation.parameters : []
-  const requestContent = Object.keys(operation.requestBody?.content || {})
-  const responses = operation.responses || {}
-  const responseCodes = Object.keys(responses)
-  const key = `${METHOD_LABELS[method]} ${path}`
+  const tag = operation.tags?.[0] || "Default";
+  const summary = operation.summary || operation.operationId || path;
+  const description = cleanDescription(operation.description || "");
+  const parameters = Array.isArray(operation.parameters) ? operation.parameters : [];
+  const requestContent = Object.keys(operation.requestBody?.content || {});
+  const responses = operation.responses || {};
+  const responseCodes = Object.keys(responses);
+  const key = `${METHOD_LABELS[method]} ${path}`;
   const search = [
     key,
     tag,
@@ -128,8 +134,10 @@ function normalizeOperation(path, method, operation) {
     description,
     operation.operationId,
     ...parameters.map((parameter) => parameter.name),
-    ...responseCodes
-  ].join(' ').toLowerCase()
+    ...responseCodes,
+  ]
+    .join(" ")
+    .toLowerCase();
 
   return {
     key,
@@ -138,64 +146,64 @@ function normalizeOperation(path, method, operation) {
     tag,
     summary,
     description,
-    operationId: operation.operationId || '',
+    operationId: operation.operationId || "",
     parameters,
     requestContent,
     responses,
     responseCodes,
     security: operation.security || [],
     deprecated: Boolean(operation.deprecated),
-    search
-  }
+    search,
+  };
 }
 
 function cleanDescription(value) {
-  return String(value || '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+  return String(value || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function methodType(method) {
-  return METHOD_TAG_TYPES[method] || 'default'
+  return METHOD_TAG_TYPES[method] || "default";
 }
 
 function selectOperation(operation) {
-  selectedKey.value = operation.key
+  selectedKey.value = operation.key;
 }
 
 function resetFilters() {
-  searchText.value = ''
-  selectedMethod.value = 'all'
-  selectedTag.value = 'all'
+  searchText.value = "";
+  selectedMethod.value = "all";
+  selectedTag.value = "all";
 }
 
 function goBack() {
-  router.push('/')
+  router.push("/");
 }
 
 async function loadSpec() {
-  loading.value = true
-  errorMessage.value = ''
+  loading.value = true;
+  errorMessage.value = "";
   try {
-    const response = await fetch(openapiUrl.value, { cache: 'no-store' })
+    const response = await fetch(openapiUrl.value, { cache: "no-store" });
     if (!response.ok) {
-      throw new Error(`OpenAPI 加载失败：HTTP ${response.status}`)
+      throw new Error(`OpenAPI 加载失败：HTTP ${response.status}`);
     }
-    spec.value = await response.json()
+    spec.value = await response.json();
   } catch (error) {
-    errorMessage.value = error.message || 'OpenAPI 加载失败'
+    errorMessage.value = error.message || "OpenAPI 加载失败";
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
 async function copyPath(operation) {
   try {
-    await navigator.clipboard.writeText(`${METHOD_LABELS[operation.method]} ${operation.path}`)
-    message.success('已复制端点')
+    await navigator.clipboard.writeText(`${METHOD_LABELS[operation.method]} ${operation.path}`);
+    message.success("已复制端点");
   } catch {
-    message.warning('复制失败')
+    message.warning("复制失败");
   }
 }
 </script>
@@ -210,10 +218,13 @@ async function copyPath(operation) {
           </template>
         </n-button>
         <div class="docs-brand">
-          <img :src="siteConfig.icon_url" :alt="siteConfig.name" class="docs-logo">
+          <img :src="siteConfig.icon_url" :alt="siteConfig.name" class="docs-logo" />
           <div class="docs-brand-copy">
             <strong>REST API 文档</strong>
-            <span>{{ apiTitle }} · v{{ apiVersion }} · OpenAPI {{ openapiVersion }} · {{ operations.length }} 个端点</span>
+            <span
+              >{{ apiTitle }} · v{{ apiVersion }} · OpenAPI {{ openapiVersion }} ·
+              {{ operations.length }} 个端点</span
+            >
           </div>
         </div>
       </div>
@@ -259,12 +270,7 @@ async function copyPath(operation) {
       </n-button>
     </section>
 
-    <n-alert
-      v-if="errorMessage"
-      type="error"
-      :bordered="false"
-      class="docs-alert"
-    >
+    <n-alert v-if="errorMessage" type="error" :bordered="false" class="docs-alert">
       {{ errorMessage }}
     </n-alert>
 
@@ -273,7 +279,9 @@ async function copyPath(operation) {
         <aside class="endpoint-panel" aria-label="端点列表">
           <div class="panel-title">
             <span>{{ visibleOperations.length }} 个端点</span>
-            <n-button v-if="hasFilters" quaternary size="small" @click="resetFilters">重置</n-button>
+            <n-button v-if="hasFilters" quaternary size="small" @click="resetFilters"
+              >重置</n-button
+            >
           </div>
           <div v-if="loading" class="endpoint-skeleton">
             <n-skeleton v-for="index in 8" :key="index" height="64px" round />
@@ -309,12 +317,19 @@ async function copyPath(operation) {
                   {{ METHOD_LABELS[selectedOperation.method] }}
                 </n-tag>
                 <n-tag size="small" round>{{ selectedOperation.tag }}</n-tag>
-                <n-tag v-if="selectedOperation.deprecated" type="warning" size="small">Deprecated</n-tag>
+                <n-tag v-if="selectedOperation.deprecated" type="warning" size="small"
+                  >Deprecated</n-tag
+                >
               </div>
               <h2>{{ selectedOperation.path }}</h2>
               <p>{{ selectedOperation.summary }}</p>
             </div>
-            <n-button secondary circle :aria-label="`复制 ${selectedOperation.path}`" @click="copyPath(selectedOperation)">
+            <n-button
+              secondary
+              circle
+              :aria-label="`复制 ${selectedOperation.path}`"
+              @click="copyPath(selectedOperation)"
+            >
               <template #icon>
                 <n-icon><copy-outline /></n-icon>
               </template>
@@ -341,7 +356,11 @@ async function copyPath(operation) {
                   <span>{{ parameter.in }}</span>
                 </div>
                 <n-tag v-if="parameter.required" type="warning" size="small">required</n-tag>
-                <p>{{ cleanDescription(parameter.description || parameter.schema?.type || '未描述') }}</p>
+                <p>
+                  {{
+                    cleanDescription(parameter.description || parameter.schema?.type || "未描述")
+                  }}
+                </p>
               </div>
             </div>
             <p v-else class="muted-text">无参数</p>
@@ -364,27 +383,34 @@ async function copyPath(operation) {
           <section class="detail-section">
             <h3>响应</h3>
             <div class="response-list">
-              <div
-                v-for="code in selectedOperation.responseCodes"
-                :key="code"
-                class="response-row"
-              >
-                <n-tag :type="code.startsWith('2') ? 'success' : code.startsWith('4') || code.startsWith('5') ? 'error' : 'default'">
+              <div v-for="code in selectedOperation.responseCodes" :key="code" class="response-row">
+                <n-tag
+                  :type="
+                    code.startsWith('2')
+                      ? 'success'
+                      : code.startsWith('4') || code.startsWith('5')
+                        ? 'error'
+                        : 'default'
+                  "
+                >
                   {{ code }}
                 </n-tag>
-                <span>{{ selectedOperation.responses[code]?.description || '未描述' }}</span>
+                <span>{{ selectedOperation.responses[code]?.description || "未描述" }}</span>
               </div>
             </div>
           </section>
 
-          <section v-if="selectedOperation.operationId || selectedOperation.security.length" class="detail-section meta-section">
+          <section
+            v-if="selectedOperation.operationId || selectedOperation.security.length"
+            class="detail-section meta-section"
+          >
             <div v-if="selectedOperation.operationId">
               <span>operationId</span>
               <code>{{ selectedOperation.operationId }}</code>
             </div>
             <div>
               <span>auth</span>
-              <code>{{ selectedOperation.security.length ? 'required' : 'public' }}</code>
+              <code>{{ selectedOperation.security.length ? "required" : "public" }}</code>
             </div>
           </section>
         </article>

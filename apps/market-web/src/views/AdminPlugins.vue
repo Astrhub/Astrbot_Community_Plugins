@@ -37,7 +37,7 @@
                 </n-tag>
               </div>
               <p class="plugin-name">{{ plugin.name }}</p>
-              <p class="plugin-desc">{{ plugin.desc || '暂无描述' }}</p>
+              <p class="plugin-desc">{{ plugin.desc || "暂无描述" }}</p>
               <a :href="plugin.repo" target="_blank" rel="noreferrer" class="repo-link">
                 {{ plugin.repo }}
               </a>
@@ -51,11 +51,7 @@
               >
                 上架
               </n-button>
-              <n-button
-                secondary
-                :loading="busyId === plugin.id"
-                @click="refreshGithub(plugin)"
-              >
+              <n-button secondary :loading="busyId === plugin.id" @click="refreshGithub(plugin)">
                 刷新 GitHub
               </n-button>
               <n-button
@@ -90,11 +86,7 @@
       <template #footer>
         <div class="modal-actions">
           <n-button tertiary @click="showUnlistModal = false">取消</n-button>
-          <n-button
-            type="warning"
-            :loading="busyId === unlistTarget?.id"
-            @click="confirmUnlist"
-          >
+          <n-button type="warning" :loading="busyId === unlistTarget?.id" @click="confirmUnlist">
             确认下架
           </n-button>
         </div>
@@ -103,10 +95,10 @@
   </div>
 </template>
 
-<script setup>
-import { computed, onMounted, ref } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useRouter } from 'vue-router'
+<script setup lang="ts">
+import { computed, onMounted, ref } from "vue";
+import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -117,114 +109,114 @@ import {
   NModal,
   NSpin,
   NTag,
-  useMessage
-} from 'naive-ui'
-import { ArrowBack } from '@vicons/ionicons5'
-import { usePluginStore } from '@/stores/plugins'
+  useMessage,
+} from "naive-ui";
+import { ArrowBack } from "@vicons/ionicons5";
+import { usePluginStore } from "@/stores/plugins";
 
-const router = useRouter()
-const message = useMessage()
-const store = usePluginStore()
-const { currentUser } = storeToRefs(store)
+const router = useRouter();
+const message = useMessage();
+const store = usePluginStore();
+const { currentUser } = storeToRefs(store);
 const {
   loadAdminPlugins,
   loadCurrentUser,
   loadPlugins,
   refreshAdminPluginGithubMetadata,
-  updatePluginListing
-} = store
+  updatePluginListing,
+} = store;
 
-const loading = ref(true)
-const busyId = ref('')
-const items = ref([])
-const showUnlistModal = ref(false)
-const unlistReason = ref('')
-const unlistTarget = ref(null)
-const isAdmin = computed(() => ['core_admin', 'admin'].includes(currentUser.value?.role))
+const loading = ref(true);
+const busyId = ref("");
+const items = ref([]);
+const showUnlistModal = ref(false);
+const unlistReason = ref("");
+const unlistTarget = ref(null);
+const isAdmin = computed(() => ["core_admin", "admin"].includes(currentUser.value?.role));
 
 const statusLabel = (status) => {
-  if (status === 'listed') return '已上架'
-  if (status === 'unlisted') return '已下架'
-  return '待审核'
-}
+  if (status === "listed") return "已上架";
+  if (status === "unlisted") return "已下架";
+  return "待审核";
+};
 
 const statusType = (status) => {
-  if (status === 'listed') return 'success'
-  if (status === 'unlisted') return 'warning'
-  return 'info'
-}
+  if (status === "listed") return "success";
+  if (status === "unlisted") return "warning";
+  return "info";
+};
 
 async function loadItems() {
-  loading.value = true
+  loading.value = true;
   try {
-    await loadCurrentUser()
-    if (!isAdmin.value) return
-    items.value = await loadAdminPlugins()
+    await loadCurrentUser();
+    if (!isAdmin.value) return;
+    items.value = await loadAdminPlugins();
   } catch (error) {
-    message.error(error.message || '加载失败')
+    message.error(error.message || "加载失败");
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
-async function setListing(plugin, action, reason = '') {
-  busyId.value = plugin.id
+async function setListing(plugin, action, reason = "") {
+  busyId.value = plugin.id;
   try {
-    const payload = action === 'unlist' ? { reason } : null
-    await updatePluginListing(plugin.id, action, payload)
-    await loadItems()
-    await loadPlugins({ force: true })
-    if (action === 'list') {
-      message.success('插件已上架')
+    const payload = action === "unlist" ? { reason } : null;
+    await updatePluginListing(plugin.id, action, payload);
+    await loadItems();
+    await loadPlugins({ force: true });
+    if (action === "list") {
+      message.success("插件已上架");
     } else {
-      message.success('插件已下架')
+      message.success("插件已下架");
     }
   } catch (error) {
-    message.error(error.message || '操作失败')
+    message.error(error.message || "操作失败");
   } finally {
-    busyId.value = ''
+    busyId.value = "";
   }
 }
 
 async function refreshGithub(plugin) {
-  busyId.value = plugin.id
+  busyId.value = plugin.id;
   try {
-    await refreshAdminPluginGithubMetadata(plugin.id, {})
-    await loadItems()
-    message.success('GitHub 数据刷新已在后台开始')
+    await refreshAdminPluginGithubMetadata(plugin.id, {});
+    await loadItems();
+    message.success("GitHub 数据刷新已在后台开始");
   } catch (error) {
-    message.error(error.message || '刷新失败')
+    message.error(error.message || "刷新失败");
   } finally {
-    busyId.value = ''
+    busyId.value = "";
   }
 }
 
 function openUnlistModal(plugin) {
-  unlistTarget.value = plugin
-  unlistReason.value = ''
-  showUnlistModal.value = true
+  unlistTarget.value = plugin;
+  unlistReason.value = "";
+  showUnlistModal.value = true;
 }
 
 async function confirmUnlist() {
-  if (!unlistTarget.value) return
-  const reason = unlistReason.value.trim()
+  if (!unlistTarget.value) return;
+  const reason = unlistReason.value.trim();
   if (!reason) {
-    message.warning('请填写下架原因')
-    return
+    message.warning("请填写下架原因");
+    return;
   }
-  showUnlistModal.value = false
-  await setListing(unlistTarget.value, 'unlist', reason)
+  showUnlistModal.value = false;
+  await setListing(unlistTarget.value, "unlist", reason);
 }
 
 function goBack() {
-  router.back()
+  router.back();
 }
 
 function goHome() {
-  router.push('/')
+  router.push("/");
 }
 
-onMounted(loadItems)
+onMounted(loadItems);
 </script>
 
 <style scoped>

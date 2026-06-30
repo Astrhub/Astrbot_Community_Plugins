@@ -1,9 +1,5 @@
 <template>
-  <n-dropdown
-    :options="themeMenuOptions"
-    trigger="click"
-    @select="setThemeMode"
-  >
+  <n-dropdown :options="themeMenuOptions" trigger="click" @select="setThemeMode">
     <n-button
       quaternary
       :circle="circle"
@@ -18,52 +14,54 @@
   </n-dropdown>
 </template>
 
-<script setup>
-import { computed, h } from 'vue'
-import { storeToRefs } from 'pinia'
-import { NButton, NDropdown, NIcon } from 'naive-ui'
-import { DesktopOutline, Moon, Sunny } from '@vicons/ionicons5'
-import { usePluginStore } from '../stores/plugins'
+<script setup lang="ts">
+import { computed, h } from "vue";
+import { storeToRefs } from "pinia";
+import { NButton, NDropdown, NIcon } from "naive-ui";
+import { DesktopOutline, Moon, Sunny } from "@vicons/ionicons5";
+import { usePluginStore } from "../stores/plugins";
 
-defineOptions({ inheritAttrs: false })
+defineOptions({ inheritAttrs: false });
 
 defineProps({
   circle: {
     type: Boolean,
-    default: false
-  }
-})
+    default: false,
+  },
+});
 
-const store = usePluginStore()
-const { themeMode } = storeToRefs(store)
-const { setThemeMode } = store
+const store = usePluginStore();
+const { themeMode } = storeToRefs(store);
+const { setThemeMode } = store;
 
 const themeModes = {
   system: {
-    label: '自动',
-    icon: DesktopOutline
+    label: "自动",
+    icon: DesktopOutline,
   },
   light: {
-    label: '浅色',
-    icon: Sunny
+    label: "浅色",
+    icon: Sunny,
   },
   dark: {
-    label: '深色',
-    icon: Moon
-  }
-}
+    label: "深色",
+    icon: Moon,
+  },
+};
 
-const themeModeLabel = computed(() => themeModes[themeMode.value]?.label || themeModes.system.label)
-const themeModeIcon = computed(() => themeModes[themeMode.value]?.icon || themeModes.system.icon)
+const themeModeLabel = computed(
+  () => themeModes[themeMode.value]?.label || themeModes.system.label,
+);
+const themeModeIcon = computed(() => themeModes[themeMode.value]?.icon || themeModes.system.icon);
 const themeMenuOptions = computed(() =>
   Object.entries(themeModes).map(([key, item]) => ({
     key,
     label: item.label,
-    icon: renderIcon(item.icon)
-  }))
-)
+    icon: renderIcon(item.icon),
+  })),
+);
 
 function renderIcon(icon) {
-  return () => h(NIcon, null, { default: () => h(icon) })
+  return () => h(NIcon, null, { default: () => h(icon) });
 }
 </script>

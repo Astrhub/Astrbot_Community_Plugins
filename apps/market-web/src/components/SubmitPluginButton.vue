@@ -1,9 +1,11 @@
 <template>
-  <div class="submit-button-container" @mouseenter="showTipText = true" @mouseleave="showTipText = false">
+  <div
+    class="submit-button-container"
+    @mouseenter="showTipText = true"
+    @mouseleave="showTipText = false"
+  >
     <div class="text-container">
-      <div class="tip-text" :class="{ 'tip-text--show': showTipText }">
-        来提交你的插件吧！
-      </div>
+      <div class="tip-text" :class="{ 'tip-text--show': showTipText }">来提交你的插件吧！</div>
     </div>
     <button
       type="button"
@@ -11,9 +13,7 @@
       @click="navigateToSubmit"
       aria-label="提交插件"
     >
-      <div 
-        class="float-button__inner submit-plugin__inner"
-      >
+      <div class="float-button__inner submit-plugin__inner">
         <n-icon size="22" class="float-button__icon">
           <add-circle />
         </n-icon>
@@ -23,18 +23,18 @@
   </div>
 </template>
 
-<script setup>
-import { ref } from 'vue'
-import { NIcon } from 'naive-ui'
-import { AddCircle } from '@vicons/ionicons5'
-import { useRouter } from 'vue-router'
+<script setup lang="ts">
+import { ref } from "vue";
+import { NIcon } from "naive-ui";
+import { AddCircle } from "@vicons/ionicons5";
+import { useRouter } from "vue-router";
 
-const router = useRouter()
-const showTipText = ref(false)
+const router = useRouter();
+const showTipText = ref(false);
 
 const navigateToSubmit = () => {
-  router.push('/submit')
-}
+  router.push("/submit");
+};
 </script>
 
 <style scoped>
@@ -63,7 +63,8 @@ const navigateToSubmit = () => {
   align-items: center;
   justify-content: center;
   color: white;
-  transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+  transition:
+    background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1),
     box-shadow 0.4s cubic-bezier(0.4, 0, 0.2, 1),
     transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
@@ -122,7 +123,8 @@ const navigateToSubmit = () => {
   margin-right: -56px;
   transform: translateX(100%);
   opacity: 0;
-  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+  transition:
+    opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1),
     transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: var(--shadow-sm);
   background-clip: padding-box;
@@ -130,7 +132,7 @@ const navigateToSubmit = () => {
 }
 
 .tip-text::before {
-  content: '';
+  content: "";
   position: absolute;
   top: -2px;
   right: -2px;
@@ -174,7 +176,7 @@ const navigateToSubmit = () => {
     width: 48px;
     height: 48px;
   }
-  
+
   .float-button__icon {
     font-size: 18px;
   }

@@ -16,46 +16,45 @@
   <iris-mask :is-active="irisMaskActive" :position="irisMaskPosition" />
 </template>
 
-<script setup>
-import { computed, onMounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { storeToRefs } from 'pinia'
-import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
-import { highlightConfig } from './plugins/highlight'
+<script setup lang="ts">
+import { computed, onMounted } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { storeToRefs } from "pinia";
+import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
+import { highlightConfig } from "./plugins/highlight";
 
-import IrisMask from './components/IrisMask.vue'
-import BackToTop from './components/BackToTop.vue'
+import IrisMask from "./components/IrisMask.vue";
+import BackToTop from "./components/BackToTop.vue";
 
-import { darkThemeOverrides, lightThemeOverrides } from './config/darkTheme'
-import { usePluginStore } from './stores/plugins'
+import { darkThemeOverrides, lightThemeOverrides } from "./config/darkTheme";
+import { usePluginStore } from "./stores/plugins";
 
-const store = usePluginStore()
-const {
-  irisMaskActive,
-  irisMaskPosition,
-  isDarkMode,
-} = storeToRefs(store)
+const store = usePluginStore();
+const { irisMaskActive, irisMaskPosition, isDarkMode } = storeToRefs(store);
 
-const route = useRoute()
-const router = useRouter()
-const isFormPage = computed(() => ['/submit', '/settings', '/admin', '/admin/settings'].includes(route.path))
+const route = useRoute();
+const router = useRouter();
+const isFormPage = computed(() =>
+  ["/submit", "/settings", "/admin", "/admin/settings"].includes(route.path),
+);
 
 onMounted(async () => {
-  store.initTheme()
-  await store.loadSiteConfig()
-  const status = await store.loadSetupStatus()
+  store.initTheme();
+  await store.loadSiteConfig();
+  const status = await store.loadSetupStatus();
   if (status.required) {
-    if (route.path !== '/setup') await router.replace('/setup')
-    return
+    if (route.path !== "/setup") await router.replace("/setup");
+    return;
   }
-  await Promise.all([store.loadPlugins(), store.loadCurrentUser()])
-})
+  await Promise.all([store.loadPlugins(), store.loadCurrentUser()]);
+});
 </script>
 
 <style>
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 .app-container {
@@ -96,7 +95,7 @@ body {
   .app-container {
     padding: 0;
   }
-  
+
   .plugins-grid {
     grid-template-columns: 1fr;
     gap: 16px;

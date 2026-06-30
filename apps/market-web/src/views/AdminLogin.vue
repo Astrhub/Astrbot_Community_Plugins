@@ -45,65 +45,59 @@
   </div>
 </template>
 
-<script setup>
-import { computed, onMounted, ref } from 'vue'
-import { storeToRefs } from 'pinia'
-import { useRouter } from 'vue-router'
-import {
-  NButton,
-  NForm,
-  NFormItem,
-  NIcon,
-  NInput,
-  NLayoutHeader,
-  useMessage
-} from 'naive-ui'
-import { ArrowBack } from '@vicons/ionicons5'
-import ThemeModeButton from '@/components/ThemeModeButton.vue'
-import { usePluginStore } from '@/stores/plugins'
+<script setup lang="ts">
+import { computed, onMounted, ref } from "vue";
+import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
+import { NButton, NForm, NFormItem, NIcon, NInput, NLayoutHeader, useMessage } from "naive-ui";
+import { ArrowBack } from "@vicons/ionicons5";
+import ThemeModeButton from "@/components/ThemeModeButton.vue";
+import { usePluginStore } from "@/stores/plugins";
 
-const router = useRouter()
-const message = useMessage()
-const store = usePluginStore()
-const { currentUser } = storeToRefs(store)
-const { loadCurrentUser, loginWithPassword } = store
+const router = useRouter();
+const message = useMessage();
+const store = usePluginStore();
+const { currentUser } = storeToRefs(store);
+const { loadCurrentUser, loginWithPassword } = store;
 
-const isLoggingIn = ref(false)
-const loginForm = ref({ username: 'admin', password: '' })
-const canSubmit = computed(() => Boolean(loginForm.value.username.trim() && loginForm.value.password))
+const isLoggingIn = ref(false);
+const loginForm = ref({ username: "admin", password: "" });
+const canSubmit = computed(() =>
+  Boolean(loginForm.value.username.trim() && loginForm.value.password),
+);
 
 async function submitInternalLogin() {
-  if (!canSubmit.value) return
-  isLoggingIn.value = true
+  if (!canSubmit.value) return;
+  isLoggingIn.value = true;
   try {
     const user = await loginWithPassword({
       username: loginForm.value.username.trim(),
-      password: loginForm.value.password
-    })
-    if (user.role !== 'core_admin') {
-      await store.logout()
-      message.error('只有核心管理员可以登录后台')
-      return
+      password: loginForm.value.password,
+    });
+    if (user.role !== "core_admin") {
+      await store.logout();
+      message.error("只有核心管理员可以登录后台");
+      return;
     }
-    message.success('已登录后台')
-    router.replace('/admin/settings')
+    message.success("已登录后台");
+    router.replace("/admin/settings");
   } catch (error) {
-    message.error(error.message || '登录失败')
+    message.error(error.message || "登录失败");
   } finally {
-    isLoggingIn.value = false
+    isLoggingIn.value = false;
   }
 }
 
 function goHome() {
-  router.push('/')
+  router.push("/");
 }
 
 onMounted(async () => {
-  await loadCurrentUser()
-  if (currentUser.value?.role === 'core_admin') {
-    router.replace('/admin/settings')
+  await loadCurrentUser();
+  if (currentUser.value?.role === "core_admin") {
+    router.replace("/admin/settings");
   }
-})
+});
 </script>
 
 <style scoped>

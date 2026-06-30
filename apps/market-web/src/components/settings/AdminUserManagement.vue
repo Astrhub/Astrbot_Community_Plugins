@@ -1,5 +1,5 @@
-<script setup>
-import { computed, reactive, shallowRef } from 'vue'
+<script setup lang="ts">
+import { computed, reactive, shallowRef } from "vue";
 import {
   NButton,
   NEmpty,
@@ -12,64 +12,71 @@ import {
   NSpace,
   NSpin,
   NTag,
-  useDialog
-} from 'naive-ui'
+  useDialog,
+} from "naive-ui";
 import {
   BanOutline,
   PersonAddOutline,
   SearchOutline,
   ShieldCheckmarkOutline,
-  TrashOutline
-} from '@vicons/ionicons5'
+  TrashOutline,
+} from "@vicons/ionicons5";
 
 const props = defineProps({
   users: {
     type: Array,
-    default: () => []
+    default: () => [],
   },
   currentUser: {
     type: Object,
-    default: null
+    default: null,
   },
   loading: {
     type: Boolean,
-    default: false
+    default: false,
   },
   creating: {
     type: Boolean,
-    default: false
+    default: false,
   },
   busyIds: {
     type: Object,
-    default: () => ({})
-  }
-})
+    default: () => ({}),
+  },
+});
 
-const emit = defineEmits(['refresh', 'create-user', 'update-role', 'mute-user', 'unmute-user', 'delete-user'])
+const emit = defineEmits([
+  "refresh",
+  "create-user",
+  "update-role",
+  "mute-user",
+  "unmute-user",
+  "delete-user",
+]);
 
-const dialog = useDialog()
-const searchQuery = shallowRef('')
-const showCreateModal = shallowRef(false)
-const showMuteModal = shallowRef(false)
-const muteTarget = shallowRef(null)
+const dialog = useDialog();
+const searchQuery = shallowRef("");
+const showCreateModal = shallowRef(false);
+const showMuteModal = shallowRef(false);
+const muteTarget = shallowRef(null);
 const createForm = reactive({
-  username: '',
-  password: '',
-  role: 'user'
-})
+  username: "",
+  password: "",
+  role: "user",
+});
 const muteForm = reactive({
   days: 7,
-  reason: ''
-})
+  reason: "",
+});
 
 const roleOptions = Object.freeze([
-  { label: '普通用户', value: 'user' },
-  { label: '管理员', value: 'admin' }
-])
+  { label: "普通用户", value: "user" },
+  { label: "管理员", value: "admin" },
+]);
 
 const filteredUsers = computed(() => {
-  const query = searchQuery.value.trim().toLowerCase()
-  if (!query) return props.users
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return props.users;
   return props.users.filter((user) => {
     const searchText = [
       user.id,
@@ -77,142 +84,147 @@ const filteredUsers = computed(() => {
       user.internal_username,
       user.github_name,
       user.auth_source,
-      user.role
-    ].filter(Boolean).join(' ').toLowerCase()
-    return searchText.includes(query)
-  })
-})
+      user.role,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return searchText.includes(query);
+  });
+});
 
-const createDisabled = computed(() => !createForm.username.trim() || createForm.password.length < 8)
+const createDisabled = computed(
+  () => !createForm.username.trim() || createForm.password.length < 8,
+);
 
 const muteDisabled = computed(() => {
-  const days = Number(muteForm.days)
-  return !muteTarget.value || !Number.isInteger(days) || days < 1
-})
+  const days = Number(muteForm.days);
+  return !muteTarget.value || !Number.isInteger(days) || days < 1;
+});
 
 function displayName(user) {
-  return user.github_name || user.github_login || user.internal_username || user.id
+  return user.github_name || user.github_login || user.internal_username || user.id;
 }
 
 function username(user) {
-  return user.github_login || user.internal_username || '-'
+  return user.github_login || user.internal_username || "-";
 }
 
 function roleLabel(role) {
-  if (role === 'core_admin') return '核心管理员'
-  if (role === 'admin') return '管理员'
-  return '普通用户'
+  if (role === "core_admin") return "核心管理员";
+  if (role === "admin") return "管理员";
+  return "普通用户";
 }
 
 function roleTagType(role) {
-  if (role === 'core_admin') return 'error'
-  if (role === 'admin') return 'warning'
-  return 'default'
+  if (role === "core_admin") return "error";
+  if (role === "admin") return "warning";
+  return "default";
 }
 
 function sourceLabel(source) {
-  return source === 'internal' ? '内部账号' : 'GitHub'
+  return source === "internal" ? "内部账号" : "GitHub";
 }
 
 function isCurrentUser(user) {
-  return user.id === props.currentUser?.id
+  return user.id === props.currentUser?.id;
 }
 
 function isCoreAdmin(user) {
-  return user.role === 'core_admin'
+  return user.role === "core_admin";
 }
 
 function isMuted(user) {
-  if (!user.muted_until) return false
-  return new Date(user.muted_until).getTime() > Date.now()
+  if (!user.muted_until) return false;
+  return new Date(user.muted_until).getTime() > Date.now();
 }
 
 function formatTime(value) {
-  if (!value) return '-'
-  return new Date(value).toLocaleString()
+  if (!value) return "-";
+  return new Date(value).toLocaleString();
 }
 
 function busyState(user) {
-  return props.busyIds?.[user.id] || ''
+  return props.busyIds?.[user.id] || "";
 }
 
 function resetCreateForm() {
-  createForm.username = ''
-  createForm.password = ''
-  createForm.role = 'user'
+  createForm.username = "";
+  createForm.password = "";
+  createForm.role = "user";
 }
 
 function openCreateModal() {
-  resetCreateForm()
-  showCreateModal.value = true
+  resetCreateForm();
+  showCreateModal.value = true;
 }
 
 function submitCreateUser() {
-  const usernameValue = createForm.username.trim()
-  const passwordValue = createForm.password
-  if (createDisabled.value) return
-  emit('create-user', {
+  const usernameValue = createForm.username.trim();
+  const passwordValue = createForm.password;
+  if (createDisabled.value) return;
+  emit("create-user", {
     username: usernameValue,
     password: passwordValue,
-    role: createForm.role
-  })
-  showCreateModal.value = false
-  resetCreateForm()
+    role: createForm.role,
+  });
+  showCreateModal.value = false;
+  resetCreateForm();
 }
 
 function confirmRoleChange(user, role) {
-  if (role === user.role) return
-  emit('update-role', { user, role })
+  if (role === user.role) return;
+  emit("update-role", { user, role });
 }
 
 function muteUntilDays(days) {
-  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
 function resetMuteForm() {
-  muteForm.days = 7
-  muteForm.reason = ''
-  muteTarget.value = null
+  muteForm.days = 7;
+  muteForm.reason = "";
+  muteTarget.value = null;
 }
 
 function openMuteModal(user) {
-  muteTarget.value = user
-  muteForm.days = 7
-  muteForm.reason = ''
-  showMuteModal.value = true
+  muteTarget.value = user;
+  muteForm.days = 7;
+  muteForm.reason = "";
+  showMuteModal.value = true;
 }
 
 function submitMuteUser() {
-  if (muteDisabled.value) return
-  const user = muteTarget.value
-  const days = Number(muteForm.days)
-  emit('mute-user', {
+  if (muteDisabled.value) return;
+  const user = muteTarget.value;
+  const days = Number(muteForm.days);
+  emit("mute-user", {
     user,
     muted_until: muteUntilDays(days),
-    reason: muteForm.reason.trim()
-  })
-  showMuteModal.value = false
-  resetMuteForm()
+    reason: muteForm.reason.trim(),
+  });
+  showMuteModal.value = false;
+  resetMuteForm();
 }
 
 function confirmUnmute(user) {
   dialog.info({
-    title: '解除封禁',
+    title: "解除封禁",
     content: `确认解除 ${displayName(user)} 的封禁？`,
-    positiveText: '解除',
-    negativeText: '取消',
-    onPositiveClick: () => emit('unmute-user', user)
-  })
+    positiveText: "解除",
+    negativeText: "取消",
+    onPositiveClick: () => emit("unmute-user", user),
+  });
 }
 
 function confirmDelete(user) {
   dialog.warning({
-    title: '删除用户',
+    title: "删除用户",
     content: `${displayName(user)} 的账号将被删除，已提交插件会转给当前核心管理员保留。`,
-    positiveText: '删除',
-    negativeText: '取消',
-    onPositiveClick: () => emit('delete-user', user)
-  })
+    positiveText: "删除",
+    negativeText: "取消",
+    onPositiveClick: () => emit("delete-user", user),
+  });
 }
 </script>
 
@@ -358,7 +370,12 @@ function confirmDelete(user) {
       <template #footer>
         <div class="modal-actions">
           <NButton :disabled="creating" @click="showCreateModal = false">取消</NButton>
-          <NButton type="primary" :loading="creating" :disabled="createDisabled" @click="submitCreateUser">
+          <NButton
+            type="primary"
+            :loading="creating"
+            :disabled="createDisabled"
+            @click="submitCreateUser"
+          >
             添加用户
           </NButton>
         </div>
@@ -397,7 +414,10 @@ function confirmDelete(user) {
       </div>
       <template #footer>
         <div class="modal-actions">
-          <NButton :disabled="muteTarget && busyState(muteTarget) === 'mute'" @click="showMuteModal = false">
+          <NButton
+            :disabled="muteTarget && busyState(muteTarget) === 'mute'"
+            @click="showMuteModal = false"
+          >
             取消
           </NButton>
           <NButton

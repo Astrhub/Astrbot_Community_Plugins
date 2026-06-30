@@ -1,7 +1,7 @@
-<script setup>
-import { computed, onMounted, shallowRef } from 'vue'
-import { useRouter } from 'vue-router'
-import { storeToRefs } from 'pinia'
+<script setup lang="ts">
+import { computed, onMounted, shallowRef } from "vue";
+import { useRouter } from "vue-router";
+import { storeToRefs } from "pinia";
 import {
   NButton,
   NCheckbox,
@@ -12,210 +12,206 @@ import {
   NSpin,
   NTag,
   useDialog,
-  useMessage
-} from 'naive-ui'
-import {
-  ArrowBack,
-  NotificationsOutline,
-  RefreshOutline,
-  TrashOutline
-} from '@vicons/ionicons5'
-import { usePluginStore } from '@/stores/plugins'
+  useMessage,
+} from "naive-ui";
+import { ArrowBack, NotificationsOutline, RefreshOutline, TrashOutline } from "@vicons/ionicons5";
+import { usePluginStore } from "@/stores/plugins";
 
-const router = useRouter()
-const message = useMessage()
-const dialog = useDialog()
-const store = usePluginStore()
-const { currentUser, unreadNotificationCount } = storeToRefs(store)
+const router = useRouter();
+const message = useMessage();
+const dialog = useDialog();
+const store = usePluginStore();
+const { currentUser, unreadNotificationCount } = storeToRefs(store);
 const {
   clearNotifications,
   deleteNotification,
   deleteNotifications,
   loadCurrentUser,
   loadNotifications,
-  markNotificationsRead
-} = store
+  markNotificationsRead,
+} = store;
 
-const loading = shallowRef(true)
-const deleting = shallowRef(false)
-const notifications = shallowRef([])
-const selectedIds = shallowRef([])
-const page = shallowRef(1)
-const pageSize = shallowRef(20)
-const total = shallowRef(0)
+const loading = shallowRef(true);
+const deleting = shallowRef(false);
+const notifications = shallowRef([]);
+const selectedIds = shallowRef([]);
+const page = shallowRef(1);
+const pageSize = shallowRef(20);
+const total = shallowRef(0);
 
-const selectedCount = computed(() => selectedIds.value.length)
-const selectedIdSet = computed(() => new Set(selectedIds.value))
-const currentPageIds = computed(() => notifications.value.map((notification) => notification.id))
-const currentPageSelectedCount = computed(() =>
-  currentPageIds.value.filter((id) => selectedIdSet.value.has(id)).length
-)
-const allCurrentSelected = computed(() =>
-  currentPageIds.value.length > 0 &&
-  currentPageSelectedCount.value === currentPageIds.value.length
-)
+const selectedCount = computed(() => selectedIds.value.length);
+const selectedIdSet = computed(() => new Set(selectedIds.value));
+const currentPageIds = computed(() => notifications.value.map((notification) => notification.id));
+const currentPageSelectedCount = computed(
+  () => currentPageIds.value.filter((id) => selectedIdSet.value.has(id)).length,
+);
+const allCurrentSelected = computed(
+  () =>
+    currentPageIds.value.length > 0 &&
+    currentPageSelectedCount.value === currentPageIds.value.length,
+);
 const pageRangeText = computed(() => {
-  if (total.value === 0) return '0 条'
-  const start = (page.value - 1) * pageSize.value + 1
-  const end = Math.min(total.value, page.value * pageSize.value)
-  return `${start}-${end} / ${total.value} 条`
-})
+  if (total.value === 0) return "0 条";
+  const start = (page.value - 1) * pageSize.value + 1;
+  const end = Math.min(total.value, page.value * pageSize.value);
+  return `${start}-${end} / ${total.value} 条`;
+});
 
 function goBack() {
-  router.back()
+  router.back();
 }
 
 function formatTime(value) {
-  if (!value) return ''
-  return new Date(value).toLocaleString()
+  if (!value) return "";
+  return new Date(value).toLocaleString();
 }
 
 function isSelected(notificationId) {
-  return selectedIdSet.value.has(notificationId)
+  return selectedIdSet.value.has(notificationId);
 }
 
 function setNotificationSelected(notificationId, checked) {
   if (checked) {
-    selectedIds.value = Array.from(new Set([...selectedIds.value, notificationId]))
-    return
+    selectedIds.value = Array.from(new Set([...selectedIds.value, notificationId]));
+    return;
   }
-  selectedIds.value = selectedIds.value.filter((id) => id !== notificationId)
+  selectedIds.value = selectedIds.value.filter((id) => id !== notificationId);
 }
 
 function setCurrentPageSelected(checked) {
   if (checked) {
-    selectedIds.value = Array.from(new Set([...selectedIds.value, ...currentPageIds.value]))
-    return
+    selectedIds.value = Array.from(new Set([...selectedIds.value, ...currentPageIds.value]));
+    return;
   }
-  selectedIds.value = selectedIds.value.filter((id) => !currentPageIds.value.includes(id))
+  selectedIds.value = selectedIds.value.filter((id) => !currentPageIds.value.includes(id));
 }
 
 function clearSelection() {
-  selectedIds.value = []
+  selectedIds.value = [];
 }
 
 async function loadMessages() {
-  loading.value = true
+  loading.value = true;
   try {
     const result = await loadNotifications({
       page: page.value,
-      pageSize: pageSize.value
-    })
-    notifications.value = result.items || []
-    total.value = Number(result.total || 0)
-    pageSize.value = Number(result.page_size || pageSize.value)
-    selectedIds.value = selectedIds.value.filter((id) => currentPageIds.value.includes(id))
+      pageSize: pageSize.value,
+    });
+    notifications.value = result.items || [];
+    total.value = Number(result.total || 0);
+    pageSize.value = Number(result.page_size || pageSize.value);
+    selectedIds.value = selectedIds.value.filter((id) => currentPageIds.value.includes(id));
     if (unreadNotificationCount.value > 0) {
-      await markNotificationsRead()
+      await markNotificationsRead();
       notifications.value = notifications.value.map((notification) => ({
         ...notification,
-        read: true
-      }))
+        read: true,
+      }));
     }
   } catch (error) {
-    message.error(error.message || '消息加载失败')
+    message.error(error.message || "消息加载失败");
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
 async function reloadAfterDeleting(deletedCount) {
-  const nextTotal = Math.max(0, total.value - deletedCount)
-  const maxPage = Math.max(1, Math.ceil(nextTotal / pageSize.value))
-  if (page.value > maxPage) page.value = maxPage
-  clearSelection()
-  await loadMessages()
+  const nextTotal = Math.max(0, total.value - deletedCount);
+  const maxPage = Math.max(1, Math.ceil(nextTotal / pageSize.value));
+  if (page.value > maxPage) page.value = maxPage;
+  clearSelection();
+  await loadMessages();
 }
 
 function confirmDeleteNotification(notification) {
   dialog.warning({
-    title: '删除消息',
-    content: notification.title || '确认删除这条站内信？',
-    positiveText: '删除',
-    negativeText: '取消',
+    title: "删除消息",
+    content: notification.title || "确认删除这条站内信？",
+    positiveText: "删除",
+    negativeText: "取消",
     onPositiveClick: async () => {
-      deleting.value = true
+      deleting.value = true;
       try {
-        const deleted = await deleteNotification(notification.id)
-        await reloadAfterDeleting(deleted)
-        message.success('消息已删除')
+        const deleted = await deleteNotification(notification.id);
+        await reloadAfterDeleting(deleted);
+        message.success("消息已删除");
       } catch (error) {
-        message.error(error.message || '删除失败')
+        message.error(error.message || "删除失败");
       } finally {
-        deleting.value = false
+        deleting.value = false;
       }
-    }
-  })
+    },
+  });
 }
 
 function confirmDeleteSelected() {
-  if (selectedCount.value === 0) return
+  if (selectedCount.value === 0) return;
   dialog.warning({
-    title: '批量删除',
+    title: "批量删除",
     content: `确认删除选中的 ${selectedCount.value} 条站内信？`,
-    positiveText: '删除',
-    negativeText: '取消',
+    positiveText: "删除",
+    negativeText: "取消",
     onPositiveClick: async () => {
-      deleting.value = true
+      deleting.value = true;
       try {
-        const deleted = await deleteNotifications(selectedIds.value)
-        await reloadAfterDeleting(deleted)
-        message.success(`已删除 ${deleted} 条消息`)
+        const deleted = await deleteNotifications(selectedIds.value);
+        await reloadAfterDeleting(deleted);
+        message.success(`已删除 ${deleted} 条消息`);
       } catch (error) {
-        message.error(error.message || '批量删除失败')
+        message.error(error.message || "批量删除失败");
       } finally {
-        deleting.value = false
+        deleting.value = false;
       }
-    }
-  })
+    },
+  });
 }
 
 function confirmClearAll() {
-  if (total.value === 0) return
+  if (total.value === 0) return;
   dialog.warning({
-    title: '清空站内信',
+    title: "清空站内信",
     content: `确认清空全部 ${total.value} 条站内信？此操作不可撤销。`,
-    positiveText: '清空',
-    negativeText: '取消',
+    positiveText: "清空",
+    negativeText: "取消",
     onPositiveClick: async () => {
-      deleting.value = true
+      deleting.value = true;
       try {
-        const deleted = await clearNotifications()
-        page.value = 1
-        clearSelection()
-        await loadMessages()
-        message.success(`已清空 ${deleted} 条消息`)
+        const deleted = await clearNotifications();
+        page.value = 1;
+        clearSelection();
+        await loadMessages();
+        message.success(`已清空 ${deleted} 条消息`);
       } catch (error) {
-        message.error(error.message || '清空失败')
+        message.error(error.message || "清空失败");
       } finally {
-        deleting.value = false
+        deleting.value = false;
       }
-    }
-  })
+    },
+  });
 }
 
 async function changePage(nextPage) {
-  page.value = nextPage
-  clearSelection()
-  await loadMessages()
+  page.value = nextPage;
+  clearSelection();
+  await loadMessages();
 }
 
 async function changePageSize(nextPageSize) {
-  pageSize.value = nextPageSize
-  page.value = 1
-  clearSelection()
-  await loadMessages()
+  pageSize.value = nextPageSize;
+  page.value = 1;
+  clearSelection();
+  await loadMessages();
 }
 
 onMounted(async () => {
-  await loadCurrentUser()
+  await loadCurrentUser();
   if (!currentUser.value) {
-    message.warning('请先登录')
-    router.replace('/')
-    return
+    message.warning("请先登录");
+    router.replace("/");
+    return;
   }
-  await loadMessages()
-})
+  await loadMessages();
+});
 </script>
 
 <template>

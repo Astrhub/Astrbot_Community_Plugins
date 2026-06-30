@@ -1,5 +1,5 @@
-<script setup>
-import { computed, reactive } from 'vue'
+<script setup lang="ts">
+import { computed, reactive } from "vue";
 import {
   NAlert,
   NButton,
@@ -12,87 +12,87 @@ import {
   NInput,
   NSpace,
   NSpin,
-  NTag
-} from 'naive-ui'
+  NTag,
+} from "naive-ui";
 import {
   CopyOutline,
   KeyOutline,
   RefreshOutline,
   ShieldCheckmarkOutline,
-  TrashOutline
-} from '@vicons/ionicons5'
+  TrashOutline,
+} from "@vicons/ionicons5";
 
 const props = defineProps({
   keys: {
     type: Array,
-    default: () => []
+    default: () => [],
   },
   loading: {
     type: Boolean,
-    default: false
+    default: false,
   },
   creating: {
     type: Boolean,
-    default: false
+    default: false,
   },
   busyIds: {
     type: Object,
-    default: () => ({})
+    default: () => ({}),
   },
   newKey: {
     type: String,
-    default: ''
-  }
-})
+    default: "",
+  },
+});
 
-const emit = defineEmits(['refresh', 'create', 'delete', 'copy-key', 'clear-new-key'])
+const emit = defineEmits(["refresh", "create", "delete", "copy-key", "clear-new-key"]);
 
 const form = reactive({
-  name: 'AstrBot 插件访问密钥',
-  scopes: ['market:read']
-})
+  name: "AstrBot 插件访问密钥",
+  scopes: ["market:read"],
+});
 
 const scopeOptions = Object.freeze([
   {
-    label: '读取市场数据',
-    value: 'market:read',
-    description: '读取插件、评论、公告和公开市场元数据'
+    label: "读取市场数据",
+    value: "market:read",
+    description: "读取插件、评论、公告和公开市场元数据",
   },
   {
-    label: '写入市场数据',
-    value: 'market:write',
-    description: '为后续插件提交、同步和管理接口预留'
-  }
-])
+    label: "写入市场数据",
+    value: "market:write",
+    description: "为后续插件提交、同步和管理接口预留",
+  },
+]);
 
-const canCreate = computed(() => form.scopes.length > 0 && !props.creating)
+const canCreate = computed(() => form.scopes.length > 0 && !props.creating);
 
 function createKey() {
-  emit('create', {
-    name: form.name.trim() || 'AstrBot 插件访问密钥',
-    scopes: [...form.scopes]
-  })
+  emit("create", {
+    name: form.name.trim() || "AstrBot 插件访问密钥",
+    scopes: [...form.scopes],
+  });
 }
 
 function scopeLabel(scope) {
-  return scopeOptions.find((option) => option.value === scope)?.label || scope
+  return scopeOptions.find((option) => option.value === scope)?.label || scope;
 }
 
 function formatTime(value) {
-  if (!value) return '未知时间'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '未知时间'
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(date)
+  if (!value) return "未知时间";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未知时间";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function isBusy(key) {
-  return Boolean(props.busyIds?.[key.id])
+  return Boolean(props.busyIds?.[key.id]);
 }
 </script>
 
@@ -175,7 +175,7 @@ function isBusy(key) {
         <article v-for="key in keys" :key="key.id" class="key-row">
           <div class="key-main">
             <div class="key-title-row">
-              <strong>{{ key.name || '未命名密钥' }}</strong>
+              <strong>{{ key.name || "未命名密钥" }}</strong>
               <span>{{ formatTime(key.created_at) }}</span>
             </div>
             <NSpace :size="6" class="scope-tags">
@@ -185,12 +185,7 @@ function isBusy(key) {
             </NSpace>
           </div>
 
-          <NButton
-            secondary
-            type="error"
-            :loading="isBusy(key)"
-            @click="emit('delete', key)"
-          >
+          <NButton secondary type="error" :loading="isBusy(key)" @click="emit('delete', key)">
             <template #icon>
               <NIcon><TrashOutline /></NIcon>
             </template>

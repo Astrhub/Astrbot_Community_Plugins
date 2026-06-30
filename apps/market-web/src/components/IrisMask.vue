@@ -4,30 +4,34 @@
   </div>
 </template>
 
-<script setup>
-import { ref, watch } from 'vue'
+<script setup lang="ts">
+import { ref, watch } from "vue";
 
 const props = defineProps({
   isActive: {
     type: Boolean,
-    default: false
+    default: false,
   },
   position: {
     type: Object,
-    default: () => ({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
-  }
-})
+    default: () => ({ x: window.innerWidth / 2, y: window.innerHeight / 2 }),
+  },
+});
 
-const irisMask = ref(null)
+const irisMask = ref(null);
 
 // 监听激活状态和位置变化
-watch([() => props.isActive, () => props.position], ([active, position]) => {
-  if (irisMask.value && active) {
-    // 设置虹膜遮罩的起始位置
-    irisMask.value.style.setProperty('--iris-x', `${position.x}px`)
-    irisMask.value.style.setProperty('--iris-y', `${position.y}px`)
-  }
-}, { immediate: true })
+watch(
+  [() => props.isActive, () => props.position],
+  ([active, position]) => {
+    if (irisMask.value && active) {
+      // 设置虹膜遮罩的起始位置
+      irisMask.value.style.setProperty("--iris-x", `${position.x}px`);
+      irisMask.value.style.setProperty("--iris-y", `${position.y}px`);
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <style scoped>
@@ -55,13 +59,7 @@ watch([() => props.isActive, () => props.position], ([active, position]) => {
   left: 0;
   width: 100%;
   height: 100%;
-  background: repeating-linear-gradient(
-    45deg,
-    #eff6ff,
-    #eff6ff 10px,
-    #2563eb 10px,
-    #2563eb 20px
-  );
+  background: repeating-linear-gradient(45deg, #eff6ff, #eff6ff 10px, #2563eb 10px, #2563eb 20px);
   transform-origin: var(--iris-x, 50%) var(--iris-y, 50%);
 }
 
@@ -84,12 +82,6 @@ watch([() => props.isActive, () => props.position], ([active, position]) => {
 
 /* 深色主题适配 */
 :global(.dark) .iris-content {
-  background: repeating-linear-gradient(
-    45deg,
-    #0b1220,
-    #0b1220 10px,
-    #60a5fa 10px,
-    #60a5fa 20px
-  );
+  background: repeating-linear-gradient(45deg, #0b1220, #0b1220 10px, #60a5fa 10px, #60a5fa 20px);
 }
 </style>
