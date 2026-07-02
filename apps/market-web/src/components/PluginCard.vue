@@ -6,7 +6,7 @@
     :content-style="{ padding: '8px 16px' }"
     @click="showDetails"
     role="article"
-    :aria-label="`插件: ${plugin.name}`"
+    :aria-label="`插件: ${displayName}`"
     aria-roledescription="插件卡片"
     :aria-expanded="showPluginDetails"
     tabindex="0"
@@ -29,11 +29,11 @@
             ref="pluginNameEl"
             role="heading"
             aria-level="3"
-            :aria-label="plugin.name"
-            :aria-description="`插件：${plugin.name}，版本 ${pluginVersion}`"
+            :aria-label="displayName"
+            :aria-description="`插件：${displayName}，版本 ${pluginVersion}`"
           >
             <span class="plugin-name-text" ref="nameTextEl" :aria-hidden="isTextOverflow">{{
-              plugin.name
+              displayName
             }}</span>
           </h3>
         </div>
@@ -55,7 +55,7 @@
       <div class="plugin-logo-container">
         <img
           :src="getLogoUrl()"
-          :alt="`${plugin.name} logo`"
+          :alt="`${displayName} logo`"
           class="plugin-logo"
           width="60"
           height="60"
@@ -121,7 +121,7 @@
                 @click="(e) => openUrl(plugin.repo, e)"
                 class="main-button"
                 role="link"
-                :aria-label="`查看 ${plugin.name} 的仓库`"
+                :aria-label="`查看 ${displayName} 的仓库`"
                 aria-haspopup="true"
                 aria-expanded="false"
               >
@@ -135,7 +135,7 @@
                       size="small"
                       circle
                       @click="copyRepoUrl"
-                      :aria-label="`复制 ${plugin.name} 的仓库链接`"
+                      :aria-label="`复制 ${displayName} 的仓库链接`"
                       :aria-pressed="isCopied"
                       aria-live="polite"
                     >
@@ -179,7 +179,7 @@
                       type="warning"
                       :loading="isUnlisting"
                       @click.stop="openUnlistModal"
-                      :aria-label="`下架 ${plugin.name}`"
+                      :aria-label="`下架 ${displayName}`"
                     >
                       <n-icon size="18" aria-hidden="true">
                         <cloud-offline-outline />
@@ -224,6 +224,7 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted, nextTick, onUnmounted, watch } from "vue";
+import { DEFAULT_PLUGIN_LOGO_URL, resolvePluginLogoUrl } from "../utils/github";
 import {
   NCard,
   NSpace,
@@ -283,6 +284,7 @@ const pluginVersion = computed(() => String(props.plugin.version || "1.0.0"));
 const formattedVersion = computed(() => {
   return pluginVersion.value.startsWith("v") ? pluginVersion.value : `v${pluginVersion.value}`;
 });
+const displayName = computed(() => props.plugin.display_name || props.plugin.name);
 const headerId = computed(() => {
   const rawId = String(props.plugin.id || props.plugin.name || `plugin-${props.index}`);
   const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, "-");
@@ -433,30 +435,13 @@ async function unlistPlugin() {
 
 // 获取logo URL的逻辑
 const getLogoUrl = () => {
-  // 如果插件有logo字段，直接使用
-  if (props.plugin.logo) {
-    return props.plugin.logo;
-  }
-
-  // 如果没有logo但有repo，尝试从GitHub仓库获取logo
-  if (props.plugin.repo) {
-    const githubRepoPattern = /github\.com\/([^/]+)\/([^/]+)/;
-    const match = props.plugin.repo.match(githubRepoPattern);
-
-    if (match) {
-      const [, owner, repo] = match;
-      return `https://raw.githubusercontent.com/${owner}/${repo}/refs/heads/master/logo.png`;
-    }
-  }
-
-  // 默认返回占位符logo
-  return "/plugin_default.png";
+  return resolvePluginLogoUrl(props.plugin);
 };
 
 // 处理logo加载错误
 const handleLogoError = (event) => {
   // 如果logo加载失败，使用默认logo
-  event.target.src = "/plugin_default.png";
+  event.target.src = DEFAULT_PLUGIN_LOGO_URL;
 };
 </script>
 

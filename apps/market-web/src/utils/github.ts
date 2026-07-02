@@ -47,3 +47,35 @@ export function buildGithubRawUrl(
   const raw = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
   return githubRawUrl(raw);
 }
+
+export const DEFAULT_PLUGIN_LOGO_URL = "/plugin_default.png";
+
+export interface PluginLogoSource {
+  logo?: unknown;
+  repo?: unknown;
+}
+
+export function resolvePluginLogoUrl(plugin: PluginLogoSource): string {
+  const logo = typeof plugin.logo === "string" ? plugin.logo.trim() : "";
+  if (logo) return githubRawUrl(logo);
+
+  const repo = typeof plugin.repo === "string" ? plugin.repo.trim() : "";
+  const githubRepo = parseGithubRepoUrl(repo);
+  if (!githubRepo) return DEFAULT_PLUGIN_LOGO_URL;
+
+  return buildGithubRawUrl(githubRepo.owner, githubRepo.repo, "master", "logo.png");
+}
+
+function parseGithubRepoUrl(value: string): { owner: string; repo: string } | null {
+  if (!value) return null;
+
+  try {
+    const url = new URL(value);
+    if (url.hostname.toLowerCase() !== "github.com") return null;
+    const [owner, repo] = url.pathname.replace(/^\/+/, "").split("/");
+    if (!owner || !repo) return null;
+    return { owner, repo: repo.replace(/\.git$/, "") };
+  } catch {
+    return null;
+  }
+}
