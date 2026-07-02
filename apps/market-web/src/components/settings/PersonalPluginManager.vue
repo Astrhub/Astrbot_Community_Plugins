@@ -36,7 +36,7 @@ const tagDrafts = reactive({});
 
 const statusMeta = Object.freeze({
   listed: { label: "已上架", type: "success" },
-  pending: { label: "待审核", type: "info" },
+  pending: { label: "待审查", type: "info" },
   unlisted: { label: "已下架", type: "warning" },
 });
 
@@ -184,7 +184,7 @@ function saveTags(plugin) {
               下架
             </NButton>
 
-            <NButton v-else-if="plugin.status === 'pending'" secondary disabled> 待审核 </NButton>
+            <NButton v-else-if="plugin.status === 'pending'" secondary disabled>待审查</NButton>
 
             <NButton
               v-else

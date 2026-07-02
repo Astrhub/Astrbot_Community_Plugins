@@ -247,7 +247,11 @@ export const usePluginStore = defineStore("plugins", () => {
   const communityRepoUrl = COMMUNITY_REPO_URL;
   let mediaQuery: MediaQueryList | null = null;
   let pluginsLoaded = false;
+  let announcementsLoaded = false;
+  let currentUserLoaded = false;
   let loadPluginsPromise: Promise<Plugin[]> | null = null;
+  let loadAnnouncementsPromise: Promise<Announcement[]> | null = null;
+  let loadCurrentUserPromise: Promise<void> | null = null;
 
   function prefersDark(): boolean {
     return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
@@ -533,12 +537,23 @@ export const usePluginStore = defineStore("plugins", () => {
     return loadPluginsPromise;
   }
 
-  async function loadAnnouncements(): Promise<Announcement[]> {
-    const response = await fetch(`${apiBaseUrl}/v1/announcements`, { cache: "no-store" });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "加载公告失败");
-    announcements.value = Array.isArray(data.items) ? data.items : [];
-    return announcements.value;
+  async function loadAnnouncements(options: { force?: boolean } = {}): Promise<Announcement[]> {
+    const { force = false } = options;
+    if (loadAnnouncementsPromise) return loadAnnouncementsPromise;
+    if (announcementsLoaded && !force) return announcements.value;
+    loadAnnouncementsPromise = (async () => {
+      const response = await fetch(`${apiBaseUrl}/v1/announcements`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "加载公告失败");
+      announcements.value = Array.isArray(data.items) ? data.items : [];
+      announcementsLoaded = true;
+      return announcements.value;
+    })();
+    try {
+      return await loadAnnouncementsPromise;
+    } finally {
+      loadAnnouncementsPromise = null;
+    }
   }
 
   async function loadSetupStatus(path = "/v1/setup/status"): Promise<SetupStatus> {
@@ -1107,24 +1122,38 @@ export const usePluginStore = defineStore("plugins", () => {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "发布公告失败");
     announcements.value = [data, ...announcements.value];
+    announcementsLoaded = true;
     return data;
   }
 
-  async function loadCurrentUser(): Promise<void> {
-    try {
-      const response = await fetch(`${apiBaseUrl}/v1/me`, { credentials: "include" });
-      if (!response.ok) {
+  async function loadCurrentUser(options: { force?: boolean } = {}): Promise<void> {
+    const { force = false } = options;
+    if (loadCurrentUserPromise) return loadCurrentUserPromise;
+    if (currentUserLoaded && !force) return;
+    loadCurrentUserPromise = (async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/v1/me`, { credentials: "include" });
+        if (!response.ok) {
+          currentUser.value = null;
+          unreadNotificationCount.value = 0;
+          currentUserLoaded = true;
+          return;
+        }
+        currentUser.value = await response.json();
+        currentUserLoaded = true;
+        await loadUnreadNotificationCount().catch(() => {
+          unreadNotificationCount.value = 0;
+        });
+      } catch {
         currentUser.value = null;
         unreadNotificationCount.value = 0;
-        return;
+        currentUserLoaded = true;
       }
-      currentUser.value = await response.json();
-      await loadUnreadNotificationCount().catch(() => {
-        unreadNotificationCount.value = 0;
-      });
-    } catch {
-      currentUser.value = null;
-      unreadNotificationCount.value = 0;
+    })();
+    try {
+      await loadCurrentUserPromise;
+    } finally {
+      loadCurrentUserPromise = null;
     }
   }
 
@@ -1142,6 +1171,7 @@ export const usePluginStore = defineStore("plugins", () => {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "登录失败");
     currentUser.value = data.user;
+    currentUserLoaded = true;
     await loadUnreadNotificationCount().catch(() => {
       unreadNotificationCount.value = 0;
     });
@@ -1154,6 +1184,7 @@ export const usePluginStore = defineStore("plugins", () => {
       credentials: "include",
     });
     currentUser.value = null;
+    currentUserLoaded = true;
     unreadNotificationCount.value = 0;
   }
 
@@ -1165,8 +1196,9 @@ export const usePluginStore = defineStore("plugins", () => {
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "更新失败");
+    if (!response.ok) throw new Error(data.detail || data.error || "更新失败");
     currentUser.value = data;
+    currentUserLoaded = true;
     return data;
   }
 

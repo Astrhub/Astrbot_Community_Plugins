@@ -28,6 +28,14 @@ def make_client(enable_dev_auth: bool = True) -> TestClient:
     return TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
 
 
+def enable_test_email(client: TestClient) -> None:
+    client.app.state.settings = client.app.state.settings.with_updates(
+        email_provider="smtp",
+        smtp_host="smtp.example.com",
+        smtp_from="noreply@example.com",
+    )
+
+
 def make_store_request(store: InMemoryMarketStore) -> SimpleNamespace:
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(store=store)))
 
@@ -243,20 +251,86 @@ def test_user_notification_preferences_default_on_and_update() -> None:
     client = make_client()
     login = client.get("/v1/auth/debug-login?login=alice")
 
+    assert login.json()["user"]["notification_email"] == ""
+    assert login.json()["user"]["github_email"] == ""
+    assert login.json()["user"]["notify_plugin_review"] is True
+    assert login.json()["user"]["notify_comments"] is True
     assert login.json()["user"]["notify_replies"] is True
     assert login.json()["user"]["notify_likes"] is True
+    assert login.json()["user"]["notify_unlist"] is True
+    assert login.json()["user"]["email_notify_plugin_review"] is False
+    assert login.json()["user"]["email_notify_comments"] is False
+    assert login.json()["user"]["email_notify_replies"] is False
+    assert login.json()["user"]["email_notify_likes"] is False
+    assert login.json()["user"]["email_notify_unlist"] is False
 
     response = client.patch(
         "/v1/me/profile",
-        json={"notify_replies": False, "notify_likes": False},
+        json={
+            "notification_email": "alice@example.com",
+            "notify_plugin_review": False,
+            "notify_comments": False,
+            "notify_replies": False,
+            "notify_likes": False,
+            "notify_unlist": False,
+            "email_notify_plugin_review": True,
+            "email_notify_comments": True,
+            "email_notify_replies": True,
+            "email_notify_likes": True,
+            "email_notify_unlist": True,
+        },
     )
 
     assert response.status_code == 200
+    assert response.json()["notification_email"] == "alice@example.com"
+    assert response.json()["notify_plugin_review"] is False
+    assert response.json()["notify_comments"] is False
     assert response.json()["notify_replies"] is False
     assert response.json()["notify_likes"] is False
+    assert response.json()["notify_unlist"] is False
+    assert response.json()["email_notify_plugin_review"] is True
+    assert response.json()["email_notify_comments"] is True
+    assert response.json()["email_notify_replies"] is True
+    assert response.json()["email_notify_likes"] is True
+    assert response.json()["email_notify_unlist"] is True
     stored = client.app.state.store.get_user_by_id(login.json()["user"]["id"])
+    assert stored["notification_email"] == "alice@example.com"
+    assert stored["notify_plugin_review"] is False
+    assert stored["notify_comments"] is False
     assert stored["notify_replies"] is False
     assert stored["notify_likes"] is False
+    assert stored["notify_unlist"] is False
+    assert stored["email_notify_plugin_review"] is True
+    assert stored["email_notify_comments"] is True
+    assert stored["email_notify_replies"] is True
+    assert stored["email_notify_likes"] is True
+    assert stored["email_notify_unlist"] is True
+
+
+def test_user_notification_email_must_be_valid() -> None:
+    client = make_client()
+    client.get("/v1/auth/debug-login?login=alice")
+
+    response = client.patch("/v1/me/profile", json={"notification_email": "invalid"})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "Notification email is invalid"
+
+
+def test_public_user_does_not_expose_notification_emails() -> None:
+    user = InMemoryMarketStore().upsert_github_user(
+        {
+            "login": "alice",
+            "name": "Alice",
+            "github_email": "alice-oauth@example.com",
+            "notification_email": "notify@example.com",
+        }
+    )
+
+    public = main_module.public_user(user)
+
+    assert "github_email" not in public
+    assert "notification_email" not in public
 
 
 def test_user_can_manage_personal_api_keys() -> None:
@@ -1090,6 +1164,72 @@ def test_reply_and_like_actions_notify_recipients_once() -> None:
     assert all(item["metadata"]["actor_user_id"] == bob["id"] for item in notifications)
 
 
+def test_top_level_comment_notifies_plugin_owner_by_email(monkeypatch) -> None:
+    client = make_client()
+    enable_test_email(client)
+    sent: list[dict[str, str]] = []
+
+    async def fake_send_email(app, settings, receiver, subject, content):
+        sent.append({"receiver": receiver, "subject": subject, "content": content})
+
+    monkeypatch.setattr(main_module, "send_email", fake_send_email)
+    store = client.app.state.store
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    client.patch(
+        "/v1/me/profile",
+        json={
+            "notification_email": "notify@example.com",
+            "email_notify_comments": True,
+        },
+    )
+    plugin = store.submit_plugin(store.get_user_by_id(owner["id"]), plugin_payload())
+    store.update_plugin_status(plugin["id"], "listed", owner["id"])
+
+    client.get("/v1/auth/debug-login?login=bob")
+    comment = client.post(f"/v1/plugins/{plugin['id']}/comments", json={"body": "Great plugin"})
+
+    assert comment.status_code == 201
+    assert sent[0]["receiver"] == "notify@example.com"
+    assert sent[0]["subject"] == "AstrBot Community Plugins - 你的插件有新评论"
+    assert "bob 评论了 Demo：Great plugin" in sent[0]["content"]
+    assert "个人设置的通知偏好" in sent[0]["content"]
+    client.get("/v1/auth/debug-login?login=alice")
+    notifications = client.get("/v1/me/notifications").json()["items"]
+    assert notifications[0]["type"] == "plugin_comment"
+
+
+def test_notification_email_falls_back_to_github_email(monkeypatch) -> None:
+    client = make_client()
+    enable_test_email(client)
+    sent: list[dict[str, str]] = []
+
+    async def fake_send_email(app, settings, receiver, subject, content):
+        sent.append({"receiver": receiver, "subject": subject, "content": content})
+
+    monkeypatch.setattr(main_module, "send_email", fake_send_email)
+    store = client.app.state.store
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    store.update_user_profile(
+        owner["id"],
+        {
+            "github_email": "alice-oauth@example.com",
+            "email_notify_likes": True,
+        },
+    )
+    plugin = store.submit_plugin(store.get_user_by_id(owner["id"]), plugin_payload())
+    store.update_plugin_status(plugin["id"], "listed", owner["id"])
+
+    client.get("/v1/auth/debug-login?login=bob")
+    like = client.post(f"/v1/plugins/{plugin['id']}/like")
+
+    assert like.status_code == 200
+    assert sent[0]["receiver"] == "alice-oauth@example.com"
+    assert sent[0]["subject"] == "AstrBot Community Plugins - 你的插件收到了点赞"
+    assert "bob 点赞了 Demo" in sent[0]["content"]
+
+
 def test_notification_preferences_disable_reply_and_like_notifications() -> None:
     client = make_client()
     store = client.app.state.store
@@ -1164,6 +1304,103 @@ def test_core_admin_can_review_plugin_submissions() -> None:
     assert notifications[0]["type"] == "plugin_listed"
     assert notifications[0]["metadata"]["plugin_id"] == plugin["id"]
     assert "已通过审核并上架" in notifications[0]["body"]
+
+
+def test_review_and_unlist_notifications_can_send_email(monkeypatch) -> None:
+    client = make_client()
+    enable_test_email(client)
+    sent: list[dict[str, str]] = []
+
+    async def fake_send_email(app, settings, receiver, subject, content):
+        sent.append({"receiver": receiver, "subject": subject, "content": content})
+
+    monkeypatch.setattr(main_module, "send_email", fake_send_email)
+    store = client.app.state.store
+    store.create_internal_admin("admin", main_module.hash_password("password123"))
+    owner_login = client.get("/v1/auth/debug-login?login=alice")
+    owner = owner_login.json()["user"]
+    client.patch(
+        "/v1/me/profile",
+        json={
+            "notification_email": "owner@example.com",
+            "email_notify_plugin_review": True,
+            "email_notify_unlist": True,
+        },
+    )
+    plugin = store.submit_plugin(store.get_user_by_id(owner["id"]), plugin_payload())
+    client.post(
+        "/v1/auth/internal/login",
+        json={"username": "admin", "password": "password123"},
+    )
+
+    listed = client.post(f"/v1/admin/plugins/{plugin['id']}/list")
+    unlisted = client.post(
+        f"/v1/admin/plugins/{plugin['id']}/unlist",
+        json={"reason": "插件无法正常安装"},
+    )
+
+    assert listed.status_code == 200
+    assert unlisted.status_code == 200
+    assert [item["receiver"] for item in sent] == ["owner@example.com", "owner@example.com"]
+    assert sent[0]["subject"] == "AstrBot Community Plugins - 插件审核通过"
+    assert "Demo 已通过审核并上架" in sent[0]["content"]
+    assert sent[1]["subject"] == "AstrBot Community Plugins - 插件已下架"
+    assert "插件无法正常安装" in sent[1]["content"]
+
+
+def test_pending_review_email_is_sent_to_one_opted_in_admin(monkeypatch) -> None:
+    client = make_client()
+    enable_test_email(client)
+    sent: list[dict[str, str]] = []
+
+    async def fake_send_email(app, settings, receiver, subject, content):
+        sent.append({"receiver": receiver, "subject": subject, "content": content})
+
+    monkeypatch.setattr(main_module, "send_email", fake_send_email)
+    store = client.app.state.store
+    core = store.create_internal_admin("admin", main_module.hash_password("password123"))
+    admin = store.create_internal_user("reviewer", "hash", Role.ADMIN.value)
+    store.create_internal_user("normal", "hash", Role.USER.value)
+    client.get("/v1/auth/debug-login?login=alice")
+
+    no_email = client.post(
+        "/v1/plugins/submissions",
+        json=plugin_payload(
+            name="astrbot_plugin_pending_a",
+            repo="https://github.com/alice/astrbot_plugin_pending_a",
+        ),
+    )
+    assert no_email.status_code == 201
+    assert sent == []
+
+    store.update_user_profile(
+        core["id"],
+        {
+            "notification_email": "core@example.com",
+            "email_notify_plugin_review": True,
+        },
+    )
+    store.update_user_profile(
+        admin["id"],
+        {
+            "notification_email": "admin@example.com",
+            "email_notify_plugin_review": True,
+        },
+    )
+
+    pending = client.post(
+        "/v1/plugins/submissions",
+        json=plugin_payload(
+            name="astrbot_plugin_pending_b",
+            repo="https://github.com/alice/astrbot_plugin_pending_b",
+        ),
+    )
+
+    assert pending.status_code == 201
+    assert len(sent) == 1
+    assert sent[0]["receiver"] in {"core@example.com", "admin@example.com"}
+    assert sent[0]["subject"] == "AstrBot Community Plugins - 有新的插件待审查"
+    assert "astrbot_plugin_pending_b" in sent[0]["content"]
 
 
 def test_admin_unlist_requires_reason_and_notifies_owner() -> None:
@@ -1360,6 +1597,10 @@ def test_plugin_auto_approve_and_max_tags_are_enforced() -> None:
     submission = client.post("/v1/plugins/submissions", json=plugin_payload(tags=["demo"]))
     assert submission.status_code == 201
     assert submission.json()["status"] == "listed"
+    notifications = client.get("/v1/me/notifications").json()["items"]
+    assert notifications[0]["type"] == "plugin_listed"
+    assert notifications[0]["metadata"]["auto_approved"] is True
+    assert "已自动审核通过并上架" in notifications[0]["body"]
     patch = client.patch(
         f"/v1/plugins/{submission.json()['id']}",
         json={"tags": ["demo", "tool"]},
@@ -2494,8 +2735,18 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "CREATE TABLE IF NOT EXISTS market_comment_likes" in SCHEMA_SQL
     assert "github_token text NOT NULL DEFAULT ''" in SCHEMA_SQL
     assert "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600" in SCHEMA_SQL
+    assert "github_email text NOT NULL DEFAULT ''" in SCHEMA_SQL
+    assert "notification_email text NOT NULL DEFAULT ''" in SCHEMA_SQL
+    assert "notify_plugin_review boolean NOT NULL DEFAULT true" in SCHEMA_SQL
+    assert "notify_comments boolean NOT NULL DEFAULT true" in SCHEMA_SQL
     assert "notify_replies boolean NOT NULL DEFAULT true" in SCHEMA_SQL
     assert "notify_likes boolean NOT NULL DEFAULT true" in SCHEMA_SQL
+    assert "notify_unlist boolean NOT NULL DEFAULT true" in SCHEMA_SQL
+    assert "email_notify_plugin_review boolean NOT NULL DEFAULT false" in SCHEMA_SQL
+    assert "email_notify_comments boolean NOT NULL DEFAULT false" in SCHEMA_SQL
+    assert "email_notify_replies boolean NOT NULL DEFAULT false" in SCHEMA_SQL
+    assert "email_notify_likes boolean NOT NULL DEFAULT false" in SCHEMA_SQL
+    assert "email_notify_unlist boolean NOT NULL DEFAULT false" in SCHEMA_SQL
     assert "muted_reason text NOT NULL DEFAULT ''" in SCHEMA_SQL
     assert "likes integer NOT NULL DEFAULT 0" in SCHEMA_SQL
     assert "read boolean NOT NULL DEFAULT false" in SCHEMA_SQL

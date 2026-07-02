@@ -52,8 +52,17 @@ const formData = reactive({
   github_name: "",
   github_token: "",
   github_refresh_interval_seconds: 3600,
+  notification_email: "",
+  notify_plugin_review: true,
+  notify_comments: true,
   notify_replies: true,
   notify_likes: true,
+  notify_unlist: true,
+  email_notify_plugin_review: false,
+  email_notify_comments: false,
+  email_notify_replies: false,
+  email_notify_likes: false,
+  email_notify_unlist: false,
 });
 
 const maxPluginTags = computed(() => Number(siteConfig.value.market?.max_plugin_tags || 8));
@@ -63,8 +72,17 @@ function applyCurrentUser() {
   formData.github_token = "";
   formData.github_refresh_interval_seconds =
     currentUser.value?.github_refresh_interval_seconds || 3600;
+  formData.notification_email = currentUser.value?.notification_email || "";
+  formData.notify_plugin_review = currentUser.value?.notify_plugin_review !== false;
+  formData.notify_comments = currentUser.value?.notify_comments !== false;
   formData.notify_replies = currentUser.value?.notify_replies !== false;
   formData.notify_likes = currentUser.value?.notify_likes !== false;
+  formData.notify_unlist = currentUser.value?.notify_unlist !== false;
+  formData.email_notify_plugin_review = currentUser.value?.email_notify_plugin_review === true;
+  formData.email_notify_comments = currentUser.value?.email_notify_comments === true;
+  formData.email_notify_replies = currentUser.value?.email_notify_replies === true;
+  formData.email_notify_likes = currentUser.value?.email_notify_likes === true;
+  formData.email_notify_unlist = currentUser.value?.email_notify_unlist === true;
 }
 
 async function saveProfile() {
@@ -91,8 +109,17 @@ async function saveNotificationPreferences() {
   savingNotifications.value = true;
   try {
     await updateProfile({
+      notification_email: formData.notification_email.trim(),
+      notify_plugin_review: formData.notify_plugin_review,
+      notify_comments: formData.notify_comments,
       notify_replies: formData.notify_replies,
       notify_likes: formData.notify_likes,
+      notify_unlist: formData.notify_unlist,
+      email_notify_plugin_review: formData.email_notify_plugin_review,
+      email_notify_comments: formData.email_notify_comments,
+      email_notify_replies: formData.email_notify_replies,
+      email_notify_likes: formData.email_notify_likes,
+      email_notify_unlist: formData.email_notify_unlist,
     });
     applyCurrentUser();
     message.success("通知设置已保存");
@@ -283,8 +310,18 @@ onMounted(async () => {
           <NTabPane name="notifications" tab="通知偏好" display-directive="show">
             <div class="profile-tab-content">
               <NotificationPreferencesSection
+                v-model:notification-email="formData.notification_email"
+                v-model:notify-plugin-review="formData.notify_plugin_review"
+                v-model:notify-comments="formData.notify_comments"
                 v-model:notify-replies="formData.notify_replies"
                 v-model:notify-likes="formData.notify_likes"
+                v-model:notify-unlist="formData.notify_unlist"
+                v-model:email-notify-plugin-review="formData.email_notify_plugin_review"
+                v-model:email-notify-comments="formData.email_notify_comments"
+                v-model:email-notify-replies="formData.email_notify_replies"
+                v-model:email-notify-likes="formData.email_notify_likes"
+                v-model:email-notify-unlist="formData.email_notify_unlist"
+                :fallback-email="currentUser?.github_email || ''"
                 :saving="savingNotifications"
                 @save="saveNotificationPreferences"
               />

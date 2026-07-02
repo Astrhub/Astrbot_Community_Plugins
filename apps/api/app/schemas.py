@@ -98,10 +98,19 @@ class UserProfileUpdate(BaseModel):
     avatar_url: str | None = None
     github_token: str | None = None
     github_refresh_interval_seconds: int | None = Field(default=None, ge=300, le=86400)
+    notification_email: str | None = None
+    notify_plugin_review: bool | None = None
+    notify_comments: bool | None = None
     notify_replies: bool | None = None
     notify_likes: bool | None = None
+    notify_unlist: bool | None = None
+    email_notify_plugin_review: bool | None = None
+    email_notify_comments: bool | None = None
+    email_notify_replies: bool | None = None
+    email_notify_likes: bool | None = None
+    email_notify_unlist: bool | None = None
 
-    @field_validator("github_name", "avatar_url", "github_token")
+    @field_validator("github_name", "avatar_url", "github_token", "notification_email")
     @classmethod
     def strip_optional_text(cls, value: str | None) -> str | None:
         if value is None:

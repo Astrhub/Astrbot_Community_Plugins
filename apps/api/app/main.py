@@ -6,7 +6,9 @@ import hashlib
 import html
 import inspect
 import json
+import logging
 import re
+import secrets
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -157,6 +159,8 @@ SYSTEM_OPTION_KEYS = {
     "SMTP_VALIDATE_CERTS",
     "WEB_URL",
 }
+PRIVATE_USER_FIELDS = {"github_email", "notification_email"}
+LOGGER = logging.getLogger(__name__)
 PLUGIN_METADATA_SYNC_FIELDS = (
     "name",
     "display_name",
@@ -501,7 +505,7 @@ def register_routes(app: FastAPI) -> None:
         responses={401: {"description": "未登录"}},
     )
     async def me(request: Request) -> dict[str, Any]:
-        return public_user(await require_user(request))
+        return private_user(await require_user(request))
 
     @app.patch(
         "/v1/me/profile",
@@ -525,10 +529,16 @@ def register_routes(app: FastAPI) -> None:
             and not is_valid_public_url(profile["avatar_url"])
         ):
             raise error(400, "Avatar URL must be http(s)")
+        if (
+            "notification_email" in profile
+            and profile["notification_email"]
+            and not is_valid_email(profile["notification_email"])
+        ):
+            raise error(400, "Notification email is invalid")
         updated = await call_store(request, "update_user_profile", user["id"], profile)
         if not updated:
             raise error(404, "User not found")
-        return public_user(updated)
+        return private_user(updated)
 
     @app.get(
         "/v1/me/notifications",
@@ -708,7 +718,7 @@ def register_routes(app: FastAPI) -> None:
         if not settings.public_login_enabled and not is_core_admin(user):
             raise error(403, "Login is closed")
         session = await call_store(request, "create_session", user["id"])
-        response = JSONResponse({"user": public_user(user), "session": session})
+        response = JSONResponse({"user": private_user(user), "session": session})
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         return response
 
@@ -818,7 +828,7 @@ def register_routes(app: FastAPI) -> None:
             request, "upsert_github_user", {"login": login.strip(), "name": login.strip()}
         )
         session = await call_store(request, "create_session", user["id"])
-        response = JSONResponse({"user": public_user(user), "session": session})
+        response = JSONResponse({"user": private_user(user), "session": session})
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         return response
 
@@ -830,7 +840,7 @@ def register_routes(app: FastAPI) -> None:
         responses={200: {"description": "已登录"}, 401: {"description": "未登录"}},
     )
     async def auth_session(request: Request) -> dict[str, Any]:
-        return {"authenticated": True, "user": public_user(await require_user(request))}
+        return {"authenticated": True, "user": private_user(await require_user(request))}
 
     @app.get(
         "/v1/admin/check",
@@ -950,7 +960,10 @@ def register_routes(app: FastAPI) -> None:
             listed = await call_store(
                 request, "update_plugin_status", plugin["id"], "listed", user["id"]
             )
+            if listed:
+                await notify_plugin_review(request, listed, user, auto_approved=True)
             return listed or plugin
+        await notify_pending_plugin_review(request, plugin, user)
         return plugin
 
     @app.get(
@@ -1178,7 +1191,10 @@ def register_routes(app: FastAPI) -> None:
         comment = await call_store(
             request, "add_comment", plugin_id, user["id"], payload.body, payload.parent_id
         )
-        await notify_comment_reply(request, plugin, parent_comment, comment, user)
+        if parent_comment:
+            await notify_comment_reply(request, plugin, parent_comment, comment, user)
+        else:
+            await notify_plugin_comment(request, plugin, comment, user)
         return comment
 
     @app.post(
@@ -1326,20 +1342,7 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "Plugin not found")
         queue_plugin_github_metadata_refresh(background_tasks, request.app, updated, user)
         if previous_status != "listed" and updated.get("owner_user_id"):
-            plugin_name = updated.get("display_name") or updated.get("name") or plugin_id
-            await call_store(
-                request,
-                "create_notification",
-                updated["owner_user_id"],
-                "插件已上架",
-                f"{plugin_name} 已通过审核并上架。",
-                "plugin_listed",
-                {
-                    "plugin_id": plugin_id,
-                    "plugin_name": updated.get("name") or plugin_id,
-                    "moderator_user_id": user["id"],
-                },
-            )
+            await notify_plugin_review(request, updated, user)
         return updated
 
     @app.post(
@@ -1409,21 +1412,7 @@ def register_routes(app: FastAPI) -> None:
         if not updated:
             raise error(404, "Plugin not found")
         if plugin.get("owner_user_id"):
-            plugin_name = plugin.get("display_name") or plugin.get("name") or plugin_id
-            await call_store(
-                request,
-                "create_notification",
-                plugin["owner_user_id"],
-                "插件已下架",
-                f"{plugin_name} 已被管理员下架。原因：{payload.reason}",
-                "plugin_unlisted",
-                {
-                    "plugin_id": plugin_id,
-                    "plugin_name": plugin.get("name") or plugin_id,
-                    "reason": payload.reason,
-                    "moderator_user_id": user["id"],
-                },
-            )
+            await notify_plugin_unlisted(request, updated, user, payload.reason)
         return updated
 
     @app.delete(
@@ -1918,7 +1907,15 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in {**user, "has_github_token": bool(user.get("github_token"))}.items()
-        if key not in {"password_hash", "github_token"}
+        if key not in {"password_hash", "github_token", *PRIVATE_USER_FIELDS}
+    }
+
+
+def private_user(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **public_user(user),
+        "github_email": user.get("github_email") or "",
+        "notification_email": user.get("notification_email") or "",
     }
 
 
@@ -1964,29 +1961,197 @@ def notification_excerpt(value: str, limit: int = 80) -> str:
     return f"{text[:limit].rstrip()}..."
 
 
+def notification_email_address(user: dict[str, Any]) -> str:
+    return str(user.get("notification_email") or user.get("github_email") or "").strip()
+
+
+def notification_email_footer() -> str:
+    return "\n\n如果不想继续接收此类邮件，可到个人设置的通知偏好中关闭对应邮件通知。"
+
+
+async def send_preference_email(
+    request: Request,
+    recipient: dict[str, Any] | None,
+    preference_key: str | None,
+    subject: str,
+    body: str,
+) -> None:
+    if not preference_key or not notification_preference_enabled(recipient, preference_key):
+        return
+    receiver = notification_email_address(recipient or {})
+    if not receiver or not is_valid_email(receiver):
+        return
+    try:
+        settings = await runtime_settings_for_app(request.app)
+        if settings.email_provider == "disabled":
+            return
+        await send_email(
+            request.app,
+            settings,
+            receiver,
+            f"{settings.site_name} - {subject}",
+            f"{body}{notification_email_footer()}",
+        )
+    except HTTPException as exc:
+        LOGGER.warning(
+            "Notification email failed for user %s: %s",
+            (recipient or {}).get("id"),
+            exc.detail,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "Notification email failed for user %s: %s",
+            (recipient or {}).get("id"),
+            safe_exception_message(exc),
+        )
+
+
 async def create_preference_notification(
     request: Request,
     recipient_user_id: str | None,
-    actor_user_id: str,
+    actor_user_id: str | None,
     preference_key: str,
     title: str,
     body: str,
     notification_type: str,
     metadata: dict[str, Any],
+    email_preference_key: str | None = None,
+    email_subject: str | None = None,
+    email_body: str | None = None,
+    skip_self: bool = True,
 ) -> None:
-    if not recipient_user_id or recipient_user_id == actor_user_id:
+    if not recipient_user_id:
+        return
+    if skip_self and actor_user_id and recipient_user_id == actor_user_id:
         return
     recipient = await call_store(request, "get_user_by_id", recipient_user_id)
-    if not notification_preference_enabled(recipient, preference_key):
+    if not recipient:
         return
-    await call_store(
+    if notification_preference_enabled(recipient, preference_key):
+        await call_store(
+            request,
+            "create_notification",
+            recipient_user_id,
+            title,
+            body,
+            notification_type,
+            metadata,
+        )
+    await send_preference_email(
         request,
-        "create_notification",
-        recipient_user_id,
-        title,
+        recipient,
+        email_preference_key,
+        email_subject or title,
+        email_body or body,
+    )
+
+
+async def notify_plugin_review(
+    request: Request,
+    plugin: dict[str, Any],
+    reviewer: dict[str, Any],
+    auto_approved: bool = False,
+) -> None:
+    plugin_name = plugin_display_name(plugin)
+    body = (
+        f"{plugin_name} 已自动审核通过并上架。"
+        if auto_approved
+        else f"{plugin_name} 已通过审核并上架。"
+    )
+    await create_preference_notification(
+        request,
+        plugin.get("owner_user_id"),
+        reviewer.get("id"),
+        "notify_plugin_review",
+        "插件审核通过",
         body,
-        notification_type,
-        metadata,
+        "plugin_listed",
+        {
+            "plugin_id": plugin.get("id"),
+            "plugin_name": plugin.get("name") or plugin.get("id"),
+            "moderator_user_id": reviewer.get("id"),
+            "auto_approved": auto_approved,
+        },
+        email_preference_key="email_notify_plugin_review",
+        skip_self=False,
+    )
+
+
+async def notify_pending_plugin_review(
+    request: Request,
+    plugin: dict[str, Any],
+    submitter: dict[str, Any],
+) -> None:
+    admins = await call_store(request, "list_users")
+    candidates = [
+        user
+        for user in admins
+        if normalize_role(user.get("role")) in {Role.CORE_ADMIN, Role.ADMIN}
+        and notification_preference_enabled(user, "email_notify_plugin_review")
+        and is_valid_email(notification_email_address(user))
+    ]
+    if not candidates:
+        return
+    recipient = secrets.choice(candidates)
+    await send_preference_email(
+        request,
+        recipient,
+        "email_notify_plugin_review",
+        "有新的插件待审查",
+        f"{user_display_name(submitter)} 提交了 {plugin_display_name(plugin)}"
+        f"（{plugin.get('name') or plugin.get('id')}），请进入插件审核处理。",
+    )
+
+
+async def notify_plugin_unlisted(
+    request: Request,
+    plugin: dict[str, Any],
+    moderator: dict[str, Any],
+    reason: str,
+) -> None:
+    plugin_name = plugin_display_name(plugin)
+    body = f"{plugin_name} 已被管理员下架。原因：{reason}"
+    await create_preference_notification(
+        request,
+        plugin.get("owner_user_id"),
+        moderator.get("id"),
+        "notify_unlist",
+        "插件已下架",
+        body,
+        "plugin_unlisted",
+        {
+            "plugin_id": plugin.get("id"),
+            "plugin_name": plugin.get("name") or plugin.get("id"),
+            "reason": reason,
+            "moderator_user_id": moderator.get("id"),
+        },
+        email_preference_key="email_notify_unlist",
+        skip_self=False,
+    )
+
+
+async def notify_plugin_comment(
+    request: Request,
+    plugin: dict[str, Any],
+    comment: dict[str, Any],
+    actor: dict[str, Any],
+) -> None:
+    await create_preference_notification(
+        request,
+        plugin.get("owner_user_id"),
+        actor["id"],
+        "notify_comments",
+        "你的插件有新评论",
+        f"{user_display_name(actor)} 评论了 {plugin_display_name(plugin)}："
+        f"{notification_excerpt(comment.get('body', ''))}",
+        "plugin_comment",
+        {
+            "plugin_id": plugin.get("id"),
+            "plugin_name": plugin.get("name") or plugin.get("id"),
+            "comment_id": comment.get("id"),
+            "actor_user_id": actor["id"],
+        },
+        email_preference_key="email_notify_comments",
     )
 
 
@@ -2015,6 +2180,7 @@ async def notify_comment_reply(
             "parent_id": parent_comment.get("id"),
             "actor_user_id": actor["id"],
         },
+        email_preference_key="email_notify_replies",
     )
 
 
@@ -2036,6 +2202,7 @@ async def notify_plugin_like(
             "plugin_name": plugin.get("name") or plugin.get("id"),
             "actor_user_id": actor["id"],
         },
+        email_preference_key="email_notify_likes",
     )
 
 
@@ -2059,6 +2226,7 @@ async def notify_comment_like(
             "comment_id": comment.get("id"),
             "actor_user_id": actor["id"],
         },
+        email_preference_key="email_notify_likes",
     )
 
 
@@ -3606,6 +3774,7 @@ def github_profile_payload(profile: dict[str, Any]) -> dict[str, str]:
         "id": str(profile["id"]),
         "login": profile["login"],
         "name": profile.get("name") or profile["login"],
+        "github_email": profile.get("email") or "",
         "avatar_url": profile.get("avatar_url") or "",
     }
 
@@ -3630,6 +3799,7 @@ async def link_github_profile_to_user(
             "github_id": profile["id"],
             "github_login": profile["login"],
             "github_name": profile.get("name") or profile["login"],
+            "github_email": profile.get("github_email") or profile.get("email") or "",
         },
     )
     if not updated:
@@ -3953,10 +4123,32 @@ async def fetch_github_profile(access_token: str) -> dict[str, Any]:
             "https://api.github.com/user",
             headers=github_headers(access_token),
         )
-    data = response.json()
+        data = response.json()
+        if response.status_code < 400 and data.get("login") and not data.get("email"):
+            data["email"] = await fetch_github_primary_email(client, access_token)
     if response.status_code >= 400 or not data.get("login"):
         raise error(502, data.get("message") or "GitHub profile lookup failed")
     return data
+
+
+async def fetch_github_primary_email(client: httpx.AsyncClient, access_token: str) -> str:
+    try:
+        response = await client.get(
+            "https://api.github.com/user/emails",
+            headers=github_headers(access_token),
+        )
+        data = response.json()
+    except Exception:
+        return ""
+    if response.status_code >= 400 or not isinstance(data, list):
+        return ""
+    verified = [
+        item
+        for item in data
+        if isinstance(item, dict) and item.get("email") and item.get("verified") is True
+    ]
+    primary = next((item for item in verified if item.get("primary") is True), None)
+    return str((primary or (verified[0] if verified else {})).get("email") or "")
 
 
 async def promote_org_admin_if_needed(

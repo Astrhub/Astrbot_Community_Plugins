@@ -38,6 +38,29 @@ def coerce_bool(value: Any, default: bool = True) -> bool:
     return bool(value)
 
 
+USER_PROFILE_FIELDS = (
+    "github_id",
+    "github_login",
+    "github_name",
+    "github_email",
+    "avatar_url",
+    "auth_source",
+    "github_token",
+    "github_refresh_interval_seconds",
+    "notification_email",
+    "notify_plugin_review",
+    "notify_comments",
+    "notify_replies",
+    "notify_likes",
+    "notify_unlist",
+    "email_notify_plugin_review",
+    "email_notify_comments",
+    "email_notify_replies",
+    "email_notify_likes",
+    "email_notify_unlist",
+)
+
+
 class InMemoryMarketStore:
     """Development store. Production will persist data in PostgreSQL and Redis."""
 
@@ -546,17 +569,7 @@ class InMemoryMarketStore:
         user = self.get_user_by_id(user_id)
         if not user:
             return None
-        for key in (
-            "github_id",
-            "github_login",
-            "github_name",
-            "avatar_url",
-            "auth_source",
-            "github_token",
-            "github_refresh_interval_seconds",
-            "notify_replies",
-            "notify_likes",
-        ):
+        for key in USER_PROFILE_FIELDS:
             if key in profile:
                 user[key] = profile[key]
         user["updated_at"] = utc_now()
@@ -833,11 +846,23 @@ class InMemoryMarketStore:
             "password_hash": user.get("password_hash") or "",
             "auth_source": user.get("auth_source") or "github",
             "github_token": user.get("github_token") or "",
+            "github_email": user.get("github_email") or user.get("email") or "",
             "github_refresh_interval_seconds": int(
                 user.get("github_refresh_interval_seconds") or 3600
             ),
+            "notification_email": user.get("notification_email") or "",
+            "notify_plugin_review": coerce_bool(user.get("notify_plugin_review"), True),
+            "notify_comments": coerce_bool(user.get("notify_comments"), True),
             "notify_replies": coerce_bool(user.get("notify_replies"), True),
             "notify_likes": coerce_bool(user.get("notify_likes"), True),
+            "notify_unlist": coerce_bool(user.get("notify_unlist"), True),
+            "email_notify_plugin_review": coerce_bool(
+                user.get("email_notify_plugin_review"), False
+            ),
+            "email_notify_comments": coerce_bool(user.get("email_notify_comments"), False),
+            "email_notify_replies": coerce_bool(user.get("email_notify_replies"), False),
+            "email_notify_likes": coerce_bool(user.get("email_notify_likes"), False),
+            "email_notify_unlist": coerce_bool(user.get("email_notify_unlist"), False),
             "github_name": user.get("github_name")
             or user.get("name")
             or user.get("github_login")
@@ -924,11 +949,21 @@ CREATE TABLE IF NOT EXISTS market_users (
     password_hash text NOT NULL DEFAULT '',
     auth_source text NOT NULL DEFAULT 'github' CHECK (auth_source IN ('github', 'internal')),
     github_name text NOT NULL DEFAULT '',
+    github_email text NOT NULL DEFAULT '',
     avatar_url text NOT NULL DEFAULT '',
     github_token text NOT NULL DEFAULT '',
     github_refresh_interval_seconds integer NOT NULL DEFAULT 3600,
+    notification_email text NOT NULL DEFAULT '',
+    notify_plugin_review boolean NOT NULL DEFAULT true,
+    notify_comments boolean NOT NULL DEFAULT true,
     notify_replies boolean NOT NULL DEFAULT true,
     notify_likes boolean NOT NULL DEFAULT true,
+    notify_unlist boolean NOT NULL DEFAULT true,
+    email_notify_plugin_review boolean NOT NULL DEFAULT false,
+    email_notify_comments boolean NOT NULL DEFAULT false,
+    email_notify_replies boolean NOT NULL DEFAULT false,
+    email_notify_likes boolean NOT NULL DEFAULT false,
+    email_notify_unlist boolean NOT NULL DEFAULT false,
     role text NOT NULL CHECK (role IN ('core_admin', 'admin', 'user')),
     muted_until timestamptz,
     muted_by text REFERENCES market_users(id) ON DELETE SET NULL,
@@ -1110,12 +1145,52 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 "github_refresh_interval_seconds integer NOT NULL DEFAULT 3600"
             )
             await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS github_email text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS notification_email text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "notify_plugin_review boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "notify_comments boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
                 "notify_replies boolean NOT NULL DEFAULT true"
             )
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
                 "notify_likes boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "notify_unlist boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "email_notify_plugin_review boolean NOT NULL DEFAULT false"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "email_notify_comments boolean NOT NULL DEFAULT false"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "email_notify_replies boolean NOT NULL DEFAULT false"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "email_notify_likes boolean NOT NULL DEFAULT false"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "email_notify_unlist boolean NOT NULL DEFAULT false"
             )
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS muted_reason text "
@@ -1151,6 +1226,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                                auth_source = 'github',
                                github_name = $4,
                                avatar_url = $5,
+                               github_email = COALESCE(NULLIF($6, ''), github_email),
                                updated_at = now()
                          WHERE id = $1
                      RETURNING *
@@ -1160,6 +1236,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                         str(login),
                         profile.get("name") or login,
                         profile.get("avatar_url") or "",
+                        profile.get("github_email") or profile.get("email") or "",
                     )
                     return self._user_from_record(row)
 
@@ -1167,15 +1244,16 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     """
                     INSERT INTO market_users (
                         id, github_id, github_login, internal_username, password_hash,
-                        auth_source, github_name, avatar_url, role
+                        auth_source, github_name, github_email, avatar_url, role
                     )
-                    VALUES ($1, $2, $3, '', '', 'github', $4, $5, $6)
+                    VALUES ($1, $2, $3, '', '', 'github', $4, $5, $6, $7)
                     RETURNING *
                     """,
                     str(profile.get("id") or new_id("user")),
                     str(profile.get("id")) if profile.get("id") else None,
                     str(login),
                     profile.get("name") or login,
+                    profile.get("github_email") or profile.get("email") or "",
                     profile.get("avatar_url") or "",
                     Role.USER.value,
                 )
@@ -1868,59 +1946,23 @@ class PgRedisMarketStore(InMemoryMarketStore):
         user_id: str,
         profile: dict[str, Any],
     ) -> dict[str, Any] | None:
-        values = {
-            key: profile[key]
-            for key in (
-                "github_id",
-                "github_login",
-                "github_name",
-                "avatar_url",
-                "auth_source",
-                "github_token",
-                "github_refresh_interval_seconds",
-                "notify_replies",
-                "notify_likes",
-            )
-            if key in profile
-        }
+        values = {key: profile[key] for key in USER_PROFILE_FIELDS if key in profile}
         if not values:
             return await self.get_user_by_id(user_id)
+        args: list[Any] = [user_id]
+        set_clauses: list[str] = []
+        for key, value in values.items():
+            args.append(value)
+            set_clauses.append(f"{key} = ${len(args)}")
         row = await self._pool().fetchrow(
-            """
+            f"""
             UPDATE market_users
-               SET github_id = CASE WHEN $2 THEN $3 ELSE github_id END,
-                   github_login = CASE WHEN $4 THEN $5 ELSE github_login END,
-                   github_name = CASE WHEN $6 THEN $7 ELSE github_name END,
-                   avatar_url = CASE WHEN $8 THEN $9 ELSE avatar_url END,
-                   auth_source = CASE WHEN $10 THEN $11 ELSE auth_source END,
-                   github_token = CASE WHEN $12 THEN $13 ELSE github_token END,
-                   github_refresh_interval_seconds =
-                       CASE WHEN $14 THEN $15 ELSE github_refresh_interval_seconds END,
-                   notify_replies = CASE WHEN $16 THEN $17 ELSE notify_replies END,
-                   notify_likes = CASE WHEN $18 THEN $19 ELSE notify_likes END,
+               SET {", ".join(set_clauses)},
                    updated_at = now()
              WHERE id = $1
          RETURNING *
             """,
-            user_id,
-            "github_id" in profile,
-            profile.get("github_id"),
-            "github_login" in profile,
-            profile.get("github_login"),
-            "github_name" in profile,
-            profile.get("github_name"),
-            "avatar_url" in profile,
-            profile.get("avatar_url"),
-            "auth_source" in profile,
-            profile.get("auth_source"),
-            "github_token" in profile,
-            profile.get("github_token"),
-            "github_refresh_interval_seconds" in profile,
-            profile.get("github_refresh_interval_seconds"),
-            "notify_replies" in profile,
-            profile.get("notify_replies"),
-            "notify_likes" in profile,
-            profile.get("notify_likes"),
+            *args,
         )
         return self._user_from_record(row) if row else None
 

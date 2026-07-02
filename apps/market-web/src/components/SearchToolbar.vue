@@ -89,16 +89,20 @@
       </n-switch>
       <n-button
         v-else
+        circle
         secondary
         :type="fuzzySearchEnabled ? 'primary' : 'default'"
         :size="controlSize"
         class="mobile-mode-button"
+        :title="fuzzySearchEnabled ? '模糊搜索' : '精确搜索'"
         :aria-label="
           fuzzySearchEnabled ? '当前模糊搜索，点击切换精确搜索' : '当前精确搜索，点击切换模糊搜索'
         "
         @click="handleFuzzySearchChange(!fuzzySearchEnabled)"
       >
-        {{ fuzzySearchEnabled ? "模糊" : "精确" }}
+        <template #icon>
+          <n-icon><git-compare-outline /></n-icon>
+        </template>
       </n-button>
       <n-select
         :value="props.sortBy"
@@ -111,12 +115,20 @@
       />
       <n-button
         secondary
+        :circle="mobile"
         :size="controlSize"
         class="sort-direction-button"
+        :title="sortDirection === 'asc' ? '正序' : '倒序'"
         :aria-label="sortDirection === 'asc' ? '当前正序，点击切换倒序' : '当前倒序，点击切换正序'"
         @click="toggleSortDirection"
       >
-        {{ sortDirection === "asc" ? "正序" : "倒序" }}
+        <template v-if="mobile" #icon>
+          <n-icon>
+            <arrow-up-outline v-if="sortDirection === 'asc'" />
+            <arrow-down-outline v-else />
+          </n-icon>
+        </template>
+        <span v-if="!mobile">{{ sortDirection === "asc" ? "正序" : "倒序" }}</span>
       </n-button>
     </div>
   </div>
@@ -125,7 +137,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { NButton, NSelect, NIcon, NSwitch } from "naive-ui";
-import { Search, CloseCircle } from "@vicons/ionicons5";
+import {
+  ArrowDownOutline,
+  ArrowUpOutline,
+  CloseCircle,
+  GitCompareOutline,
+  Search,
+} from "@vicons/ionicons5";
 
 const props = defineProps({
   searchQuery: String,
@@ -787,36 +805,62 @@ const handleClearSearch = () => {
 
 .search-wrapper--mobile {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px 104px 56px 118px;
+  grid-template-columns: minmax(0, 1fr) minmax(96px, 112px) 36px 36px;
   gap: 8px;
   align-items: center;
   width: 100%;
 }
 
 .custom-search-box--mobile {
+  grid-column: 1 / -1;
   min-width: 0;
   height: 38px;
   padding: 0 10px;
 }
 
 .search-wrapper--mobile .sort-by-select {
-  width: 104px;
+  grid-column: 2;
+  grid-row: 2;
+  width: 100%;
 }
 
 .search-wrapper--mobile .tag-select {
-  width: 118px;
+  grid-column: 1;
+  grid-row: 2;
+  width: 100%;
 }
 
 .mobile-mode-button {
-  width: 64px;
-  min-width: 64px;
-  padding: 0 8px;
+  grid-column: 3;
+  grid-row: 2;
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
 }
 
 .search-wrapper--mobile .sort-direction-button {
-  width: 56px;
-  min-width: 56px;
-  padding: 0 8px;
+  grid-column: 4;
+  grid-row: 2;
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+}
+
+.search-wrapper--mobile :deep(.sort-select .n-base-selection) {
+  max-width: none;
+}
+
+@media (max-width: 360px) {
+  .search-wrapper--mobile {
+    grid-template-columns: minmax(0, 1fr) minmax(82px, 96px) 34px 34px;
+    gap: 6px;
+  }
+
+  .mobile-mode-button,
+  .search-wrapper--mobile .sort-direction-button {
+    width: 34px;
+    min-width: 34px;
+  }
 }
 
 .search-container--mobile :deep(.sort-select .n-base-selection) {

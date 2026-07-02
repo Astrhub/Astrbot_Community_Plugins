@@ -76,16 +76,11 @@
     </section>
   </header>
 
-  <header
-    class="sticky-header"
-    :class="{ 'sticky-header--visible': showStickyHeader, 'is-search-open': isMobileSearchOpen }"
-  >
+  <header class="sticky-header" :class="{ 'sticky-header--visible': showStickyHeader }">
     <div class="sticky-header-content">
       <div class="sticky-header-left">
         <img :src="siteIconUrl" :alt="siteName" class="sticky-logo" width="32" height="32" />
-        <h2 class="sticky-title" :class="{ 'hidden-on-search': isMobileSearchOpen }">
-          {{ siteName }}
-        </h2>
+        <h2 class="sticky-title">{{ siteName }}</h2>
       </div>
       <div class="sticky-header-center">
         <search-toolbar
@@ -108,21 +103,6 @@
           @update:selectedCategory="handleSelectedCategoryChange"
           @update:selectedTag="handleSelectedTagChange"
         />
-        <div class="mobile-inline-search" :class="{ 'is-open': isMobileSearchOpen }">
-          <n-input
-            size="medium"
-            :value="searchQuery"
-            @update:value="handleSearchQueryChange"
-            placeholder="搜索插件…"
-            aria-label="搜索插件"
-            :input-props="{
-              name: 'mobile-plugin-search',
-              autocomplete: 'off',
-              spellcheck: 'false',
-            }"
-            clearable
-          />
-        </div>
       </div>
       <div class="sticky-actions">
         <n-button
@@ -182,19 +162,6 @@
         >
           <n-icon><log-in-outline /></n-icon>
         </n-button>
-        <n-button
-          quaternary
-          circle
-          class="mobile-only"
-          @click="toggleMobileSearch"
-          :aria-expanded="isMobileSearchOpen"
-          :aria-label="isMobileSearchOpen ? '关闭搜索' : '打开搜索'"
-        >
-          <n-icon>
-            <close-outline v-if="isMobileSearchOpen" />
-            <search-outline v-else />
-          </n-icon>
-        </n-button>
         <theme-mode-button circle class="hide-on-mobile-search" />
       </div>
     </div>
@@ -230,16 +197,14 @@
 import { computed, h, onMounted, ref, onUnmounted } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
-import { NAlert, NCheckbox, NDropdown, NIcon, NButton, NInput, NModal, useMessage } from "naive-ui";
+import { NAlert, NCheckbox, NDropdown, NIcon, NButton, NModal, useMessage } from "naive-ui";
 import {
-  CloseOutline,
   LinkOutline,
   LogInOutline,
   LogOutOutline,
   LogoGithub,
   NotificationsOutline,
   PersonOutline,
-  SearchOutline,
   SettingsOutline,
   ShieldCheckmarkOutline,
 } from "@vicons/ionicons5";
@@ -278,7 +243,6 @@ const { loginWithGithub, logout } = store;
 
 const fullHeader = ref(null);
 const showStickyHeader = ref(false);
-const isMobileSearchOpen = ref(false);
 const isLoginModalOpen = ref(false);
 const agreementAccepted = ref(false);
 const pluginSourceUrl = computed(() => store.pluginSourceUrl);
@@ -426,10 +390,6 @@ const writeClipboard = async (value) => {
   const copied = document.execCommand("copy");
   document.body.removeChild(textarea);
   if (!copied) throw new Error("copy failed");
-};
-
-const toggleMobileSearch = () => {
-  isMobileSearchOpen.value = !isMobileSearchOpen.value;
 };
 
 const handleScroll = () => {
@@ -648,7 +608,6 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-.mobile-only,
 .mobile-inline-search {
   display: none;
 }
@@ -724,42 +683,6 @@ onUnmounted(() => {
     display: none;
   }
 
-  .mobile-only {
-    display: inline-flex;
-  }
-
-  .mobile-inline-search {
-    display: block;
-    position: absolute;
-    left: 96px;
-    right: 176px;
-    top: 50%;
-    transform: translateY(-50%) scaleY(0.96);
-    opacity: 0;
-    pointer-events: none;
-    transition:
-      transform 0.18s ease,
-      opacity 0.18s ease;
-  }
-
-  .mobile-inline-search.is-open {
-    opacity: 1;
-    transform: translateY(-50%) scaleY(1);
-    pointer-events: auto;
-  }
-
-  .hidden-on-search {
-    display: none;
-  }
-
-  .is-search-open .hide-on-mobile-search {
-    display: none;
-  }
-
-  .is-search-open .mobile-inline-search {
-    right: 56px;
-  }
-
   .nav-actions {
     display: none;
   }
@@ -768,11 +691,6 @@ onUnmounted(() => {
 @media (max-width: 480px) {
   .sticky-title {
     font-size: 14px;
-  }
-
-  .mobile-inline-search {
-    left: 58px;
-    right: 56px;
   }
 }
 </style>

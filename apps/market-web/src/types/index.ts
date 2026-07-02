@@ -123,8 +123,18 @@ export interface User {
   muted_until?: string | null;
   muted_by?: number | string | null;
   muted_reason?: string | null;
+  github_email?: string;
+  notification_email?: string;
+  notify_plugin_review?: boolean;
+  notify_comments?: boolean;
   notify_replies?: boolean;
   notify_likes?: boolean;
+  notify_unlist?: boolean;
+  email_notify_plugin_review?: boolean;
+  email_notify_comments?: boolean;
+  email_notify_replies?: boolean;
+  email_notify_likes?: boolean;
+  email_notify_unlist?: boolean;
   created_at?: string;
   [key: string]: unknown;
 }
