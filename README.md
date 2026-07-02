@@ -14,6 +14,7 @@
 - **身份与角色**：内部核心管理员（用户名/密码登录）+ GitHub OAuth 登录；三级角色（core_admin / admin / user）+ 受信任 GitHub 组织自动提权。
 - **用户管理**：管理员可创建内部用户、调整角色、禁言/解禁、删除用户；核心管理员管理管理员队伍。
 - **API Key**：全局静态 Key（环境变量）、管理员动态颁发 Key、登录用户个人 Key（`sk-ah-` 前缀，原文仅返回一次），均支持 scopes 与 `Bearer` 鉴权。
+- **API 文档与机器可读契约**：`/docs/rest` 提供 Vue API Reference 与在线试用；`/openapi.json` 和 `/llms.txt` 会按当前登录角色过滤可见端点，便于外部工具与 LLM 接入。
 - **通知中心**：未读徽标、分页列表、标记已读、批量/单条/清空删除；用户可按回复/点赞维度关闭通知偏好。
 - **运行时配置**：核心管理员在 `/admin/settings` 热更新站点展示、GitHub OAuth、市场功能开关、自动上架、最大标签数、邮件服务，无需重启进程。
 - **首次启动向导**：未配置数据库时，前端 `/setup` 分步引导填写站点信息、核心管理员、PostgreSQL、Redis、邮件；保存后进程内热切换到持久化存储。
@@ -22,12 +23,14 @@
 - **主题**：亮色/暗色/跟随系统，页面切换动画。
 
 ## 技术栈
+
 | 层 | 技术 |
 |---|---|
-| 前端 | Vue 3.5 + Vite+（Vite Plus）+ TypeScript + Naive UI + Pinia 3 + Vue Router 4；`marked` + `DOMPurify` + `highlight.js` 渲染 Markdown；`@giscus/vue` 评论 |
+| 前端 | Vue 3.5 + Vite+（Vite Plus）+ TypeScript + Naive UI + Pinia 3 + Vue Router 4；`marked` + `marked-alert` + `DOMPurify` + `highlight.js` 渲染 Markdown；`vue-api-playground` 在线试用 API；`@giscus/vue` 评论 |
 | 后端 | Python 3.11+ · FastAPI · uvicorn · Pydantic 2 · asyncpg · redis-py（异步）· httpx |
 | 存储 | PostgreSQL（持久化业务数据，10 张表）· Redis（登录会话，TTL 自动过期） |
 | 部署 | Docker Compose · systemd · uv（Python 包管理）· npm（前端） |
+
 > 前端使用 TypeScript（`<script setup lang="ts">`），类型定义见 `apps/market-web/src/types/index.ts`。API 调用使用原生 `fetch`（`credentials: 'include'` cookie session）；`axios` 仅作为历史依赖保留，当前未被引用。
 
 ## 项目结构
@@ -68,10 +71,10 @@ VITE_API_BASE_URL=http://127.0.0.1:8787
 
 后端默认允许的 CORS 来源为 `http://127.0.0.1:3000,http://localhost:3000`（见 `apps/api/.env.example` 的 `CORS_ORIGIN`）。未配置 `DATABASE_URL`/`REDIS_URL` 时后端回退到内存存储，可直接启动；生产持久化存储请通过 `/setup` 或环境变量配置 PostgreSQL + Redis。
 
-
 ```bash
 npm run build:web   # Vite+ 生产构建（vp build），输出到 apps/market-web/dist，供 FastAPI 托管
 npm test            # 运行后端 pytest（使用内存存储，无需真实 PG/Redis）
+cd apps/market-web && vp test --run  # 运行前端 Vite+ 测试
 ```
 
 ## 部署
@@ -81,8 +84,11 @@ npm test            # 运行后端 pytest（使用内存存储，无需真实 PG
 - 网站首页与 SPA 路由：`http://your-host:8787/`
 - AstrBot 插件源：`http://your-host:8787/plugins.json`
 - 市场 API：`http://your-host:8787/v1/...`
+- REST API 文档页：`http://your-host:8787/docs/rest`
+- 角色过滤 OpenAPI：`http://your-host:8787/openapi.json`
+- LLM 友好 API 索引：`http://your-host:8787/llms.txt`
 
-> FastAPI 通过路径保留机制区分 API 路由（`v1`、`health`、`plugins.json`、`plugins-md5.json`、`openapi.json`、`docs`、`redoc`）与静态文件回退，互不冲突。REST API 文档可访问 `/docs/rest`（Vue + Naive UI API Reference），原生 Swagger UI 仍保留在 `/docs`。
+> FastAPI 通过路径保留机制区分 API 路由（`v1`、`health`、`plugins.json`、`plugins-md5.json`、`openapi.json`、`llms.txt`、`docs`、`redoc`）与静态文件回退，互不冲突。REST API 文档可访问 `/docs/rest`（Vue + Naive UI API Reference + 在线试用）。原生 Swagger UI 与 ReDoc 已关闭，`/docs` 与 `/redoc` 返回 404。
 
 后端依赖 **PostgreSQL**（持久化）与 **Redis**（会话）。两者均配置时启用 `PgRedisMarketStore`；否则回退 `InMemoryMarketStore`，仅适合开发与首次启动。
 
@@ -195,7 +201,7 @@ journalctl -u astrbot-community-plugins -f
 | `SESSION_MAX_AGE_SECONDS` | `604800` | 会话有效期（默认 7 天） |
 | `COOKIE_SECURE` / `COOKIE_SAME_SITE` | `false` / `Lax` | Cookie 安全属性（生产 HTTPS 应设 `COOKIE_SECURE=true`） |
 | `ENABLE_DEV_AUTH` | `true` | 开发调试登录（生产必须 `false`） |
-| `MARKET_API_KEYS` | `local:dev-market-key:market:read|market:write` | 全局静态 API Key，格式 `name:key:scope1|scope2` |
+| `MARKET_API_KEYS` | `local:dev-market-key:market:read\|market:write` | 全局静态 API Key，格式 `name:key:scope1\|scope2` |
 
 > 环境变量优先级：默认读取 `apps/api/.env`，同名系统环境变量覆盖之；测试或特殊部署可用 `APP_ENV_FILE` 指向其他 env 文件。Web 后台保存的站点、OAuth、市场策略与邮件设置进入数据库配置表，并覆盖 `.env` 中的同名系统设置。
 
@@ -260,6 +266,7 @@ cd apps/market-web
 npm install
 npm run dev      # Vite+ 开发服务器（vp dev）
 npm run build    # Vite+ 生产构建（vp build）
+vp test --run    # 前端 Vite+ 测试
 ```
 
 安装 Git hooks：
@@ -276,7 +283,8 @@ uv run --project apps/api --directory apps/api pre-commit install --hook-type pr
 
 - Python 3.11+，4 空格缩进，公共 helper 加类型注解，单一职责的小函数。
 - 插件 ID 遵循 `astrbot_plugin_<name>` 模式；路由统一在 `/v1/*`，admin 与 core_admin 动作使用显式路径。
-- 测试位于 `apps/api/tests/`，基于 pytest + FastAPI `TestClient`，覆盖角色检查、登录/会话、提交流程、所有权校验、审核与失败路径。
+- 后端测试位于 `apps/api/tests/`，基于 pytest + FastAPI `TestClient`，覆盖角色检查、登录/会话、提交流程、所有权校验、审核与失败路径。
+- 前端测试使用 `vp test --run`，放在对应源码旁边的 `*.test.ts` 文件中；当前覆盖插件卡片 logo 解析与默认 logo 回退。`npm test` 只是 `apps/market-web/package.json` 里的等价脚本别名。
 
 ## 许可
 
