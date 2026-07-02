@@ -21,7 +21,8 @@ import httpx
 import asyncpg
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 from .auth import (
     Role,
@@ -40,6 +41,8 @@ from .auth import (
 )
 from .config import ApiKey, Settings, load_settings
 from .env_file import write_env_file
+from .llms_txt import build_llms_txt
+from .openapi_filter import filter_openapi_by_role, role_for_openapi
 from .schemas import (
     AnnouncementCreate,
     ApiKeyCreate,
@@ -95,6 +98,7 @@ RESERVED_WEB_PATHS = {
     "plugins.json",
     "plugins-md5.json",
     "openapi.json",
+    "llms.txt",
     "docs",
     "redoc",
 }
@@ -175,6 +179,21 @@ def create_app(
         title="AstrBot Community Plugins API",
         version="0.1.0",
         lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        openapi_tags=[
+            {"name": "plugins", "description": "插件浏览与详情"},
+            {"name": "submissions", "description": "插件提交与管理"},
+            {"name": "comments", "description": "评论与点赞"},
+            {"name": "integration", "description": "AstrBot 插件源"},
+            {"name": "auth", "description": "认证与会话"},
+            {"name": "user", "description": "个人资料与通知"},
+            {"name": "announcements", "description": "公告"},
+            {"name": "admin", "description": "管理员操作"},
+            {"name": "core-admin", "description": "核心管理员操作"},
+            {"name": "system", "description": "系统配置与安装"},
+        ],
     )
     app.state.settings = settings or load_settings()
     app.state.store = store or create_store(app.state.settings)
@@ -257,7 +276,12 @@ def register_routes(app: FastAPI) -> None:
     async def rest_api_docs() -> Response:
         return serve_market_web_file("docs/rest")
 
-    @app.get("/health")
+    @app.get(
+        "/health",
+        tags=["system"],
+        summary="健康检查",
+        description="返回服务状态，包括数据库和 Redis 连接情况。",
+    )
     async def health(request: Request) -> dict[str, str]:
         settings = get_settings(request)
         return {
@@ -267,7 +291,12 @@ def register_routes(app: FastAPI) -> None:
             "redis": "configured" if settings.redis_url else "missing",
         }
 
-    @app.get("/v1/site")
+    @app.get(
+        "/v1/site",
+        tags=["system"],
+        summary="获取站点配置",
+        description="返回站点名称、图标、描述、认证方式、市场功能开关等公开配置。",
+    )
     async def site_config(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
         runtime_config = await effective_runtime_config(request)
@@ -277,7 +306,13 @@ def register_routes(app: FastAPI) -> None:
             "market": get_public_market_config(settings, runtime_config),
         }
 
-    @app.get("/v1/admin/settings")
+    @app.get(
+        "/v1/admin/settings",
+        tags=["core-admin"],
+        summary="获取系统设置",
+        description="获取完整的系统设置，包括数据库、Redis、OAuth、邮件等。仅核心管理员可用。",
+        responses={403: {"description": "需要核心管理员权限"}, 401: {"description": "未登录"}},
+    )
     async def admin_settings(request: Request) -> dict[str, Any]:
         user = await require_user(request)
         if not is_core_admin(user):
@@ -286,7 +321,16 @@ def register_routes(app: FastAPI) -> None:
         runtime_config = await effective_runtime_config(request)
         return build_system_settings(settings, runtime_config, include_secrets=False)
 
-    @app.put("/v1/admin/settings")
+    @app.put(
+        "/v1/admin/settings",
+        tags=["core-admin"],
+        summary="更新系统设置",
+        description="更新系统设置。部分修改需要重启服务才能生效。仅核心管理员可用。",
+        responses={
+            403: {"description": "需要核心管理员权限"},
+            400: {"description": "参数校验失败"},
+        },
+    )
     async def update_admin_settings(
         request: Request,
         payload: SystemSettingsPayload,
@@ -314,7 +358,16 @@ def register_routes(app: FastAPI) -> None:
             "settings": updated,
         }
 
-    @app.post("/v1/admin/settings/email/test")
+    @app.post(
+        "/v1/admin/settings/email/test",
+        tags=["core-admin"],
+        summary="测试邮件发送",
+        description="用当前邮件配置发送一封测试邮件。仅核心管理员可用。",
+        responses={
+            403: {"description": "需要核心管理员权限"},
+            400: {"description": "收件人邮箱格式无效"},
+        },
+    )
     async def send_test_email(request: Request, payload: TestEmailPayload) -> dict[str, bool]:
         user = await require_user(request)
         if not is_core_admin(user):
@@ -325,7 +378,13 @@ def register_routes(app: FastAPI) -> None:
         await send_email(request.app, settings, payload.to, payload.subject, payload.body)
         return {"sent": True}
 
-    @app.get("/v1/admin/setup/status")
+    @app.get(
+        "/v1/admin/setup/status",
+        tags=["core-admin"],
+        summary="获取安装状态",
+        description="返回数据库、Redis 等基础设施的安装状态。仅核心管理员可用。",
+        responses={403: {"description": "需要核心管理员权限"}},
+    )
     async def admin_setup_status(request: Request) -> dict[str, Any]:
         user = await require_user(request)
         if not is_core_admin(user):
@@ -339,7 +398,13 @@ def register_routes(app: FastAPI) -> None:
             redact_saved_setup=False,
         )
 
-    @app.get("/v1/setup/status")
+    @app.get(
+        "/v1/setup/status",
+        tags=["core-admin"],
+        summary="获取安装状态（安装阶段）",
+        description="仅在首次安装未完成时可用。返回脱敏后的安装状态。",
+        responses={404: {"description": "安装已完成，此接口不可用"}},
+    )
     async def setup_status(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
         if not settings.is_setup_required():
@@ -351,7 +416,17 @@ def register_routes(app: FastAPI) -> None:
             redact_saved_setup=True,
         )
 
-    @app.post("/v1/setup")
+    @app.post(
+        "/v1/setup",
+        tags=["core-admin"],
+        summary="完成首次安装",
+        description="配置数据库、Redis、核心管理员等基础设施。仅首次安装未完成时可用。",
+        responses={
+            200: {"description": "安装成功"},
+            404: {"description": "安装已完成"},
+            400: {"description": "参数校验失败"},
+        },
+    )
     async def save_setup(
         request: Request,
         payload: SetupConfig,
@@ -409,11 +484,27 @@ def register_routes(app: FastAPI) -> None:
             "message": "Configuration saved and PostgreSQL/Redis storage is active.",
         }
 
-    @app.get("/v1/me")
+    @app.get(
+        "/v1/me",
+        tags=["user"],
+        summary="获取当前用户信息",
+        description="返回当前登录用户的公开信息，包括角色、GitHub 信息等。",
+        responses={401: {"description": "未登录"}},
+    )
     async def me(request: Request) -> dict[str, Any]:
         return public_user(await require_user(request))
 
-    @app.patch("/v1/me/profile")
+    @app.patch(
+        "/v1/me/profile",
+        tags=["user"],
+        summary="更新个人资料",
+        description="更新当前用户的资料，包括显示名、头像、GitHub Token、通知偏好等。",
+        responses={
+            401: {"description": "未登录"},
+            400: {"description": "无更新字段或头像 URL 无效"},
+            404: {"description": "用户不存在"},
+        },
+    )
     async def update_my_profile(request: Request, payload: UserProfileUpdate) -> dict[str, Any]:
         user = await require_user(request)
         profile = {key: value for key, value in payload.model_dump().items() if value is not None}
@@ -430,7 +521,13 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "User not found")
         return public_user(updated)
 
-    @app.get("/v1/me/notifications")
+    @app.get(
+        "/v1/me/notifications",
+        tags=["user"],
+        summary="获取通知列表",
+        description="返回当前用户的通知列表，支持分页。",
+        responses={401: {"description": "未登录"}},
+    )
     async def my_notifications(
         request: Request,
         limit: int = 20,
@@ -453,22 +550,46 @@ def register_routes(app: FastAPI) -> None:
             "offset": safe_offset,
         }
 
-    @app.get("/v1/me/notifications/unread-count")
+    @app.get(
+        "/v1/me/notifications/unread-count",
+        tags=["user"],
+        summary="获取未读通知数",
+        description="返回当前用户的未读通知数量。",
+        responses={401: {"description": "未登录"}},
+    )
     async def my_unread_notification_count(request: Request) -> dict[str, int]:
         user = await require_user(request)
         return {"count": await call_store(request, "count_unread_notifications", user["id"])}
 
-    @app.post("/v1/me/notifications/read")
+    @app.post(
+        "/v1/me/notifications/read",
+        tags=["user"],
+        summary="标记通知已读",
+        description="将当前用户的所有通知标记为已读。",
+        responses={401: {"description": "未登录"}},
+    )
     async def mark_my_notifications_read(request: Request) -> dict[str, int]:
         user = await require_user(request)
         return {"updated": await call_store(request, "mark_notifications_read", user["id"])}
 
-    @app.delete("/v1/me/notifications")
+    @app.delete(
+        "/v1/me/notifications",
+        tags=["user"],
+        summary="清空全部通知",
+        description="删除当前用户的所有通知。",
+        responses={401: {"description": "未登录"}},
+    )
     async def clear_my_notifications(request: Request) -> dict[str, int]:
         user = await require_user(request)
         return {"deleted": await call_store(request, "delete_notifications", user["id"], None)}
 
-    @app.delete("/v1/me/notifications/{notification_id}")
+    @app.delete(
+        "/v1/me/notifications/{notification_id}",
+        tags=["user"],
+        summary="删除单条通知",
+        description="删除当前用户的指定通知。",
+        responses={401: {"description": "未登录"}},
+    )
     async def delete_my_notification(request: Request, notification_id: str) -> dict[str, int]:
         user = await require_user(request)
         return {
@@ -480,7 +601,13 @@ def register_routes(app: FastAPI) -> None:
             )
         }
 
-    @app.post("/v1/me/notifications/delete")
+    @app.post(
+        "/v1/me/notifications/delete",
+        tags=["user"],
+        summary="批量删除通知",
+        description="删除当前用户的多条通知。",
+        responses={401: {"description": "未登录"}, 400: {"description": "缺少通知 ID"}},
+    )
     async def delete_my_notifications(
         request: Request,
         payload: NotificationDeletePayload,
@@ -497,7 +624,13 @@ def register_routes(app: FastAPI) -> None:
             )
         }
 
-    @app.get("/v1/me/plugins")
+    @app.get(
+        "/v1/me/plugins",
+        tags=["user"],
+        summary="获取我提交的插件",
+        description="返回当前用户提交的所有插件（包括未上架的）。",
+        responses={401: {"description": "未登录"}},
+    )
     async def my_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
         user = await require_user(request)
         return {
@@ -509,13 +642,26 @@ def register_routes(app: FastAPI) -> None:
             )
         }
 
-    @app.get("/v1/me/api-keys")
+    @app.get(
+        "/v1/me/api-keys",
+        tags=["user"],
+        summary="获取我的 API Key",
+        description="返回当前用户创建的 API Key 列表（不含 Key 值）。",
+        responses={401: {"description": "未登录"}},
+    )
     async def my_api_keys(request: Request) -> dict[str, list[dict[str, Any]]]:
         user = await require_user(request)
         keys = await call_store(request, "list_api_keys_for_user", user["id"])
         return {"items": [public_api_key(key) for key in keys]}
 
-    @app.post("/v1/me/api-keys", status_code=201)
+    @app.post(
+        "/v1/me/api-keys",
+        status_code=201,
+        tags=["user"],
+        summary="创建 API Key",
+        description="为当前用户创建一个新的 API Key，支持指定名称和权限范围。",
+        responses={401: {"description": "未登录"}, 201: {"description": "创建成功"}},
+    )
     async def issue_my_api_key(request: Request, payload: ApiKeyCreate) -> dict[str, Any]:
         user = await require_user(request)
         api_key = await call_store(
@@ -523,12 +669,28 @@ def register_routes(app: FastAPI) -> None:
         )
         return public_api_key(api_key, include_key=True)
 
-    @app.delete("/v1/me/api-keys/{api_key_id}")
+    @app.delete(
+        "/v1/me/api-keys/{api_key_id}",
+        tags=["user"],
+        summary="删除 API Key",
+        description="删除当前用户的指定 API Key。",
+        responses={401: {"description": "未登录"}},
+    )
     async def delete_my_api_key(request: Request, api_key_id: str) -> dict[str, int]:
         user = await require_user(request)
         return {"deleted": await call_store(request, "delete_api_key", user["id"], api_key_id)}
 
-    @app.post("/v1/auth/internal/login")
+    @app.post(
+        "/v1/auth/internal/login",
+        tags=["auth"],
+        summary="用户名密码登录",
+        description="使用用户名和密码进行内部登录。如果站点关闭了公开登录，仅核心管理员可登录。",
+        responses={
+            200: {"description": "登录成功"},
+            401: {"description": "用户名或密码错误"},
+            403: {"description": "登录功能已关闭"},
+        },
+    )
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
         settings = await runtime_settings_for_app(request.app)
         user = await call_store(request, "get_user_by_internal_username", payload.username)
@@ -541,7 +703,17 @@ def register_routes(app: FastAPI) -> None:
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         return response
 
-    @app.get("/v1/auth/github/login")
+    @app.get(
+        "/v1/auth/github/login",
+        tags=["auth"],
+        summary="GitHub OAuth 登录",
+        description="重定向到 GitHub OAuth 授权页面。需要在站点设置中配置 GitHub OAuth 应用。",
+        responses={
+            302: {"description": "重定向到 GitHub"},
+            403: {"description": "GitHub 登录已关闭"},
+            501: {"description": "GitHub OAuth 未配置"},
+        },
+    )
     async def github_login(request: Request) -> Response:
         settings = await runtime_settings_for_app(request.app)
         if not settings.github_login_enabled:
@@ -568,7 +740,16 @@ def register_routes(app: FastAPI) -> None:
         set_cookie(response, settings.oauth_state_cookie_name, state, settings, max_age=600)
         return response
 
-    @app.get("/v1/auth/github/callback")
+    @app.get(
+        "/v1/auth/github/callback",
+        tags=["auth"],
+        summary="GitHub OAuth 回调",
+        description="处理 GitHub OAuth 授权回调，创建或更新用户会话。",
+        responses={
+            302: {"description": "登录成功，重定向到首页"},
+            400: {"description": "无效的 OAuth 回调"},
+        },
+    )
     async def github_callback(
         request: Request, code: str | None = None, state: str | None = None
     ) -> Response:
@@ -592,7 +773,14 @@ def register_routes(app: FastAPI) -> None:
         response.delete_cookie(settings.oauth_state_cookie_name, path="/")
         return response
 
-    @app.post("/v1/auth/logout", status_code=204)
+    @app.post(
+        "/v1/auth/logout",
+        status_code=204,
+        tags=["auth"],
+        summary="退出登录",
+        description="撤销当前会话并清除登录 Cookie。",
+        responses={204: {"description": "退出成功"}},
+    )
     async def logout(request: Request, response: Response) -> None:
         settings = await runtime_settings_for_app(request.app)
         session_token = request.cookies.get(settings.session_cookie_name)
@@ -600,7 +788,17 @@ def register_routes(app: FastAPI) -> None:
             await call_store(request, "revoke_session", session_token)
         response.delete_cookie(settings.session_cookie_name, path="/")
 
-    @app.get("/v1/auth/debug-login")
+    @app.get(
+        "/v1/auth/debug-login",
+        tags=["auth"],
+        summary="开发调试登录",
+        description="仅供开发环境使用。通过 GitHub 用户名直接创建会话，无需 OAuth。需要启用开发认证模式。",
+        responses={
+            200: {"description": "登录成功"},
+            403: {"description": "开发认证已关闭"},
+            400: {"description": "缺少 login 参数"},
+        },
+    )
     async def debug_login(request: Request, login: str = "") -> Response:
         settings = await runtime_settings_for_app(request.app)
         if not settings.enable_dev_auth:
@@ -615,11 +813,23 @@ def register_routes(app: FastAPI) -> None:
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         return response
 
-    @app.get("/v1/auth/session")
+    @app.get(
+        "/v1/auth/session",
+        tags=["auth"],
+        summary="检查当前会话",
+        description="返回当前登录状态和用户信息。",
+        responses={200: {"description": "已登录"}, 401: {"description": "未登录"}},
+    )
     async def auth_session(request: Request) -> dict[str, Any]:
         return {"authenticated": True, "user": public_user(await require_user(request))}
 
-    @app.get("/v1/admin/check")
+    @app.get(
+        "/v1/admin/check",
+        tags=["admin"],
+        summary="检查管理员权限",
+        description="返回当前用户的管理权限详情。",
+        responses={401: {"description": "未登录"}},
+    )
     async def admin_check(request: Request) -> dict[str, bool]:
         user = await require_user(request)
         return {
@@ -630,7 +840,13 @@ def register_routes(app: FastAPI) -> None:
             "can_manage_admins": can_manage_admins(user),
         }
 
-    @app.get("/v1/permissions")
+    @app.get(
+        "/v1/permissions",
+        tags=["user"],
+        summary="获取当前权限",
+        description="返回当前用户可执行的操作列表。",
+        responses={401: {"description": "未登录"}},
+    )
     async def permissions(request: Request) -> dict[str, bool]:
         user = await require_user(request)
         return {
@@ -641,37 +857,76 @@ def register_routes(app: FastAPI) -> None:
             "can_manage_admins": can_manage_admins(user),
         }
 
-    @app.get("/v1/plugins")
+    @app.get(
+        "/v1/plugins",
+        tags=["plugins"],
+        summary="获取已上架插件列表",
+        description="返回所有已上架的插件。无需登录。",
+        responses={200: {"description": "插件列表"}},
+    )
     async def list_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
         return {"items": await call_store(request, "list_public_plugins")}
 
-    @app.get("/plugins.json")
+    @app.get(
+        "/plugins.json",
+        tags=["integration"],
+        summary="AstrBot 插件源",
+        description="返回 AstrBot 插件市场的完整插件源数据（机器可读格式）。无需登录。",
+    )
     async def astrbot_plugin_source(request: Request) -> dict[str, dict[str, Any]]:
         return build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
 
-    @app.get("/plugins-md5.json")
+    @app.get(
+        "/plugins-md5.json",
+        tags=["integration"],
+        summary="AstrBot 插件源 MD5",
+        description="返回插件源数据的 MD5 校验值，用于增量更新检测。无需登录。",
+    )
     async def astrbot_plugin_source_md5(request: Request) -> dict[str, str]:
         feed = build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
         return {"md5": digest_plugin_source(feed)}
 
-    @app.get("/v1/astrbot/plugins")
-    @app.get("/v1/astrbot/plugins.json")
+    @app.get("/v1/astrbot/plugins", tags=["integration"], summary="AstrBot 插件源 v1")
+    @app.get("/v1/astrbot/plugins.json", tags=["integration"], summary="AstrBot 插件源 v1")
     async def astrbot_plugin_source_v1(request: Request) -> dict[str, dict[str, Any]]:
         return build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
 
-    @app.get("/v1/astrbot/plugins-md5.json")
+    @app.get(
+        "/v1/astrbot/plugins-md5.json",
+        tags=["integration"],
+        summary="AstrBot 插件源 v1 MD5",
+        description="返回 v1 插件源数据的 MD5 校验值。",
+    )
     async def astrbot_plugin_source_v1_md5(request: Request) -> dict[str, str]:
         feed = build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
         return {"md5": digest_plugin_source(feed)}
 
-    @app.get("/v1/plugins/submissions")
+    @app.get(
+        "/v1/plugins/submissions",
+        tags=["submissions"],
+        summary="获取待审核提交列表",
+        description="获取所有待审核的插件提交。仅管理员可用。",
+        responses={401: {"description": "未登录"}, 403: {"description": "需要管理员权限"}},
+    )
     async def list_submissions(request: Request) -> dict[str, list[dict[str, Any]]]:
         user = await require_user(request)
         if not is_admin(user):
             raise error(403, "Forbidden")
         return {"items": await call_store(request, "list_submissions")}
 
-    @app.post("/v1/plugins/submissions", status_code=201)
+    @app.post(
+        "/v1/plugins/submissions",
+        status_code=201,
+        tags=["submissions"],
+        summary="提交新插件",
+        description="提交一个新插件到市场。需要验证 GitHub 仓库归属。如果启用自动审核，提交后直接上架。",
+        responses={
+            201: {"description": "提交成功"},
+            401: {"description": "未登录"},
+            403: {"description": "插件提交已关闭"},
+            400: {"description": "参数校验失败"},
+        },
+    )
     async def submit_plugin(request: Request, payload: PluginSubmission) -> dict[str, Any]:
         user = await require_user(request)
         settings = await runtime_settings_for_app(request.app)
@@ -689,13 +944,30 @@ def register_routes(app: FastAPI) -> None:
             return listed or plugin
         return plugin
 
-    @app.get("/v1/plugins/{plugin_id}")
+    @app.get(
+        "/v1/plugins/{plugin_id}",
+        tags=["plugins"],
+        summary="获取插件详情",
+        description="返回指定插件的详细信息，包括描述、作者、版本、交互状态等。无需登录。",
+        responses={200: {"description": "插件详情"}, 404: {"description": "插件不存在"}},
+    )
     async def plugin_detail(request: Request, plugin_id: str) -> dict[str, Any]:
         plugin = await get_plugin_or_404(request, plugin_id)
         user = await current_user(request)
         return await plugin_with_interaction_state(request, plugin, user)
 
-    @app.patch("/v1/plugins/{plugin_id}")
+    @app.patch(
+        "/v1/plugins/{plugin_id}",
+        tags=["submissions"],
+        summary="更新插件信息",
+        description="更新插件信息。仅插件作者或管理员可操作。",
+        responses={
+            200: {"description": "更新成功"},
+            401: {"description": "未登录"},
+            403: {"description": "无权编辑此插件"},
+            404: {"description": "插件不存在"},
+        },
+    )
     async def update_plugin(
         request: Request, plugin_id: str, payload: PluginPatch
     ) -> dict[str, Any]:
@@ -735,7 +1007,18 @@ def register_routes(app: FastAPI) -> None:
         )
         return updated or {}
 
-    @app.post("/v1/plugins/{plugin_id}/request-list")
+    @app.post(
+        "/v1/plugins/{plugin_id}/request-list",
+        tags=["submissions"],
+        summary="申请上架",
+        description="插件作者申请将插件上架。如果插件已上架则直接返回。",
+        responses={
+            200: {"description": "已申请上架或已上架"},
+            401: {"description": "未登录"},
+            403: {"description": "无权操作"},
+            404: {"description": "插件不存在"},
+        },
+    )
     async def request_plugin_list(request: Request, plugin_id: str) -> dict[str, Any]:
         user = await require_user(request)
         plugin = await get_plugin_or_404(request, plugin_id)
@@ -748,7 +1031,18 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "Plugin not found")
         return updated
 
-    @app.post("/v1/plugins/{plugin_id}/unlist")
+    @app.post(
+        "/v1/plugins/{plugin_id}/unlist",
+        tags=["submissions"],
+        summary="作者下架插件",
+        description="插件作者下架自己的插件。可附下架原因。",
+        responses={
+            200: {"description": "下架成功"},
+            401: {"description": "未登录"},
+            403: {"description": "无权操作"},
+            404: {"description": "插件不存在"},
+        },
+    )
     async def unlist_own_plugin(
         request: Request,
         plugin_id: str,
@@ -764,7 +1058,17 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "Plugin not found")
         return updated
 
-    @app.post("/v1/plugins/{plugin_id}/refresh-github")
+    @app.post(
+        "/v1/plugins/{plugin_id}/refresh-github",
+        tags=["submissions"],
+        summary="刷新插件 GitHub 元数据",
+        description="手动触发刷新插件的 GitHub 元数据（stars、描述、README 等）。",
+        responses={
+            200: {"description": "刷新成功"},
+            401: {"description": "未登录"},
+            403: {"description": "无权操作"},
+        },
+    )
     async def refresh_own_plugin_github_metadata(
         request: Request,
         plugin_id: str,
@@ -786,7 +1090,18 @@ def register_routes(app: FastAPI) -> None:
         )
         return updated or plugin
 
-    @app.post("/v1/plugins/{plugin_id}/like")
+    @app.post(
+        "/v1/plugins/{plugin_id}/like",
+        tags=["comments"],
+        summary="点赞插件",
+        description="为指定插件点赞。需要登录。",
+        responses={
+            200: {"description": "点赞成功"},
+            401: {"description": "未登录"},
+            403: {"description": "点赞功能已关闭"},
+            404: {"description": "插件不存在"},
+        },
+    )
     async def like_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
         if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Plugin likes are closed")
@@ -798,7 +1113,17 @@ def register_routes(app: FastAPI) -> None:
             await notify_plugin_like(request, original_plugin, user)
         return await plugin_with_interaction_state(request, plugin, user)
 
-    @app.post("/v1/plugins/{plugin_id}/unlike")
+    @app.post(
+        "/v1/plugins/{plugin_id}/unlike",
+        tags=["comments"],
+        summary="取消点赞插件",
+        description="取消对指定插件的点赞。需要登录。",
+        responses={
+            200: {"description": "取消成功"},
+            401: {"description": "未登录"},
+            403: {"description": "点赞功能已关闭"},
+        },
+    )
     async def unlike_plugin(request: Request, plugin_id: str) -> dict[str, Any]:
         if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Plugin likes are closed")
@@ -807,7 +1132,19 @@ def register_routes(app: FastAPI) -> None:
         plugin = await call_store(request, "unlike_plugin", plugin_id, user["id"])
         return await plugin_with_interaction_state(request, plugin, user)
 
-    @app.post("/v1/plugins/{plugin_id}/comments", status_code=201)
+    @app.post(
+        "/v1/plugins/{plugin_id}/comments",
+        status_code=201,
+        tags=["comments"],
+        summary="发表评论",
+        description="在指定插件下发表评论，支持回复（传 parent_id）。被禁言用户无法评论。",
+        responses={
+            201: {"description": "评论成功"},
+            401: {"description": "未登录"},
+            403: {"description": "评论功能已关闭或用户被禁言"},
+            400: {"description": "评论内容为空或父评论无效"},
+        },
+    )
     async def add_comment(
         request: Request, plugin_id: str, payload: CommentCreate
     ) -> dict[str, Any]:
@@ -835,7 +1172,18 @@ def register_routes(app: FastAPI) -> None:
         await notify_comment_reply(request, plugin, parent_comment, comment, user)
         return comment
 
-    @app.post("/v1/comments/{comment_id}/like")
+    @app.post(
+        "/v1/comments/{comment_id}/like",
+        tags=["comments"],
+        summary="点赞评论",
+        description="为指定评论点赞。需要登录。",
+        responses={
+            200: {"description": "点赞成功"},
+            401: {"description": "未登录"},
+            403: {"description": "点赞功能已关闭"},
+            404: {"description": "评论不存在"},
+        },
+    )
     async def like_comment(request: Request, comment_id: str) -> dict[str, Any]:
         if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Comment likes are closed")
@@ -852,7 +1200,18 @@ def register_routes(app: FastAPI) -> None:
             await notify_comment_like(request, plugin, original_comment, user)
         return with_comment_permissions(comment, user, liked=True)
 
-    @app.post("/v1/comments/{comment_id}/unlike")
+    @app.post(
+        "/v1/comments/{comment_id}/unlike",
+        tags=["comments"],
+        summary="取消点赞评论",
+        description="取消对指定评论的点赞。需要登录。",
+        responses={
+            200: {"description": "取消成功"},
+            401: {"description": "未登录"},
+            403: {"description": "点赞功能已关闭"},
+            404: {"description": "评论不存在"},
+        },
+    )
     async def unlike_comment(request: Request, comment_id: str) -> dict[str, Any]:
         if not (await runtime_settings_for_app(request.app)).market_likes_enabled:
             raise error(403, "Comment likes are closed")
@@ -862,12 +1221,33 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "Comment not found")
         return with_comment_permissions(comment, user, liked=False)
 
-    @app.delete("/v1/comments/{comment_id}")
+    @app.delete(
+        "/v1/comments/{comment_id}",
+        tags=["comments"],
+        summary="删除评论",
+        description="删除指定评论。仅评论作者或管理员可操作。",
+        responses={
+            200: {"description": "删除成功"},
+            401: {"description": "未登录"},
+            403: {"description": "无权删除"},
+            404: {"description": "评论不存在"},
+        },
+    )
     async def delete_own_comment(request: Request, comment_id: str) -> dict[str, Any]:
         user = await require_user(request)
         return await delete_comment_by_user(request, comment_id, user)
 
-    @app.post("/v1/plugins/{plugin_id}/reindex")
+    @app.post(
+        "/v1/plugins/{plugin_id}/reindex",
+        tags=["submissions"],
+        summary="重新索引插件",
+        description="触发重新索引插件搜索数据。仅插件作者或管理员可操作。",
+        responses={
+            200: {"description": "索引完成"},
+            401: {"description": "未登录"},
+            403: {"description": "无权操作"},
+        },
+    )
     async def reindex_plugin(request: Request, plugin_id: str) -> dict[str, bool]:
         user = await require_user(request)
         plugin = await get_plugin_or_404(request, plugin_id)
@@ -875,24 +1255,53 @@ def register_routes(app: FastAPI) -> None:
             raise error(403, "Forbidden")
         return {"ok": True}
 
-    @app.get("/v1/admin/users")
+    @app.get(
+        "/v1/admin/users",
+        tags=["admin"],
+        summary="获取所有用户",
+        description="返回所有用户的公开信息。仅管理员可用。",
+        responses={401: {"description": "未登录"}, 403: {"description": "需要管理员权限"}},
+    )
     async def admin_users(request: Request) -> dict[str, list[dict[str, Any]]]:
         await require_admin(request)
         users = await call_store(request, "list_users")
         return {"items": [public_user(user) for user in users]}
 
-    @app.get("/v1/admin/plugins")
+    @app.get(
+        "/v1/admin/plugins",
+        tags=["admin"],
+        summary="获取所有插件",
+        description="返回所有插件（含未上架）。仅管理员可用。",
+        responses={401: {"description": "未登录"}, 403: {"description": "需要管理员权限"}},
+    )
     async def admin_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
         await require_admin(request)
         return {"items": await call_store(request, "list_plugins")}
 
-    @app.get("/v1/admin/summary")
+    @app.get(
+        "/v1/admin/summary",
+        tags=["admin"],
+        summary="获取后台统计摘要",
+        description="返回后台统计数据，包括用户数、插件数、评论数等。仅管理员可用。",
+        responses={401: {"description": "未登录"}, 403: {"description": "需要管理员权限"}},
+    )
     async def admin_summary(request: Request) -> dict[str, Any]:
         user = await require_admin(request)
         summary = await call_store(request, "summary")
         return {**summary, "role": user["role"]}
 
-    @app.post("/v1/admin/plugins/{plugin_id}/list")
+    @app.post(
+        "/v1/admin/plugins/{plugin_id}/list",
+        tags=["admin"],
+        summary="审核上架插件",
+        description="将指定插件的状态改为已上架。会通知插件作者。仅管理员可用。",
+        responses={
+            200: {"description": "上架成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要管理员权限"},
+            404: {"description": "插件不存在"},
+        },
+    )
     async def list_plugin(
         request: Request,
         plugin_id: str,
@@ -924,7 +1333,18 @@ def register_routes(app: FastAPI) -> None:
             )
         return updated
 
-    @app.post("/v1/admin/plugins/{plugin_id}/refresh-github", status_code=202)
+    @app.post(
+        "/v1/admin/plugins/{plugin_id}/refresh-github",
+        status_code=202,
+        tags=["admin"],
+        summary="管理员刷新 GitHub 元数据",
+        description="管理员触发刷新指定插件的 GitHub 元数据。异步执行。",
+        responses={
+            202: {"description": "已接受，异步处理中"},
+            401: {"description": "未登录"},
+            403: {"description": "需要管理员权限"},
+        },
+    )
     async def refresh_admin_plugin_github_metadata(
         request: Request,
         plugin_id: str,
@@ -952,7 +1372,19 @@ def register_routes(app: FastAPI) -> None:
         )
         return {"accepted": True, "plugin_id": plugin_id}
 
-    @app.post("/v1/admin/plugins/{plugin_id}/unlist")
+    @app.post(
+        "/v1/admin/plugins/{plugin_id}/unlist",
+        tags=["admin"],
+        summary="管理员下架插件",
+        description="管理员下架指定插件。必须提供下架原因。会通知插件作者。",
+        responses={
+            200: {"description": "下架成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要管理员权限"},
+            400: {"description": "缺少下架原因"},
+            404: {"description": "插件不存在"},
+        },
+    )
     async def unlist_plugin(
         request: Request,
         plugin_id: str,
@@ -985,14 +1417,36 @@ def register_routes(app: FastAPI) -> None:
             )
         return updated
 
-    @app.delete("/v1/admin/comments/{comment_id}")
+    @app.delete(
+        "/v1/admin/comments/{comment_id}",
+        tags=["admin"],
+        summary="删除评论（管理员）",
+        description="管理员删除任意评论。",
+        responses={
+            200: {"description": "删除成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要管理员权限"},
+            404: {"description": "评论不存在"},
+        },
+    )
     async def delete_comment(request: Request, comment_id: str) -> dict[str, Any]:
         user = await require_user(request)
         if not can_moderate_community(user):
             raise error(403, "Forbidden")
         return await delete_comment_by_user(request, comment_id, user)
 
-    @app.post("/v1/admin/users/{user_id}/mute")
+    @app.post(
+        "/v1/admin/users/{user_id}/mute",
+        tags=["admin"],
+        summary="禁言用户",
+        description="禁言指定用户，可设置禁言到期时间和原因。仅管理员可用。",
+        responses={
+            200: {"description": "禁言成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要管理员权限"},
+            404: {"description": "用户不存在"},
+        },
+    )
     async def mute_user(request: Request, user_id: str, payload: MuteUserPayload) -> dict[str, Any]:
         user = await require_user(request)
         if not can_moderate_community(user):
@@ -1010,7 +1464,18 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "User not found")
         return public_user(muted)
 
-    @app.post("/v1/admin/users/{user_id}/unmute")
+    @app.post(
+        "/v1/admin/users/{user_id}/unmute",
+        tags=["admin"],
+        summary="解除禁言",
+        description="解除指定用户的禁言状态。仅管理员可用。",
+        responses={
+            200: {"description": "解除成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要管理员权限"},
+            404: {"description": "用户不存在"},
+        },
+    )
     async def unmute_user(request: Request, user_id: str) -> dict[str, Any]:
         user = await require_user(request)
         if not can_moderate_community(user):
@@ -1020,7 +1485,20 @@ def register_routes(app: FastAPI) -> None:
             raise error(404, "User not found")
         return public_user(unmuted)
 
-    @app.post("/v1/core/users", status_code=201)
+    @app.post(
+        "/v1/core/users",
+        status_code=201,
+        tags=["core-admin"],
+        summary="创建内部用户",
+        description="创建一个新的内部用户账号（非 GitHub 登录）。仅核心管理员可用。",
+        responses={
+            201: {"description": "创建成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要核心管理员权限"},
+            400: {"description": "参数校验失败"},
+            409: {"description": "用户名已存在"},
+        },
+    )
     async def create_internal_user(
         request: Request,
         payload: InternalUserCreate,
@@ -1048,7 +1526,19 @@ def register_routes(app: FastAPI) -> None:
         )
         return public_user(created)
 
-    @app.delete("/v1/core/users/{user_id}")
+    @app.delete(
+        "/v1/core/users/{user_id}",
+        tags=["core-admin"],
+        summary="删除用户",
+        description="删除指定用户账号。不能删除自己或核心管理员。仅核心管理员可用。",
+        responses={
+            200: {"description": "删除成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要核心管理员权限"},
+            400: {"description": "不能删除自己或核心管理员"},
+            404: {"description": "用户不存在"},
+        },
+    )
     async def delete_user(request: Request, user_id: str) -> dict[str, Any]:
         user = await require_user(request)
         if not can_manage_admins(user):
@@ -1063,7 +1553,19 @@ def register_routes(app: FastAPI) -> None:
         deleted = await call_store(request, "delete_user", user_id, user["id"])
         return {"deleted": bool(deleted)}
 
-    @app.post("/v1/core/admins/{user_id}")
+    @app.post(
+        "/v1/core/admins/{user_id}",
+        tags=["core-admin"],
+        summary="修改管理员角色",
+        description="设置或取消用户的管理员角色。不能修改核心管理员角色。仅核心管理员可用。",
+        responses={
+            200: {"description": "修改成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要核心管理员权限"},
+            400: {"description": "不能修改核心管理员角色"},
+            404: {"description": "用户不存在"},
+        },
+    )
     async def update_admin(
         request: Request, user_id: str, payload: RoleUpdatePayload
     ) -> dict[str, Any]:
@@ -1080,7 +1582,19 @@ def register_routes(app: FastAPI) -> None:
         )
         return public_user(updated) if updated else {}
 
-    @app.post("/v1/core/announcements", status_code=201)
+    @app.post(
+        "/v1/core/announcements",
+        status_code=201,
+        tags=["core-admin"],
+        summary="发布公告",
+        description="发布一条全站公告。仅核心管理员可用。",
+        responses={
+            201: {"description": "发布成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要核心管理员权限"},
+            400: {"description": "标题和内容不能为空"},
+        },
+    )
     async def create_announcement(request: Request, payload: AnnouncementCreate) -> dict[str, Any]:
         user = await require_user(request)
         if not can_publish_announcement(user):
@@ -1091,18 +1605,44 @@ def register_routes(app: FastAPI) -> None:
             request, "publish_announcement", payload.title, payload.body, user["id"]
         )
 
-    @app.get("/v1/announcements")
+    @app.get(
+        "/v1/announcements",
+        tags=["announcements"],
+        summary="获取公告列表",
+        description="返回全站公告列表。无需登录。",
+    )
     async def announcements(request: Request) -> dict[str, list[dict[str, Any]]]:
         return {"items": await call_store(request, "list_announcements")}
 
-    @app.post("/v1/api-keys", status_code=201)
+    @app.post(
+        "/v1/api-keys",
+        status_code=201,
+        tags=["admin"],
+        summary="签发 API Key",
+        description="签发一个新的 API Key。仅管理员可用。",
+        responses={
+            201: {"description": "签发成功"},
+            401: {"description": "未登录"},
+            403: {"description": "需要管理员权限"},
+        },
+    )
     async def issue_api_key(request: Request, payload: ApiKeyCreate) -> dict[str, Any]:
         user = await require_user(request)
         if not is_admin(user):
             raise error(403, "Forbidden")
         return await call_store(request, "issue_api_key", payload.name, user["id"], payload.scopes)
 
-    @app.get("/v1/api-keys")
+    @app.get(
+        "/v1/api-keys",
+        tags=["admin"],
+        summary="获取 API Key 列表",
+        description="返回所有 API Key 列表。需要携带有效的 API Key。",
+        responses={
+            200: {"description": "获取成功"},
+            401: {"description": "API Key 无效"},
+            403: {"description": "权限不足"},
+        },
+    )
     async def api_keys(request: Request) -> dict[str, list[dict[str, Any]]]:
         keys = await all_api_keys(request)
         ok, status, message = require_api_key(
@@ -1111,6 +1651,28 @@ def register_routes(app: FastAPI) -> None:
         if not ok:
             raise error(status, message)
         return {"items": [public_api_key(key) for key in keys]}
+
+    @app.get("/openapi.json", include_in_schema=False)
+    async def custom_openapi(request: Request) -> JSONResponse:
+        user = await current_user(request)
+        role = role_for_openapi(user)
+        if not hasattr(request.app.state, "_openapi_schema_cache"):
+            base = get_openapi(
+                title=request.app.title,
+                version=request.app.version,
+                routes=request.app.routes,
+            )
+            base["tags"] = request.app.openapi_tags or []
+            request.app.state._openapi_schema_cache = base
+        base_schema = request.app.state._openapi_schema_cache
+        filtered = filter_openapi_by_role(base_schema, role)
+        return JSONResponse(filtered)
+
+    @app.get("/llms.txt", include_in_schema=False)
+    async def llms_txt(request: Request) -> PlainTextResponse:
+        user = await current_user(request)
+        role = role_for_openapi(user)
+        return PlainTextResponse(build_llms_txt(role), media_type="text/plain; charset=utf-8")
 
 
 def register_market_web_routes(app: FastAPI) -> None:
