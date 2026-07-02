@@ -48,12 +48,25 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: apps/market-web/package-lock.json
 
+      - name: Install Vite+ CLI
+        run: npm install --global vite-plus
+
       - name: Install web dependencies
-        run: npm ci --prefix apps/market-web
+        working-directory: apps/market-web
+        run: vp install --frozen-lockfile
+
+      - name: Check web app
+        working-directory: apps/market-web
+        run: ./node_modules/.bin/vp check
+
+      - name: Test web app
+        working-directory: apps/market-web
+        run: ./node_modules/.bin/vp test --run
 
       - name: Build web app
-        run: npm run build:web
+        working-directory: apps/market-web
+        run: ./node_modules/.bin/vp build
