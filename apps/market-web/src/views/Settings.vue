@@ -382,8 +382,19 @@
                         v-model:value="formData.email.smtp.password"
                         type="password"
                         show-password-on="click"
-                        placeholder="留空或保持遮蔽值表示不更新"
+                        :placeholder="
+                          formData.email.smtp.password_configured
+                            ? '已配置，留空保持不变'
+                            : '请输入 SMTP 密码'
+                        "
                       />
+                      <template #feedback>
+                        {{
+                          formData.email.smtp.password_configured
+                            ? "当前已配置，输入新值后更新"
+                            : "当前未配置"
+                        }}
+                      </template>
                     </n-form-item>
                     <n-form-item label="发件邮箱" path="email.smtp.from_address">
                       <n-input
@@ -407,8 +418,19 @@
                         v-model:value="formData.email.cloudflare.api_token"
                         type="password"
                         show-password-on="click"
-                        placeholder="留空或保持遮蔽值表示不更新"
+                        :placeholder="
+                          formData.email.cloudflare.api_token_configured
+                            ? '已配置，留空保持不变'
+                            : '请输入 Cloudflare API Token'
+                        "
                       />
+                      <template #feedback>
+                        {{
+                          formData.email.cloudflare.api_token_configured
+                            ? "当前已配置，输入新值后更新"
+                            : "当前未配置"
+                        }}
+                      </template>
                     </n-form-item>
                     <n-form-item label="发件邮箱" path="email.cloudflare.from_address">
                       <n-input
@@ -600,6 +622,7 @@ const emailProviderOptions = [
   { label: "Cloudflare Email Service", value: "cloudflare" },
 ];
 
+const MASKED_SECRET = "********";
 const requiredText = (text) => ({ required: true, message: text, trigger: "blur" });
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function isPublicHttpUrl(value) {
@@ -715,7 +738,8 @@ const rules = {
     {
       validator: () =>
         formData.email.provider !== "cloudflare" ||
-        Boolean(formData.email.cloudflare.api_token.trim()),
+        Boolean(formData.email.cloudflare.api_token.trim()) ||
+        formData.email.cloudflare.api_token_configured,
       message: "启用 Cloudflare 后必须填写 API Token",
       trigger: "blur",
     },
@@ -819,6 +843,8 @@ function applySettings(config = {}) {
   Object.assign(formData.email, config.email || {});
   Object.assign(formData.email.smtp, config.email?.smtp || {});
   Object.assign(formData.email.cloudflare, config.email?.cloudflare || {});
+  formData.email.smtp.password = "";
+  formData.email.cloudflare.api_token = "";
 }
 
 function normalizeNumberFields() {
@@ -838,10 +864,20 @@ function settingsPayload() {
   const payload = JSON.parse(JSON.stringify(formData));
   delete payload.github.client_secret;
   delete payload.github.client_secret_configured;
-  if (payload.market.api_token === "********") {
-    payload.market.api_token = "";
-  }
+  payload.market.api_token = secretInputPayload(payload.market.api_token);
+  delete payload.market.api_token_configured;
+  delete payload.market.api_token_previews;
+  payload.email.smtp.password = secretInputPayload(payload.email.smtp.password);
+  delete payload.email.smtp.password_configured;
+  payload.email.cloudflare.api_token = secretInputPayload(payload.email.cloudflare.api_token);
+  delete payload.email.cloudflare.api_token_configured;
+  delete payload.email.cloudflare.api_token_previews;
   return payload;
+}
+
+function secretInputPayload(value) {
+  const text = String(value || "").trim();
+  return text === MASKED_SECRET ? "" : text;
 }
 
 function toggleMarketTokenRemoval(index) {

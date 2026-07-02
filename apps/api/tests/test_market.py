@@ -1655,6 +1655,7 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
         json={"username": "admin", "password": "password123"},
     )
     payload = system_settings_payload()
+    payload["email"]["smtp"]["password"] = "smtp-secret"
     saved = client.put("/v1/admin/settings", json=payload)
     assert saved.status_code == 200
     settings = saved.json()["settings"]
@@ -1666,6 +1667,8 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert settings["market"]["api_token_configured"] is True
     assert settings["market"]["api_token_previews"] == ["s*****************n"]
     assert settings["market"]["metadata_sync_interval_seconds"] == 1800
+    assert settings["email"]["smtp"]["password"] == main_module.MASKED_SECRET
+    assert settings["email"]["smtp"]["password_configured"] is True
     assert settings["email"]["cloudflare"]["api_token"] == main_module.MASKED_SECRET
     assert settings["email"]["cloudflare"]["api_token_configured"] is True
     assert client.get("/v1/site").json()["market"]["max_plugin_tags"] == 4
@@ -1673,13 +1676,16 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert stored_options["SITE_NAME"] == "AstrHub"
     assert "GITHUB_CLIENT_SECRET" not in stored_options
     assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
+    assert stored_options["SMTP_PASSWORD"] == "smtp-secret"
     assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
     assert client.app.state.settings.github_client_secret == "env-github-secret"
+    assert client.app.state.settings.smtp_password == "smtp-secret"
     env_file_before = (tmp_path / ".env").read_text()
 
     masked_payload = system_settings_payload()
     masked_payload["github"]["client_secret"] = main_module.MASKED_SECRET
     masked_payload["market"]["api_token"] = main_module.MASKED_SECRET
+    masked_payload["email"]["smtp"]["password"] = main_module.MASKED_SECRET
     masked_payload["email"]["cloudflare"]["api_token"] = main_module.MASKED_SECRET
     masked_payload["site"]["name"] = "AstrHub Updated"
     preserved = client.put("/v1/admin/settings", json=masked_payload)
@@ -1688,6 +1694,7 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert "GITHUB_CLIENT_SECRET" not in stored_options
     assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
     assert stored_options["GITHUB_METADATA_SYNC_INTERVAL_SECONDS"] == "1800"
+    assert stored_options["SMTP_PASSWORD"] == "smtp-secret"
     assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
     assert stored_options["SITE_NAME"] == "AstrHub Updated"
     assert stored_options["WEB_URL"] == "https://market.example.com"
