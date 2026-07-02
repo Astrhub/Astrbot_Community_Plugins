@@ -89,6 +89,7 @@ import { NIcon, NModal, NCard, NSpace, NH2, NH3, NText, NButton, NInput } from "
 import { HelpCircle, OpenOutline } from "@vicons/ionicons5";
 import { helpContent } from "../config/helpContent";
 import { marked } from "marked";
+import markedAlert from "marked-alert";
 
 const isMobile = ref(window.innerWidth <= 768);
 let helpTextTimer = null;
@@ -123,6 +124,7 @@ marked.setOptions({
   gfm: true,
   breaks: true,
 });
+marked.use(markedAlert());
 
 const showHelp = ref(false);
 const showHelpText = ref(false);

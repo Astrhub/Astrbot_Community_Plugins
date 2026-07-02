@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, shallowRef, watch } from "vue";
+import { computed, onMounted, ref, shallowRef, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
   NAlert,
@@ -15,6 +15,7 @@ import {
 } from "naive-ui";
 import {
   ArrowBackOutline,
+  CodeSlashOutline,
   CopyOutline,
   DocumentTextOutline,
   OpenOutline,
@@ -22,6 +23,8 @@ import {
   SearchOutline,
 } from "@vicons/ionicons5";
 import { storeToRefs } from "pinia";
+import { Playground } from "vue-api-playground";
+import "vue-api-playground/styles";
 import ThemeModeButton from "../components/ThemeModeButton.vue";
 import { usePluginStore } from "../stores/plugins";
 
@@ -46,6 +49,53 @@ const message = useMessage();
 const store = usePluginStore();
 const { siteConfig } = storeToRefs(store);
 
+const API_KEY_STORAGE_KEY = "astrbot_docs_apikey";
+const DANGEROUS_METHODS = new Set(["post", "put", "patch", "delete"]);
+const endpointAlertText = computed(() => {
+  const base = String(store.apiBaseUrl || "")
+    .trim()
+    .replace(/\/$/, "");
+  const openapi = base ? `${base}/openapi.json` : "/openapi.json";
+  const llms = base ? `${base}/llms.txt` : "/llms.txt";
+  const keys = base ? `${base}/v1/me/api-keys` : "/v1/me/api-keys";
+  return [
+    "AstrBot Community Plugins REST API",
+    `Base URL: ${base || "<same-origin>"}`,
+    `OpenAPI spec: ${openapi}`,
+    `LLM-friendly index: ${llms}`,
+    "",
+    "Authentication:",
+    "  Session cookie (GitHub OAuth / internal login) — sent automatically by the browser.",
+    "  Bearer API key — generate at GET " + keys + ", then send as Authorization: Bearer <key>.",
+    "",
+    "Conventions:",
+    "  JSON in / JSON out unless stated otherwise.",
+    '  Error responses use {"error": "<message>"} with HTTP 4xx/5xx.',
+    "  Pagination uses page (1-based) and page_size query params unless documented otherwise.",
+    "",
+    "Ready-to-curl example (replace <key>):",
+    `  curl -H "Authorization: Bearer <key>" ${base}/v1/plugins?page=1&page_size=20`,
+    "",
+    "OpenAPI JSON is the source of truth — fetch it once and let your tooling derive the rest.",
+  ].join("\n");
+});
+
+const apiKey = ref(
+  typeof sessionStorage !== "undefined" ? sessionStorage.getItem(API_KEY_STORAGE_KEY) || "" : "",
+);
+const endpointAlertVisible = ref(true);
+
+const authConfig = computed(() => ({
+  type: apiKey.value ? "bearer" : "none",
+  token: apiKey.value || undefined,
+}));
+
+watch(apiKey, (value) => {
+  if (typeof sessionStorage === "undefined") return;
+  if (value) sessionStorage.setItem(API_KEY_STORAGE_KEY, value);
+  else sessionStorage.removeItem(API_KEY_STORAGE_KEY);
+});
+
 const spec = shallowRef(null);
 const loading = shallowRef(true);
 const errorMessage = shallowRef("");
@@ -55,6 +105,13 @@ const selectedTag = shallowRef("all");
 const selectedKey = shallowRef("");
 
 const openapiUrl = computed(() => `${store.apiBaseUrl || ""}/openapi.json`);
+const llmsTxtUrl = computed(() => `${store.apiBaseUrl || ""}/llms.txt`);
+const playgroundServers = computed(() => {
+  const base = String(store.apiBaseUrl || "")
+    .trim()
+    .replace(/\/$/, "");
+  return base ? [base] : [];
+});
 const apiTitle = computed(() => spec.value?.info?.title || "AstrBot Community Plugins API");
 const apiVersion = computed(() => spec.value?.info?.version || "0.1.0");
 const openapiVersion = computed(() => spec.value?.openapi || "3.x");
@@ -101,6 +158,50 @@ const hasFilters = computed(
     selectedMethod.value !== "all" ||
     selectedTag.value !== "all",
 );
+const visibleGroups = computed(() => {
+  const groups = new Map();
+  for (const operation of visibleOperations.value) {
+    const list = groups.get(operation.tag) || [];
+    list.push(operation);
+    groups.set(operation.tag, list);
+  }
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([tag, items]) => ({ tag, items }));
+});
+
+const playgroundPayload = computed(() => {
+  const op = selectedOperation.value;
+  if (!op) {
+    return { url: "", method: "get", data: [] };
+  }
+  const data = op.parameters.map((parameter) => ({
+    name: parameter.name,
+    value: parameter.example ?? parameter.schema?.example ?? parameter.schema?.default ?? "",
+    type: parameter.in === "path" ? "path" : "query",
+    description: cleanDescription(parameter.description || ""),
+  }));
+  return { url: op.path, method: op.method, data };
+});
+
+function handleBeforeSend({ url, init }) {
+  const op = selectedOperation.value;
+  if (op && DANGEROUS_METHODS.has(op.method)) {
+    const ok = window.confirm(
+      `即将发起 ${METHOD_LABELS[op.method]} 请求到 ${url}\n\n确定要继续吗？`,
+    );
+    if (!ok) {
+      throw new Error("用户已取消请求");
+    }
+  }
+  if (init) {
+    init.credentials = "include";
+  }
+}
+
+function clearApiKey() {
+  apiKey.value = "";
+}
 
 watch(
   visibleOperations,
@@ -186,7 +287,10 @@ async function loadSpec() {
   loading.value = true;
   errorMessage.value = "";
   try {
-    const response = await fetch(openapiUrl.value, { cache: "no-store" });
+    const response = await fetch(openapiUrl.value, {
+      cache: "no-store",
+      credentials: "include",
+    });
     if (!response.ok) {
       throw new Error(`OpenAPI 加载失败：HTTP ${response.status}`);
     }
@@ -202,6 +306,15 @@ async function copyPath(operation) {
   try {
     await navigator.clipboard.writeText(`${METHOD_LABELS[operation.method]} ${operation.path}`);
     message.success("已复制端点");
+  } catch {
+    message.warning("复制失败");
+  }
+}
+
+async function copyEndpointGuide() {
+  try {
+    await navigator.clipboard.writeText(endpointAlertText.value);
+    message.success("已复制接入说明");
   } catch {
     message.warning("复制失败");
   }
@@ -239,6 +352,44 @@ async function copyPath(operation) {
       </div>
     </header>
 
+    <section v-if="endpointAlertVisible" class="endpoint-alert" aria-label="机器可读入口">
+      <n-alert type="info" :bordered="false" closable @close="endpointAlertVisible = false">
+        <template #header>
+          <strong>机器可读入口</strong>
+        </template>
+        <div class="endpoint-alert-body">
+          <p class="endpoint-alert-copy">
+            把下面两个地址交给 LLM 或外部工具即可自助接入，无需登录本页面。
+          </p>
+          <ul class="endpoint-alert-links">
+            <li>
+              <n-icon><code-slash-outline /></n-icon>
+              <a :href="openapiUrl" target="_blank" rel="noopener noreferrer">
+                {{ openapiUrl }}
+              </a>
+            </li>
+            <li>
+              <n-icon><document-text-outline /></n-icon>
+              <a :href="llmsTxtUrl" target="_blank" rel="noopener noreferrer">
+                {{ llmsTxtUrl }}
+              </a>
+            </li>
+          </ul>
+          <n-button
+            size="small"
+            secondary
+            class="endpoint-alert-copy-btn"
+            @click="copyEndpointGuide"
+          >
+            <template #icon>
+              <n-icon><copy-outline /></n-icon>
+            </template>
+            复制接入说明
+          </n-button>
+        </div>
+      </n-alert>
+    </section>
+
     <section class="docs-toolbar" aria-label="文档筛选">
       <n-input
         v-model:value="searchText"
@@ -270,7 +421,7 @@ async function copyPath(operation) {
       </n-button>
     </section>
 
-    <n-alert v-if="errorMessage" type="error" :bordered="false" class="docs-alert">
+    <n-alert v-if="errorMessage" type="error" :bordered="false" class="docs-alert" closable>
       {{ errorMessage }}
     </n-alert>
 
@@ -292,20 +443,31 @@ async function copyPath(operation) {
             class="docs-empty"
           />
           <div v-else class="endpoint-list">
-            <button
-              v-for="operation in visibleOperations"
-              :key="operation.key"
-              type="button"
-              class="endpoint-item"
-              :class="{ 'is-active': selectedOperation?.key === operation.key }"
-              @click="selectOperation(operation)"
+            <section
+              v-for="group in visibleGroups"
+              :key="group.tag"
+              class="endpoint-group"
+              :aria-label="`标签 ${group.tag}`"
             >
-              <n-tag :type="methodType(operation.method)" size="small" class="method-tag">
-                {{ METHOD_LABELS[operation.method] }}
-              </n-tag>
-              <span class="endpoint-path">{{ operation.path }}</span>
-              <span class="endpoint-summary">{{ operation.summary }}</span>
-            </button>
+              <header class="endpoint-group-header">
+                <span class="endpoint-group-title">{{ group.tag }}</span>
+                <span class="endpoint-group-count">{{ group.items.length }}</span>
+              </header>
+              <button
+                v-for="operation in group.items"
+                :key="operation.key"
+                type="button"
+                class="endpoint-item"
+                :class="{ 'is-active': selectedOperation?.key === operation.key }"
+                @click="selectOperation(operation)"
+              >
+                <n-tag :type="methodType(operation.method)" size="small" class="method-tag">
+                  {{ METHOD_LABELS[operation.method] }}
+                </n-tag>
+                <span class="endpoint-path">{{ operation.path }}</span>
+                <span class="endpoint-summary">{{ operation.summary }}</span>
+              </button>
+            </section>
           </div>
         </aside>
 
@@ -413,11 +575,145 @@ async function copyPath(operation) {
               <code>{{ selectedOperation.security.length ? "required" : "public" }}</code>
             </div>
           </section>
+
+          <section class="detail-section try-it-out-section" aria-label="在线试用">
+            <h3>
+              <n-icon><code-slash-outline /></n-icon>
+              在线试用
+            </h3>
+            <p class="try-it-out-hint">
+              Playground 会直接对当前端点发起请求。DELETE / POST / PUT / PATCH 会弹窗确认。 会话
+              Cookie 会自动附带，Bearer API Key 会保存到当前浏览器。
+            </p>
+            <div class="try-it-out-auth">
+              <n-input
+                v-model:value="apiKey"
+                type="password"
+                show-password-on="click"
+                placeholder="可选：Bearer API Key（POST /v1/me/api-keys 生成）"
+                clearable
+                @clear="clearApiKey"
+              />
+            </div>
+            <div class="try-it-out-host">
+              <Playground
+                v-if="selectedOperation"
+                :key="selectedOperation.key"
+                :url="playgroundPayload.url"
+                :method="playgroundPayload.method"
+                :data="playgroundPayload.data"
+                :auth="authConfig"
+                :servers="playgroundServers"
+                show-method
+                show-url
+                @before-send="handleBeforeSend"
+              />
+            </div>
+          </section>
         </article>
       </section>
     </n-spin>
   </main>
 </template>
+
+<style>
+/*
+ * Map project CSS variables to vue-api-playground's --vap-* tokens.
+ * Declared globally so the cascade reaches the child Playground component.
+ * Dark overrides live under .app-container.dark (set by App.vue based on isDarkMode).
+ */
+:where(:root) {
+  --vap-bg: var(--bg-card);
+  --vap-bg-soft: var(--bg-base);
+  --vap-border: var(--border-base);
+  --vap-brand: var(--primary-color);
+  --vap-text: var(--text-primary);
+  --vap-text-light: var(--text-tertiary);
+  --vap-surface: var(--bg-base);
+  --vap-surface-border: var(--border-base);
+  --vap-code-bg: var(--bg-base);
+  --vap-code-text: var(--text-primary);
+  --vap-success: var(--success-color);
+  --vap-danger: #dc2626;
+  --vap-warning: #d97706;
+  --vap-info: var(--primary-color);
+  --vap-radius: 8px;
+  --vap-focus-ring: var(--primary-light);
+  --vap-font-ui:
+    "Lexend", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --vap-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Method badges — keep the project's semantic method palette. */
+  --vap-method-get: var(--primary-color);
+  --vap-method-post: var(--success-color);
+  --vap-method-put: #d97706;
+  --vap-method-patch: #d97706;
+  --vap-method-delete: #dc2626;
+  --vap-method-head: var(--text-tertiary);
+  --vap-method-options: var(--text-tertiary);
+  --vap-method-trace: var(--text-tertiary);
+  --vap-method-get-bg: var(--primary-light);
+  --vap-method-get-text: var(--primary-active);
+  --vap-method-head-bg: var(--bg-hover);
+  --vap-method-head-text: var(--text-secondary);
+  --vap-method-options-bg: var(--bg-hover);
+  --vap-method-options-text: var(--text-secondary);
+  --vap-method-trace-bg: var(--bg-hover);
+  --vap-method-trace-text: var(--text-secondary);
+  --vap-method-post-bg: rgba(22, 163, 74, 0.12);
+  --vap-method-post-text: var(--success-color);
+  --vap-method-put-bg: rgba(217, 119, 6, 0.14);
+  --vap-method-put-text: #b45309;
+  --vap-method-patch-bg: rgba(217, 119, 6, 0.14);
+  --vap-method-patch-text: #b45309;
+  --vap-method-delete-bg: rgba(220, 38, 38, 0.14);
+  --vap-method-delete-text: #b91c1c;
+
+  /* HTTP status dots. */
+  --vap-status-2xx: var(--success-color);
+  --vap-status-3xx: var(--primary-color);
+  --vap-status-4xx: #d97706;
+  --vap-status-5xx: #dc2626;
+
+  /* JSON / syntax highlighting — readable in both themes via existing tokens. */
+  --vap-syntax-string: var(--primary-active);
+  --vap-syntax-number: #0e7490;
+  --vap-syntax-keyword: #7c3aed;
+  --vap-syntax-comment: var(--text-tertiary);
+  --vap-syntax-function: var(--text-primary);
+  --vap-syntax-flag: #7c3aed;
+  --vap-syntax-url: var(--primary-color);
+  --vap-syntax-identifier: var(--text-primary);
+  --vap-syntax-punct: var(--text-tertiary);
+}
+
+:where(.app-container.dark) {
+  --vap-bg: var(--bg-card);
+  --vap-bg-soft: var(--bg-base);
+  --vap-border: var(--border-base);
+  --vap-surface: var(--bg-base);
+  --vap-surface-border: var(--border-base);
+  --vap-text: var(--text-primary);
+  --vap-text-light: var(--text-tertiary);
+  --vap-code-bg: rgba(15, 23, 42, 0.7);
+  --vap-code-text: var(--text-primary);
+  --vap-success: #4ade80;
+  --vap-danger: #f87171;
+  --vap-warning: #fbbf24;
+  --vap-info: #93c5fd;
+  --vap-focus-ring: rgba(96, 165, 250, 0.35);
+
+  --vap-syntax-string: #ce9178;
+  --vap-syntax-number: #b5cea8;
+  --vap-syntax-keyword: #c586c0;
+  --vap-syntax-comment: #6a9955;
+  --vap-syntax-function: #dcdcaa;
+  --vap-syntax-flag: #c586c0;
+  --vap-syntax-url: #4ec9b0;
+  --vap-syntax-identifier: var(--text-primary);
+  --vap-syntax-punct: var(--text-tertiary);
+}
+</style>
 
 <style scoped>
 .docs-page {
@@ -791,5 +1087,114 @@ async function copyPath(operation) {
   .operation-heading h2 {
     font-size: 19px;
   }
+}
+.endpoint-alert {
+  padding: 12px clamp(14px, 3vw, 36px) 0;
+}
+
+.endpoint-alert-body {
+  display: grid;
+  gap: 10px;
+}
+
+.endpoint-alert-copy {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.endpoint-alert-links {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.endpoint-alert-links li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.endpoint-alert-links a {
+  color: var(--primary-color);
+  text-decoration: none;
+}
+
+.endpoint-alert-links a:hover {
+  text-decoration: underline;
+}
+
+.endpoint-alert-copy-btn {
+  justify-self: start;
+}
+
+.endpoint-group {
+  display: grid;
+  gap: 6px;
+}
+
+.endpoint-group + .endpoint-group {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-base);
+}
+
+.endpoint-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 2px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.endpoint-group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.try-it-out-section .try-it-out-hint {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  border: 1px dashed var(--border-base);
+  border-radius: 8px;
+  background: var(--bg-base);
+}
+
+.try-it-out-section .try-it-out-auth {
+  margin-bottom: 12px;
+}
+
+.try-it-out-host {
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--bg-base);
+}
+
+.try-it-out-host :deep(.vap-playground) {
+  background: transparent;
 }
 </style>

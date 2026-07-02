@@ -14,7 +14,7 @@
             <n-icon size="24">
               <extension-puzzle-outline />
             </n-icon>
-            {{ plugin?.name }}
+            {{ plugin?.display_name || plugin?.name }}
             <n-tag type="success" size="small" :bordered="false">
               {{ plugin?.version?.startsWith("v") ? plugin?.version : "v" + plugin?.version }}
             </n-tag>
@@ -165,6 +165,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import markedAlert from "marked-alert";
 import {
   NModal,
   NSpace,
@@ -186,6 +187,7 @@ import {
 import { storeToRefs } from "pinia";
 import { usePluginStore } from "../stores/plugins";
 import PluginComment from "./PluginComment.vue";
+import { githubRawUrl } from "../utils/github";
 import {
   ArrowBackOutline,
   DocumentTextOutline,
@@ -243,6 +245,7 @@ const {
   unlikePlugin,
 } = store;
 const MARKDOWN_FILE_EXTENSIONS = new Set([".md", ".markdown", ".mdown", ".mkd"]);
+marked.use(markedAlert());
 const IMAGE_FILE_EXTENSIONS = new Set([".avif", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"]);
 const TEXT_FILE_EXTENSIONS = new Set([
   ".cfg",
@@ -365,7 +368,9 @@ async function fetchReadme() {
         for (const filename of candidates) {
           try {
             const resp = await fetchWithTimeout(
-              `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filename}`,
+              githubRawUrl(
+                `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filename}`,
+              ),
               {
                 method: "GET",
                 headers: {
@@ -953,7 +958,9 @@ function createRepositoryTarget({ owner, repo, branch, path, hash = "", kind = "
     hash,
     browserUrl: `https://github.com/${owner}/${repo}/${browserMode}/${branch}${browserPath}${hash}`,
     rawUrl: cleanPath
-      ? `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encodedPath}${hash}`
+      ? githubRawUrl(
+          `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encodedPath}${hash}`,
+        )
       : "",
   };
 }
@@ -1059,7 +1066,9 @@ function githubBlobUrlToRaw(url) {
     const [owner, repo, , branch, ...pathParts] = parts;
     if (!owner || !repo || !branch || !pathParts.length) return "";
     const path = pathParts.map(encodeURIComponent).join("/");
-    return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}${parsed.search}${parsed.hash}`;
+    return githubRawUrl(
+      `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}${parsed.search}${parsed.hash}`,
+    );
   } catch (_) {
     return "";
   }
@@ -1487,6 +1496,64 @@ function confirmExternalOpen(url) {
   padding-left: 1em;
   border-left: 4px solid var(--n-border-color);
   color: var(--n-text-color-3);
+}
+
+.markdown-content :deep(.markdown-alert) {
+  margin: 1em 0;
+  padding: 12px 16px;
+  border-left: 4px solid var(--n-border-color);
+  border-radius: 0 8px 8px 0;
+  background: var(--n-color-hover, rgba(0, 0, 0, 0.03));
+}
+
+.markdown-content :deep(.markdown-alert-title) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 0.95em;
+  margin-bottom: 4px;
+}
+
+.markdown-content :deep(.markdown-alert-title svg) {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.markdown-content :deep(.markdown-alert-note) {
+  border-left-color: #0969da;
+}
+.markdown-content :deep(.markdown-alert-note .markdown-alert-title) {
+  color: #0969da;
+}
+
+.markdown-content :deep(.markdown-alert-tip) {
+  border-left-color: #1a7f37;
+}
+.markdown-content :deep(.markdown-alert-tip .markdown-alert-title) {
+  color: #1a7f37;
+}
+
+.markdown-content :deep(.markdown-alert-important) {
+  border-left-color: #8250df;
+}
+.markdown-content :deep(.markdown-alert-important .markdown-alert-title) {
+  color: #8250df;
+}
+
+.markdown-content :deep(.markdown-alert-warning) {
+  border-left-color: #9a6700;
+}
+.markdown-content :deep(.markdown-alert-warning .markdown-alert-title) {
+  color: #9a6700;
+}
+
+.markdown-content :deep(.markdown-alert-caution) {
+  border-left-color: #cf222e;
+}
+.markdown-content :deep(.markdown-alert-caution .markdown-alert-title) {
+  color: #cf222e;
 }
 
 .markdown-content :deep(ul),
