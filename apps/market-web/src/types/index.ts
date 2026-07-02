@@ -229,6 +229,9 @@ export interface SmtpConfig {
   password: string;
   from_address: string;
   ssl: boolean;
+  encryption: string;
+  auth_method: string;
+  validate_certs: boolean;
 }
 
 export interface CloudflareEmailConfig {

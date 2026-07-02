@@ -17,6 +17,8 @@ DEFAULT_SITE_DOCS_URL = "https://docs.astrbot.app/dev/star/plugin-new.html"
 DEFAULT_LOGIN_AGREEMENT_TEXT = ""
 DEFAULT_SERVICE_TERMS_TEXT = ""
 DEFAULT_EMAIL_PROVIDER = "disabled"
+DEFAULT_SMTP_AUTH_METHOD = "auto"
+DEFAULT_SMTP_ENCRYPTION = "auto"
 DEFAULT_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 60 * 60
 MIN_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 5 * 60
 MAX_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
@@ -68,6 +70,9 @@ class Settings:
     smtp_password: str
     smtp_from: str
     smtp_ssl: bool
+    smtp_encryption: str
+    smtp_auth_method: str
+    smtp_validate_certs: bool
     cloudflare_email_account_id: str
     cloudflare_email_api_token: str
     cloudflare_email_from: str
@@ -155,7 +160,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         smtp_username=merged.get("SMTP_USERNAME", ""),
         smtp_password=merged.get("SMTP_PASSWORD", ""),
         smtp_from=merged.get("SMTP_FROM", ""),
-        smtp_ssl=_bool(merged.get("SMTP_SSL")),
+        smtp_ssl=normalize_smtp_encryption(merged.get("SMTP_ENCRYPTION")) == "ssl_tls",
+        smtp_encryption=normalize_smtp_encryption(merged.get("SMTP_ENCRYPTION")),
+        smtp_auth_method=normalize_smtp_auth_method(
+            merged.get("SMTP_AUTH_METHOD", DEFAULT_SMTP_AUTH_METHOD)
+        ),
+        smtp_validate_certs=_bool(merged.get("SMTP_VALIDATE_CERTS"), default=True),
         cloudflare_email_account_id=merged.get("CLOUDFLARE_EMAIL_ACCOUNT_ID", ""),
         cloudflare_email_api_token=merged.get("CLOUDFLARE_EMAIL_API_TOKEN", ""),
         cloudflare_email_from=merged.get("CLOUDFLARE_EMAIL_FROM", ""),
@@ -225,3 +235,25 @@ def _bounded_int(value: str | None, default: int, minimum: int, maximum: int) ->
 def _email_provider(value: str) -> str:
     provider = str(value or "").strip().lower()
     return provider if provider in {"disabled", "smtp", "cloudflare"} else DEFAULT_EMAIL_PROVIDER
+
+
+def normalize_smtp_encryption(value: str | None) -> str:
+    encryption = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "auto": "auto",
+        "none": "none",
+        "plain": "none",
+        "starttls": "starttls",
+        "start_tls": "starttls",
+        "ssl": "ssl_tls",
+        "tls": "ssl_tls",
+        "ssl_tls": "ssl_tls",
+    }
+    if encryption:
+        return aliases.get(encryption, DEFAULT_SMTP_ENCRYPTION)
+    return DEFAULT_SMTP_ENCRYPTION
+
+
+def normalize_smtp_auth_method(value: str | None) -> str:
+    method = str(value or "").strip().lower().replace("-", "_")
+    return method if method in {"auto", "login", "plain", "none"} else DEFAULT_SMTP_AUTH_METHOD

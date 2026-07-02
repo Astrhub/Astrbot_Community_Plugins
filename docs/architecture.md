@@ -260,7 +260,7 @@ create_app(settings, store)
 `EMAIL_PROVIDER` 决定后端：
 
 - `disabled`（默认）— 发送即返回 400。
-- `smtp` — `smtplib`，端口 465 自动用 SMTP_SSL，支持 STARTTLS。
+- `smtp` — `aiosmtplib`，默认自动 STARTTLS/认证协商；可显式设置 `STARTTLS`、`SSL/TLS`、不加密、`AUTH LOGIN` 或 `AUTH PLAIN`。
 - `cloudflare` — Cloudflare Email Sending API `POST /accounts/{account_id}/email/sending/send`。
 
 `EMAIL_DAILY_LIMIT` 控制每日上限（内存计数器，按日清零）。详见 [security.md](security.md)。

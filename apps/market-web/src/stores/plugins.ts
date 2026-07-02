@@ -183,6 +183,9 @@ const createDefaultSetupConfig = (): SetupConfig => ({
       password: "",
       from_address: "",
       ssl: false,
+      encryption: "auto",
+      auth_method: "auto",
+      validate_certs: true,
     },
     cloudflare: {
       account_id: "",
@@ -1050,6 +1053,17 @@ export const usePluginStore = defineStore("plugins", () => {
     return Number(data.deleted || 0);
   }
 
+  function apiErrorMessage(data: unknown, fallback: string): string {
+    const payload = (data || {}) as Record<string, unknown>;
+    for (const key of ["error", "detail", "message"]) {
+      const value = payload[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (Array.isArray(value) && value.length) return JSON.stringify(value);
+      if (value && typeof value === "object") return JSON.stringify(value);
+    }
+    return fallback;
+  }
+
   async function saveSystemSettings(
     payload: Partial<SetupConfig>,
   ): Promise<Record<string, unknown>> {
@@ -1060,7 +1074,7 @@ export const usePluginStore = defineStore("plugins", () => {
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "保存设置失败");
+    if (!response.ok) throw new Error(apiErrorMessage(data, "保存设置失败"));
     if (data.settings?.site) {
       applySiteConfig({
         ...data.settings.site,
@@ -1079,7 +1093,7 @@ export const usePluginStore = defineStore("plugins", () => {
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "测试邮件发送失败");
+    if (!response.ok) throw new Error(apiErrorMessage(data, "测试邮件发送失败"));
     return data;
   }
 

@@ -374,6 +374,20 @@
                         :max="65535"
                       />
                     </n-form-item>
+                    <n-form-item label="连接加密" path="email.smtp.encryption">
+                      <n-select
+                        v-model:value="formData.email.smtp.encryption"
+                        :options="smtpEncryptionOptions"
+                      />
+                      <template #feedback>{{ smtpEncryptionFeedback }}</template>
+                    </n-form-item>
+                    <n-form-item label="认证方式" path="email.smtp.auth_method">
+                      <n-select
+                        v-model:value="formData.email.smtp.auth_method"
+                        :options="smtpAuthMethodOptions"
+                      />
+                      <template #feedback>{{ smtpAuthMethodFeedback }}</template>
+                    </n-form-item>
                     <n-form-item label="SMTP 账号" path="email.smtp.username">
                       <n-input v-model:value="formData.email.smtp.username" />
                     </n-form-item>
@@ -402,10 +416,16 @@
                         placeholder="noreply@example.com"
                       />
                     </n-form-item>
-                    <n-form-item label="SMTP SSL" path="email.smtp.ssl">
+                    <n-form-item
+                      v-if="formData.email.smtp.encryption !== 'none'"
+                      label="证书校验"
+                      path="email.smtp.validate_certs"
+                    >
                       <div class="switch-row">
-                        <n-switch v-model:value="formData.email.smtp.ssl" />
-                        <span>{{ formData.email.smtp.ssl ? "启用 SSL" : "不启用 SSL" }}</span>
+                        <n-switch v-model:value="formData.email.smtp.validate_certs" />
+                        <span>{{
+                          formData.email.smtp.validate_certs ? "验证 TLS 证书" : "不验证证书"
+                        }}</span>
                       </div>
                     </n-form-item>
                   </div>
@@ -615,11 +635,41 @@ const marketTokenPreviewRows = computed(() => {
     removing: removeIndexes.has(index),
   }));
 });
+const smtpEncryptionFeedback = computed(() => {
+  const messages: Record<string, string> = {
+    auto: "自动：服务器支持 STARTTLS 时自动升级，否则保持原连接。",
+    starttls: "常用于 587 端口，连接后升级到 TLS。",
+    ssl_tls: "常用于 465 端口，建立连接时直接使用 TLS。",
+    none: "仅用于本地或受信任内网 SMTP，不建议公网使用。",
+  };
+  return messages[formData.email.smtp.encryption] || messages.auto;
+});
+const smtpAuthMethodFeedback = computed(() => {
+  const messages: Record<string, string> = {
+    auto: "自动选择服务器支持的认证方式。",
+    login: "强制使用 AUTH LOGIN，适合部分 Outlook、SendCloud、Azure 通道。",
+    plain: "强制使用 AUTH PLAIN。",
+    none: "不发送认证命令，适合免认证内网 SMTP。",
+  };
+  return messages[formData.email.smtp.auth_method] || messages.auto;
+});
 
 const emailProviderOptions = [
   { label: "关闭邮件", value: "disabled" },
   { label: "SMTP", value: "smtp" },
   { label: "Cloudflare Email Service", value: "cloudflare" },
+];
+const smtpEncryptionOptions = [
+  { label: "自动", value: "auto" },
+  { label: "STARTTLS", value: "starttls" },
+  { label: "SSL/TLS", value: "ssl_tls" },
+  { label: "不加密", value: "none" },
+];
+const smtpAuthMethodOptions = [
+  { label: "自动", value: "auto" },
+  { label: "AUTH LOGIN", value: "login" },
+  { label: "AUTH PLAIN", value: "plain" },
+  { label: "不认证", value: "none" },
 ];
 
 const MASKED_SECRET = "********";
@@ -805,6 +855,9 @@ function createSettingsForm() {
         password_configured: false,
         from_address: "",
         ssl: false,
+        encryption: "auto",
+        auth_method: "auto",
+        validate_certs: true,
       },
       cloudflare: {
         account_id: "",
@@ -843,6 +896,7 @@ function applySettings(config = {}) {
   Object.assign(formData.email, config.email || {});
   Object.assign(formData.email.smtp, config.email?.smtp || {});
   Object.assign(formData.email.cloudflare, config.email?.cloudflare || {});
+  normalizeSmtpOptions();
   formData.email.smtp.password = "";
   formData.email.cloudflare.api_token = "";
 }
@@ -857,6 +911,7 @@ function normalizeNumberFields() {
   formData.email.verification_daily_limit_per_user = Number(
     formData.email.verification_daily_limit_per_user || 0,
   );
+  normalizeSmtpOptions();
 }
 
 function settingsPayload() {
@@ -868,6 +923,7 @@ function settingsPayload() {
   delete payload.market.api_token_configured;
   delete payload.market.api_token_previews;
   payload.email.smtp.password = secretInputPayload(payload.email.smtp.password);
+  payload.email.smtp.ssl = payload.email.smtp.encryption === "ssl_tls";
   delete payload.email.smtp.password_configured;
   payload.email.cloudflare.api_token = secretInputPayload(payload.email.cloudflare.api_token);
   delete payload.email.cloudflare.api_token_configured;
@@ -878,6 +934,31 @@ function settingsPayload() {
 function secretInputPayload(value) {
   const text = String(value || "").trim();
   return text === MASKED_SECRET ? "" : text;
+}
+
+function normalizeSmtpOptions() {
+  formData.email.smtp.encryption = normalizeSmtpEncryption(formData.email.smtp.encryption);
+  formData.email.smtp.auth_method = normalizeSmtpAuthMethod(formData.email.smtp.auth_method);
+  formData.email.smtp.validate_certs = formData.email.smtp.validate_certs !== false;
+  formData.email.smtp.ssl = formData.email.smtp.encryption === "ssl_tls";
+}
+
+function normalizeSmtpEncryption(value) {
+  const encryption = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace("-", "_");
+  if (["auto", "none", "starttls", "ssl_tls"].includes(encryption)) return encryption;
+  if (["ssl", "tls"].includes(encryption)) return "ssl_tls";
+  return "auto";
+}
+
+function normalizeSmtpAuthMethod(value) {
+  const method = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace("-", "_");
+  return ["auto", "login", "plain", "none"].includes(method) ? method : "auto";
 }
 
 function toggleMarketTokenRemoval(index) {

@@ -7,16 +7,16 @@ import html
 import inspect
 import json
 import re
-import smtplib
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
+import aiosmtplib
 import httpx
 import asyncpg
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
@@ -39,7 +39,13 @@ from .auth import (
     require_api_key,
     verify_password,
 )
-from .config import ApiKey, Settings, load_settings
+from .config import (
+    ApiKey,
+    Settings,
+    load_settings,
+    normalize_smtp_auth_method,
+    normalize_smtp_encryption,
+)
 from .env_file import write_env_file
 from .llms_txt import build_llms_txt
 from .openapi_filter import filter_openapi_by_role, role_for_openapi
@@ -141,11 +147,14 @@ SYSTEM_OPTION_KEYS = {
     "SITE_NAME",
     "SITE_SUBTITLE",
     "SMTP_FROM",
+    "SMTP_AUTH_METHOD",
+    "SMTP_ENCRYPTION",
     "SMTP_HOST",
     "SMTP_PASSWORD",
     "SMTP_PORT",
     "SMTP_SSL",
     "SMTP_USERNAME",
+    "SMTP_VALIDATE_CERTS",
     "WEB_URL",
 }
 PLUGIN_METADATA_SYNC_FIELDS = (
@@ -1815,7 +1824,20 @@ def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, s
         smtp_username=runtime_config.get("SMTP_USERNAME", settings.smtp_username),
         smtp_password=runtime_config.get("SMTP_PASSWORD", settings.smtp_password),
         smtp_from=runtime_config.get("SMTP_FROM", settings.smtp_from),
-        smtp_ssl=parse_bool(runtime_config.get("SMTP_SSL"), settings.smtp_ssl),
+        smtp_ssl=normalize_smtp_encryption(
+            runtime_config.get("SMTP_ENCRYPTION", settings.smtp_encryption)
+        )
+        == "ssl_tls",
+        smtp_encryption=normalize_smtp_encryption(
+            runtime_config.get("SMTP_ENCRYPTION", settings.smtp_encryption)
+        ),
+        smtp_auth_method=normalize_smtp_auth_method(
+            runtime_config.get("SMTP_AUTH_METHOD", settings.smtp_auth_method)
+        ),
+        smtp_validate_certs=parse_bool(
+            runtime_config.get("SMTP_VALIDATE_CERTS"),
+            settings.smtp_validate_certs,
+        ),
         cloudflare_email_account_id=runtime_config.get(
             "CLOUDFLARE_EMAIL_ACCOUNT_ID",
             settings.cloudflare_email_account_id,
@@ -2812,6 +2834,18 @@ def validate_system_settings_payload(
             payload.email.smtp.from_address
         ):
             raise error(400, "SMTP from address is invalid")
+        smtp_auth_method = normalize_smtp_auth_method(payload.email.smtp.auth_method)
+        existing_smtp_password = runtime_config.get("SMTP_PASSWORD") or (
+            settings.smtp_password if settings else ""
+        )
+        if smtp_auth_method in {"login", "plain"} and not payload.email.smtp.username:
+            raise error(400, "SMTP username is required for explicit authentication")
+        if (
+            smtp_auth_method != "none"
+            and payload.email.smtp.username
+            and not has_secret_value(payload.email.smtp.password, existing_smtp_password)
+        ):
+            raise error(400, "SMTP password is required when SMTP authentication is enabled")
     if payload.email.provider == "cloudflare":
         if not payload.email.cloudflare.account_id:
             raise error(400, "Cloudflare account ID is required")
@@ -2941,12 +2975,15 @@ def settings_config_values(settings: Settings) -> dict[str, str]:
         "SITE_ICON_URL": settings.site_icon_url,
         "SITE_NAME": settings.site_name,
         "SITE_SUBTITLE": settings.site_subtitle,
+        "SMTP_AUTH_METHOD": settings.smtp_auth_method,
+        "SMTP_ENCRYPTION": settings.smtp_encryption,
         "SMTP_FROM": settings.smtp_from,
         "SMTP_HOST": settings.smtp_host,
         "SMTP_PASSWORD": settings.smtp_password,
         "SMTP_PORT": str(settings.smtp_port),
-        "SMTP_SSL": serialize_bool(settings.smtp_ssl),
+        "SMTP_SSL": serialize_bool(settings.smtp_encryption == "ssl_tls"),
         "SMTP_USERNAME": settings.smtp_username,
+        "SMTP_VALIDATE_CERTS": serialize_bool(settings.smtp_validate_certs),
         "WEB_URL": settings.web_url,
     }
     if settings.database_url:
@@ -3159,17 +3196,29 @@ def build_market_settings(settings: Settings, runtime_config: dict[str, str]) ->
 
 
 def build_email_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, Any]:
+    smtp_port = parse_int(runtime_config.get("SMTP_PORT"), settings.smtp_port)
+    smtp_encryption = normalize_smtp_encryption(
+        runtime_config.get("SMTP_ENCRYPTION", settings.smtp_encryption)
+    )
     return {
         "provider": normalize_email_provider(
             runtime_config.get("EMAIL_PROVIDER", settings.email_provider)
         ),
         "smtp": {
             "host": runtime_config.get("SMTP_HOST", settings.smtp_host),
-            "port": parse_int(runtime_config.get("SMTP_PORT"), settings.smtp_port),
+            "port": smtp_port,
             "username": runtime_config.get("SMTP_USERNAME", settings.smtp_username),
             "password": runtime_config.get("SMTP_PASSWORD", settings.smtp_password),
             "from_address": runtime_config.get("SMTP_FROM", settings.smtp_from),
-            "ssl": parse_bool(runtime_config.get("SMTP_SSL"), settings.smtp_ssl),
+            "ssl": smtp_encryption == "ssl_tls",
+            "encryption": smtp_encryption,
+            "auth_method": normalize_smtp_auth_method(
+                runtime_config.get("SMTP_AUTH_METHOD", settings.smtp_auth_method)
+            ),
+            "validate_certs": parse_bool(
+                runtime_config.get("SMTP_VALIDATE_CERTS"),
+                settings.smtp_validate_certs,
+            ),
         },
         "cloudflare": {
             "account_id": runtime_config.get(
@@ -3333,17 +3382,23 @@ def runtime_values_from_email_settings(
     payload: Any,
     runtime_config: dict[str, str],
 ) -> dict[str, str]:
+    smtp_encryption = normalize_smtp_encryption(
+        payload.smtp.encryption,
+    )
     values = {
         "CLOUDFLARE_EMAIL_ACCOUNT_ID": payload.cloudflare.account_id,
         "CLOUDFLARE_EMAIL_FROM": payload.cloudflare.from_address,
         "EMAIL_DAILY_LIMIT": str(payload.daily_limit),
         "EMAIL_PROVIDER": payload.provider,
         "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER": str(payload.verification_daily_limit_per_user),
+        "SMTP_AUTH_METHOD": normalize_smtp_auth_method(payload.smtp.auth_method),
+        "SMTP_ENCRYPTION": smtp_encryption,
         "SMTP_FROM": payload.smtp.from_address,
         "SMTP_HOST": payload.smtp.host,
         "SMTP_PORT": str(payload.smtp.port),
-        "SMTP_SSL": serialize_bool(payload.smtp.ssl),
+        "SMTP_SSL": serialize_bool(smtp_encryption == "ssl_tls"),
         "SMTP_USERNAME": payload.smtp.username,
+        "SMTP_VALIDATE_CERTS": serialize_bool(payload.smtp.validate_certs),
     }
     if should_write_secret(payload.smtp.password):
         values["SMTP_PASSWORD"] = payload.smtp.password
@@ -3361,6 +3416,9 @@ def settings_from_system_settings(
     payload: SystemSettingsPayload,
     runtime_config: dict[str, str],
 ) -> Settings:
+    smtp_encryption = normalize_smtp_encryption(
+        payload.email.smtp.encryption,
+    )
     return current.with_updates(
         site_name=payload.site.name,
         site_icon_url=payload.site.icon_url,
@@ -3401,7 +3459,10 @@ def settings_from_system_settings(
             runtime_config.get("SMTP_PASSWORD") or current.smtp_password,
         ),
         smtp_from=payload.email.smtp.from_address,
-        smtp_ssl=payload.email.smtp.ssl,
+        smtp_ssl=smtp_encryption == "ssl_tls",
+        smtp_encryption=smtp_encryption,
+        smtp_auth_method=normalize_smtp_auth_method(payload.email.smtp.auth_method),
+        smtp_validate_certs=payload.email.smtp.validate_certs,
         cloudflare_email_account_id=payload.email.cloudflare.account_id,
         cloudflare_email_api_token=preserve_secret(
             payload.email.cloudflare.api_token,
@@ -3710,12 +3771,12 @@ async def send_email_via_smtp(
     if not settings.smtp_from:
         raise error(400, "SMTP from address is not configured")
     try:
-        await asyncio.to_thread(send_email_via_smtp_sync, settings, receiver, subject, content)
-    except smtplib.SMTPException as exc:
-        raise error(502, f"SMTP send failed: {exc}") from exc
+        await send_email_via_smtp_client(settings, receiver, subject, content)
+    except (aiosmtplib.errors.SMTPException, OSError, TimeoutError, ValueError) as exc:
+        raise error(502, smtp_error_message(exc)) from exc
 
 
-def send_email_via_smtp_sync(
+async def send_email_via_smtp_client(
     settings: Settings,
     receiver: str,
     subject: str,
@@ -3726,16 +3787,57 @@ def send_email_via_smtp_sync(
     message["To"] = receiver
     message["Subject"] = subject
     message.set_content(content)
-    if settings.smtp_ssl or settings.smtp_port == 465:
-        with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as client:
-            if settings.smtp_username:
-                client.login(settings.smtp_username, settings.smtp_password)
-            client.send_message(message)
+    smtp_encryption = normalize_smtp_encryption(
+        settings.smtp_encryption,
+    )
+    client_options = {
+        "hostname": settings.smtp_host,
+        "port": settings.smtp_port,
+        "timeout": 10,
+        "use_tls": smtp_encryption == "ssl_tls",
+        "validate_certs": settings.smtp_validate_certs,
+    }
+    if smtp_encryption == "starttls":
+        client_options["start_tls"] = True
+    elif smtp_encryption == "none":
+        client_options["start_tls"] = False
+    client = aiosmtplib.SMTP(**client_options)
+    try:
+        await client.connect()
+        await authenticate_smtp_client(client, settings)
+        await client.send_message(message)
+    finally:
+        if client.is_connected:
+            with suppress(aiosmtplib.errors.SMTPException, OSError, TimeoutError):
+                await client.quit()
+
+
+async def authenticate_smtp_client(client: aiosmtplib.SMTP, settings: Settings) -> None:
+    auth_method = normalize_smtp_auth_method(settings.smtp_auth_method)
+    if auth_method == "none" or not settings.smtp_username:
         return
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as client:
-        if settings.smtp_username:
-            client.login(settings.smtp_username, settings.smtp_password)
-        client.send_message(message)
+    if auth_method == "login":
+        await client.auth_login(settings.smtp_username, settings.smtp_password)
+        return
+    if auth_method == "plain":
+        await client.auth_plain(settings.smtp_username, settings.smtp_password)
+        return
+    await client.login(settings.smtp_username, settings.smtp_password)
+
+
+def smtp_error_message(exc: Exception) -> str:
+    details = safe_exception_message(exc)
+    if isinstance(exc, aiosmtplib.errors.SMTPResponseException):
+        code = getattr(exc, "code", "")
+        response = getattr(exc, "message", details)
+        details = f"{exc.__class__.__name__} code={code} message={response}"
+    elif isinstance(exc, aiosmtplib.errors.SMTPRecipientsRefused):
+        details = f"{exc.__class__.__name__}: {getattr(exc, 'recipients', details)}"
+    elif details:
+        details = f"{exc.__class__.__name__}: {details}"
+    else:
+        details = exc.__class__.__name__
+    return f"SMTP send failed: {details}"
 
 
 def serialize_bool(value: bool) -> str:

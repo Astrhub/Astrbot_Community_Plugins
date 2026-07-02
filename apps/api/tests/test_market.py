@@ -5,6 +5,7 @@ import base64
 import os
 from types import SimpleNamespace
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import pytest
 
@@ -155,6 +156,9 @@ def system_settings_payload() -> dict[str, object]:
                 "password": "",
                 "from_address": "",
                 "ssl": False,
+                "encryption": "auto",
+                "auth_method": "auto",
+                "validate_certs": True,
             },
             "cloudflare": {
                 "account_id": "cf-account",
@@ -1656,6 +1660,9 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     )
     payload = system_settings_payload()
     payload["email"]["smtp"]["password"] = "smtp-secret"
+    payload["email"]["smtp"]["encryption"] = "ssl_tls"
+    payload["email"]["smtp"]["auth_method"] = "login"
+    payload["email"]["smtp"]["validate_certs"] = False
     saved = client.put("/v1/admin/settings", json=payload)
     assert saved.status_code == 200
     settings = saved.json()["settings"]
@@ -1669,6 +1676,9 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert settings["market"]["metadata_sync_interval_seconds"] == 1800
     assert settings["email"]["smtp"]["password"] == main_module.MASKED_SECRET
     assert settings["email"]["smtp"]["password_configured"] is True
+    assert settings["email"]["smtp"]["encryption"] == "ssl_tls"
+    assert settings["email"]["smtp"]["auth_method"] == "login"
+    assert settings["email"]["smtp"]["validate_certs"] is False
     assert settings["email"]["cloudflare"]["api_token"] == main_module.MASKED_SECRET
     assert settings["email"]["cloudflare"]["api_token_configured"] is True
     assert client.get("/v1/site").json()["market"]["max_plugin_tags"] == 4
@@ -1676,7 +1686,10 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert stored_options["SITE_NAME"] == "AstrHub"
     assert "GITHUB_CLIENT_SECRET" not in stored_options
     assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
+    assert stored_options["SMTP_AUTH_METHOD"] == "login"
+    assert stored_options["SMTP_ENCRYPTION"] == "ssl_tls"
     assert stored_options["SMTP_PASSWORD"] == "smtp-secret"
+    assert stored_options["SMTP_VALIDATE_CERTS"] == "false"
     assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
     assert client.app.state.settings.github_client_secret == "env-github-secret"
     assert client.app.state.settings.smtp_password == "smtp-secret"
@@ -1694,7 +1707,10 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert "GITHUB_CLIENT_SECRET" not in stored_options
     assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
     assert stored_options["GITHUB_METADATA_SYNC_INTERVAL_SECONDS"] == "1800"
+    assert stored_options["SMTP_AUTH_METHOD"] == "auto"
+    assert stored_options["SMTP_ENCRYPTION"] == "auto"
     assert stored_options["SMTP_PASSWORD"] == "smtp-secret"
+    assert stored_options["SMTP_VALIDATE_CERTS"] == "true"
     assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
     assert stored_options["SITE_NAME"] == "AstrHub Updated"
     assert stored_options["WEB_URL"] == "https://market.example.com"
@@ -1792,6 +1808,26 @@ def test_redact_token_previews_masks_each_token_individually() -> None:
         "t*****b",
         "t*****c",
     ]
+
+
+def test_smtp_settings_default_to_auto_encryption() -> None:
+    default_settings = load_settings({"SMTP_PORT": "587"})
+    ssl_flag_settings = load_settings({"SMTP_PORT": "587", "SMTP_SSL": "true"})
+    ssl_port_settings = load_settings({"SMTP_PORT": "465"})
+    explicit_tls_settings = load_settings({"SMTP_PORT": "465", "SMTP_ENCRYPTION": "ssl_tls"})
+    explicit_plain_settings = load_settings(
+        {"SMTP_PORT": "465", "SMTP_ENCRYPTION": "none", "SMTP_AUTH_METHOD": "LOGIN"}
+    )
+
+    assert default_settings.smtp_encryption == "auto"
+    assert default_settings.smtp_validate_certs is True
+    assert ssl_flag_settings.smtp_encryption == "auto"
+    assert ssl_flag_settings.smtp_ssl is False
+    assert ssl_port_settings.smtp_encryption == "auto"
+    assert explicit_tls_settings.smtp_encryption == "ssl_tls"
+    assert explicit_tls_settings.smtp_ssl is True
+    assert explicit_plain_settings.smtp_encryption == "none"
+    assert explicit_plain_settings.smtp_auth_method == "login"
 
 
 def test_system_settings_reject_local_oauth_callback_when_enabled(tmp_path) -> None:
@@ -2278,6 +2314,130 @@ def test_cloudflare_email_errors_are_reported(monkeypatch) -> None:
     )
     assert response.status_code == 502
     assert response.json()["error"] == "Cloudflare email API error: [1000] bad sender"
+
+
+def test_smtp_email_uses_auto_encryption_by_default(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeSmtpClient:
+        is_connected = True
+
+        def __init__(self, **kwargs) -> None:
+            calls["options"] = kwargs
+
+        async def connect(self) -> None:
+            calls["connected"] = True
+
+        async def login(self, username: str, password: str) -> None:
+            calls["login"] = (username, password)
+
+        async def send_message(self, message) -> None:
+            calls["message"] = message
+
+        async def quit(self) -> None:
+            calls["quit"] = True
+
+    monkeypatch.setattr(main_module.aiosmtplib, "SMTP", FakeSmtpClient)
+    settings = load_settings(
+        {
+            "EMAIL_PROVIDER": "smtp",
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_PORT": "587",
+            "SMTP_USERNAME": "user",
+            "SMTP_PASSWORD": "secret",
+            "SMTP_FROM": "noreply@example.com",
+        }
+    )
+
+    asyncio.run(main_module.send_email_via_smtp(settings, "to@example.com", "Hello", "Body"))
+
+    assert calls["options"] == {
+        "hostname": "smtp.example.com",
+        "port": 587,
+        "timeout": 10,
+        "use_tls": False,
+        "validate_certs": True,
+    }
+    assert calls["login"] == ("user", "secret")
+    assert calls["message"]["Subject"] == "Hello"
+    assert calls["quit"] is True
+
+
+def test_smtp_email_can_force_auth_login(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeSmtpClient:
+        is_connected = True
+
+        def __init__(self, **kwargs) -> None:
+            calls["options"] = kwargs
+
+        async def connect(self) -> None:
+            pass
+
+        async def auth_login(self, username: str, password: str) -> None:
+            calls["auth_login"] = (username, password)
+
+        async def send_message(self, message) -> None:
+            calls["message"] = message
+
+        async def quit(self) -> None:
+            pass
+
+    monkeypatch.setattr(main_module.aiosmtplib, "SMTP", FakeSmtpClient)
+    settings = load_settings(
+        {
+            "EMAIL_PROVIDER": "smtp",
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_PORT": "465",
+            "SMTP_USERNAME": "user",
+            "SMTP_PASSWORD": "secret",
+            "SMTP_FROM": "noreply@example.com",
+            "SMTP_ENCRYPTION": "ssl_tls",
+            "SMTP_AUTH_METHOD": "login",
+            "SMTP_VALIDATE_CERTS": "false",
+        }
+    )
+
+    asyncio.run(main_module.send_email_via_smtp(settings, "to@example.com", "Hello", "Body"))
+
+    assert calls["options"] == {
+        "hostname": "smtp.example.com",
+        "port": 465,
+        "timeout": 10,
+        "use_tls": True,
+        "validate_certs": False,
+    }
+    assert calls["auth_login"] == ("user", "secret")
+
+
+def test_smtp_email_error_message_includes_server_response(monkeypatch) -> None:
+    class FakeSmtpClient:
+        is_connected = True
+
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def connect(self) -> None:
+            raise main_module.aiosmtplib.errors.SMTPResponseException(535, "auth failed")
+
+        async def quit(self) -> None:
+            pass
+
+    monkeypatch.setattr(main_module.aiosmtplib, "SMTP", FakeSmtpClient)
+    settings = load_settings(
+        {
+            "EMAIL_PROVIDER": "smtp",
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_FROM": "noreply@example.com",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(main_module.send_email_via_smtp(settings, "to@example.com", "Hello", "Body"))
+
+    assert exc_info.value.status_code == 502
+    assert "SMTPResponseException code=535 message=auth failed" in exc_info.value.detail
 
 
 def test_market_web_fallback_does_not_mask_api_routes(tmp_path, monkeypatch) -> None:
