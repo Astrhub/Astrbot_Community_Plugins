@@ -224,6 +224,7 @@ dist/
 # Local environment
 .env.local
 .DS_Store
+.codex/
 
 # Project runtime data
 apps/api/data/
