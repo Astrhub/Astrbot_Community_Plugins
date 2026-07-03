@@ -2248,6 +2248,63 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
     assert "Bearer github_pat_readonly" in seen_authorizations
 
 
+def test_submission_does_not_use_desc_as_display_name(monkeypatch) -> None:
+    client = make_client()
+    client.get("/v1/auth/debug-login?login=alice")
+    metadata_text = "\n".join(
+        [
+            "name: astrbot_plugin_demo",
+            "display_name: Repo metadata description",
+            "desc: Repo metadata description",
+        ]
+    )
+
+    class FakeResponse:
+        def __init__(self, status_code: int, data: dict[str, object]) -> None:
+            self.status_code = status_code
+            self._data = data
+            self.headers = {}
+
+        def json(self) -> dict[str, object]:
+            return self._data
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            if url == "https://api.github.com/repos/alice/astrbot_plugin_demo":
+                return FakeResponse(
+                    200,
+                    {
+                        "stargazers_count": 5,
+                        "updated_at": "2026-05-17T00:00:00Z",
+                        "default_branch": "main",
+                    },
+                )
+            if url.endswith("/contents/metadata.yml"):
+                return FakeResponse(
+                    200,
+                    {"content": base64.b64encode(metadata_text.encode()).decode()},
+                )
+            return FakeResponse(404, {})
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post("/v1/plugins/submissions", json=plugin_payload())
+    plugin = response.json()
+
+    assert response.status_code == 201
+    assert plugin["display_name"] == "Demo"
+    assert plugin["desc"] == "Repo metadata description"
+
+
 def test_github_metadata_uses_system_fallback_token(monkeypatch) -> None:
     seen_authorizations = []
 

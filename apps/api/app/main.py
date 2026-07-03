@@ -2561,7 +2561,7 @@ async def fetch_plugin_github_metadata(
             payload[field] = value
     if logo:
         payload["logo"] = logo
-    return payload
+    return drop_desc_display_name_alias(payload)
 
 
 async def fetch_github_repository(
@@ -2656,6 +2656,16 @@ def normalize_plugin_metadata_field(field: str, value: Any) -> Any:
             return [str(item).strip() for item in value if str(item).strip()]
         return []
     return value
+
+
+def metadata_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def drop_desc_display_name_alias(payload: dict[str, Any]) -> dict[str, Any]:
+    if metadata_text(payload.get("display_name")) == metadata_text(payload.get("desc")):
+        payload.pop("display_name", None)
+    return payload
 
 
 def github_sync_success_metadata(

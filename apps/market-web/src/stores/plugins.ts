@@ -109,6 +109,13 @@ export const normalizePluginTags = (value: unknown): string[] => {
   return Array.from(new Set(tags));
 };
 
+const normalizePluginText = (value: unknown): string => {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value).trim();
+  }
+  return "";
+};
+
 export const getPluginCategoryLabel = (value: unknown): string => {
   const category = normalizePluginCategory(value);
   return PLUGIN_CATEGORY_LABELS[category] || category;
@@ -492,11 +499,14 @@ export const usePluginStore = defineStore("plugins", () => {
 
   function normalizePluginItem(plugin: RawPlugin, index: number): Plugin {
     const id = plugin.id || plugin.name || `plugin-${index}`;
+    const name = normalizePluginText(plugin.name) || String(id);
+    const displayName = normalizePluginText(plugin.display_name);
+    const desc = normalizePluginText(plugin.desc);
     return {
       ...plugin,
       id,
-      name: plugin.name || String(id),
-      display_name: plugin.display_name || plugin.name || String(id),
+      name,
+      display_name: displayName && displayName !== desc ? displayName : name,
       version: plugin.version || "1.0.0",
       logo: plugin.logo || "",
       tags: normalizePluginTags(plugin.tags),
