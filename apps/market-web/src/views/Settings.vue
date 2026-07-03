@@ -416,6 +416,12 @@
                         placeholder="noreply@example.com"
                       />
                     </n-form-item>
+                    <n-form-item label="发件名称" path="email.smtp.from_name">
+                      <n-input
+                        v-model:value="formData.email.smtp.from_name"
+                        placeholder="Astrhub Plugins Market"
+                      />
+                    </n-form-item>
                     <n-form-item
                       v-if="formData.email.smtp.encryption !== 'none'"
                       label="证书校验"
@@ -456,6 +462,12 @@
                       <n-input
                         v-model:value="formData.email.cloudflare.from_address"
                         placeholder="noreply@mail.example.com"
+                      />
+                    </n-form-item>
+                    <n-form-item label="发件名称" path="email.cloudflare.from_name">
+                      <n-input
+                        v-model:value="formData.email.cloudflare.from_name"
+                        placeholder="Astrhub Plugins Market"
                       />
                     </n-form-item>
                   </div>
@@ -673,6 +685,7 @@ const smtpAuthMethodOptions = [
 ];
 
 const MASKED_SECRET = "********";
+const DEFAULT_EMAIL_FROM_NAME = "Astrhub Plugins Market";
 const requiredText = (text) => ({ required: true, message: text, trigger: "blur" });
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function isPublicHttpUrl(value) {
@@ -854,6 +867,7 @@ function createSettingsForm() {
         password: "",
         password_configured: false,
         from_address: "",
+        from_name: DEFAULT_EMAIL_FROM_NAME,
         ssl: false,
         encryption: "auto",
         auth_method: "auto",
@@ -864,6 +878,7 @@ function createSettingsForm() {
         api_token: "",
         api_token_configured: false,
         from_address: "",
+        from_name: DEFAULT_EMAIL_FROM_NAME,
       },
       daily_limit: 0,
       verification_daily_limit_per_user: 5,

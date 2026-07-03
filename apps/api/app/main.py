@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
@@ -43,6 +44,7 @@ from .auth import (
 )
 from .config import (
     ApiKey,
+    DEFAULT_EMAIL_FROM_NAME,
     Settings,
     load_settings,
     normalize_smtp_auth_method,
@@ -121,6 +123,7 @@ SYSTEM_OPTION_KEYS = {
     "CLOUDFLARE_EMAIL_ACCOUNT_ID",
     "CLOUDFLARE_EMAIL_API_TOKEN",
     "CLOUDFLARE_EMAIL_FROM",
+    "CLOUDFLARE_EMAIL_FROM_NAME",
     "EMAIL_DAILY_LIMIT",
     "EMAIL_PROVIDER",
     "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER",
@@ -149,6 +152,7 @@ SYSTEM_OPTION_KEYS = {
     "SITE_NAME",
     "SITE_SUBTITLE",
     "SMTP_FROM",
+    "SMTP_FROM_NAME",
     "SMTP_AUTH_METHOD",
     "SMTP_ENCRYPTION",
     "SMTP_HOST",
@@ -1813,6 +1817,9 @@ def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, s
         smtp_username=runtime_config.get("SMTP_USERNAME", settings.smtp_username),
         smtp_password=runtime_config.get("SMTP_PASSWORD", settings.smtp_password),
         smtp_from=runtime_config.get("SMTP_FROM", settings.smtp_from),
+        smtp_from_name=sender_name(
+            runtime_config.get("SMTP_FROM_NAME", settings.smtp_from_name),
+        ),
         smtp_ssl=normalize_smtp_encryption(
             runtime_config.get("SMTP_ENCRYPTION", settings.smtp_encryption)
         )
@@ -1838,6 +1845,12 @@ def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, s
         cloudflare_email_from=runtime_config.get(
             "CLOUDFLARE_EMAIL_FROM",
             settings.cloudflare_email_from,
+        ),
+        cloudflare_email_from_name=sender_name(
+            runtime_config.get(
+                "CLOUDFLARE_EMAIL_FROM_NAME",
+                settings.cloudflare_email_from_name,
+            ),
         ),
         email_daily_limit=parse_int(
             runtime_config.get("EMAIL_DAILY_LIMIT"),
@@ -3117,6 +3130,7 @@ def settings_config_values(settings: Settings) -> dict[str, str]:
         "CLOUDFLARE_EMAIL_ACCOUNT_ID": settings.cloudflare_email_account_id,
         "CLOUDFLARE_EMAIL_API_TOKEN": settings.cloudflare_email_api_token,
         "CLOUDFLARE_EMAIL_FROM": settings.cloudflare_email_from,
+        "CLOUDFLARE_EMAIL_FROM_NAME": settings.cloudflare_email_from_name,
         "CORE_ADMIN_PASSWORD_HASH": settings.core_admin_password_hash,
         "CORE_ADMIN_USERNAME": settings.core_admin_username,
         "DATABASE_URL": settings.database_url,
@@ -3156,6 +3170,7 @@ def settings_config_values(settings: Settings) -> dict[str, str]:
         "SMTP_AUTH_METHOD": settings.smtp_auth_method,
         "SMTP_ENCRYPTION": settings.smtp_encryption,
         "SMTP_FROM": settings.smtp_from,
+        "SMTP_FROM_NAME": settings.smtp_from_name,
         "SMTP_HOST": settings.smtp_host,
         "SMTP_PASSWORD": settings.smtp_password,
         "SMTP_PORT": str(settings.smtp_port),
@@ -3388,6 +3403,9 @@ def build_email_settings(settings: Settings, runtime_config: dict[str, str]) -> 
             "username": runtime_config.get("SMTP_USERNAME", settings.smtp_username),
             "password": runtime_config.get("SMTP_PASSWORD", settings.smtp_password),
             "from_address": runtime_config.get("SMTP_FROM", settings.smtp_from),
+            "from_name": sender_name(
+                runtime_config.get("SMTP_FROM_NAME", settings.smtp_from_name),
+            ),
             "ssl": smtp_encryption == "ssl_tls",
             "encryption": smtp_encryption,
             "auth_method": normalize_smtp_auth_method(
@@ -3407,6 +3425,12 @@ def build_email_settings(settings: Settings, runtime_config: dict[str, str]) -> 
             ),
             "from_address": runtime_config.get(
                 "CLOUDFLARE_EMAIL_FROM", settings.cloudflare_email_from
+            ),
+            "from_name": sender_name(
+                runtime_config.get(
+                    "CLOUDFLARE_EMAIL_FROM_NAME",
+                    settings.cloudflare_email_from_name,
+                ),
             ),
         },
         "daily_limit": parse_int(
@@ -3566,12 +3590,14 @@ def runtime_values_from_email_settings(
     values = {
         "CLOUDFLARE_EMAIL_ACCOUNT_ID": payload.cloudflare.account_id,
         "CLOUDFLARE_EMAIL_FROM": payload.cloudflare.from_address,
+        "CLOUDFLARE_EMAIL_FROM_NAME": payload.cloudflare.from_name,
         "EMAIL_DAILY_LIMIT": str(payload.daily_limit),
         "EMAIL_PROVIDER": payload.provider,
         "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER": str(payload.verification_daily_limit_per_user),
         "SMTP_AUTH_METHOD": normalize_smtp_auth_method(payload.smtp.auth_method),
         "SMTP_ENCRYPTION": smtp_encryption,
         "SMTP_FROM": payload.smtp.from_address,
+        "SMTP_FROM_NAME": payload.smtp.from_name,
         "SMTP_HOST": payload.smtp.host,
         "SMTP_PORT": str(payload.smtp.port),
         "SMTP_SSL": serialize_bool(smtp_encryption == "ssl_tls"),
@@ -3637,6 +3663,7 @@ def settings_from_system_settings(
             runtime_config.get("SMTP_PASSWORD") or current.smtp_password,
         ),
         smtp_from=payload.email.smtp.from_address,
+        smtp_from_name=sender_name(payload.email.smtp.from_name),
         smtp_ssl=smtp_encryption == "ssl_tls",
         smtp_encryption=smtp_encryption,
         smtp_auth_method=normalize_smtp_auth_method(payload.email.smtp.auth_method),
@@ -3647,6 +3674,7 @@ def settings_from_system_settings(
             runtime_config.get("CLOUDFLARE_EMAIL_API_TOKEN") or current.cloudflare_email_api_token,
         ),
         cloudflare_email_from=payload.email.cloudflare.from_address,
+        cloudflare_email_from_name=sender_name(payload.email.cloudflare.from_name),
         email_daily_limit=payload.email.daily_limit,
         email_verification_daily_limit_per_user=payload.email.verification_daily_limit_per_user,
     )
@@ -3841,6 +3869,14 @@ def normalize_email_provider(value: str) -> str:
     return provider if provider in {"disabled", "smtp", "cloudflare"} else "disabled"
 
 
+def sender_name(value: Any) -> str:
+    return str(value or "").strip() or DEFAULT_EMAIL_FROM_NAME
+
+
+def formatted_sender(address: str, name: Any) -> str:
+    return formataddr((sender_name(name), address))
+
+
 async def send_email(
     app: FastAPI,
     settings: Settings,
@@ -3897,7 +3933,10 @@ async def send_email_via_cloudflare(
         raise error(400, "Cloudflare from address is not configured")
     payload = {
         "to": receiver,
-        "from": settings.cloudflare_email_from,
+        "from": {
+            "email": settings.cloudflare_email_from,
+            "name": sender_name(settings.cloudflare_email_from_name),
+        },
         "subject": subject[:998],
         "text": content,
         "html": html.escape(content).replace("\n", "<br>"),
@@ -3963,7 +4002,7 @@ async def send_email_via_smtp_client(
     content: str,
 ) -> None:
     message = EmailMessage()
-    message["From"] = settings.smtp_from
+    message["From"] = formatted_sender(settings.smtp_from, settings.smtp_from_name)
     message["To"] = receiver
     message["Subject"] = subject
     message.set_content(content)

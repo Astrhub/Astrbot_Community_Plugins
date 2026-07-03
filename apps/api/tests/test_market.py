@@ -163,6 +163,7 @@ def system_settings_payload() -> dict[str, object]:
                 "username": "",
                 "password": "",
                 "from_address": "",
+                "from_name": "Astrhub Plugins Market",
                 "ssl": False,
                 "encryption": "auto",
                 "auth_method": "auto",
@@ -172,6 +173,7 @@ def system_settings_payload() -> dict[str, object]:
                 "account_id": "cf-account",
                 "api_token": "cf-token",
                 "from_address": "noreply@example.com",
+                "from_name": "AstrHub Notice",
             },
             "daily_limit": 10,
             "verification_daily_limit_per_user": 3,
@@ -1920,8 +1922,10 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert settings["email"]["smtp"]["encryption"] == "ssl_tls"
     assert settings["email"]["smtp"]["auth_method"] == "login"
     assert settings["email"]["smtp"]["validate_certs"] is False
+    assert settings["email"]["smtp"]["from_name"] == "Astrhub Plugins Market"
     assert settings["email"]["cloudflare"]["api_token"] == main_module.MASKED_SECRET
     assert settings["email"]["cloudflare"]["api_token_configured"] is True
+    assert settings["email"]["cloudflare"]["from_name"] == "AstrHub Notice"
     assert client.get("/v1/site").json()["market"]["max_plugin_tags"] == 4
     stored_options = client.app.state.store.list_options()
     assert stored_options["SITE_NAME"] == "AstrHub"
@@ -1929,9 +1933,11 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     assert stored_options["GITHUB_API_TOKEN"] == "system-github-token"
     assert stored_options["SMTP_AUTH_METHOD"] == "login"
     assert stored_options["SMTP_ENCRYPTION"] == "ssl_tls"
+    assert stored_options["SMTP_FROM_NAME"] == "Astrhub Plugins Market"
     assert stored_options["SMTP_PASSWORD"] == "smtp-secret"
     assert stored_options["SMTP_VALIDATE_CERTS"] == "false"
     assert stored_options["CLOUDFLARE_EMAIL_API_TOKEN"] == "cf-token"
+    assert stored_options["CLOUDFLARE_EMAIL_FROM_NAME"] == "AstrHub Notice"
     assert client.app.state.settings.github_client_secret == "env-github-secret"
     assert client.app.state.settings.smtp_password == "smtp-secret"
     env_file_before = (tmp_path / ".env").read_text()
@@ -2558,7 +2564,7 @@ def test_cloudflare_email_test_uses_official_sending_endpoint(monkeypatch) -> No
     assert requests[0]["headers"]["authorization"] == "Bearer token"
     assert requests[0]["json"] == {
         "to": "user@example.com",
-        "from": "noreply@example.com",
+        "from": {"email": "noreply@example.com", "name": "Astrhub Plugins Market"},
         "subject": "Test",
         "text": "Hello",
         "html": "Hello",
@@ -2657,6 +2663,7 @@ def test_smtp_email_uses_auto_encryption_by_default(monkeypatch) -> None:
         "validate_certs": True,
     }
     assert calls["login"] == ("user", "secret")
+    assert calls["message"]["From"] == "Astrhub Plugins Market <noreply@example.com>"
     assert calls["message"]["Subject"] == "Hello"
     assert calls["quit"] is True
 
@@ -2691,6 +2698,7 @@ def test_smtp_email_can_force_auth_login(monkeypatch) -> None:
             "SMTP_USERNAME": "user",
             "SMTP_PASSWORD": "secret",
             "SMTP_FROM": "noreply@example.com",
+            "SMTP_FROM_NAME": "Custom Sender",
             "SMTP_ENCRYPTION": "ssl_tls",
             "SMTP_AUTH_METHOD": "login",
             "SMTP_VALIDATE_CERTS": "false",
@@ -2707,6 +2715,7 @@ def test_smtp_email_can_force_auth_login(monkeypatch) -> None:
         "validate_certs": False,
     }
     assert calls["auth_login"] == ("user", "secret")
+    assert calls["message"]["From"] == "Custom Sender <noreply@example.com>"
 
 
 def test_smtp_email_error_message_includes_server_response(monkeypatch) -> None:

@@ -238,6 +238,7 @@ export interface SmtpConfig {
   username: string;
   password: string;
   from_address: string;
+  from_name: string;
   ssl: boolean;
   encryption: string;
   auth_method: string;
@@ -248,6 +249,7 @@ export interface CloudflareEmailConfig {
   account_id: string;
   api_token: string;
   from_address: string;
+  from_name: string;
 }
 
 export interface DbHostConfig {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .config import normalize_smtp_auth_method, normalize_smtp_encryption
+from .config import DEFAULT_EMAIL_FROM_NAME, normalize_smtp_auth_method, normalize_smtp_encryption
 
 
 class PluginSubmission(BaseModel):
@@ -316,12 +316,21 @@ class SmtpSetupConfig(BaseModel):
     username: str = ""
     password: str = ""
     from_address: str = ""
+    from_name: str = DEFAULT_EMAIL_FROM_NAME
     ssl: bool = False
     encryption: str = ""
     auth_method: str = "auto"
     validate_certs: bool = True
 
-    @field_validator("host", "username", "password", "from_address", "encryption", "auth_method")
+    @field_validator(
+        "host",
+        "username",
+        "password",
+        "from_address",
+        "from_name",
+        "encryption",
+        "auth_method",
+    )
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
@@ -338,8 +347,9 @@ class CloudflareEmailSetupConfig(BaseModel):
     account_id: str = ""
     api_token: str = ""
     from_address: str = ""
+    from_name: str = DEFAULT_EMAIL_FROM_NAME
 
-    @field_validator("account_id", "api_token", "from_address")
+    @field_validator("account_id", "api_token", "from_address", "from_name")
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
