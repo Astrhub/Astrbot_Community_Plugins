@@ -58,14 +58,18 @@ const formData = reactive({
   notify_replies: true,
   notify_likes: true,
   notify_unlist: true,
-  email_notify_plugin_review: false,
+  email_notify_plugin_review: true,
+  email_notify_pending_review: true,
   email_notify_comments: false,
   email_notify_replies: false,
   email_notify_likes: false,
-  email_notify_unlist: false,
+  email_notify_unlist: true,
 });
 
 const maxPluginTags = computed(() => Number(siteConfig.value.market?.max_plugin_tags || 8));
+const isAdminUser = computed(() =>
+  ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
+);
 
 function applyCurrentUser() {
   formData.github_name = currentUser.value?.github_name || "";
@@ -78,11 +82,12 @@ function applyCurrentUser() {
   formData.notify_replies = currentUser.value?.notify_replies !== false;
   formData.notify_likes = currentUser.value?.notify_likes !== false;
   formData.notify_unlist = currentUser.value?.notify_unlist !== false;
-  formData.email_notify_plugin_review = currentUser.value?.email_notify_plugin_review === true;
+  formData.email_notify_plugin_review = currentUser.value?.email_notify_plugin_review !== false;
+  formData.email_notify_pending_review = currentUser.value?.email_notify_pending_review !== false;
   formData.email_notify_comments = currentUser.value?.email_notify_comments === true;
   formData.email_notify_replies = currentUser.value?.email_notify_replies === true;
   formData.email_notify_likes = currentUser.value?.email_notify_likes === true;
-  formData.email_notify_unlist = currentUser.value?.email_notify_unlist === true;
+  formData.email_notify_unlist = currentUser.value?.email_notify_unlist !== false;
 }
 
 async function saveProfile() {
@@ -116,6 +121,7 @@ async function saveNotificationPreferences() {
       notify_likes: formData.notify_likes,
       notify_unlist: formData.notify_unlist,
       email_notify_plugin_review: formData.email_notify_plugin_review,
+      email_notify_pending_review: formData.email_notify_pending_review,
       email_notify_comments: formData.email_notify_comments,
       email_notify_replies: formData.email_notify_replies,
       email_notify_likes: formData.email_notify_likes,
@@ -317,11 +323,13 @@ onMounted(async () => {
                 v-model:notify-likes="formData.notify_likes"
                 v-model:notify-unlist="formData.notify_unlist"
                 v-model:email-notify-plugin-review="formData.email_notify_plugin_review"
+                v-model:email-notify-pending-review="formData.email_notify_pending_review"
                 v-model:email-notify-comments="formData.email_notify_comments"
                 v-model:email-notify-replies="formData.email_notify_replies"
                 v-model:email-notify-likes="formData.email_notify_likes"
                 v-model:email-notify-unlist="formData.email_notify_unlist"
                 :fallback-email="currentUser?.github_email || ''"
+                :show-pending-review-email="isAdminUser"
                 :saving="savingNotifications"
                 @save="saveNotificationPreferences"
               />

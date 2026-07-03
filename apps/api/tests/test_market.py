@@ -260,11 +260,12 @@ def test_user_notification_preferences_default_on_and_update() -> None:
     assert login.json()["user"]["notify_replies"] is True
     assert login.json()["user"]["notify_likes"] is True
     assert login.json()["user"]["notify_unlist"] is True
-    assert login.json()["user"]["email_notify_plugin_review"] is False
+    assert login.json()["user"]["email_notify_plugin_review"] is True
+    assert login.json()["user"]["email_notify_pending_review"] is True
     assert login.json()["user"]["email_notify_comments"] is False
     assert login.json()["user"]["email_notify_replies"] is False
     assert login.json()["user"]["email_notify_likes"] is False
-    assert login.json()["user"]["email_notify_unlist"] is False
+    assert login.json()["user"]["email_notify_unlist"] is True
 
     response = client.patch(
         "/v1/me/profile",
@@ -276,6 +277,7 @@ def test_user_notification_preferences_default_on_and_update() -> None:
             "notify_likes": False,
             "notify_unlist": False,
             "email_notify_plugin_review": True,
+            "email_notify_pending_review": False,
             "email_notify_comments": True,
             "email_notify_replies": True,
             "email_notify_likes": True,
@@ -291,6 +293,7 @@ def test_user_notification_preferences_default_on_and_update() -> None:
     assert response.json()["notify_likes"] is False
     assert response.json()["notify_unlist"] is False
     assert response.json()["email_notify_plugin_review"] is True
+    assert response.json()["email_notify_pending_review"] is False
     assert response.json()["email_notify_comments"] is True
     assert response.json()["email_notify_replies"] is True
     assert response.json()["email_notify_likes"] is True
@@ -303,6 +306,7 @@ def test_user_notification_preferences_default_on_and_update() -> None:
     assert stored["notify_likes"] is False
     assert stored["notify_unlist"] is False
     assert stored["email_notify_plugin_review"] is True
+    assert stored["email_notify_pending_review"] is False
     assert stored["email_notify_comments"] is True
     assert stored["email_notify_replies"] is True
     assert stored["email_notify_likes"] is True
@@ -1379,7 +1383,7 @@ def test_pending_review_email_is_sent_to_one_opted_in_admin(monkeypatch) -> None
         core["id"],
         {
             "notification_email": "core@example.com",
-            "email_notify_plugin_review": True,
+            "email_notify_pending_review": True,
         },
     )
     store.update_user_profile(
@@ -1387,6 +1391,7 @@ def test_pending_review_email_is_sent_to_one_opted_in_admin(monkeypatch) -> None
         {
             "notification_email": "admin@example.com",
             "email_notify_plugin_review": True,
+            "email_notify_pending_review": False,
         },
     )
 
@@ -1400,7 +1405,7 @@ def test_pending_review_email_is_sent_to_one_opted_in_admin(monkeypatch) -> None
 
     assert pending.status_code == 201
     assert len(sent) == 1
-    assert sent[0]["receiver"] in {"core@example.com", "admin@example.com"}
+    assert sent[0]["receiver"] == "core@example.com"
     assert sent[0]["subject"] == "AstrBot Community Plugins - 有新的插件待审查"
     assert "astrbot_plugin_pending_b" in sent[0]["content"]
 
@@ -2808,11 +2813,12 @@ def test_postgres_schema_uses_constraints_jsonb_and_indexes() -> None:
     assert "notify_replies boolean NOT NULL DEFAULT true" in SCHEMA_SQL
     assert "notify_likes boolean NOT NULL DEFAULT true" in SCHEMA_SQL
     assert "notify_unlist boolean NOT NULL DEFAULT true" in SCHEMA_SQL
-    assert "email_notify_plugin_review boolean NOT NULL DEFAULT false" in SCHEMA_SQL
+    assert "email_notify_plugin_review boolean NOT NULL DEFAULT true" in SCHEMA_SQL
+    assert "email_notify_pending_review boolean NOT NULL DEFAULT true" in SCHEMA_SQL
     assert "email_notify_comments boolean NOT NULL DEFAULT false" in SCHEMA_SQL
     assert "email_notify_replies boolean NOT NULL DEFAULT false" in SCHEMA_SQL
     assert "email_notify_likes boolean NOT NULL DEFAULT false" in SCHEMA_SQL
-    assert "email_notify_unlist boolean NOT NULL DEFAULT false" in SCHEMA_SQL
+    assert "email_notify_unlist boolean NOT NULL DEFAULT true" in SCHEMA_SQL
     assert "muted_reason text NOT NULL DEFAULT ''" in SCHEMA_SQL
     assert "likes integer NOT NULL DEFAULT 0" in SCHEMA_SQL
     assert "read boolean NOT NULL DEFAULT false" in SCHEMA_SQL

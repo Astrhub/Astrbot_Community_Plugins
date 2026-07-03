@@ -2100,7 +2100,7 @@ async def notify_pending_plugin_review(
         user
         for user in admins
         if normalize_role(user.get("role")) in {Role.CORE_ADMIN, Role.ADMIN}
-        and notification_preference_enabled(user, "email_notify_plugin_review")
+        and notification_preference_enabled(user, "email_notify_pending_review")
         and is_valid_email(notification_email_address(user))
     ]
     if not candidates:
@@ -2109,7 +2109,7 @@ async def notify_pending_plugin_review(
     await send_preference_email(
         request,
         recipient,
-        "email_notify_plugin_review",
+        "email_notify_pending_review",
         "有新的插件待审查",
         f"{user_display_name(submitter)} 提交了 {plugin_display_name(plugin)}"
         f"（{plugin.get('name') or plugin.get('id')}），请进入插件审核处理。",

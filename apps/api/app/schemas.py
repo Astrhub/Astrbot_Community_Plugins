@@ -105,6 +105,7 @@ class UserProfileUpdate(BaseModel):
     notify_likes: bool | None = None
     notify_unlist: bool | None = None
     email_notify_plugin_review: bool | None = None
+    email_notify_pending_review: bool | None = None
     email_notify_comments: bool | None = None
     email_notify_replies: bool | None = None
     email_notify_likes: bool | None = None

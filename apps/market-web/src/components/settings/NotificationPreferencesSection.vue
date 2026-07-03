@@ -16,17 +16,25 @@ const notifyLikes = defineModel("notifyLikes", { type: Boolean, default: true })
 const notifyUnlist = defineModel("notifyUnlist", { type: Boolean, default: true });
 const emailNotifyPluginReview = defineModel("emailNotifyPluginReview", {
   type: Boolean,
-  default: false,
+  default: true,
+});
+const emailNotifyPendingReview = defineModel("emailNotifyPendingReview", {
+  type: Boolean,
+  default: true,
 });
 const emailNotifyComments = defineModel("emailNotifyComments", { type: Boolean, default: false });
 const emailNotifyReplies = defineModel("emailNotifyReplies", { type: Boolean, default: false });
 const emailNotifyLikes = defineModel("emailNotifyLikes", { type: Boolean, default: false });
-const emailNotifyUnlist = defineModel("emailNotifyUnlist", { type: Boolean, default: false });
+const emailNotifyUnlist = defineModel("emailNotifyUnlist", { type: Boolean, default: true });
 
 defineProps({
   fallbackEmail: {
     type: String,
     default: "",
+  },
+  showPendingReviewEmail: {
+    type: Boolean,
+    default: false,
   },
   saving: {
     type: Boolean,
@@ -134,10 +142,20 @@ const emit = defineEmits(["save"]);
             <NIcon><MailOutline /></NIcon>
           </div>
           <div class="preference-copy">
-            <strong>审查相关</strong>
-            <span>审核结果和管理员待审查提醒发邮件</span>
+            <strong>审核结果</strong>
+            <span>默认开启，插件审核通过或自动审核通过时发邮件</span>
           </div>
           <NSwitch v-model:value="emailNotifyPluginReview" />
+        </div>
+        <div v-if="showPendingReviewEmail" class="preference-row">
+          <div class="preference-icon">
+            <NIcon><MailOutline /></NIcon>
+          </div>
+          <div class="preference-copy">
+            <strong>待审查提醒</strong>
+            <span>默认开启，有新的插件待审查时随机提醒一名管理员</span>
+          </div>
+          <NSwitch v-model:value="emailNotifyPendingReview" />
         </div>
         <div class="preference-row">
           <div class="preference-icon">
@@ -175,7 +193,7 @@ const emit = defineEmits(["save"]);
           </div>
           <div class="preference-copy">
             <strong>下架</strong>
-            <span>插件被管理员下架时发邮件</span>
+            <span>默认开启，插件被管理员下架时发邮件</span>
           </div>
           <NSwitch v-model:value="emailNotifyUnlist" />
         </div>

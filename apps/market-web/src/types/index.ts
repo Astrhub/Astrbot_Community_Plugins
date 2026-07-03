@@ -131,6 +131,7 @@ export interface User {
   notify_likes?: boolean;
   notify_unlist?: boolean;
   email_notify_plugin_review?: boolean;
+  email_notify_pending_review?: boolean;
   email_notify_comments?: boolean;
   email_notify_replies?: boolean;
   email_notify_likes?: boolean;

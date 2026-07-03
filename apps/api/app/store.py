@@ -54,6 +54,7 @@ USER_PROFILE_FIELDS = (
     "notify_likes",
     "notify_unlist",
     "email_notify_plugin_review",
+    "email_notify_pending_review",
     "email_notify_comments",
     "email_notify_replies",
     "email_notify_likes",
@@ -856,13 +857,14 @@ class InMemoryMarketStore:
             "notify_replies": coerce_bool(user.get("notify_replies"), True),
             "notify_likes": coerce_bool(user.get("notify_likes"), True),
             "notify_unlist": coerce_bool(user.get("notify_unlist"), True),
-            "email_notify_plugin_review": coerce_bool(
-                user.get("email_notify_plugin_review"), False
+            "email_notify_plugin_review": coerce_bool(user.get("email_notify_plugin_review"), True),
+            "email_notify_pending_review": coerce_bool(
+                user.get("email_notify_pending_review"), True
             ),
             "email_notify_comments": coerce_bool(user.get("email_notify_comments"), False),
             "email_notify_replies": coerce_bool(user.get("email_notify_replies"), False),
             "email_notify_likes": coerce_bool(user.get("email_notify_likes"), False),
-            "email_notify_unlist": coerce_bool(user.get("email_notify_unlist"), False),
+            "email_notify_unlist": coerce_bool(user.get("email_notify_unlist"), True),
             "github_name": user.get("github_name")
             or user.get("name")
             or user.get("github_login")
@@ -959,11 +961,12 @@ CREATE TABLE IF NOT EXISTS market_users (
     notify_replies boolean NOT NULL DEFAULT true,
     notify_likes boolean NOT NULL DEFAULT true,
     notify_unlist boolean NOT NULL DEFAULT true,
-    email_notify_plugin_review boolean NOT NULL DEFAULT false,
+    email_notify_plugin_review boolean NOT NULL DEFAULT true,
+    email_notify_pending_review boolean NOT NULL DEFAULT true,
     email_notify_comments boolean NOT NULL DEFAULT false,
     email_notify_replies boolean NOT NULL DEFAULT false,
     email_notify_likes boolean NOT NULL DEFAULT false,
-    email_notify_unlist boolean NOT NULL DEFAULT false,
+    email_notify_unlist boolean NOT NULL DEFAULT true,
     role text NOT NULL CHECK (role IN ('core_admin', 'admin', 'user')),
     muted_until timestamptz,
     muted_by text REFERENCES market_users(id) ON DELETE SET NULL,
@@ -1174,7 +1177,17 @@ class PgRedisMarketStore(InMemoryMarketStore):
             )
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
-                "email_notify_plugin_review boolean NOT NULL DEFAULT false"
+                "email_notify_plugin_review boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ALTER COLUMN email_notify_plugin_review SET DEFAULT true"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "email_notify_pending_review boolean NOT NULL DEFAULT true"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ALTER COLUMN email_notify_pending_review SET DEFAULT true"
             )
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
@@ -1190,8 +1203,12 @@ class PgRedisMarketStore(InMemoryMarketStore):
             )
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
-                "email_notify_unlist boolean NOT NULL DEFAULT false"
+                "email_notify_unlist boolean NOT NULL DEFAULT true"
             )
+            await connection.execute(
+                "ALTER TABLE market_users ALTER COLUMN email_notify_unlist SET DEFAULT true"
+            )
+            await self._apply_email_notification_defaults_migration(connection)
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS muted_reason text "
                 "NOT NULL DEFAULT ''"
@@ -1204,6 +1221,36 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 "ALTER TABLE market_notifications ADD COLUMN IF NOT EXISTS read boolean "
                 "NOT NULL DEFAULT false"
             )
+
+    async def _apply_email_notification_defaults_migration(
+        self,
+        connection: asyncpg.Connection,
+    ) -> None:
+        migration_key = "migration_email_notification_defaults_20260704"
+        applied = await connection.fetchval(
+            "SELECT option_value FROM market_options WHERE option_key = $1",
+            migration_key,
+        )
+        if applied == "done":
+            return
+        await connection.execute(
+            """
+            UPDATE market_users
+               SET email_notify_plugin_review = true,
+                   email_notify_pending_review = true,
+                   email_notify_unlist = true
+            """
+        )
+        await connection.execute(
+            """
+            INSERT INTO market_options (option_key, option_value)
+            VALUES ($1, 'done')
+            ON CONFLICT (option_key) DO UPDATE
+               SET option_value = EXCLUDED.option_value,
+                   updated_at = now()
+            """,
+            migration_key,
+        )
 
     async def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
         login = profile.get("login") or profile.get("github_login")
