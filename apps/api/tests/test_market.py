@@ -2054,6 +2054,32 @@ def test_system_github_api_tokens_are_rotated() -> None:
     assert main_module.next_system_github_api_token(app, settings) == "token-a"
 
 
+def test_disabled_system_github_api_tokens_are_skipped() -> None:
+    settings = load_settings(
+        {
+            "GITHUB_API_TOKEN": "token-a\ntoken-b",
+        }
+    )
+    app = main_module.create_app(settings=settings, store=InMemoryMarketStore())
+    statuses = {
+        main_module.github_api_token_hash("token-a"): {
+            "disabled": True,
+            "status": "disabled",
+            "error_code": 401,
+        }
+    }
+
+    assert (
+        main_module.github_api_headers(
+            settings=settings,
+            token_statuses=statuses,
+        )["authorization"]
+        == "Bearer token-b"
+    )
+    assert main_module.next_system_github_api_token(app, settings, statuses) == "token-b"
+    assert main_module.next_system_github_api_token(app, settings, statuses) == "token-b"
+
+
 def test_redact_token_previews_masks_each_token_individually() -> None:
     assert main_module.redact_token_previews("token-a\ntoken-b, token-c") == [
         "t*****a",
@@ -2259,7 +2285,254 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
     assert "Bearer github_pat_readonly" in seen_authorizations
 
 
-def test_submission_does_not_use_desc_as_display_name(monkeypatch) -> None:
+def test_submission_metadata_preview_prefills_from_github(monkeypatch) -> None:
+    client = make_client()
+    client.get("/v1/auth/debug-login?login=alice")
+    metadata_text = "\n".join(
+        [
+            "name: astrbot_plugin_demo",
+            "desc: Preview metadata description",
+            "display_name: Preview Demo",
+            "version: v2.2.0",
+            "author: Preview Author",
+            "repo: https://github.com/alice/astrbot_plugin_demo",
+            'astrbot_version: ">=4.10.4"',
+            "social_link: https://example.com/preview",
+            "category: productivity",
+            "tags:",
+            "  - preview",
+            "  - metadata",
+            "support_platforms:",
+            "  - aiocqhttp",
+        ]
+    )
+    metadata_filenames: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int, data: dict[str, object]) -> None:
+            self.status_code = status_code
+            self._data = data
+            self.headers = {}
+
+        def json(self) -> dict[str, object]:
+            return self._data
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            if url == "https://api.github.com/repos/alice/astrbot_plugin_demo":
+                return FakeResponse(
+                    200,
+                    {
+                        "name": "astrbot_plugin_demo",
+                        "description": "Repository description",
+                        "homepage": "https://example.com/home",
+                        "topics": ["repo-topic"],
+                        "owner": {"login": "alice"},
+                    },
+                )
+            if "/contents/metadata." in url:
+                metadata_filenames.append(url.rsplit("/", 1)[-1])
+            if url.endswith("/contents/metadata.yaml"):
+                return FakeResponse(
+                    200,
+                    {"content": base64.b64encode(metadata_text.encode()).decode()},
+                )
+            return FakeResponse(404, {})
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post(
+        "/v1/plugins/submissions/metadata-preview",
+        json={"repo": "https://github.com/alice/astrbot_plugin_demo"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "repo": "https://github.com/alice/astrbot_plugin_demo",
+        "name": "astrbot_plugin_demo",
+        "display_name": "Preview Demo",
+        "desc": "Preview metadata description",
+        "author": "Preview Author",
+        "social_link": "https://example.com/preview",
+        "category": "productivity",
+        "tags": ["preview", "metadata"],
+    }
+    assert metadata_filenames == ["metadata.yaml"]
+    assert client.app.state.store.list_submissions() == []
+
+
+def test_submission_metadata_preview_marks_bad_system_token_and_falls_back(
+    monkeypatch,
+) -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "DATABASE_URL": "postgresql://test:test@127.0.0.1:5432/test",
+            "REDIS_URL": "redis://127.0.0.1:6379/0",
+            "GITHUB_API_TOKEN": "bad-system-token",
+        }
+    )
+    store = InMemoryMarketStore({"options": {"GITHUB_API_TOKEN": "bad-system-token"}})
+    client = TestClient(main_module.create_app(settings=settings, store=store))
+    client.get("/v1/auth/debug-login?login=alice")
+    metadata_text = "\n".join(
+        [
+            "name: astrbot_plugin_demo",
+            "display_name: Preview Demo",
+            "desc: Preview metadata description",
+            "author: Preview Author",
+        ]
+    )
+    authorizations: list[str] = []
+
+    class FakeResponse:
+        def __init__(
+            self,
+            status_code: int,
+            data: dict[str, object],
+            headers: dict[str, str] | None = None,
+        ) -> None:
+            self.status_code = status_code
+            self._data = data
+            self.headers = headers or {}
+
+        def json(self) -> dict[str, object]:
+            return self._data
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            authorization = (kwargs.get("headers") or {}).get("authorization", "")
+            authorizations.append(authorization)
+            if authorization == "Bearer bad-system-token":
+                return FakeResponse(401, {"message": "Bad credentials"})
+            if url == "https://api.github.com/repos/alice/astrbot_plugin_demo":
+                return FakeResponse(
+                    200,
+                    {"name": "astrbot_plugin_demo", "owner": {"login": "alice"}},
+                )
+            if url.endswith("/contents/metadata.yaml"):
+                return FakeResponse(
+                    200,
+                    {"content": base64.b64encode(metadata_text.encode()).decode()},
+                )
+            return FakeResponse(404, {})
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post(
+        "/v1/plugins/submissions/metadata-preview",
+        json={"repo": "https://github.com/alice/astrbot_plugin_demo"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["display_name"] == "Preview Demo"
+    assert response.json()["desc"] == "Preview metadata description"
+    assert "Bearer bad-system-token" in authorizations
+    assert "" in authorizations
+    statuses = main_module.parse_github_api_token_statuses(
+        store.list_options()["GITHUB_API_TOKEN_STATUS"]
+    )
+    status = statuses[main_module.github_api_token_hash("bad-system-token")]
+    assert status["disabled"] is True
+    assert status["error_code"] == 401
+    admin_login = client.get("/v1/auth/debug-login?login=admin")
+    store.update_user_role(admin_login.json()["user"]["id"], Role.CORE_ADMIN.value)
+    settings_response = client.get("/v1/admin/settings")
+    token_status = settings_response.json()["market"]["api_token_statuses"][0]
+    assert token_status["token"] == "b**************n"
+    assert token_status["disabled"] is True
+    assert token_status["error_code"] == 401
+
+
+def test_github_rate_limited_system_token_keeps_rotating_with_retry_after() -> None:
+    class FakeResponse:
+        status_code = 429
+        headers = {"retry-after": "90"}
+
+        def json(self) -> dict[str, object]:
+            return {"message": "secondary rate limit"}
+
+    status = main_module.github_api_token_status_from_response(FakeResponse())
+
+    assert status is not None
+    assert status["disabled"] is False
+    assert status["status"] == "rate_limited"
+    assert status["error_code"] == 429
+    assert status["retry_after_seconds"] == 90
+
+
+def test_github_forbidden_system_token_is_disabled_when_not_rate_limited() -> None:
+    class FakeResponse:
+        status_code = 403
+        headers = {"x-ratelimit-remaining": "42"}
+
+        def json(self) -> dict[str, object]:
+            return {"message": "Resource not accessible by personal access token"}
+
+    status = main_module.github_api_token_status_from_response(FakeResponse())
+
+    assert status is not None
+    assert status["disabled"] is True
+    assert status["status"] == "disabled"
+    assert status["error_code"] == 403
+
+
+def test_submission_metadata_preview_requires_repo_owner() -> None:
+    client = make_client()
+    client.get("/v1/auth/debug-login?login=alice")
+
+    response = client.post(
+        "/v1/plugins/submissions/metadata-preview",
+        json={"repo": "https://github.com/bob/astrbot_plugin_demo"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "GitHub account must own the repository"
+
+
+def test_submission_metadata_preview_is_rate_limited() -> None:
+    client = make_client()
+    client.app.state.settings = client.app.state.settings.with_updates(
+        github_metadata_sync_enabled=False,
+    )
+    client.get("/v1/auth/debug-login?login=alice")
+
+    for _ in range(main_module.SUBMISSION_METADATA_PREVIEW_RPM):
+        response = client.post(
+            "/v1/plugins/submissions/metadata-preview",
+            json={"repo": "https://github.com/alice/astrbot_plugin_demo"},
+        )
+        assert response.status_code == 200
+
+    limited = client.post(
+        "/v1/plugins/submissions/metadata-preview",
+        json={"repo": "https://github.com/alice/astrbot_plugin_demo"},
+    )
+
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"]
+    assert "Rate limit exceeded" in limited.json()["error"]
+
+
+def test_submission_uses_explicit_display_name_and_desc_fields(monkeypatch) -> None:
     client = make_client()
     client.get("/v1/auth/debug-login?login=alice")
     metadata_text = "\n".join(
@@ -2312,7 +2585,7 @@ def test_submission_does_not_use_desc_as_display_name(monkeypatch) -> None:
     plugin = response.json()
 
     assert response.status_code == 201
-    assert plugin["display_name"] == "Demo"
+    assert plugin["display_name"] == "Repo metadata description"
     assert plugin["desc"] == "Repo metadata description"
 
 

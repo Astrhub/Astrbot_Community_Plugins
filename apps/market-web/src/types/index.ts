@@ -169,6 +169,18 @@ export interface Submission {
   [key: string]: unknown;
 }
 
+/** GitHub 仓库预取出的提交表单候选数据。 */
+export interface PluginSubmissionMetadataPreview {
+  repo: string;
+  name?: string;
+  display_name?: string;
+  desc?: string;
+  author?: string;
+  social_link?: string;
+  category?: PluginCategory | "";
+  tags?: string[];
+}
+
 /** 站点认证配置。 */
 export interface AuthConfig {
   github_login_enabled: boolean;

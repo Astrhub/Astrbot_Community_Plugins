@@ -14,6 +14,7 @@ import type {
   PluginCategory,
   PluginDetail,
   PluginSortBy,
+  PluginSubmissionMetadataPreview,
   RawPlugin,
   SetupConfig,
   SetupStatus,
@@ -1226,6 +1227,20 @@ export const usePluginStore = defineStore("plugins", () => {
     return data;
   }
 
+  async function fetchPluginSubmissionMetadata(
+    repo: string,
+  ): Promise<PluginSubmissionMetadataPreview> {
+    const response = await fetch(`${apiBaseUrl}/v1/plugins/submissions/metadata-preview`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "仓库信息拉取失败"));
+    return data as PluginSubmissionMetadataPreview;
+  }
+
   function setSearchQuery(query: string): void {
     searchQuery.value = query;
   }
@@ -1362,6 +1377,7 @@ export const usePluginStore = defineStore("plugins", () => {
     sendTestEmail,
     publishAnnouncement,
     submitPlugin,
+    fetchPluginSubmissionMetadata,
     setSearchQuery,
     setSelectedTag,
     setSelectedCategory,

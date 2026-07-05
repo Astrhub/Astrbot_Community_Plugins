@@ -41,6 +41,7 @@
             <li>仓库必须是公开 GitHub 仓库。</li>
             <li>插件名必须使用 `astrbot_plugin_` 前缀。</li>
           </ul>
+          <p class="rule-tip">填写仓库地址后，可点击“拉取信息”自动填充，请确保仓库地址无误。</p>
         </n-card>
       </section>
 
@@ -64,6 +65,36 @@
 
           <n-form ref="formRef" :model="formData" :rules="rules" label-placement="top">
             <n-grid :x-gap="16" :y-gap="10" :cols="2" responsive="screen">
+              <n-grid-item span="2">
+                <n-form-item label="GitHub 仓库地址" path="repo">
+                  <n-input-group>
+                    <n-input
+                      v-model:value="formData.repo"
+                      type="url"
+                      placeholder="例如：https://github.com/owner/repository…"
+                      :input-props="{
+                        name: 'plugin-repo',
+                        autocomplete: 'off',
+                        inputmode: 'url',
+                        spellcheck: 'false',
+                      }"
+                      @update:value="handleRepoInput"
+                    />
+                    <n-button
+                      type="primary"
+                      ghost
+                      :loading="metadataLoading"
+                      :disabled="!canFetchMetadata"
+                      @click="fetchMetadataFromRepo"
+                    >
+                      拉取信息
+                    </n-button>
+                  </n-input-group>
+                  <p v-if="metadataStatus.text" :class="metadataFeedbackClass">
+                    {{ metadataStatus.text }}
+                  </p>
+                </n-form-item>
+              </n-grid-item>
               <n-grid-item span="2 m:1">
                 <n-form-item label="插件名" path="name">
                   <n-input
@@ -85,21 +116,6 @@
                     :input-props="{
                       name: 'plugin-display-name',
                       autocomplete: 'off',
-                    }"
-                  />
-                </n-form-item>
-              </n-grid-item>
-              <n-grid-item span="2">
-                <n-form-item label="GitHub 仓库地址" path="repo">
-                  <n-input
-                    v-model:value="formData.repo"
-                    type="url"
-                    placeholder="例如：https://github.com/owner/repository…"
-                    :input-props="{
-                      name: 'plugin-repo',
-                      autocomplete: 'off',
-                      inputmode: 'url',
-                      spellcheck: 'false',
                     }"
                   />
                 </n-form-item>
@@ -135,11 +151,11 @@
                 </n-form-item>
               </n-grid-item>
               <n-grid-item span="2 m:1">
-                <n-form-item label="官方分类" path="category">
+                <n-form-item label="官方分类（可选）" path="category">
                   <n-select
                     v-model:value="formData.category"
                     :options="pluginCategoryOptions"
-                    placeholder="选择分类…"
+                    placeholder="不选择则归为其他…"
                     aria-label="官方分类"
                   />
                 </n-form-item>
@@ -187,7 +203,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, shallowRef } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
 import {
@@ -200,6 +216,7 @@ import {
   NGridItem,
   NIcon,
   NInput,
+  NInputGroup,
   NLayoutHeader,
   NSelect,
   NTag,
@@ -208,6 +225,7 @@ import {
 import { ArrowBack, LogoGithub } from "@vicons/ionicons5";
 import { PLUGIN_CATEGORY_OPTIONS, usePluginStore } from "@/stores/plugins";
 import ThemeModeButton from "@/components/ThemeModeButton.vue";
+import type { PluginSubmissionMetadataPreview } from "@/types";
 
 const router = useRouter();
 const message = useMessage();
@@ -215,11 +233,32 @@ const store = usePluginStore();
 const { currentUser, siteConfig } = storeToRefs(store);
 const { loginWithGithub } = store;
 const formRef = ref(null);
-const submitting = ref(false);
+const submitting = shallowRef(false);
+const metadataLoading = shallowRef(false);
+const lastPreviewRepo = shallowRef("");
 const maxPluginTags = computed(() => siteConfig.value.market?.max_plugin_tags || 8);
 const pluginCategoryOptions = PLUGIN_CATEGORY_OPTIONS;
+const githubRepoPattern = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(?:\.git)?\/?$/;
 
-const formData = reactive({
+type SubmissionFormData = {
+  name: string;
+  display_name: string;
+  desc: string;
+  author: string;
+  repo: string;
+  category: string;
+  tags: string[];
+  social_link: string;
+};
+
+type TextAutofillField = Exclude<keyof SubmissionFormData, "repo" | "tags">;
+
+const metadataStatus = reactive({
+  type: "" as "" | "success" | "warning" | "error",
+  text: "",
+});
+
+const formData = reactive<SubmissionFormData>({
   name: "",
   display_name: "",
   desc: "",
@@ -229,6 +268,25 @@ const formData = reactive({
   tags: [],
   social_link: "",
 });
+
+const autoFilledTextValues = reactive<Partial<Record<TextAutofillField, string>>>({});
+const autoFilledTags = shallowRef<string[]>([]);
+
+const canFetchMetadata = computed(() => {
+  return (
+    Boolean(currentUser.value) &&
+    Boolean(siteConfig.value.market?.submissions_enabled) &&
+    githubRepoPattern.test(formData.repo.trim()) &&
+    !metadataLoading.value
+  );
+});
+
+const metadataFeedbackClass = computed(() => ({
+  "metadata-feedback": true,
+  "is-success": metadataStatus.type === "success",
+  "is-warning": metadataStatus.type === "warning",
+  "is-error": metadataStatus.type === "error",
+}));
 
 const rules = {
   name: [
@@ -260,16 +318,11 @@ const rules = {
   repo: [
     { required: true, message: "请输入 GitHub 仓库地址", trigger: "blur" },
     {
-      pattern: /^https:\/\/github\.com\/[\w-]+\/[\w.-]+\/?$/,
+      pattern: githubRepoPattern,
       message: "请输入有效的 GitHub 仓库地址",
       trigger: "blur",
     },
   ],
-  category: {
-    required: true,
-    message: "请选择官方分类",
-    trigger: ["change", "blur"],
-  },
   tags: [
     {
       validator: (_, value) => !Array.isArray(value) || value.length <= maxPluginTags.value,
@@ -278,6 +331,138 @@ const rules = {
     },
   ],
 };
+
+let metadataRequestId = 0;
+
+function cleanText(value: unknown): string {
+  return String(value || "").trim();
+}
+
+function clearMetadataStatus() {
+  metadataStatus.type = "";
+  metadataStatus.text = "";
+}
+
+function handleRepoInput(value: string) {
+  if (!cleanText(value)) {
+    lastPreviewRepo.value = "";
+    clearMetadataStatus();
+    return;
+  }
+  if (cleanText(value) !== lastPreviewRepo.value) {
+    clearMetadataStatus();
+  }
+}
+
+function cleanTags(tags: unknown): string[] {
+  const rawTags = Array.isArray(tags) ? tags : [];
+  return Array.from(new Set(rawTags.map((tag) => cleanText(tag)).filter(Boolean))).slice(
+    0,
+    maxPluginTags.value,
+  );
+}
+
+function applyTextField(field: TextAutofillField, value: unknown): boolean {
+  const nextValue = cleanText(value);
+  if (!nextValue) return false;
+  const currentValue = cleanText(formData[field]);
+  const previousAutoValue = autoFilledTextValues[field] || "";
+  if (currentValue && currentValue !== previousAutoValue) return false;
+  if (field === "category" && !pluginCategoryOptions.some((option) => option.value === nextValue)) {
+    return false;
+  }
+  formData[field] = field === "desc" ? nextValue.slice(0, 120) : nextValue;
+  autoFilledTextValues[field] = formData[field];
+  return currentValue !== formData[field];
+}
+
+function applyTags(value: unknown): boolean {
+  const nextTags = cleanTags(value);
+  if (!nextTags.length) return false;
+  const currentTags = cleanTags(formData.tags);
+  if (currentTags.length && currentTags.join("\n") !== autoFilledTags.value.join("\n")) {
+    return false;
+  }
+  formData.tags = nextTags;
+  autoFilledTags.value = [...nextTags];
+  return currentTags.join("\n") !== nextTags.join("\n");
+}
+
+function applyMetadataPreview(preview: PluginSubmissionMetadataPreview): number {
+  let applied = 0;
+  const fields: TextAutofillField[] = [
+    "name",
+    "display_name",
+    "desc",
+    "author",
+    "social_link",
+    "category",
+  ];
+  fields.forEach((field) => {
+    if (applyTextField(field, preview[field])) applied += 1;
+  });
+  if (applyTags(preview.tags)) applied += 1;
+  return applied;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function metadataErrorMessage(error: unknown): string {
+  const rawMessage = errorMessage(error, "仓库信息拉取失败");
+  const retrySeconds = rawMessage.match(/(\d+)\s+seconds?/i)?.[1];
+  if (/rate limit|too many requests/i.test(rawMessage)) {
+    return retrySeconds
+      ? `自动填充请求过于频繁，请 ${retrySeconds} 秒后再试`
+      : "自动填充请求过于频繁，请稍后再试";
+  }
+  return rawMessage;
+}
+
+async function fetchMetadataFromRepo() {
+  const repo = formData.repo.trim();
+  if (!repo) {
+    message.warning("请先填写 GitHub 仓库地址");
+    return;
+  }
+  if (!githubRepoPattern.test(repo)) {
+    message.warning("请输入有效的 GitHub 仓库地址");
+    return;
+  }
+  if (!currentUser.value) {
+    message.warning("请先使用 GitHub 登录");
+    return;
+  }
+  if (!siteConfig.value.market?.submissions_enabled) {
+    message.warning("当前站点已暂停插件提交");
+    return;
+  }
+
+  const requestId = metadataRequestId + 1;
+  metadataRequestId = requestId;
+  metadataLoading.value = true;
+  metadataStatus.type = "";
+  metadataStatus.text = "";
+  try {
+    const preview = await store.fetchPluginSubmissionMetadata(repo);
+    if (requestId !== metadataRequestId || repo !== formData.repo.trim()) return;
+    const applied = applyMetadataPreview(preview);
+    lastPreviewRepo.value = repo;
+    metadataStatus.type = applied > 0 ? "success" : "warning";
+    metadataStatus.text =
+      applied > 0
+        ? `已自动填充 ${applied} 项，可继续手动调整`
+        : "仓库信息已拉取，没有可填充的新字段";
+  } catch (error) {
+    if (requestId !== metadataRequestId) return;
+    metadataStatus.type = "error";
+    metadataStatus.text = metadataErrorMessage(error);
+    message.error(metadataStatus.text);
+  } finally {
+    if (requestId === metadataRequestId) metadataLoading.value = false;
+  }
+}
 
 const goBack = () => {
   router.back();
@@ -300,7 +485,7 @@ const handleSubmit = () => {
       message.success("已提交审核");
       router.push("/");
     } catch (error) {
-      message.error(error.message || "提交失败");
+      message.error(errorMessage(error, "提交失败"));
     } finally {
       submitting.value = false;
     }
@@ -382,6 +567,10 @@ const handleSubmit = () => {
   padding-left: 18px;
 }
 
+.rule-tip {
+  margin: 14px 0 0;
+}
+
 .form-title {
   display: flex;
   align-items: center;
@@ -393,6 +582,24 @@ const handleSubmit = () => {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+}
+
+.metadata-feedback {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.metadata-feedback.is-success {
+  color: var(--success-color);
+}
+
+.metadata-feedback.is-warning {
+  color: var(--warning-color);
+}
+
+.metadata-feedback.is-error {
+  color: var(--error-color);
 }
 
 @media (max-width: 860px) {
@@ -414,6 +621,15 @@ const handleSubmit = () => {
 
   .submit-content {
     padding: 20px 14px;
+  }
+
+  :deep(.n-input-group) {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  :deep(.n-input-group .n-button) {
+    width: 100%;
   }
 }
 </style>

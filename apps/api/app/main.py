@@ -64,6 +64,7 @@ from .schemas import (
     PluginGithubRefreshPayload,
     PluginPatch,
     PluginSubmission,
+    PluginSubmissionMetadataPreviewPayload,
     PluginUnlistPayload,
     RoleUpdatePayload,
     SetupConfig,
@@ -129,6 +130,7 @@ SYSTEM_OPTION_KEYS = {
     "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER",
     "GITHUB_ADMIN_ORG",
     "GITHUB_API_TOKEN",
+    "GITHUB_API_TOKEN_STATUS",
     "GITHUB_CALLBACK_URL",
     "GITHUB_CLIENT_ID",
     "GITHUB_LOGIN_ENABLED",
@@ -165,6 +167,8 @@ SYSTEM_OPTION_KEYS = {
 }
 PRIVATE_USER_FIELDS = {"github_email", "notification_email"}
 LOGGER = logging.getLogger(__name__)
+SUBMISSION_METADATA_PREVIEW_RPM = 10
+RATE_LIMIT_WINDOW_SECONDS = 60
 PLUGIN_METADATA_SYNC_FIELDS = (
     "name",
     "display_name",
@@ -216,6 +220,7 @@ def create_app(
     app.state.store = store or create_store(app.state.settings)
     app.state.email_daily_counter = {"date": "", "count": 0}
     app.state.github_api_token_index = 0
+    app.state.rate_limit_counters = {}
 
     app.add_middleware(
         CORSMiddleware,
@@ -232,8 +237,12 @@ def create_app(
 
 async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
     if isinstance(exc.detail, dict):
-        return JSONResponse(status_code=exc.status_code, content=exc.detail)
-    return JSONResponse(status_code=exc.status_code, content={"error": str(exc.detail)})
+        return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=exc.headers)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": str(exc.detail)},
+        headers=exc.headers,
+    )
 
 
 def create_store(settings: Settings) -> InMemoryMarketStore | PgRedisMarketStore:
@@ -938,6 +947,44 @@ def register_routes(app: FastAPI) -> None:
         return {"items": await call_store(request, "list_submissions")}
 
     @app.post(
+        "/v1/plugins/submissions/metadata-preview",
+        tags=["submissions"],
+        summary="预取插件提交元数据",
+        description="根据 GitHub 仓库地址预取可用于插件提交表单的元数据。需要登录并验证仓库归属。",
+        responses={
+            200: {"description": "预取成功"},
+            401: {"description": "未登录"},
+            403: {"description": "插件提交已关闭或无仓库权限"},
+            400: {"description": "参数校验失败"},
+            429: {"description": "GitHub API 速率限制"},
+        },
+    )
+    async def preview_submission_metadata(
+        request: Request,
+        payload: PluginSubmissionMetadataPreviewPayload,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        await enforce_user_rpm_limit(
+            request,
+            "submission_metadata_preview",
+            user,
+            SUBMISSION_METADATA_PREVIEW_RPM,
+        )
+        settings = await runtime_settings_for_app(request.app)
+        if not settings.market_submissions_enabled:
+            raise error(403, "Plugin submissions are closed")
+        validate_repo_owner(payload.repo, user)
+        try:
+            return await fetch_plugin_submission_metadata_preview(
+                payload.repo,
+                settings,
+                user,
+                store=request.app.state.store,
+            )
+        except GithubMetadataError as exc:
+            raise error(exc.status_code, exc.message) from exc
+
+    @app.post(
         "/v1/plugins/submissions",
         status_code=201,
         tags=["submissions"],
@@ -958,7 +1005,14 @@ def register_routes(app: FastAPI) -> None:
         data = payload.model_dump()
         validate_plugin_submission(data, settings)
         validate_repo_owner(data["repo"], user)
-        data.update(await safe_fetch_plugin_github_metadata(data["repo"], settings, user))
+        data.update(
+            await safe_fetch_plugin_github_metadata(
+                data["repo"],
+                settings,
+                user,
+                store=request.app.state.store,
+            )
+        )
         plugin = await call_store(request, "submit_plugin", user, data)
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
@@ -2361,6 +2415,66 @@ def validate_github_repo(repo: str) -> re.Match[str]:
     return match
 
 
+async def enforce_user_rpm_limit(
+    request: Request,
+    scope: str,
+    user: dict[str, Any],
+    rpm: int,
+) -> None:
+    if rpm <= 0:
+        return
+    now = int(datetime.now(UTC).timestamp())
+    window = now // RATE_LIMIT_WINDOW_SECONDS
+    retry_after = RATE_LIMIT_WINDOW_SECONDS - (now % RATE_LIMIT_WINDOW_SECONDS)
+    subject = str(user.get("id") or user.get("github_login") or "unknown")
+    key = f"rate_limit:{scope}:{subject}:{window}"
+    count = await redis_rate_limit_count(request, key, RATE_LIMIT_WINDOW_SECONDS + 5)
+    if count is None:
+        count = memory_rate_limit_count(request, key, now + retry_after, now)
+    if count > rpm:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+async def redis_rate_limit_count(request: Request, key: str, ttl_seconds: int) -> int | None:
+    redis_client = getattr(getattr(request.app.state, "store", None), "redis", None)
+    if not redis_client:
+        return None
+    try:
+        count = int(await redis_client.incr(key))
+        if count == 1:
+            await redis_client.expire(key, ttl_seconds)
+        return count
+    except Exception:
+        LOGGER.warning("Redis rate limit counter failed; falling back to memory", exc_info=True)
+        return None
+
+
+def memory_rate_limit_count(
+    request: Request,
+    key: str,
+    expires_at: int,
+    now: int,
+) -> int:
+    counters = getattr(request.app.state, "rate_limit_counters", None)
+    if not isinstance(counters, dict):
+        counters = {}
+        request.app.state.rate_limit_counters = counters
+    if len(counters) > 1000:
+        for counter_key, entry in list(counters.items()):
+            if int(entry.get("expires_at") or 0) <= now:
+                counters.pop(counter_key, None)
+    entry = counters.get(key)
+    if not entry or int(entry.get("expires_at") or 0) <= now:
+        entry = {"count": 0, "expires_at": expires_at}
+        counters[key] = entry
+    entry["count"] = int(entry.get("count") or 0) + 1
+    return int(entry["count"])
+
+
 class GithubMetadataError(Exception):
     def __init__(self, message: str, status_code: int = 502) -> None:
         super().__init__(message)
@@ -2375,9 +2489,13 @@ async def github_metadata_sync_worker(app: FastAPI) -> None:
 
 
 async def sync_due_github_plugin_metadata_once(app: FastAPI, limit: int) -> int:
-    settings = await runtime_settings_for_app(app)
+    runtime_config = await load_system_options(app.state.store)
+    settings = settings_with_runtime_config(app.state.settings, runtime_config)
     if not settings.github_metadata_sync_enabled:
         return 0
+    token_statuses = parse_github_api_token_statuses(
+        runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
+    )
     plugins = await list_due_github_sync_plugins(app.state.store, limit)
     for plugin in plugins:
         try:
@@ -2385,15 +2503,21 @@ async def sync_due_github_plugin_metadata_once(app: FastAPI, limit: int) -> int:
             token = (
                 ""
                 if owner and owner.get("github_token")
-                else next_system_github_api_token(app, settings)
+                else next_system_github_api_token(app, settings, token_statuses)
             )
             await refresh_plugin_github_metadata_for_plugin(app, plugin, owner, token=token)
+            token_statuses = parse_github_api_token_statuses(
+                (await load_system_options(app.state.store)).get("GITHUB_API_TOKEN_STATUS", "")
+            )
         except Exception as exc:
             await update_plugin_github_sync_failure(
                 app.state.store,
                 plugin,
                 settings,
                 safe_exception_message(exc),
+            )
+            token_statuses = parse_github_api_token_statuses(
+                (await load_system_options(app.state.store)).get("GITHUB_API_TOKEN_STATUS", "")
             )
     return len(plugins)
 
@@ -2509,6 +2633,7 @@ async def refresh_plugin_github_metadata_for_plugin(
             settings,
             user,
             token=token,
+            store=app.state.store if token else None,
         )
     except GithubMetadataError as exc:
         await update_plugin_github_sync_failure(app.state.store, plugin, settings, exc.message)
@@ -2529,11 +2654,63 @@ async def safe_fetch_plugin_github_metadata(
     user: dict[str, Any] | None = None,
     *,
     token: str = "",
+    store: Any | None = None,
 ) -> dict[str, Any]:
     try:
-        return await fetch_plugin_github_metadata(repo, settings, user, token=token)
+        return await fetch_plugin_github_metadata(repo, settings, user, token=token, store=store)
     except GithubMetadataError:
         return {}
+
+
+async def fetch_plugin_submission_metadata_preview(
+    repo: str,
+    settings: Settings,
+    user: dict[str, Any],
+    store: Any | None = None,
+) -> dict[str, Any]:
+    match = validate_github_repo(repo)
+    owner = match.group("owner")
+    repo_name = match.group("repo")
+    preview = build_plugin_submission_metadata_preview(owner, repo_name, settings=settings)
+    if not settings.github_metadata_sync_enabled:
+        return preview
+
+    runtime_config = await load_system_options(store) if store else {}
+    token_statuses = parse_github_api_token_statuses(
+        runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
+    )
+    headers = github_api_headers(user, settings, token_statuses=token_statuses)
+    uses_system_token = bool(headers.get("authorization")) and not user.get("github_token")
+    status_store = store if uses_system_token else None
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            repository = await fetch_github_repository(
+                client,
+                owner,
+                repo_name,
+                headers,
+                store=status_store,
+            )
+            metadata = (
+                await fetch_github_plugin_metadata_files(
+                    client,
+                    owner,
+                    repo_name,
+                    headers,
+                    store=status_store,
+                )
+                if repository
+                else {}
+            )
+    except httpx.HTTPError as exc:
+        raise GithubMetadataError("GitHub metadata fetch failed", 502) from exc
+    return build_plugin_submission_metadata_preview(
+        owner,
+        repo_name,
+        repository=repository,
+        metadata=metadata,
+        settings=settings,
+    )
 
 
 async def fetch_plugin_github_metadata(
@@ -2542,25 +2719,45 @@ async def fetch_plugin_github_metadata(
     user: dict[str, Any] | None = None,
     *,
     token: str = "",
+    store: Any | None = None,
 ) -> dict[str, Any]:
     if not settings.github_metadata_sync_enabled:
         return {}
     match = validate_github_repo(repo)
     owner = match.group("owner")
     repo_name = match.group("repo")
-    headers = github_api_headers(user, settings, token)
+    runtime_config = await load_system_options(store) if store else {}
+    token_statuses = parse_github_api_token_statuses(
+        runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
+    )
+    headers = github_api_headers(user, settings, token, token_statuses)
+    uses_system_token = bool(headers.get("authorization")) and not (user or {}).get("github_token")
+    status_store = store if uses_system_token else None
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            repository = await fetch_github_repository(client, owner, repo_name, headers)
+            repository = await fetch_github_repository(
+                client,
+                owner,
+                repo_name,
+                headers,
+                store=status_store,
+            )
             if not repository:
                 return {}
-            metadata = await fetch_github_plugin_metadata_files(client, owner, repo_name, headers)
+            metadata = await fetch_github_plugin_metadata_files(
+                client,
+                owner,
+                repo_name,
+                headers,
+                store=status_store,
+            )
             logo = await fetch_github_plugin_logo_url(
                 client,
                 owner,
                 repo_name,
                 repository.get("default_branch") or "main",
                 headers,
+                store=status_store,
             )
     except httpx.HTTPError as exc:
         raise GithubMetadataError("GitHub metadata fetch failed", 502) from exc
@@ -2574,7 +2771,7 @@ async def fetch_plugin_github_metadata(
             payload[field] = value
     if logo:
         payload["logo"] = logo
-    return drop_desc_display_name_alias(payload)
+    return payload
 
 
 async def fetch_github_repository(
@@ -2582,10 +2779,13 @@ async def fetch_github_repository(
     owner: str,
     repo: str,
     headers: dict[str, str],
+    store: Any | None = None,
 ) -> dict[str, Any]:
-    response = await client.get(
+    response = await github_get(
+        client,
         f"https://api.github.com/repos/{owner}/{repo}",
-        headers=headers,
+        headers,
+        store=store,
     )
     raise_for_github_rate_limit(response)
     if response.status_code != 200:
@@ -2594,16 +2794,112 @@ async def fetch_github_repository(
     return data if isinstance(data, dict) else {}
 
 
+async def github_get(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    store: Any | None = None,
+) -> httpx.Response:
+    response = await client.get(url, headers=headers)
+    token = github_token_from_headers(headers)
+    if store and token:
+        await record_github_api_token_response(store, token, response)
+    if github_response_allows_public_fallback(response) and token:
+        return await client.get(url, headers=github_public_headers())
+    return response
+
+
+def github_token_from_headers(headers: dict[str, str]) -> str:
+    authorization = str(headers.get("authorization") or "")
+    if not authorization.lower().startswith("bearer "):
+        return ""
+    return authorization.split(" ", 1)[1].strip()
+
+
+def github_response_allows_public_fallback(response: Any) -> bool:
+    return response.status_code in {401, 403}
+
+
+def github_api_token_status_from_response(response: Any) -> dict[str, Any] | None:
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code not in {401, 403, 429}:
+        return None
+    rate_limited = is_github_rate_limit_response(response)
+    if status_code == 429 or rate_limited:
+        retry_after_seconds, reset_at = github_retry_after(response)
+        return {
+            "disabled": False,
+            "status": "rate_limited",
+            "error_code": status_code,
+            "error_message": github_response_message(response) or GITHUB_RATE_LIMIT_MESSAGE,
+            "retry_after_seconds": retry_after_seconds,
+            "reset_at": reset_at,
+            "checked_at": isoformat_utc(datetime.now(UTC)),
+        }
+    if status_code in {401, 403}:
+        return {
+            "disabled": True,
+            "status": "disabled",
+            "error_code": status_code,
+            "error_message": github_response_message(response) or "GitHub API token rejected",
+            "checked_at": isoformat_utc(datetime.now(UTC)),
+        }
+    return None
+
+
+def github_retry_after(response: Any) -> tuple[int, str]:
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = parse_positive_int(headers.get("retry-after"))
+    if retry_after:
+        return retry_after, ""
+    reset_epoch = parse_positive_int(headers.get("x-ratelimit-reset"))
+    if not reset_epoch:
+        return 0, ""
+    reset_at = datetime.fromtimestamp(reset_epoch, UTC)
+    seconds = max(0, int((reset_at - datetime.now(UTC)).total_seconds()))
+    return seconds, isoformat_utc(reset_at)
+
+
+def parse_positive_int(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
+
+
+async def record_github_api_token_response(store: Any, token: str, response: Any) -> None:
+    status = github_api_token_status_from_response(response)
+    if not status:
+        return
+    runtime_config = await load_system_options(store)
+    token_pool = runtime_config.get("GITHUB_API_TOKEN", "")
+    if token not in parse_github_api_tokens(token_pool):
+        return
+    statuses = clean_github_api_token_statuses(
+        token_pool,
+        runtime_config.get("GITHUB_API_TOKEN_STATUS", ""),
+    )
+    statuses[github_api_token_hash(token)] = status
+    await save_system_options_to_store(
+        store,
+        {"GITHUB_API_TOKEN_STATUS": serialize_github_api_token_statuses(statuses)},
+    )
+
+
 async def fetch_github_plugin_metadata_files(
     client: httpx.AsyncClient,
     owner: str,
     repo: str,
     headers: dict[str, str],
+    store: Any | None = None,
 ) -> dict[str, Any]:
-    for filename in ("metadata.yml", "metadata.yaml"):
-        response = await client.get(
+    for filename in ("metadata.yaml", "metadata.yml"):
+        response = await github_get(
+            client,
             f"https://api.github.com/repos/{owner}/{repo}/contents/{filename}",
-            headers=headers,
+            headers,
+            store=store,
         )
         raise_for_github_rate_limit(response)
         if response.status_code != 200:
@@ -2628,10 +2924,13 @@ async def fetch_github_plugin_logo_url(
     repo: str,
     default_branch: str,
     headers: dict[str, str],
+    store: Any | None = None,
 ) -> str:
-    response = await client.get(
+    response = await github_get(
+        client,
         f"https://api.github.com/repos/{owner}/{repo}/contents/logo.png",
-        headers=headers,
+        headers,
+        store=store,
     )
     raise_for_github_rate_limit(response)
     if response.status_code == 200:
@@ -2639,13 +2938,98 @@ async def fetch_github_plugin_logo_url(
     return ""
 
 
+def build_plugin_submission_metadata_preview(
+    owner: str,
+    repo_name: str,
+    *,
+    repository: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    repository = repository or {}
+    metadata = metadata or {}
+    repo_owner = repository_owner_login(repository) or owner
+    repository_name = metadata_text(repository.get("name")) or repo_name
+    payload: dict[str, Any] = {
+        "repo": f"https://github.com/{owner}/{repo_name}",
+        "display_name": repository_name,
+        "author": repo_owner,
+        "social_link": f"https://github.com/{repo_owner}",
+    }
+    if PLUGIN_NAME_PATTERN.match(repository_name):
+        payload["name"] = repository_name
+
+    description = metadata_text(repository.get("description"))
+    if description:
+        payload["desc"] = truncate_plugin_description(description)
+
+    homepage = metadata_text(repository.get("homepage"))
+    if homepage:
+        payload["social_link"] = homepage
+
+    topics = normalize_plugin_metadata_field("tags", repository.get("topics"))
+    if has_metadata_value(topics):
+        payload["tags"] = limit_plugin_tags(topics, settings)
+
+    for field in ("name", "display_name", "author", "social_link", "category"):
+        value = normalize_plugin_metadata_field(field, metadata.get(field))
+        if has_metadata_value(value):
+            payload[field] = value
+
+    desc = normalize_plugin_metadata_field("desc", metadata.get("desc"))
+    if not has_metadata_value(desc):
+        desc = normalize_plugin_metadata_field("short_desc", metadata.get("short_desc"))
+    if has_metadata_value(desc):
+        payload["desc"] = truncate_plugin_description(str(desc))
+
+    tags = normalize_plugin_metadata_field("tags", metadata.get("tags"))
+    if has_metadata_value(tags):
+        payload["tags"] = limit_plugin_tags(tags, settings)
+
+    return drop_empty_submission_preview_fields(payload)
+
+
+def repository_owner_login(repository: dict[str, Any]) -> str:
+    owner = repository.get("owner")
+    if isinstance(owner, dict):
+        return metadata_text(owner.get("login"))
+    return ""
+
+
+def truncate_plugin_description(value: str, limit: int = 120) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def limit_plugin_tags(value: Any, settings: Settings | None = None) -> list[str]:
+    max_tags = settings.max_plugin_tags if settings else 8
+    if max_tags <= 0:
+        return []
+    if isinstance(value, list):
+        tags = [str(tag).strip() for tag in value if str(tag).strip()]
+    else:
+        tags = []
+    return list(dict.fromkeys(tags))[:max_tags]
+
+
+def drop_empty_submission_preview_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in payload.items():
+        if has_metadata_value(value):
+            result[key] = value
+    return result
+
+
 def raise_for_github_rate_limit(response: Any) -> None:
+    if is_github_rate_limit_response(response):
+        raise GithubMetadataError(GITHUB_RATE_LIMIT_MESSAGE, 429)
+
+
+def is_github_rate_limit_response(response: Any) -> bool:
     if response.status_code not in {403, 429}:
-        return
+        return False
     headers = getattr(response, "headers", {}) or {}
     message = github_response_message(response).lower()
-    if headers.get("x-ratelimit-remaining") == "0" or "rate limit" in message:
-        raise GithubMetadataError(GITHUB_RATE_LIMIT_MESSAGE, 429)
+    return headers.get("x-ratelimit-remaining") == "0" or "rate limit" in message
 
 
 def github_response_message(response: Any) -> str:
@@ -2673,12 +3057,6 @@ def normalize_plugin_metadata_field(field: str, value: Any) -> Any:
 
 def metadata_text(value: Any) -> str:
     return str(value or "").strip()
-
-
-def drop_desc_display_name_alias(payload: dict[str, Any]) -> dict[str, Any]:
-    if metadata_text(payload.get("display_name")) == metadata_text(payload.get("desc")):
-        payload.pop("display_name", None)
-    return payload
 
 
 def github_sync_success_metadata(
@@ -3375,6 +3753,7 @@ def build_market_settings(settings: Settings, runtime_config: dict[str, str]) ->
             settings.max_plugin_tags,
         ),
         "api_token": runtime_config.get("GITHUB_API_TOKEN", settings.github_api_token),
+        "api_token_status": runtime_config.get("GITHUB_API_TOKEN_STATUS", ""),
         "metadata_sync_enabled": parse_bool(
             runtime_config.get("GITHUB_METADATA_SYNC_ENABLED"),
             settings.github_metadata_sync_enabled,
@@ -3453,11 +3832,14 @@ def redact_github_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 def redact_market_settings(config: dict[str, Any]) -> dict[str, Any]:
     raw_api_token = str(config.get("api_token", "") or "")
+    raw_token_status = str(config.get("api_token_status", "") or "")
     return {
         **config,
         "api_token": MASKED_SECRET if raw_api_token else "",
+        "api_token_status": "",
         "api_token_configured": bool(raw_api_token),
         "api_token_previews": redact_token_previews(raw_api_token),
+        "api_token_statuses": redact_token_statuses(raw_api_token, raw_token_status),
     }
 
 
@@ -3480,6 +3862,17 @@ def redact_token_previews(value: str) -> list[str]:
     return [redact_token_preview(token) for token in tokens]
 
 
+def redact_token_statuses(value: str, status_value: str = "") -> list[dict[str, Any]]:
+    statuses = parse_github_api_token_statuses(status_value)
+    return [
+        {
+            "token": redact_token_preview(token),
+            **github_api_token_public_status(statuses.get(github_api_token_hash(token))),
+        }
+        for token in parse_github_api_tokens(value)
+    ]
+
+
 def redact_token_preview(value: str) -> str:
     token = str(value or "").strip()
     if not token:
@@ -3487,6 +3880,77 @@ def redact_token_preview(value: str) -> str:
     if len(token) <= 2:
         return token[0] + "*" * max(len(token) - 1, 0)
     return f"{token[0]}{'*' * max(len(token) - 2, 0)}{token[-1]}"
+
+
+def github_api_token_hash(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def parse_github_api_token_statuses(value: str) -> dict[str, dict[str, Any]]:
+    try:
+        data = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    statuses: dict[str, dict[str, Any]] = {}
+    for token_hash, status in data.items():
+        if not isinstance(token_hash, str) or not isinstance(status, dict):
+            continue
+        statuses[token_hash] = {
+            "disabled": bool(status.get("disabled")),
+            "status": str(status.get("status") or ""),
+            "error_code": int(status.get("error_code") or 0),
+            "error_message": str(status.get("error_message") or "")[:200],
+            "retry_after_seconds": int(status.get("retry_after_seconds") or 0),
+            "reset_at": str(status.get("reset_at") or ""),
+            "checked_at": str(status.get("checked_at") or ""),
+        }
+    return statuses
+
+
+def serialize_github_api_token_statuses(statuses: dict[str, dict[str, Any]]) -> str:
+    clean = {
+        token_hash: status
+        for token_hash, status in statuses.items()
+        if isinstance(token_hash, str) and isinstance(status, dict)
+    }
+    return json.dumps(clean, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def clean_github_api_token_statuses(
+    token_value: str,
+    status_value: str,
+) -> dict[str, dict[str, Any]]:
+    allowed_hashes = {
+        github_api_token_hash(token) for token in parse_github_api_tokens(token_value)
+    }
+    return {
+        token_hash: status
+        for token_hash, status in parse_github_api_token_statuses(status_value).items()
+        if token_hash in allowed_hashes
+    }
+
+
+def github_api_token_public_status(status: dict[str, Any] | None) -> dict[str, Any]:
+    if not status:
+        return {
+            "disabled": False,
+            "status": "active",
+            "error_code": None,
+            "error_message": "",
+            "checked_at": "",
+        }
+    error_code = int(status.get("error_code") or 0)
+    return {
+        "disabled": bool(status.get("disabled")),
+        "status": str(status.get("status") or ("disabled" if status.get("disabled") else "active")),
+        "error_code": error_code or None,
+        "error_message": str(status.get("error_message") or "")[:200],
+        "retry_after_seconds": int(status.get("retry_after_seconds") or 0),
+        "reset_at": str(status.get("reset_at") or ""),
+        "checked_at": str(status.get("checked_at") or ""),
+    }
 
 
 def runtime_values_from_system_settings(
@@ -3539,13 +4003,26 @@ def runtime_values_from_market_settings(
     api_token = system_github_api_token_payload(payload, legacy_api_token)
     remove_indexes = getattr(payload, "api_token_remove_indexes", []) or []
     if should_write_secret(api_token) or remove_indexes:
-        values["GITHUB_API_TOKEN"] = merge_github_api_token_pool(
+        merged_token_pool = merge_github_api_token_pool(
             runtime_config.get("GITHUB_API_TOKEN", ""),
             api_token,
             remove_indexes,
         )
+        values["GITHUB_API_TOKEN"] = merged_token_pool
+        values["GITHUB_API_TOKEN_STATUS"] = serialize_github_api_token_statuses(
+            clean_github_api_token_statuses(
+                merged_token_pool,
+                runtime_config.get("GITHUB_API_TOKEN_STATUS", ""),
+            )
+        )
     elif "GITHUB_API_TOKEN" in runtime_config:
         values["GITHUB_API_TOKEN"] = runtime_config["GITHUB_API_TOKEN"]
+        values["GITHUB_API_TOKEN_STATUS"] = serialize_github_api_token_statuses(
+            clean_github_api_token_statuses(
+                runtime_config["GITHUB_API_TOKEN"],
+                runtime_config.get("GITHUB_API_TOKEN_STATUS", ""),
+            )
+        )
     return values
 
 
@@ -4243,28 +4720,48 @@ def parse_github_api_tokens(value: str) -> list[str]:
     return [token.strip() for token in re.split(r"[\n,;]+", value or "") if token.strip()]
 
 
-def first_github_api_token(value: str) -> str:
+def is_github_api_token_disabled(token: str, statuses: dict[str, dict[str, Any]] | None) -> bool:
+    if not statuses:
+        return False
+    return bool((statuses.get(github_api_token_hash(token)) or {}).get("disabled"))
+
+
+def first_github_api_token(
+    value: str,
+    statuses: dict[str, dict[str, Any]] | None = None,
+) -> str:
     tokens = parse_github_api_tokens(value)
-    return tokens[0] if tokens else ""
+    for token in tokens:
+        if not is_github_api_token_disabled(token, statuses):
+            return token
+    return ""
 
 
-def next_system_github_api_token(app: FastAPI, settings: Settings) -> str:
+def next_system_github_api_token(
+    app: FastAPI,
+    settings: Settings,
+    statuses: dict[str, dict[str, Any]] | None = None,
+) -> str:
     tokens = parse_github_api_tokens(settings.github_api_token)
     if not tokens:
         return ""
+    active_tokens = [token for token in tokens if not is_github_api_token_disabled(token, statuses)]
+    if not active_tokens:
+        return ""
     index = int(getattr(app.state, "github_api_token_index", 0) or 0)
     app.state.github_api_token_index = index + 1
-    return tokens[index % len(tokens)]
+    return active_tokens[index % len(active_tokens)]
 
 
 def github_api_headers(
     user: dict[str, Any] | None = None,
     settings: Settings | None = None,
     token: str = "",
+    token_statuses: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     token = str(token or (user or {}).get("github_token") or "").strip()
     if not token and settings:
-        token = first_github_api_token(settings.github_api_token)
+        token = first_github_api_token(settings.github_api_token, token_statuses)
     if not token:
         return github_public_headers()
     return {

@@ -35,6 +35,15 @@ class PluginSubmission(BaseModel):
         return [str(tag).strip() for tag in value or [] if str(tag).strip()]
 
 
+class PluginSubmissionMetadataPreviewPayload(BaseModel):
+    repo: str
+
+    @field_validator("repo", mode="before")
+    @classmethod
+    def strip_repo(cls, value: str | None) -> str:
+        return str(value or "").strip()
+
+
 class PluginPatch(BaseModel):
     name: str | None = None
     display_name: str | None = None
