@@ -230,6 +230,16 @@ export interface SetupConfig {
     api_token: string;
     api_token_configured: boolean;
     api_token_previews: string[];
+    api_token_statuses: {
+      token: string;
+      disabled: boolean;
+      status: string;
+      error_code?: number | null;
+      error_message?: string;
+      retry_after_seconds?: number;
+      reset_at?: string;
+      checked_at?: string;
+    }[];
     api_token_remove_indexes: number[];
     metadata_sync_enabled: boolean;
     metadata_sync_interval_seconds: number;

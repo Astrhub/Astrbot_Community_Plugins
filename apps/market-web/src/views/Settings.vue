@@ -301,9 +301,32 @@
                               v-for="item in marketTokenPreviewRows"
                               :key="`${item.index}-${item.token}`"
                               class="token-preview-item"
-                              :class="{ 'token-preview-item--removing': item.removing }"
+                              :class="{
+                                'token-preview-item--removing': item.removing,
+                                'token-preview-item--disabled': item.disabled,
+                              }"
                             >
-                              <span>Token {{ item.index + 1 }}: {{ item.token }}</span>
+                              <div class="token-preview-main">
+                                <span>Token {{ item.index + 1 }}: {{ item.token }}</span>
+                                <div
+                                  v-if="item.errorCode || item.status !== 'active'"
+                                  class="token-status-line"
+                                >
+                                  <n-tag
+                                    size="small"
+                                    :type="item.disabled ? 'error' : 'warning'"
+                                    :bordered="false"
+                                  >
+                                    {{ tokenStatusLabels[item.status] || item.status }}
+                                  </n-tag>
+                                  <span v-if="item.errorCode">HTTP {{ item.errorCode }}</span>
+                                  <span v-if="item.retryAfterSeconds">
+                                    等待 {{ item.retryAfterSeconds }} 秒
+                                  </span>
+                                  <span v-else-if="item.resetAt">重置于 {{ item.resetAt }}</span>
+                                  <span v-if="item.errorMessage">{{ item.errorMessage }}</span>
+                                </div>
+                              </div>
                               <n-button
                                 tertiary
                                 size="tiny"
@@ -641,12 +664,26 @@ const announcementForm = reactive({ title: "", body: "" });
 const formData = reactive(createSettingsForm());
 const marketTokenPreviewRows = computed(() => {
   const removeIndexes = new Set(formData.market.api_token_remove_indexes || []);
-  return (formData.market.api_token_previews || []).map((token, index) => ({
-    token,
+  const statuses = formData.market.api_token_statuses || [];
+  const previews = formData.market.api_token_previews || [];
+  const rows = statuses.length ? statuses : previews.map((token) => ({ token }));
+  return rows.map((item, index) => ({
+    token: item.token,
     index,
     removing: removeIndexes.has(index),
+    disabled: Boolean(item.disabled),
+    status: item.status || "active",
+    errorCode: item.error_code,
+    errorMessage: item.error_message || "",
+    retryAfterSeconds: Number(item.retry_after_seconds || 0),
+    resetAt: item.reset_at || "",
   }));
 });
+const tokenStatusLabels = {
+  active: "正常",
+  disabled: "已停用",
+  rate_limited: "限流",
+};
 const smtpEncryptionFeedback = computed(() => {
   const messages: Record<string, string> = {
     auto: "自动：服务器支持 STARTTLS 时自动升级，否则保持原连接。",
@@ -854,6 +891,7 @@ function createSettingsForm() {
       api_token: "",
       api_token_configured: false,
       api_token_previews: [],
+      api_token_statuses: [],
       api_token_remove_indexes: [],
       metadata_sync_enabled: true,
       metadata_sync_interval_seconds: 3600,
@@ -937,6 +975,8 @@ function settingsPayload() {
   payload.market.api_token = secretInputPayload(payload.market.api_token);
   delete payload.market.api_token_configured;
   delete payload.market.api_token_previews;
+  delete payload.market.api_token_statuses;
+  delete payload.market.api_token_status;
   payload.email.smtp.password = secretInputPayload(payload.email.smtp.password);
   payload.email.smtp.ssl = payload.email.smtp.encryption === "ssl_tls";
   delete payload.email.smtp.password_configured;
@@ -1370,6 +1410,24 @@ h1 {
   font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.token-preview-main {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.token-status-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-family);
+}
+
+.token-preview-item--disabled {
+  border-color: var(--error-color);
 }
 
 .token-preview-item--removing {

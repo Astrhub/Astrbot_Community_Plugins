@@ -178,6 +178,7 @@ const createDefaultSetupConfig = (): SetupConfig => ({
     api_token: "",
     api_token_configured: false,
     api_token_previews: [],
+    api_token_statuses: [],
     api_token_remove_indexes: [],
     metadata_sync_enabled: true,
     metadata_sync_interval_seconds: 3600,
