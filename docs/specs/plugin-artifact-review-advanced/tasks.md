@@ -1,0 +1,510 @@
+# 插件制品高级审查系统 - 任务清单
+
+## Implementation Tasks
+
+- [ ] 1. **高级审查数据模型与状态机**
+    - [ ] 1.1. 创建 advanced review 版本化迁移
+        - *Goal*: 为 P2-P4 建立向前兼容、可审计的数据基础。
+        - *Details*: 新增 `20260710_002_artifact_advanced_review.sql`；扩展 artifact/files/runs/findings/jobs/decisions；创建 diff、dependency edges、runtime dispatch、comments/events、policies/events、SBOM 表；为 FK、check、partial unique index 和查询路径建立约束。
+        - *Requirements*: FR-202、FR-209、FR-212、FR-213、FR-214、FR-220、FR-223；数据需求、可靠性。
+    - [ ] 1.2. 扩展领域枚举和转换
+        - *Goal*: 让新增状态和动作具有单一服务端来源。
+        - *Details*: 新增 `changes_requested`、`auto_approve`、`request_changes` 和高级 job types；保持旧 P0/P1 值有效；`critical` 继续只作为 risk level；更新 review/publication transitions 和稳定错误码。
+        - *Requirements*: FR-208、FR-213、FR-215；兼容性。
+    - [ ] 1.3. 扩展 Repository Protocol 与 PG/内存实现
+        - *Goal*: 以事务接口覆盖新表和并发动作。
+        - *Details*: 增加 policy snapshot、stage run、runtime dispatch、diff/graph、comments/events、history source、finding status/correlation 和 SBOM 操作；批量查询避免 N+1；内存实现与生产语义一致但不替代 PG 约束。
+        - *Requirements*: FR-202、FR-209 至 FR-215、FR-220、FR-223。
+    - [ ] 1.4. 增加迁移、约束和状态机测试
+        - *Goal*: 证明 P1 数据升级、重复迁移、并发唯一性和非法转换安全。
+        - *Details*: 覆盖空库、P1 schema、checksum、FK 删除策略、active policy 唯一、dispatch lease、comment version、decision 幂等和旧状态兼容。
+        - *Requirements*: 全局回归、可靠性、可维护性。
+    - [ ] 1.5. 验证并提交数据基础
+        - *Goal*: 形成第一个可回滚的高级审查提交。
+        - *Details*: 运行 Ruff、迁移/Repository/状态机测试、`git diff --check`；审查 SQL 和敏感信息后提交，提交信息使用现有 imperative 风格。
+        - *Requirements*: 全局回归、完成定义。
+
+- [ ] 2. **版本化 Review Policy 与配置基础**
+    - [ ] 2.1. 定义 policy schema 和跨字段校验
+        - *Goal*: 用一个不可变 policy snapshot 表达阶段、阈值、版本、资源、网络和路由规则。
+        - *Details*: Pydantic/JSON Schema 覆盖 required stages、AstrBot/Python exact versions、limits、network profiles、LLM budget、malware/dependency thresholds、category 和 routing；密钥仅保存 config reference。
+        - *Requirements*: FR-204、FR-208、FR-219、FR-220。
+    - [ ] 2.2. 实现 draft/validate/activate/retire/rollback
+        - *Goal*: 只有核心管理员能原子切换 active policy。
+        - *Details*: activation 使用行锁和 partial unique index；保存 actor、reason、request ID、base version 和脱敏 diff；无效 draft 不影响 current active。
+        - *Requirements*: FR-220、FR-223；P4 验收。
+    - [ ] 2.3. 在 artifact 首阶段固定 policy snapshot
+        - *Goal*: active policy 后续变化不污染在途 artifact 和历史 run。
+        - *Details*: precheck 开始时原子写 `policy_version_id`；stage/run/decision 引用相同 snapshot；只有核心管理员显式迁移可改变并留下 decision/event。
+        - *Requirements*: FR-208、FR-220。
+    - [ ] 2.4. 增加配置与健康状态骨架
+        - *Goal*: 以 fail-visible 方式表达 runtime、LLM、malware、dependency 和 policy 是否 configured/ready/degraded。
+        - *Details*: 扩展 `ArtifactSettings` 和 `/health` 摘要，不返回 endpoint、bucket、规则正文或 token；auto approve 默认关闭。
+        - *Requirements*: FR-221；安全、兼容性。
+    - [ ] 2.5. 验证并提交 policy 基础
+        - *Goal*: 独立交付可测试的策略控制面。
+        - *Details*: 运行 schema/权限/并发 activation/health tests、Ruff 和 OpenAPI 过滤测试；差异自审后提交。
+        - *Requirements*: FR-220、FR-221、FR-223。
+
+- [ ] 3. **可恢复的高级审查 DAG**
+    - [ ] 3.1. 从 `ArtifactJobRunner` 抽取 stage handlers
+        - *Goal*: 防止 runtime/LLM/security 阶段继续堆入单一 jobs.py。
+        - *Details*: 建立 `ReviewStage`/`StageContext`/`StageOutcome`；保留 P1 handler 行为；统一 completed/blocked/degraded/retryable/terminal 语义。
+        - *Requirements*: FR-208、FR-221；可维护性。
+    - [ ] 3.2. 实现 DAG readiness 和幂等入队
+        - *Goal*: 根据固定 policy 只运行满足依赖的阶段，并最终唯一进入 routing。
+        - *Details*: 每 stage 使用 artifact/policy/tool version 幂等键；重试创建新 run attempt；硬阻断可跳过成本阶段但保存 coverage reason；worker crash 后可恢复。
+        - *Requirements*: FR-202、FR-205 至 FR-208、FR-216 至 FR-220。
+    - [ ] 3.3. 调整 static 完成后的流程
+        - *Goal*: static 不再直接无条件进入人工队列，而是启动高级 DAG。
+        - *Details*: 高级功能关闭时保持 P1 `pending_review`；启用时入队 diff/malware/runtime 等 policy stages；critical 静态 finding 继续确定性拒绝。
+        - *Requirements*: FR-208；兼容性。
+    - [ ] 3.4. 增加 stage DAG truth-table 与恢复测试
+        - *Goal*: 证明成功、阻断、降级、重试、跳过和重复领取不会误通过。
+        - *Details*: 覆盖 feature flag 组合、policy changes、worker crash、重复 callback、缺失 run 和 route 只创建一次。
+        - *Requirements*: FR-208、FR-221；可靠性。
+    - [ ] 3.5. 验证并提交 orchestration
+        - *Goal*: 形成后续工具统一接入点。
+        - *Details*: 运行现有 artifact pipeline 回归、DAG tests、Ruff；确认 P0/P1 默认路径不变后提交。
+        - *Requirements*: 全局回归。
+
+- [ ] 4. **Runtime Dispatch 与独立 Runner 服务**
+    - [ ] 4.1. 定义 request/result typed contract
+        - *Goal*: 让控制 worker 和 runner 只通过无凭据、可 hash 的 JSON 通信。
+        - *Details*: 建立 schema version、artifact SHA、policy/target/limits/network profile、result key；限制字段和输出大小；canonical JSON hash 校验。
+        - *Requirements*: FR-202、FR-203、FR-204。
+    - [ ] 4.2. 实现 runtime dispatch claim/lease/result collection
+        - *Goal*: runner 崩溃或 worker 重启后任务可回收且结果只消费一次。
+        - *Details*: 独立 lease owner、expiry、attempt、result hash、collected_at；普通 worker 创建 dispatch 和 reconcile completed dispatch；runner 使用最小权限 repository。
+        - *Requirements*: FR-202、FR-221；可靠性。
+    - [ ] 4.3. 新增 `runtime-runner` 独立入口
+        - *Goal*: 保证 API 和普通 artifact worker 无容器执行代码路径。
+        - *Details*: 新增 worker loop、SIGTERM、lease heartbeat、result upload 和 orphan cleanup；模块不能导入市场 API/store；使用专用配置/身份。
+        - *Requirements*: FR-202；P2 验收。
+    - [ ] 4.4. 定义 `ContainerExecutor` 和确定性 fake
+        - *Goal*: 隔离容器引擎实现并完整测试失败矩阵。
+        - *Details*: Protocol 包含 prepare/install/smoke/attest/cleanup；fake 覆盖 timeout/OOM/crash/cleanup failure；生产实现后续接 rootless Docker。
+        - *Requirements*: FR-202、FR-219；可维护性。
+    - [ ] 4.5. 验证进程边界并提交
+        - *Goal*: 证明 API/普通 worker 不执行插件代码。
+        - *Details*: 增加 import/command path tests 和静态断言；运行 dispatch/lease/contract tests、Ruff；确认无 Docker socket 配置进入 app/worker 后提交。
+        - *Requirements*: 核心原则 1-3；P2 验收。
+
+- [ ] 5. **AstrBot 精确版本 Install 与 Smoke Probe**
+    - [ ] 5.1. 实现 runtime target resolver
+        - *Goal*: 将 policy exact versions 与 artifact `astrbot_version` 正确求交。
+        - *Details*: 禁止 `latest`；保存 AstrBot/Python/image/source snapshot；不把插件 artifact version 与 AstrBot runtime version混淆；版本不相交产生阻断 finding。
+        - *Requirements*: FR-204。
+    - [ ] 5.2. 实现 install sandbox
+        - *Goal*: 安装精确 AstrBot 和插件依赖并检测核心依赖破坏。
+        - *Details*: 创建一次性 venv/volume；`pip install AstrBot==target`、安装 requirements、`pip check`、安装前后核心依赖 snapshot、受限日志和 SBOM；URL 凭据脱敏。
+        - *Requirements*: FR-203、FR-218。
+    - [ ] 5.3. 实现 AstrBot 4.26.5 source-backed smoke adapter
+        - *Goal*: 通过真实 AstrBot lifecycle 验证插件，而不是裸 import。
+        - *Details*: 参考 `/root/work/AstrBot` 的 `AstrBotCoreLifecycle.initialize()`、`PluginManager.load()`、`failed_plugin_dict`、`StarMetadata.star_handler_full_names` 和 LLM tool registry；记录 metadata/import/instance/initialize/startup/handler/hook/tool/terminate。
+        - *Requirements*: FR-203。
+    - [ ] 5.4. 规范化 runtime findings
+        - *Goal*: 将依赖、导入、初始化和注册错误映射为稳定结构化 finding。
+        - *Details*: 定义 error code/severity/deterministic/evidence limit；保存 target/tool/image/dependency hash；原始日志进入私有对象且有大小上限。
+        - *Requirements*: FR-203、FR-204、FR-221。
+    - [ ] 5.5. 增加 fixture 和 contract tests
+        - *Goal*: 覆盖正常插件、依赖冲突、import/initialize/handler/tool/terminate 失败。
+        - *Details*: fixture 全部为仓库内安全最小插件，不执行互联网插件；fake executor 测试完整失败矩阵。
+        - *Requirements*: P2 验收、可维护性。
+    - [ ] 5.6. 验证并提交 AstrBot smoke 能力
+        - *Goal*: 形成可在隔离 engine 中执行的完整 probe。
+        - *Details*: 运行 resolver/probe/result validation tests、Ruff；核对源码版本事实和日志脱敏后提交。
+        - *Requirements*: FR-203、FR-204。
+
+- [ ] 6. **Rootless Docker 执行、网络隔离与真实 Runtime 门禁**
+    - [ ] 6.1. 实现 Docker `ContainerExecutor`
+        - *Goal*: 用结构化 argv 创建一次性 install/smoke 容器。
+        - *Details*: non-root、read-only rootfs、cap-drop all、no-new-privileges、seccomp、CPU/memory/PID/time/tmpfs 限制；禁止 privileged、host namespace 和 artifact 输入 shell 拼接。
+        - *Requirements*: FR-202、FR-219。
+    - [ ] 6.2. 实现 install/smoke 独立网络 profile
+        - *Goal*: install 仅访问批准包源，smoke 默认无网络。
+        - *Details*: 基础设施层阻止私网、metadata、宿主回环、站点 PostgreSQL/Redis、对象管理端；生成 network attestation；无法证明时 runtime degraded/failed。
+        - *Requirements*: FR-219。
+    - [ ] 6.3. 实现强制 cleanup 和 orphan reconciler
+        - *Goal*: 成功、失败、timeout、cancel 和 runner crash 后无残留容器/volume/network。
+        - *Details*: 所有资源带 dispatch label；cleanup 独立记录；未确认 cleanup 阻止 auto approve；定期扫描并清理过期资源。
+        - *Requirements*: FR-202、FR-221。
+    - [ ] 6.4. 增加 Compose opt-in runner profile
+        - *Goal*: 本地可重复运行真实 smoke，生产配置明确最小权限前置。
+        - *Details*: app/artifact-worker 不挂 socket；runner 使用独立 service/config；开发 root socket 降级明确标记非生产；提供 rootless/Kubernetes 运维说明。
+        - *Requirements*: FR-202、FR-219；部署。
+    - [ ] 6.5. 执行真实安全 fixture
+        - *Goal*: 获取 P2 必需的非 mock 证据。
+        - *Details*: 运行正常/冲突/import failure fixtures；验证外网、metadata、host、postgres、redis 不可达；验证资源销毁和 structured result。
+        - *Requirements*: P2 验收、全局回归。
+    - [ ] 6.6. 验证并提交 runtime runner
+        - *Goal*: 只有真实隔离门禁通过后交付 runtime 阶段。
+        - *Details*: 运行 unit/integration/Compose config/Ruff；记录 image digest 和测试结果，差异自审后提交。
+        - *Requirements*: FR-202 至 FR-204、FR-219。
+
+- [ ] 7. **AI 分类建议**
+    - [ ] 7.1. 定义分类输入/输出 schema
+        - *Goal*: 只发送 metadata、README 摘要、文件树和允许分类枚举。
+        - *Details*: JSON schema 包含 category/confidence/reason/model/prompt version；脱敏、长度和枚举限制；原始响应私有保存。
+        - *Requirements*: FR-201。
+    - [ ] 7.2. 实现 reviewer/user/ai/default 优先级
+        - *Goal*: AI 永远不覆盖明确人工分类。
+        - *Details*: 只在空/other 且 policy 允许并达阈值时应用；artifact 保存建议，plugin 保存当前投影；并发更新使用条件 SQL。
+        - *Requirements*: FR-201。
+    - [ ] 7.3. 增加分类 adapter 和失败语义
+        - *Goal*: provider timeout/invalid JSON 不被当作分类完成。
+        - *Details*: 使用 Protocol 和 deterministic fake；配置模型/prompt version/token limit；失败进入 coverage/degraded，不影响人工选择。
+        - *Requirements*: FR-201、FR-221。
+    - [ ] 7.4. 验证并提交分类功能
+        - *Goal*: 独立验证分类数据边界与优先级。
+        - *Details*: 运行 schema、prompt injection、优先级、并发和 API projection tests、Ruff 后提交。
+        - *Requirements*: FR-201。
+
+- [ ] 8. **结构化 LLM 包级审查**
+    - [ ] 8.1. 构造限长 package input
+        - *Goal*: 不发送整个代码包或全量源码。
+        - *Details*: 组合 tree、metadata、requirements、README 脱敏摘要、deterministic findings、diff/graph coverage 和 policy；保存 input hash/token estimate。
+        - *Requirements*: FR-205。
+    - [ ] 8.2. 定义 `PackageReviewResultV1`
+        - *Goal*: 严格校验风险摘要、建议文件、分类和 coverage notes。
+        - *Details*: 拒绝隐藏命令、未知字段超限、路径穿越、二进制/不存在文件；保存 model/prompt/schema versions。
+        - *Requirements*: FR-205、FR-207。
+    - [ ] 8.3. 实现 provider adapter、预算和重试
+        - *Goal*: timeout/429/invalid JSON 具有明确失败和人工复核语义。
+        - *Details*: 有限重试、费用/token budget、原始响应私有存储、日志脱敏；不把模型失败映射为 clean。
+        - *Requirements*: FR-205、FR-207、FR-221。
+    - [ ] 8.4. 增加包级数据边界测试
+        - *Goal*: 证明请求不含全量源码、凭据或隔离 key。
+        - *Details*: 使用恶意 README/requirements/prompt injection、超长 tree 和 invalid outputs 测试。
+        - *Requirements*: FR-205、FR-207。
+    - [ ] 8.5. 验证并提交 package LLM
+        - *Goal*: 交付可审计包级建议。
+        - *Details*: 运行 LLM schema/budget/redaction/failure tests、Ruff 后提交。
+        - *Requirements*: FR-205、FR-207。
+
+- [ ] 9. **LLM 文件选择、文件级审查与汇总**
+    - [ ] 9.1. 实现确定性候选集合和排序
+        - *Goal*: 入口、依赖闭包、变更、命中、强制和模型建议文件按 policy 预算审查。
+        - *Details*: 只接受 manifest 中受限文本；保存 reviewed/skipped 文件、原因和 coverage；未完成不得声称全量。
+        - *Requirements*: FR-206、FR-210。
+    - [ ] 9.2. 实现 file input 和 result schema
+        - *Goal*: 每个 run 绑定 file ID/SHA、prompt、model 和 input hash。
+        - *Details*: 限制单文件/总 token；服务端复读行范围和 evidence；无法复核输出不写普通 finding。
+        - *Requirements*: FR-206。
+    - [ ] 9.3. 实现 summary non-mutation boundary
+        - *Goal*: 汇总只能消费规范化结果，不能改写历史 finding。
+        - *Details*: 输出人工优先级/摘要；LLM finding deterministic=false；severity merge 只升不降；禁止 decision/revoke command。
+        - *Requirements*: FR-207。
+    - [ ] 9.4. 增加路径、行号、预算和 severity 测试
+        - *Goal*: 阻止模型越权读取和风险降级。
+        - *Details*: 覆盖未知 path、binary、oversize、SHA drift、line overflow、evidence mismatch、budget exhaustion 和模型建议 critical。
+        - *Requirements*: FR-206、FR-207。
+    - [ ] 9.5. 验证并提交 file/summary LLM
+        - *Goal*: 完成结构化 LLM 审查链。
+        - *Details*: 运行 targeted tests、Ruff、敏感输出扫描后提交。
+        - *Requirements*: FR-206、FR-207。
+
+- [ ] 10. **确定性自动路由与 P2 报告 API**
+    - [ ] 10.1. 实现 routing truth table
+        - *Goal*: 明确 auto reject/manual/auto approve 的唯一计算路径。
+        - *Details*: 只消费 fixed policy、required runs、tool health、coverage 和 open findings；LLM safe 不能单独通过；auto approve 默认关闭。
+        - *Requirements*: FR-208。
+    - [ ] 10.2. 实现 route decision 审计与幂等
+        - *Goal*: 保存 policy、run IDs、fingerprints、coverage hash、理由和 idempotency key。
+        - *Details*: 行锁 artifact；并发 route/admin decision 只有合法转换成功；auto approve 复用现有 publish job，不绕过版本门控。
+        - *Requirements*: FR-208、FR-223。
+    - [ ] 10.3. 扩展 artifact/runs/findings 报告 schema
+        - *Goal*: 作者和管理员看到 structured runtime/LLM/category/coverage，不看到 raw prompt/log/key。
+        - *Details*: typed summaries、tool/model/version、degraded 状态和“自动审查建议”标签；OpenAPI 角色过滤。
+        - *Requirements*: FR-207、FR-221、FR-223、FR-224。
+    - [ ] 10.4. 扩展 Summary/Header/Decision UI
+        - *Goal*: P2 结果可读且不会误称绝对安全。
+        - *Details*: 展示 stage、target、coverage、finding、建议分类和 route reason；现有 route view 保持薄；管理员命令仍由后端鉴权。
+        - *Requirements*: FR-207、FR-224。
+    - [ ] 10.5. 验证并提交 P2 闭环
+        - *Goal*: 证明 runtime + AI + routing 端到端工作且旧发布安全。
+        - *Details*: 运行 API/worker/runtime/LLM/frontend tests、`vp check`、Vitest/build、OpenAPI、Compose；检查拒绝候选不影响旧 CDN 后提交。
+        - *Requirements*: P2 验收、全局回归。
+
+- [ ] 11. **Artifact Diff 与 Tree Hash 绑定**
+    - [ ] 11.1. 实现 base artifact 校验
+        - *Goal*: 只比较同插件、提交时固定且 tree 完整的 base。
+        - *Details*: base 缺失/跨插件/未完成 manifest 时标记 degraded 并退化全量；不使用后续 current pointer 替换已记录 base。
+        - *Requirements*: FR-209。
+    - [ ] 11.2. 实现文件 change classification
+        - *Goal*: 确定性识别 added/deleted/modified/unchanged/exact rename。
+        - *Details*: path+SHA 比较；rename 仅相同 SHA 一一对应；二进制只存 metadata；绑定两侧 tree/file SHA。
+        - *Requirements*: FR-209。
+    - [ ] 11.3. 生成受限 unified hunks
+        - *Goal*: 为文本 diff 和行级评论提供稳定行范围。
+        - *Details*: 限制文件/总字节、hunk context 和输出大小；私有对象存储；读取时校验 tree hash，过期重算。
+        - *Requirements*: FR-209、FR-211。
+    - [ ] 11.4. 增加 diff corpus tests
+        - *Goal*: 覆盖换行、Unicode、rename ambiguity、binary、delete 和 tree drift。
+        - *Details*: 使用小型动态 fixture；断言 deterministic output 和 limits。
+        - *Requirements*: FR-209。
+    - [ ] 11.5. 验证并提交 diff backend
+        - *Goal*: 独立交付可靠文件 diff。
+        - *Details*: 运行 diff/storage/repository tests、Ruff、迁移 checks 后提交。
+        - *Requirements*: FR-209。
+
+- [ ] 12. **Python Import Graph 与增量审查集合**
+    - [ ] 12.1. 实现 AST local import resolver
+        - *Goal*: 不执行源码地解析 import/from/relative/package imports。
+        - *Details*: 区分 local/external/unknown；保存 line、edge type、confidence；从 `main.py` 和 policy entrypoints 计算 reachability。
+        - *Requirements*: FR-210。
+    - [ ] 12.2. 实现 incomplete detection
+        - *Goal*: 动态 import、`sys.path`、语法错误和未知入口不被静默忽略。
+        - *Details*: 保存 reason/coverage；policy 决定全量或人工；LLM 只能继续建议。
+        - *Requirements*: FR-210。
+    - [ ] 12.3. 计算 forward/reverse/removed impact
+        - *Goal*: 增量集合包含变更反向依赖、入口路径和删除文件旧依赖。
+        - *Details*: 使用 current/base graph；metadata/requirements/entry changes 强制完整 runtime/dependency。
+        - *Requirements*: FR-206、FR-210。
+    - [ ] 12.4. 增加 import graph fixtures
+        - *Goal*: 覆盖 package、relative、cycle、dynamic、syntax error、delete 和 reverse dependency。
+        - *Details*: 断言 coverage 和降级 reason，不导入 fixture。
+        - *Requirements*: FR-210。
+    - [ ] 12.5. 验证并提交 graph/scope
+        - *Goal*: 完成可证明的增量选择基础。
+        - *Details*: 运行 graph/scope/DAG tests、Ruff 后提交。
+        - *Requirements*: FR-206、FR-210。
+
+- [ ] 13. **受限文件与 Diff API**
+    - [ ] 13.1. 扩展 ArtifactStorage 安全读取接口
+        - *Goal*: 通过登记 key 读取受限文本/JSON，不暴露预签名 URL。
+        - *Details*: Local/S3 实现 range/size/hash；API service 只接受 artifact/file/diff IDs；路径和对象 key 不来自客户端。
+        - *Requirements*: FR-211。
+    - [ ] 13.2. 实现文件树、文本行分页和 diff API
+        - *Goal*: 作者/管理员安全浏览 artifact。
+        - *Details*: 所有权/admin 校验、UTF-8 text only、binary metadata、line limits、Cache-Control no-store、稳定错误码和可选读取审计。
+        - *Requirements*: FR-211、FR-223。
+    - [ ] 13.3. 更新 typed schemas 和 OpenAPI
+        - *Goal*: public/user/admin/core_admin surface 准确。
+        - *Details*: 不返回 content_key/quarantine_key/log/prompt；同步静态 OpenAPI 和过滤测试。
+        - *Requirements*: FR-211、FR-223。
+    - [ ] 13.4. 增加权限与恶意输入测试
+        - *Goal*: 阻止跨作者、任意路径、二进制、超限和 SHA drift。
+        - *Details*: 覆盖 `../`、object key、跨 artifact file ID、huge line、invalid range、non-UTF8、stale diff。
+        - *Requirements*: P3 验收、安全。
+    - [ ] 13.5. 验证并提交内容 API
+        - *Goal*: 后端阅读边界验证无误后提交。
+        - *Details*: 运行 API/permissions/storage/OpenAPI/Ruff tests，敏感字段搜索后提交。
+        - *Requirements*: FR-211、FR-223。
+
+- [ ] 14. **行级评论、要求修改与重新提交**
+    - [ ] 14.1. 实现 comment thread/event domain service
+        - *Goal*: 评论绑定 artifact/file SHA/side/line 并以追加事件审计。
+        - *Details*: create/edit/reply/resolve/reopen/author_addressed；正文纯文本限长；乐观 version + idempotency；最终 decision 后锁定。
+        - *Requirements*: FR-212。
+    - [ ] 14.2. 实现角色权限和行范围校验
+        - *Goal*: 管理员控制审查线程，作者只能回复/标记已处理。
+        - *Details*: current/base file 和 hunk 校验；作者不能改管理员原文或解决状态；用户删除后保留 nickname/role snapshot。
+        - *Requirements*: FR-212、FR-223。
+    - [ ] 14.3. 实现 `request_changes` decision
+        - *Goal*: 区分要求修改与拒绝，并保证候选不发布。
+        - *Details*: 理由必填；锁定旧 artifact/thread；新提交创建新 artifact，记录 base/supersedes；禁止原 ZIP 原地替换；完整安全阶段重跑。
+        - *Requirements*: FR-213。
+    - [ ] 14.4. 增加评论并发和重新提交测试
+        - *Goal*: 并发回复/resolve 不丢事件，终态历史不可变。
+        - *Details*: 覆盖 stale version、duplicate idempotency、跨角色、line drift、locked thread 和 supersedes chain。
+        - *Requirements*: FR-212、FR-213。
+    - [ ] 14.5. 验证并提交评论/修改流程
+        - *Goal*: 完成作者-管理员修改闭环后提交。
+        - *Details*: 运行 domain/repository/API/permission tests、Ruff 和 OpenAPI 后提交。
+        - *Requirements*: FR-212、FR-213。
+
+- [ ] 15. **审查历史与 Stable Risk 关联**
+    - [ ] 15.1. 实现 cursor history projection
+        - *Goal*: 不复制事实地聚合 runs/findings/comments/decisions/publication/policy events。
+        - *Details*: 按 `(occurred_at,type,id)` 稳定分页；带 actor/source/idempotency/policy snapshot；隐藏敏感 raw data。
+        - *Requirements*: FR-214。
+    - [ ] 15.2. 实现 deterministic stable correlator
+        - *Goal*: 候选 critical 默认不撤回 stable，只有证据关联后才能下架。
+        - *Details*: 同 path+SHA、dependency/advisory、deterministic fingerprint、管理员确认；LLM 只产生 suggestion。
+        - *Requirements*: FR-215。
+    - [ ] 15.3. 接入紧急撤回和通知
+        - *Goal*: 确认影响 stable 后先隐藏 feed，再异步撤回对象。
+        - *Details*: 保存 correlation/finding/actor/policy/reason；复用 P1 revoke idempotency/retry；通知作者和管理员。
+        - *Requirements*: FR-215、FR-222。
+    - [ ] 15.4. 增加误关联和下架失败测试
+        - *Goal*: 证明候选风险不会无证据污染稳定版本。
+        - *Details*: 覆盖 LLM-only、同路径不同 SHA、同 SHA、dependency match、admin confirmation、revoke failure 和旧 CDN 指针行为。
+        - *Requirements*: P3 验收。
+    - [ ] 15.5. 验证并提交 history/stable risk
+        - *Goal*: 审计和重大风险处置验证后提交。
+        - *Details*: 运行 history/correlation/revoke/feed/notification tests、Ruff 后提交。
+        - *Requirements*: FR-214、FR-215。
+
+- [ ] 16. **完整 Plugin Workbench UI**
+    - [ ] 16.1. 建立 review workspace typed state
+        - *Goal*: route query 是选择权威，Pinia 只保存服务端实体和加载状态。
+        - *Details*: 保留 `stores/artifacts.ts`；新增 review workspace store/composables；不保存 ZIP、整包源码、raw prompt/log；使用 Composition API 和 `<script setup lang="ts">`。
+        - *Requirements*: FR-224；前端规范。
+    - [ ] 16.2. 实现 `ReviewFileBrowser` 和 `ReviewDiffViewer`
+        - *Goal*: 稳定布局中浏览受限文本、binary metadata 和 hunks。
+        - *Details*: 行分页、loading/error/truncated、base/current mode、行选择；用 text interpolation/DOM text，不使用未清洗 `v-html`。
+        - *Requirements*: FR-211、FR-224。
+    - [ ] 16.3. 实现 `ReviewCommentThread` 和 `ReviewHistoryTimeline`
+        - *Goal*: 支持回复、已处理、resolve/reopen、locked 状态和 cursor history。
+        - *Details*: typed emits；busy/optimistic conflict/error；不解析评论 Markdown/mention；显示 actor snapshots。
+        - *Requirements*: FR-212、FR-214、FR-224。
+    - [ ] 16.4. 扩展 `ReviewDecisionPanel`
+        - *Goal*: 管理员执行 approve/reject/request changes/stable revoke，作者重新提交。
+        - *Details*: 图标按钮和明确 tooltip；角色/状态决定可见性；理由 modal；后端错误是权威；避免重复提交。
+        - *Requirements*: FR-213、FR-215、FR-224。
+    - [ ] 16.5. 完善桌面/移动布局和无障碍
+        - *Goal*: 高密度审查工具在常见 viewport 无重叠和文本溢出。
+        - *Details*: 桌面 sidebar/header/main/thread；窄屏 drawer+tabs；固定 line gutter、minmax/overflow；键盘 focus、aria labels、非颜色唯一状态。
+        - *Requirements*: FR-224；可用性。
+    - [ ] 16.6. 增加组件/store/路由行为测试
+        - *Goal*: 覆盖 file/diff/comment/history/decision/深链和窄屏状态。
+        - *Details*: Vue Test Utils/Pinia，断言可见行为/emits；异步用 `flushPromises`；恶意文本不执行。
+        - *Requirements*: P3 验收、前端测试策略。
+    - [ ] 16.7. 验证并提交 P3 工作台
+        - *Goal*: P3 后端能力形成完整作者/管理员体验。
+        - *Details*: 运行 `vp check`、Vitest/build、API permission tests；使用桌面/移动截图检查重叠和文本，再提交。
+        - *Requirements*: FR-224、P3 验收。
+
+- [ ] 17. **ClamAV 与 YARA**
+    - [ ] 17.1. 实现 ClamAV adapter
+        - *Goal*: 扫描 quarantine ZIP 并保存 engine/database/target/signature 快照。
+        - *Details*: 使用 INSTREAM/等价安全协议；clean/infected/unknown/error/stale 分离；daemon 不在 API；confirmed infection deterministic critical。
+        - *Requirements*: FR-216。
+    - [ ] 17.2. 实现版本化 YARA ruleset 和 scanner
+        - *Goal*: 规则来源/hash/激活可审计，扫描受资源限制。
+        - *Details*: 核心管理员管理 ruleset；bounded subprocess/service；保存 namespace/rule/tags/offset；author 不能注入规则；timeout/error degraded。
+        - *Requirements*: FR-217、FR-220。
+    - [ ] 17.3. 接入 DAG/routing/tool health
+        - *Goal*: malware 工具结果正确阻断或降级。
+        - *Details*: policy fail-closed/manual 配置；工具未运行不显示 clean；run 保存 tool/rules/database versions；通知 critical/degraded。
+        - *Requirements*: FR-208、FR-216、FR-217、FR-221、FR-222。
+    - [ ] 17.4. 增加 EICAR/YARA/error tests
+        - *Goal*: 覆盖 infected、clean、unknown、stale、timeout、bad rules 和输出限额。
+        - *Details*: 使用官方安全测试字符串/本地测试规则，不提交真实恶意样本。
+        - *Requirements*: P4 验收。
+    - [ ] 17.5. 验证并提交 malware scanning
+        - *Goal*: 生产 adapter 契约和失败语义验证后提交。
+        - *Details*: 运行 unit/contract/DAG/routing/Ruff/Compose tests，记录病毒库/ruleset 测试快照后提交。
+        - *Requirements*: FR-216、FR-217。
+
+- [ ] 18. **依赖解析、SBOM 与漏洞风险**
+    - [ ] 18.1. 实现 requirements 规范解析
+        - *Goal*: 结构化名称、specifier、marker、extra、source 和 hash。
+        - *Details*: 保留 direct URL/VCS/local/editable 阻断；识别 dependency confusion/withdrawn/license policy inputs；不执行 requirement 内容。
+        - *Requirements*: FR-218。
+    - [ ] 18.2. 消费 install sandbox 最终依赖图和 SBOM
+        - *Goal*: 审查真实安装结果而非仅声明文本。
+        - *Details*: 验证 SBOM SHA/format/generator；私有保存正文；比较 AstrBot core snapshots 和 `pip check`；生成 normalized packages。
+        - *Requirements*: FR-203、FR-218。
+    - [ ] 18.3. 实现 vulnerability/advisory adapter
+        - *Goal*: 保存 advisory、affected range、fixed version、source 和 data timestamp。
+        - *Details*: Protocol 支持本地 snapshot/外部服务；缓存绑定数据库版本；stale/not_queried/error 不显示 no vulnerabilities。
+        - *Requirements*: FR-218、FR-221。
+    - [ ] 18.4. 接入 policy/routing/findings
+        - *Goal*: 按确定性严重度和数据新鲜度阻断或人工复核。
+        - *Details*: core dependency downgrade 和 policy critical/high 规则；同 dependency evidence 可用于 stable correlation；保存 snapshot hash。
+        - *Requirements*: FR-208、FR-215、FR-218、FR-220。
+    - [ ] 18.5. 增加 parser/SBOM/advisory tests
+        - *Goal*: 覆盖 marker/extra/direct、known advisory/fix、stale/unavailable 和 core conflict。
+        - *Details*: 使用固定本地 advisory fixture，避免实时数据库让测试不确定。
+        - *Requirements*: P4 验收。
+    - [ ] 18.6. 验证并提交 dependency security
+        - *Goal*: 完成依赖安全闭环后提交。
+        - *Details*: 运行 unit/contract/runtime/DAG/routing/Ruff tests，检查 SBOM/URL 凭据不泄露后提交。
+        - *Requirements*: FR-218。
+
+- [ ] 19. **Policy API、工具健康、可观测性与核心管理员 UI**
+    - [ ] 19.1. 实现 core-admin policy API
+        - *Goal*: 提供 list/create/validate/activate/retire/rollback typed endpoints。
+        - *Details*: core admin only；普通 admin read-only snapshot；stable errors、idempotency、OpenAPI 角色过滤。
+        - *Requirements*: FR-220、FR-223。
+    - [ ] 19.2. 实现工具健康和指标
+        - *Goal*: 暴露 configured/ready/degraded 而不泄露凭据。
+        - *Details*: runner/LLM/ClamAV/YARA/advisory/policy freshness；队列深度、stage latency、failure/timeout、manual wait、routing/revoke metrics。
+        - *Requirements*: FR-221。
+    - [ ] 19.3. 实现 `ReviewPolicyPanel`
+        - *Goal*: 核心管理员管理 policy 并查看工具状态。
+        - *Details*: draft editor 使用 structured controls；validate diff/errors；activation reason；非核心管理员不可见 mutation；不显示 secret refs 值。
+        - *Requirements*: FR-220、FR-224。
+    - [ ] 19.4. 增加权限、并发和脱敏测试
+        - *Goal*: 无效策略/并发激活/普通管理员不能改变 active，health 不泄密。
+        - *Details*: API/OpenAPI/frontend/metrics label cardinality tests。
+        - *Requirements*: P4 验收、安全、可观测性。
+    - [ ] 19.5. 验证并提交 policy workbench
+        - *Goal*: 完成策略治理用户面。
+        - *Details*: 运行 Ruff/API/OpenAPI/`vp check`/Vitest/build 和并发 PG tests后提交。
+        - *Requirements*: FR-220、FR-221、FR-223、FR-224。
+
+- [ ] 20. **通知、部署与安全运行手册**
+    - [ ] 20.1. 扩展状态通知事件
+        - *Goal*: 覆盖 runtime/malware/dependency/要求修改/critical/degraded/policy 相关提醒。
+        - *Details*: 邮件只含插件、版本、状态、简短原因和工作台链接；源码/diff/evidence/log/key 只在站内鉴权页面；保持外部邮件 at-least-once 语义。
+        - *Requirements*: FR-222。
+    - [ ] 20.2. 完善 Compose/systemd/env 示例
+        - *Goal*: 运维可配置 runner、LLM、ClamAV/YARA、advisory、network profiles 和 policy flags。
+        - *Details*: 不提交真实凭据；app/worker/runner 最小权限分离；服务依赖/readiness；feature flags 默认安全。
+        - *Requirements*: FR-219 至 FR-222；部署。
+    - [ ] 20.3. 更新架构、安全和操作文档
+        - *Goal*: 说明信任边界、版本语义、失败/降级、自动路由、下架和已知限制。
+        - *Details*: 更新 README、architecture/security、API、runner runbook、policy rollback、orphan cleanup 和 incident handling；不承诺绝对安全。
+        - *Requirements*: 非功能需求、完成定义。
+    - [ ] 20.4. 增加通知内容和部署配置测试
+        - *Goal*: 防止源码/凭据进入邮件、日志和健康接口，配置可解析。
+        - *Details*: 恶意 error/requirements/comment 输入；outbox dedupe；Compose config；缺服务 fail-visible。
+        - *Requirements*: FR-221、FR-222；安全。
+    - [ ] 20.5. 验证并提交运维闭环
+        - *Goal*: 运维和通知材料与实现一致。
+        - *Details*: 运行 notification/config/docs link/Compose/Ruff tests，敏感信息扫描后提交。
+        - *Requirements*: FR-219 至 FR-222。
+
+- [ ] 21. **端到端完成度审计与最终回归**
+    - [ ] 21.1. 建立需求到证据矩阵
+        - *Goal*: 对 FR-201 至 FR-224 和每条验收逐项提供代码、测试或真实运行证据。
+        - *Details*: 未验证外部工具/容器门禁明确标为未完成，不能用 mock、接口或 UI 存在代替生产证据。
+        - *Requirements*: 完成定义。
+    - [ ] 21.2. 执行真实端到端场景
+        - *Goal*: 从提交 artifact 到发布/拒绝/修改/下架覆盖完整业务。
+        - *Details*: 正常发布；仓库版本更新未过审旧 CDN 不冒充新版本；runtime failure；LLM invalid；request changes/resubmit；critical stable correlation/revoke；tool degraded。
+        - *Requirements*: P2-P4 验收、全局回归。
+    - [ ] 21.3. 执行全量后端验证
+        - *Goal*: 证明迁移、API、worker、runner、policy、安全工具和旧市场行为无回归。
+        - *Details*: Ruff check/format、全量 pytest、真实 PG 可选门禁、OpenAPI、Compose、迁移 checksum 和敏感信息检查。
+        - *Requirements*: 全局回归。
+    - [ ] 21.4. 执行全量前端验证
+        - *Goal*: 证明工作台、路由和旧市场页面均可构建和测试。
+        - *Details*: `vp check`、全量 Vitest、production build；桌面/移动截图检查文本、重叠、loading/error/empty 状态和交互。
+        - *Requirements*: FR-224、全局回归。
+    - [ ] 21.5. 审查 Git 差异并提交最终修正
+        - *Goal*: 只在全部要求有当前证据后结束目标。
+        - *Details*: 查看 status/diff/staged，排除 `.env`、凭据、`.codegraph`、构建产物和用户无关改动；提交最终审计修正；不自动 push。
+        - *Requirements*: 完成定义、Git 安全。
+
+## Task Dependencies
+
+- Task 1 是全部高级数据、状态和接口的前置。
+- Task 2 依赖 Task 1；Task 3 依赖 Tasks 1-2。
+- Task 4 依赖 Tasks 1-3；Task 5 依赖 Task 4；Task 6 依赖 Tasks 4-5。
+- Task 7 可在 Task 3 后实现，但按顺序在 runtime 完成后推进，以保持一次一个主目标。
+- Tasks 8-9 依赖 Tasks 3、7；Task 9 最终依赖 Tasks 11-12 提供完整增量集合，但可先以 full-review scope 实现，随后用新 scope 替换并回归。
+- Task 10 依赖 Tasks 2-9，是 P2 闭环门禁。
+- Task 11 依赖 Task 1；Task 12 依赖 Task 11；Task 13 依赖 Tasks 11-12。
+- Task 14 依赖 Tasks 1、11、13；Task 15 依赖 Tasks 1、14 和 P1 revoke。
+- Task 16 依赖 Tasks 10、13-15，是 P3 完整工作台门禁。
+- Task 17 依赖 Tasks 2-3；Task 18 依赖 Tasks 5-6 和 Task 2。
+- Task 19 依赖 Tasks 2、17-18；Task 20 依赖全部运行服务和 UI 合约。
+- Task 21 依赖 Tasks 1-20；只有真实 runtime 和外部工具门禁通过后才能标记完成。
+- 实现时按主任务编号顺序推进。每个主任务完成针对性验证、自审并提交后，才进入下一主任务；不把多个未验证阶段积压到一个提交。
+
+## Estimated Timeline
+
+本清单不作工时承诺，按相对规模和风险划分：
+
+- Tasks 1-3（数据、策略、编排基础）：Large。
+- Tasks 4-6（runtime runner、AstrBot smoke、网络隔离）：Extra Large，且包含真实容器门禁。
+- Tasks 7-10（AI 分类、LLM、自动路由、P2 UI）：Large。
+- Tasks 11-16（diff、import 图、内容/评论/历史、完整工作台）：Extra Large。
+- Tasks 17-20（malware、依赖、策略治理、运维）：Extra Large，且依赖外部服务契约验证。
+- Task 21（完成度审计和全量回归）：Large。
+
+相对规模只用于排序，不允许为了缩短阶段而跳过权限、失败路径、真实隔离、版本一致性或旧 CDN 兼容验证。
