@@ -25,6 +25,23 @@ services:
       ENABLE_DEV_AUTH: ${ENABLE_DEV_AUTH:-false}
     volumes:
       - ./apps/api/.env:/app/apps/api/.env
+      - artifact-data:/var/lib/astrbot-market/artifacts
+
+  artifact-worker:
+    profiles: ["artifacts"]
+    image: astrbot-community-plugins:local
+    restart: unless-stopped
+    command: ["python", "-m", "app.artifacts.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV_FILE: /app/apps/api/.env
+    volumes:
+      - ./apps/api/.env:/app/apps/api/.env
+      - artifact-data:/var/lib/astrbot-market/artifacts
 
   postgres:
     image: postgres:16-alpine
@@ -56,3 +73,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  artifact-data:

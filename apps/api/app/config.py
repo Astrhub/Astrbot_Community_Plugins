@@ -23,6 +23,10 @@ DEFAULT_SMTP_ENCRYPTION = "auto"
 DEFAULT_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 60 * 60
 MIN_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 5 * 60
 MAX_GITHUB_METADATA_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_ARTIFACT_LOCAL_ROOT = "/var/lib/astrbot-market/artifacts"
+DEFAULT_ARTIFACT_MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+DEFAULT_ARTIFACT_MAX_UNPACKED_BYTES = 128 * 1024 * 1024
+DEFAULT_ARTIFACT_MAX_FILE_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,71 @@ class ApiKey:
     name: str
     key: str
     scopes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ArtifactSettings:
+    enabled: bool
+    storage_backend: str
+    local_root: str
+    cdn_base_url: str
+    s3_endpoint_url: str
+    s3_region: str
+    s3_access_key_id: str
+    s3_secret_access_key: str
+    quarantine_bucket: str
+    published_bucket: str
+    max_upload_bytes: int
+    max_unpacked_bytes: int
+    max_file_bytes: int
+    max_files: int
+    max_compression_ratio: int
+    max_path_depth: int
+    submission_rpm: int
+    job_lease_seconds: int
+    worker_poll_seconds: int
+    quarantine_retention_days: int
+
+    def validation_errors(self, database_url: str) -> tuple[str, ...]:
+        if not self.enabled:
+            return ()
+        errors: list[str] = []
+        if not database_url:
+            errors.append("database_url_missing")
+        if not self.cdn_base_url:
+            errors.append("cdn_base_url_missing")
+        if self.storage_backend == "local":
+            if not self.local_root:
+                errors.append("local_root_missing")
+        elif self.storage_backend == "s3":
+            required = {
+                "s3_endpoint_url_missing": self.s3_endpoint_url,
+                "s3_access_key_id_missing": self.s3_access_key_id,
+                "s3_secret_access_key_missing": self.s3_secret_access_key,
+                "quarantine_bucket_missing": self.quarantine_bucket,
+                "published_bucket_missing": self.published_bucket,
+            }
+            errors.extend(code for code, value in required.items() if not value)
+        else:
+            errors.append("storage_backend_invalid")
+        return tuple(errors)
+
+    def public_status(self, database_url: str) -> dict[str, object]:
+        errors = self.validation_errors(database_url)
+        return {
+            "enabled": self.enabled,
+            "ready": self.enabled and not errors,
+            "storage_backend": self.storage_backend,
+            "cdn_configured": bool(self.cdn_base_url),
+            "database_configured": bool(database_url),
+            "configuration_errors": list(errors),
+            "limits": {
+                "max_upload_bytes": self.max_upload_bytes,
+                "max_unpacked_bytes": self.max_unpacked_bytes,
+                "max_file_bytes": self.max_file_bytes,
+                "max_files": self.max_files,
+            },
+        }
 
 
 @dataclass(frozen=True)
@@ -92,6 +161,7 @@ class Settings:
     enable_dev_auth: bool
     session_max_age_seconds: int
     api_keys: tuple[ApiKey, ...]
+    artifacts: ArtifactSettings
 
     def is_setup_required(self) -> bool:
         return not self.database_url or not self.redis_url
@@ -193,6 +263,46 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         enable_dev_auth=_bool(merged.get("ENABLE_DEV_AUTH")),
         session_max_age_seconds=_int(merged.get("SESSION_MAX_AGE_SECONDS"), 60 * 60 * 24 * 7),
         api_keys=parse_api_keys(merged.get("MARKET_API_KEYS", "")),
+        artifacts=ArtifactSettings(
+            enabled=_bool(merged.get("ARTIFACTS_ENABLED")),
+            storage_backend=_choice(
+                merged.get("ARTIFACT_STORAGE_BACKEND"),
+                {"local", "s3"},
+                "local",
+            ),
+            local_root=merged.get("ARTIFACT_LOCAL_ROOT", DEFAULT_ARTIFACT_LOCAL_ROOT),
+            cdn_base_url=merged.get("ARTIFACT_CDN_BASE_URL", "").rstrip("/"),
+            s3_endpoint_url=merged.get("ARTIFACT_S3_ENDPOINT_URL", ""),
+            s3_region=merged.get("ARTIFACT_S3_REGION", "auto"),
+            s3_access_key_id=merged.get("ARTIFACT_S3_ACCESS_KEY_ID", ""),
+            s3_secret_access_key=merged.get("ARTIFACT_S3_SECRET_ACCESS_KEY", ""),
+            quarantine_bucket=merged.get("ARTIFACT_QUARANTINE_BUCKET", ""),
+            published_bucket=merged.get("ARTIFACT_PUBLISHED_BUCKET", ""),
+            max_upload_bytes=max(
+                1,
+                _int(merged.get("ARTIFACT_MAX_UPLOAD_BYTES"), DEFAULT_ARTIFACT_MAX_UPLOAD_BYTES),
+            ),
+            max_unpacked_bytes=max(
+                1,
+                _int(
+                    merged.get("ARTIFACT_MAX_UNPACKED_BYTES"),
+                    DEFAULT_ARTIFACT_MAX_UNPACKED_BYTES,
+                ),
+            ),
+            max_file_bytes=max(
+                1,
+                _int(merged.get("ARTIFACT_MAX_FILE_BYTES"), DEFAULT_ARTIFACT_MAX_FILE_BYTES),
+            ),
+            max_files=max(1, _int(merged.get("ARTIFACT_MAX_FILES"), 2000)),
+            max_compression_ratio=max(1, _int(merged.get("ARTIFACT_MAX_COMPRESSION_RATIO"), 100)),
+            max_path_depth=max(1, _int(merged.get("ARTIFACT_MAX_PATH_DEPTH"), 16)),
+            submission_rpm=max(0, _int(merged.get("ARTIFACT_SUBMISSION_RPM"), 6)),
+            job_lease_seconds=max(30, _int(merged.get("ARTIFACT_JOB_LEASE_SECONDS"), 300)),
+            worker_poll_seconds=max(1, _int(merged.get("ARTIFACT_WORKER_POLL_SECONDS"), 2)),
+            quarantine_retention_days=max(
+                1, _int(merged.get("ARTIFACT_QUARANTINE_RETENTION_DAYS"), 30)
+            ),
+        ),
     )
 
 
@@ -228,6 +338,11 @@ def _bool(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _choice(value: str | None, choices: set[str], default: str) -> str:
+    normalized = str(value or default).strip().lower()
+    return normalized if normalized in choices else normalized
 
 
 def _int(value: str | None, default: int) -> int:

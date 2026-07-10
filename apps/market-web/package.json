@@ -25,8 +25,11 @@
     "vue-router": "4.6.3"
   },
   "devDependencies": {
+    "@pinia/testing": "^1.0.3",
     "@types/node": "^26.0.1",
     "@vitejs/plugin-vue": "6.0.7",
+    "@vue/test-utils": "^2.4.11",
+    "jsdom": "^29.1.1",
     "vite": "npm:@voidzero-dev/vite-plus-core@latest",
     "vite-plugin-sitemap": "0.8.2",
     "vite-plus": "latest"

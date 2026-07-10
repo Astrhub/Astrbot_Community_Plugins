@@ -35,7 +35,7 @@ const { irisMaskActive, irisMaskPosition, isDarkMode } = storeToRefs(store);
 const route = useRoute();
 const router = useRouter();
 const isFormPage = computed(() =>
-  ["/submit", "/settings", "/admin", "/admin/settings"].includes(route.path),
+  ["/submit", "/settings", "/admin", "/admin/settings", "/plugin-workbench"].includes(route.path),
 );
 
 onMounted(async () => {

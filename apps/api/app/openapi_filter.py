@@ -33,6 +33,7 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
             "system",
             "auth",
             "user",
+            "artifacts",
         }
     ),
     "admin": frozenset(
@@ -46,6 +47,8 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
             "auth",
             "user",
             "admin",
+            "artifacts",
+            "reviews",
         }
     ),
     "core_admin": frozenset(
@@ -60,6 +63,8 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
             "user",
             "admin",
             "core-admin",
+            "artifacts",
+            "reviews",
         }
     ),
 }

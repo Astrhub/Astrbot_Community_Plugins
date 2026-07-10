@@ -1,6 +1,7 @@
 import type { RouteRecordRaw } from "vue-router";
 import { createRouter, createWebHistory } from "vue-router";
 import Home from "../views/Home.vue";
+import { usePluginStore } from "../stores/plugins";
 
 const SubmitPlugin = () => import("../views/SubmitPlugin.vue");
 const Setup = () => import("../views/Setup.vue");
@@ -10,6 +11,7 @@ const Notifications = () => import("../views/Notifications.vue");
 const AdminPlugins = () => import("../views/AdminPlugins.vue");
 const AdminLogin = () => import("../views/AdminLogin.vue");
 const RestDocs = () => import("../views/RestDocs.vue");
+const PluginWorkbench = () => import("../views/PluginWorkbench.vue");
 const NotFound = () => import("../views/NotFound.vue");
 
 const routes: RouteRecordRaw[] = [
@@ -43,6 +45,12 @@ const routes: RouteRecordRaw[] = [
     component: Notifications,
   },
   {
+    path: "/plugin-workbench",
+    name: "PluginWorkbench",
+    component: PluginWorkbench,
+    meta: { requiresAuth: true },
+  },
+  {
     path: "/admin",
     name: "AdminLogin",
     component: AdminLogin,
@@ -72,6 +80,14 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
+});
+
+router.beforeEach(async (to) => {
+  if (!to.meta.requiresAuth) return true;
+  const store = usePluginStore();
+  await store.loadCurrentUser();
+  if (store.currentUser) return true;
+  return { name: "Home", query: { login: "required", redirect: to.fullPath } };
 });
 
 export default router;

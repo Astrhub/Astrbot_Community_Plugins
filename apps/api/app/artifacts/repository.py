@@ -1,0 +1,2250 @@
+from __future__ import annotations
+
+import asyncio
+import secrets
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
+
+import asyncpg
+
+from .models import (
+    ArtifactStateError,
+    JobStatus,
+    PublicationStatus,
+    ReviewStatus,
+    new_domain_id,
+    validate_publication_transition,
+    validate_review_transition,
+)
+
+
+class ArtifactRepository(Protocol):
+    async def create_artifact(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None: ...
+
+    async def get_artifact_by_sha(
+        self, plugin_id: str, archive_sha256: str
+    ) -> dict[str, Any] | None: ...
+
+    async def list_user_artifacts(
+        self, user_id: str, limit: int, offset: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_review_queue(
+        self,
+        *,
+        review_status: str,
+        risk_level: str,
+        limit: int,
+        offset: int,
+    ) -> list[dict[str, Any]]: ...
+
+    async def replace_artifact_files(
+        self, artifact_id: str, files: Sequence[Mapping[str, Any]], tree_sha256: str
+    ) -> list[dict[str, Any]]: ...
+
+    async def update_artifact_manifest(
+        self,
+        artifact_id: str,
+        *,
+        version: str,
+        normalized_version: str,
+        tree_sha256: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def create_review_run(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def complete_review_run(
+        self, run_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    async def list_review_runs(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def fail_open_review_runs(
+        self,
+        artifact_id: str,
+        run_type: str,
+        *,
+        error_code: str,
+        summary: str,
+    ) -> int: ...
+
+    async def replace_findings(
+        self, artifact_id: str, run_id: str, findings: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_findings(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def transition_review_status(
+        self,
+        artifact_id: str,
+        target: str,
+        *,
+        risk_level: str | None = None,
+        rejection_code: str | None = None,
+    ) -> dict[str, Any] | None: ...
+
+    async def transition_publication_status(
+        self, artifact_id: str, target: str
+    ) -> dict[str, Any] | None: ...
+
+    async def enqueue_job(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def claim_jobs(
+        self, worker_id: str, limit: int, lease_seconds: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def renew_job_lease(self, job_id: str, worker_id: str, lease_seconds: int) -> bool: ...
+
+    async def complete_job(self, job_id: str, worker_id: str) -> bool: ...
+
+    async def fail_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+        retry: bool,
+        retry_delay_seconds: int = 0,
+    ) -> bool: ...
+
+    async def decide_artifact(
+        self,
+        artifact_id: str,
+        *,
+        action: str,
+        target_status: str,
+        reason: str,
+        reviewer: Mapping[str, Any] | None,
+        idempotency_key: str,
+        policy_version: str = "p1",
+        risk_level: str | None = None,
+        rejection_code: str | None = None,
+    ) -> dict[str, Any] | None: ...
+
+    async def approve_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reviewer: Mapping[str, Any],
+        reason: str,
+        expected_repo_version: str,
+        expected_normalized_version: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def request_revoke_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reason: str,
+        reviewer: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def publish_artifact(
+        self,
+        artifact_id: str,
+        *,
+        expected_repo_version: str,
+        published_key: str,
+        download_url: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def revoke_artifact(self, artifact_id: str) -> dict[str, Any] | None: ...
+
+    async def list_current_publications(
+        self, plugin_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]: ...
+
+    async def list_review_decisions(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def record_decision(
+        self,
+        artifact_id: str,
+        *,
+        action: str,
+        from_status: str,
+        to_status: str,
+        reason: str,
+        reviewer: Mapping[str, Any] | None,
+        idempotency_key: str,
+        policy_version: str = "p1",
+    ) -> dict[str, Any]: ...
+
+    async def enqueue_outbox(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def list_pending_outbox(self, limit: int) -> list[dict[str, Any]]: ...
+
+    async def claim_outbox(
+        self, worker_id: str, limit: int, lease_seconds: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def complete_outbox(self, event_id: str, worker_id: str) -> bool: ...
+
+    async def fail_outbox(
+        self,
+        event_id: str,
+        worker_id: str,
+        *,
+        error_message: str,
+        retry: bool,
+        retry_delay_seconds: int = 0,
+    ) -> bool: ...
+
+    async def mark_outbox_delivered(self, event_id: str) -> bool: ...
+
+
+class PgArtifactRepository:
+    def __init__(self, store: Any) -> None:
+        self.store = store
+
+    def rebind_store(self, store: Any) -> None:
+        self.store = store
+
+    async def create_artifact(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        artifact_id = str(payload.get("id") or new_domain_id("artifact"))
+        path_suffix = str(payload.get("path_suffix") or secrets.token_hex(5))
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO plugin_artifacts (
+                id, plugin_id, version, normalized_version, source_type, source_repo,
+                source_ref, source_commit_sha, archive_sha256, tree_sha256, size_bytes,
+                quarantine_key, path_suffix, submitted_by, submitted_by_snapshot,
+                base_artifact_id
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15::jsonb, $16
+            )
+            ON CONFLICT (plugin_id, archive_sha256) DO UPDATE
+               SET plugin_id = EXCLUDED.plugin_id
+            RETURNING *
+            """,
+            artifact_id,
+            payload["plugin_id"],
+            payload.get("version", ""),
+            payload.get("normalized_version", ""),
+            payload["source_type"],
+            payload["source_repo"],
+            payload.get("source_ref", ""),
+            payload.get("source_commit_sha", ""),
+            payload["archive_sha256"],
+            payload.get("tree_sha256", ""),
+            int(payload.get("size_bytes") or 0),
+            payload["quarantine_key"],
+            path_suffix,
+            payload.get("submitted_by"),
+            dict(payload.get("submitted_by_snapshot") or {}),
+            payload.get("base_artifact_id"),
+        )
+        return _record(row)
+
+    async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            SELECT a.*,
+                   p.name AS plugin_name,
+                   p.repo AS plugin_repo,
+                   p.repo_version,
+                   p.current_artifact_id,
+                   p.owner_user_id,
+                   p.owner_github_login,
+                   current.version AS published_version
+              FROM plugin_artifacts a
+              JOIN market_plugins p ON p.id = a.plugin_id
+         LEFT JOIN plugin_artifacts current ON current.id = p.current_artifact_id
+             WHERE a.id = $1
+            """,
+            artifact_id,
+        )
+        return _record(row) if row else None
+
+    async def get_artifact_by_sha(
+        self, plugin_id: str, archive_sha256: str
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            SELECT a.*,
+                   p.name AS plugin_name,
+                   p.repo AS plugin_repo,
+                   p.repo_version,
+                   p.current_artifact_id,
+                   p.owner_user_id,
+                   p.owner_github_login,
+                   current.version AS published_version
+              FROM plugin_artifacts a
+              JOIN market_plugins p ON p.id = a.plugin_id
+         LEFT JOIN plugin_artifacts current ON current.id = p.current_artifact_id
+             WHERE a.plugin_id = $1
+               AND a.archive_sha256 = $2
+            """,
+            plugin_id,
+            archive_sha256,
+        )
+        return _record(row) if row else None
+
+    async def list_user_artifacts(
+        self, user_id: str, limit: int, offset: int
+    ) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            SELECT a.*,
+                   p.name AS plugin_name,
+                   p.repo AS plugin_repo,
+                   p.repo_version,
+                   current.version AS published_version
+              FROM plugin_artifacts a
+              JOIN market_plugins p ON p.id = a.plugin_id
+         LEFT JOIN plugin_artifacts current ON current.id = p.current_artifact_id
+             WHERE p.owner_user_id = $1 OR a.submitted_by = $1
+          ORDER BY a.created_at DESC
+             LIMIT $2 OFFSET $3
+            """,
+            user_id,
+            limit,
+            offset,
+        )
+        return [_record(row) for row in rows]
+
+    async def list_review_queue(
+        self,
+        *,
+        review_status: str = "",
+        risk_level: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            SELECT a.*,
+                   p.name AS plugin_name,
+                   p.repo AS plugin_repo,
+                   p.repo_version,
+                   p.owner_user_id,
+                   p.owner_github_login,
+                   current.version AS published_version
+              FROM plugin_artifacts a
+              JOIN market_plugins p ON p.id = a.plugin_id
+         LEFT JOIN plugin_artifacts current ON current.id = p.current_artifact_id
+             WHERE ($1 = '' OR a.review_status = $1)
+               AND ($2 = '' OR a.risk_level = $2)
+          ORDER BY a.created_at ASC
+             LIMIT $3 OFFSET $4
+            """,
+            review_status,
+            risk_level,
+            limit,
+            offset,
+        )
+        return [_record(row) for row in rows]
+
+    async def replace_artifact_files(
+        self,
+        artifact_id: str,
+        files: Sequence[Mapping[str, Any]],
+        tree_sha256: str,
+    ) -> list[dict[str, Any]]:
+        inserted: list[dict[str, Any]] = []
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    "DELETE FROM artifact_files WHERE artifact_id = $1", artifact_id
+                )
+                for item in files:
+                    row = await connection.fetchrow(
+                        """
+                        INSERT INTO artifact_files (
+                            id, artifact_id, path, language, mime_type, sha256,
+                            size_bytes, line_count, is_text, content_key, flags
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+                        RETURNING *
+                        """,
+                        item.get("id") or new_domain_id("file"),
+                        artifact_id,
+                        item["path"],
+                        item.get("language", ""),
+                        item.get("mime_type", "application/octet-stream"),
+                        item["sha256"],
+                        int(item.get("size_bytes") or 0),
+                        item.get("line_count"),
+                        bool(item.get("is_text")),
+                        item.get("content_key"),
+                        dict(item.get("flags") or {}),
+                    )
+                    inserted.append(_record(row))
+                await connection.execute(
+                    """
+                    UPDATE plugin_artifacts
+                       SET tree_sha256 = $2,
+                           updated_at = now()
+                     WHERE id = $1
+                    """,
+                    artifact_id,
+                    tree_sha256,
+                )
+        return inserted
+
+    async def update_artifact_manifest(
+        self,
+        artifact_id: str,
+        *,
+        version: str,
+        normalized_version: str,
+        tree_sha256: str,
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE plugin_artifacts
+               SET version = $2,
+                   normalized_version = $3,
+                   tree_sha256 = $4,
+                   updated_at = now()
+             WHERE id = $1
+               AND review_status = 'prechecking'
+         RETURNING *
+            """,
+            artifact_id,
+            version,
+            normalized_version,
+            tree_sha256,
+        )
+        return _record(row) if row else None
+
+    async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            "SELECT * FROM artifact_files WHERE artifact_id = $1 ORDER BY path",
+            artifact_id,
+        )
+        return [_record(row) for row in rows]
+
+    async def create_review_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO review_runs (
+                id, artifact_id, type, status, attempt, ruleset_version,
+                model, summary, raw_result, raw_result_key, error_code, started_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11,
+                CASE WHEN $4 = 'running' THEN now() ELSE NULL END
+            )
+            RETURNING *
+            """,
+            payload.get("id") or new_domain_id("run"),
+            payload["artifact_id"],
+            payload["type"],
+            payload.get("status", "queued"),
+            int(payload.get("attempt") or 1),
+            payload.get("ruleset_version", ""),
+            payload.get("model", ""),
+            payload.get("summary", ""),
+            dict(payload.get("raw_result") or {}),
+            payload.get("raw_result_key"),
+            payload.get("error_code", ""),
+        )
+        return _record(row)
+
+    async def complete_review_run(
+        self, run_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE review_runs
+               SET status = $2,
+                   summary = $3,
+                   raw_result = $4::jsonb,
+                   raw_result_key = $5,
+                   error_code = $6,
+                   completed_at = now()
+             WHERE id = $1
+         RETURNING *
+            """,
+            run_id,
+            payload["status"],
+            payload.get("summary", ""),
+            dict(payload.get("raw_result") or {}),
+            payload.get("raw_result_key"),
+            payload.get("error_code", ""),
+        )
+        return _record(row) if row else None
+
+    async def list_review_runs(self, artifact_id: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            "SELECT * FROM review_runs WHERE artifact_id = $1 ORDER BY created_at",
+            artifact_id,
+        )
+        return [_record(row) for row in rows]
+
+    async def fail_open_review_runs(
+        self,
+        artifact_id: str,
+        run_type: str,
+        *,
+        error_code: str,
+        summary: str,
+    ) -> int:
+        result = await self._pool().execute(
+            """
+            UPDATE review_runs
+               SET status = 'failed',
+                   error_code = $3,
+                   summary = $4,
+                   completed_at = now()
+             WHERE artifact_id = $1
+               AND type = $2
+               AND status IN ('queued', 'running')
+            """,
+            artifact_id,
+            run_type,
+            error_code,
+            summary,
+        )
+        return int(result.rsplit(" ", 1)[-1])
+
+    async def replace_findings(
+        self,
+        artifact_id: str,
+        run_id: str,
+        findings: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        saved: list[dict[str, Any]] = []
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("DELETE FROM review_findings WHERE run_id = $1", run_id)
+                for finding in findings:
+                    row = await connection.fetchrow(
+                        """
+                        INSERT INTO review_findings (
+                            id, artifact_id, run_id, fingerprint, rule_id, file_path,
+                            line_start, line_end, severity, category, message, suggestion,
+                            evidence_excerpt, confidence, status, metadata
+                        )
+                        VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                            $13, $14, $15, $16::jsonb
+                        )
+                        ON CONFLICT (artifact_id, fingerprint) DO UPDATE
+                           SET run_id = EXCLUDED.run_id,
+                               rule_id = EXCLUDED.rule_id,
+                               file_path = EXCLUDED.file_path,
+                               line_start = EXCLUDED.line_start,
+                               line_end = EXCLUDED.line_end,
+                               severity = EXCLUDED.severity,
+                               category = EXCLUDED.category,
+                               message = EXCLUDED.message,
+                               suggestion = EXCLUDED.suggestion,
+                               evidence_excerpt = EXCLUDED.evidence_excerpt,
+                               confidence = EXCLUDED.confidence,
+                               metadata = EXCLUDED.metadata
+                        RETURNING *
+                        """,
+                        finding.get("id") or new_domain_id("finding"),
+                        artifact_id,
+                        run_id,
+                        finding["fingerprint"],
+                        finding.get("rule_id", ""),
+                        finding.get("file_path", ""),
+                        finding.get("line_start"),
+                        finding.get("line_end"),
+                        finding["severity"],
+                        finding.get("category", ""),
+                        finding["message"],
+                        finding.get("suggestion", ""),
+                        finding.get("evidence_excerpt", ""),
+                        finding.get("confidence"),
+                        finding.get("status", "open"),
+                        dict(finding.get("metadata") or {}),
+                    )
+                    saved.append(_record(row))
+        return saved
+
+    async def list_findings(self, artifact_id: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            SELECT * FROM review_findings
+             WHERE artifact_id = $1
+          ORDER BY CASE severity
+                       WHEN 'critical' THEN 5
+                       WHEN 'high' THEN 4
+                       WHEN 'medium' THEN 3
+                       WHEN 'low' THEN 2
+                       ELSE 1
+                   END DESC,
+                   file_path,
+                   line_start NULLS FIRST
+            """,
+            artifact_id,
+        )
+        return [_record(row) for row in rows]
+
+    async def transition_review_status(
+        self,
+        artifact_id: str,
+        target: str,
+        *,
+        risk_level: str | None = None,
+        rejection_code: str | None = None,
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                current = await connection.fetchrow(
+                    "SELECT * FROM plugin_artifacts WHERE id = $1 FOR UPDATE", artifact_id
+                )
+                if not current:
+                    return None
+                validate_review_transition(str(current["review_status"]), target)
+                row = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET review_status = $2,
+                           risk_level = COALESCE($3, risk_level),
+                           rejection_code = COALESCE($4, rejection_code),
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                    target,
+                    risk_level,
+                    rejection_code,
+                )
+        return _record(row)
+
+    async def transition_publication_status(
+        self, artifact_id: str, target: str
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                current = await connection.fetchrow(
+                    "SELECT * FROM plugin_artifacts WHERE id = $1 FOR UPDATE", artifact_id
+                )
+                if not current:
+                    return None
+                validate_publication_transition(str(current["publication_status"]), target)
+                row = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET publication_status = $2,
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                    target,
+                )
+        return _record(row)
+
+    async def enqueue_job(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO artifact_jobs (
+                id, artifact_id, type, payload, max_attempts,
+                available_at, idempotency_key
+            )
+            VALUES (
+                $1, $2, $3, $4::jsonb, $5,
+                COALESCE($6::timestamptz, now()), $7
+            )
+            ON CONFLICT (idempotency_key) DO UPDATE
+               SET idempotency_key = EXCLUDED.idempotency_key
+            RETURNING *
+            """,
+            payload.get("id") or new_domain_id("job"),
+            payload.get("artifact_id"),
+            payload["type"],
+            dict(payload.get("payload") or {}),
+            int(payload.get("max_attempts") or 3),
+            payload.get("available_at"),
+            payload["idempotency_key"],
+        )
+        return _record(row)
+
+    async def claim_jobs(
+        self, worker_id: str, limit: int, lease_seconds: int
+    ) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            WITH candidates AS (
+                SELECT id
+                  FROM artifact_jobs
+                 WHERE attempts < max_attempts
+                   AND (
+                       (status = 'queued' AND available_at <= now())
+                       OR (status = 'running' AND lease_expires_at < now())
+                   )
+              ORDER BY available_at, created_at
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT $2
+            )
+            UPDATE artifact_jobs jobs
+               SET status = 'running',
+                   attempts = jobs.attempts + 1,
+                   lease_owner = $1,
+                   lease_expires_at = now() + ($3 * interval '1 second'),
+                   updated_at = now()
+              FROM candidates
+             WHERE jobs.id = candidates.id
+         RETURNING jobs.*
+            """,
+            worker_id,
+            limit,
+            lease_seconds,
+        )
+        return [_record(row) for row in rows]
+
+    async def renew_job_lease(self, job_id: str, worker_id: str, lease_seconds: int) -> bool:
+        result = await self._pool().execute(
+            """
+            UPDATE artifact_jobs
+               SET lease_expires_at = now() + ($3 * interval '1 second'),
+                   updated_at = now()
+             WHERE id = $1
+               AND status = 'running'
+               AND lease_owner = $2
+            """,
+            job_id,
+            worker_id,
+            lease_seconds,
+        )
+        return result.endswith(" 1")
+
+    async def complete_job(self, job_id: str, worker_id: str) -> bool:
+        result = await self._pool().execute(
+            """
+            UPDATE artifact_jobs
+               SET status = 'succeeded',
+                   lease_owner = NULL,
+                   lease_expires_at = NULL,
+                   completed_at = now(),
+                   updated_at = now()
+             WHERE id = $1
+               AND status = 'running'
+               AND lease_owner = $2
+            """,
+            job_id,
+            worker_id,
+        )
+        return result.endswith(" 1")
+
+    async def fail_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+        retry: bool,
+        retry_delay_seconds: int = 0,
+    ) -> bool:
+        result = await self._pool().execute(
+            """
+            UPDATE artifact_jobs
+               SET status = CASE
+                       WHEN $5 AND attempts < max_attempts THEN 'queued'
+                       ELSE 'failed'
+                   END,
+                   available_at = CASE
+                       WHEN $5 THEN now() + ($6 * interval '1 second')
+                       ELSE available_at
+                   END,
+                   lease_owner = NULL,
+                   lease_expires_at = NULL,
+                   last_error_code = $3,
+                   last_error = $4,
+                   completed_at = CASE
+                       WHEN $5 AND attempts < max_attempts THEN NULL
+                       ELSE now()
+                   END,
+                   updated_at = now()
+             WHERE id = $1
+               AND status = 'running'
+               AND lease_owner = $2
+            """,
+            job_id,
+            worker_id,
+            error_code,
+            error_message,
+            retry,
+            retry_delay_seconds,
+        )
+        return result.endswith(" 1")
+
+    async def decide_artifact(
+        self,
+        artifact_id: str,
+        *,
+        action: str,
+        target_status: str,
+        reason: str,
+        reviewer: Mapping[str, Any] | None,
+        idempotency_key: str,
+        policy_version: str = "p1",
+        risk_level: str | None = None,
+        rejection_code: str | None = None,
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                existing = await connection.fetchrow(
+                    "SELECT artifact_id FROM review_decisions WHERE idempotency_key = $1",
+                    idempotency_key,
+                )
+                if existing:
+                    if str(existing["artifact_id"]) != artifact_id:
+                        raise ValueError("idempotency_key_conflict")
+                    row = await connection.fetchrow(
+                        "SELECT * FROM plugin_artifacts WHERE id = $1", existing["artifact_id"]
+                    )
+                    return _record(row) if row else None
+                current = await connection.fetchrow(
+                    "SELECT * FROM plugin_artifacts WHERE id = $1 FOR UPDATE", artifact_id
+                )
+                if not current:
+                    return None
+                if str(current["review_status"]) in {
+                    ReviewStatus.APPROVED.value,
+                    ReviewStatus.REJECTED.value,
+                }:
+                    raise ArtifactStateError(
+                        "artifact_already_decided",
+                        str(current["review_status"]),
+                        target_status,
+                    )
+                validate_review_transition(str(current["review_status"]), target_status)
+                await connection.execute(
+                    """
+                    INSERT INTO review_decisions (
+                        id, artifact_id, action, from_status, to_status, reason,
+                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    """,
+                    new_domain_id("decision"),
+                    artifact_id,
+                    action,
+                    current["review_status"],
+                    target_status,
+                    reason,
+                    (reviewer or {}).get("id"),
+                    _reviewer_name(reviewer),
+                    policy_version,
+                    idempotency_key,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET review_status = $2,
+                           risk_level = COALESCE($3, risk_level),
+                           rejection_code = COALESCE($4, rejection_code),
+                           reviewed_at = now(),
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                    target_status,
+                    risk_level,
+                    rejection_code,
+                )
+        return _record(row)
+
+    async def approve_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reviewer: Mapping[str, Any],
+        reason: str,
+        expected_repo_version: str,
+        expected_normalized_version: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                existing = await connection.fetchrow(
+                    "SELECT artifact_id FROM review_decisions WHERE idempotency_key = $1",
+                    idempotency_key,
+                )
+                if existing:
+                    if str(existing["artifact_id"]) != artifact_id:
+                        raise ValueError("idempotency_key_conflict")
+                    row = await connection.fetchrow(
+                        "SELECT * FROM plugin_artifacts WHERE id = $1", existing["artifact_id"]
+                    )
+                    return _record(row) if row else None
+
+                current = await connection.fetchrow(
+                    """
+                    SELECT a.*, p.repo_version, p.owner_user_id
+                      FROM plugin_artifacts a
+                      JOIN market_plugins p ON p.id = a.plugin_id
+                     WHERE a.id = $1
+                     FOR UPDATE OF a, p
+                    """,
+                    artifact_id,
+                )
+                if not current:
+                    return None
+                existing = await connection.fetchrow(
+                    "SELECT artifact_id FROM review_decisions WHERE idempotency_key = $1",
+                    idempotency_key,
+                )
+                if existing:
+                    if str(existing["artifact_id"]) != artifact_id:
+                        raise ValueError("idempotency_key_conflict")
+                    return _record(current)
+                if str(current["review_status"]) != ReviewStatus.PENDING_REVIEW.value:
+                    raise ArtifactStateError(
+                        "artifact_not_pending_review",
+                        str(current["review_status"]),
+                        ReviewStatus.APPROVED.value,
+                    )
+                if str(current["owner_user_id"] or "") == str(reviewer.get("id") or ""):
+                    raise ArtifactStateError(
+                        "self_approval_forbidden",
+                        str(current["review_status"]),
+                        ReviewStatus.APPROVED.value,
+                    )
+                if str(current["repo_version"] or "") != expected_repo_version:
+                    raise ValueError("repo_version_changed")
+                if str(current["normalized_version"] or "") != expected_normalized_version:
+                    raise ValueError("artifact_version_changed")
+
+                run_rows = await connection.fetch(
+                    """
+                    SELECT type, bool_or(status = 'succeeded') AS succeeded
+                      FROM review_runs
+                     WHERE artifact_id = $1
+                       AND type IN ('precheck', 'static')
+                  GROUP BY type
+                    """,
+                    artifact_id,
+                )
+                succeeded = {str(run["type"]) for run in run_rows if bool(run["succeeded"])}
+                if succeeded != {"precheck", "static"}:
+                    raise ValueError("required_review_runs_missing")
+
+                await connection.execute(
+                    """
+                    INSERT INTO review_decisions (
+                        id, artifact_id, action, from_status, to_status, reason,
+                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key
+                    )
+                    VALUES ($1, $2, 'approve', $3, 'approved', $4, $5, $6, 'p1', $7)
+                    """,
+                    new_domain_id("decision"),
+                    artifact_id,
+                    current["review_status"],
+                    reason,
+                    reviewer.get("id"),
+                    _reviewer_name(reviewer),
+                    idempotency_key,
+                )
+                approved = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET review_status = 'approved',
+                           reviewed_at = now(),
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO artifact_jobs (
+                        id, artifact_id, type, payload, max_attempts, idempotency_key
+                    )
+                    VALUES ($1, $2, 'publish', $3::jsonb, 5, $4)
+                    ON CONFLICT (idempotency_key) DO NOTHING
+                    """,
+                    new_domain_id("job"),
+                    artifact_id,
+                    {"expected_repo_version": expected_repo_version},
+                    f"publish:{artifact_id}",
+                )
+        return _record(approved)
+
+    async def request_revoke_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reason: str,
+        reviewer: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                current = await connection.fetchrow(
+                    """
+                    SELECT a.*, p.current_artifact_id
+                      FROM plugin_artifacts a
+                      JOIN market_plugins p ON p.id = a.plugin_id
+                     WHERE a.id = $1
+                     FOR UPDATE OF a, p
+                    """,
+                    artifact_id,
+                )
+                if not current:
+                    return None
+                existing = await connection.fetchrow(
+                    "SELECT artifact_id FROM review_decisions WHERE idempotency_key = $1",
+                    idempotency_key,
+                )
+                if existing:
+                    if str(existing["artifact_id"]) != artifact_id:
+                        raise ValueError("idempotency_key_conflict")
+                    return _record(current)
+                if str(current["current_artifact_id"] or "") != artifact_id:
+                    raise ArtifactStateError(
+                        "artifact_not_current_release",
+                        str(current["publication_status"]),
+                        PublicationStatus.REVOKING.value,
+                    )
+                validate_publication_transition(
+                    str(current["publication_status"]), PublicationStatus.REVOKING.value
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO review_decisions (
+                        id, artifact_id, action, from_status, to_status, reason,
+                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key
+                    )
+                    VALUES ($1, $2, 'revoke', $3, 'revoking', $4, $5, $6, 'p1', $7)
+                    """,
+                    new_domain_id("decision"),
+                    artifact_id,
+                    current["publication_status"],
+                    reason,
+                    reviewer.get("id"),
+                    _reviewer_name(reviewer),
+                    idempotency_key,
+                )
+                revoking = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET publication_status = 'revoking',
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE market_plugins
+                       SET status = 'unlisted',
+                           updated_at = now()
+                     WHERE id = $1
+                       AND current_artifact_id = $2
+                    """,
+                    current["plugin_id"],
+                    artifact_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO artifact_jobs (
+                        id, artifact_id, type, payload, max_attempts, idempotency_key
+                    )
+                    VALUES ($1, $2, 'revoke', $3::jsonb, 5, $4)
+                    ON CONFLICT (idempotency_key) DO NOTHING
+                    """,
+                    new_domain_id("job"),
+                    artifact_id,
+                    {"reason": reason},
+                    idempotency_key,
+                )
+        return _record(revoking)
+
+    async def publish_artifact(
+        self,
+        artifact_id: str,
+        *,
+        expected_repo_version: str,
+        published_key: str,
+        download_url: str,
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT a.*, p.repo_version
+                      FROM plugin_artifacts a
+                      JOIN market_plugins p ON p.id = a.plugin_id
+                     WHERE a.id = $1
+                     FOR UPDATE OF a, p
+                    """,
+                    artifact_id,
+                )
+                if not row:
+                    return None
+                if str(row["repo_version"]) != expected_repo_version:
+                    raise ValueError("repo_version_changed")
+                validate_publication_transition(
+                    str(row["publication_status"]), PublicationStatus.PUBLISHED.value
+                )
+                published = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET publication_status = 'published',
+                           published_key = $2,
+                           download_url = $3,
+                           published_at = now(),
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                    published_key,
+                    download_url,
+                )
+                await connection.execute(
+                    """
+                    UPDATE market_plugins
+                       SET current_artifact_id = $2,
+                           status = 'listed',
+                           updated_at = now()
+                     WHERE id = $1
+                    """,
+                    row["plugin_id"],
+                    artifact_id,
+                )
+        return _record(published)
+
+    async def revoke_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                current = await connection.fetchrow(
+                    "SELECT * FROM plugin_artifacts WHERE id = $1 FOR UPDATE", artifact_id
+                )
+                if not current:
+                    return None
+                validate_publication_transition(
+                    str(current["publication_status"]), PublicationStatus.REVOKED.value
+                )
+                revoked = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET publication_status = 'revoked',
+                           download_url = NULL,
+                           revoked_at = now(),
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE market_plugins
+                       SET current_artifact_id = NULL,
+                           status = 'unlisted',
+                           updated_at = now()
+                     WHERE id = $1
+                       AND current_artifact_id = $2
+                    """,
+                    current["plugin_id"],
+                    artifact_id,
+                )
+        return _record(revoked)
+
+    async def list_current_publications(
+        self, plugin_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        if not plugin_ids:
+            return {}
+        rows = await self._pool().fetch(
+            """
+            SELECT p.id AS plugin_id,
+                   p.repo_version,
+                   a.*
+              FROM market_plugins p
+              JOIN plugin_artifacts a ON a.id = p.current_artifact_id
+             WHERE p.id = ANY($1::text[])
+            """,
+            list(plugin_ids),
+        )
+        return {str(row["plugin_id"]): _record(row) for row in rows}
+
+    async def list_review_decisions(self, artifact_id: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            "SELECT * FROM review_decisions WHERE artifact_id = $1 ORDER BY created_at",
+            artifact_id,
+        )
+        return [_record(row) for row in rows]
+
+    async def record_decision(
+        self,
+        artifact_id: str,
+        *,
+        action: str,
+        from_status: str,
+        to_status: str,
+        reason: str,
+        reviewer: Mapping[str, Any] | None,
+        idempotency_key: str,
+        policy_version: str = "p1",
+    ) -> dict[str, Any]:
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO review_decisions (
+                id, artifact_id, action, from_status, to_status, reason,
+                reviewer_user_id, reviewer_nickname, policy_version, idempotency_key
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (idempotency_key) DO UPDATE
+               SET idempotency_key = EXCLUDED.idempotency_key
+            RETURNING *
+            """,
+            new_domain_id("decision"),
+            artifact_id,
+            action,
+            from_status,
+            to_status,
+            reason,
+            (reviewer or {}).get("id"),
+            _reviewer_name(reviewer),
+            policy_version,
+            idempotency_key,
+        )
+        return _record(row)
+
+    async def enqueue_outbox(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO outbox_events (
+                id, event_type, aggregate_type, aggregate_id,
+                recipient_user_id, payload, dedupe_key
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+            ON CONFLICT (dedupe_key) DO UPDATE
+               SET dedupe_key = EXCLUDED.dedupe_key
+            RETURNING *
+            """,
+            payload.get("id") or new_domain_id("outbox"),
+            payload["event_type"],
+            payload["aggregate_type"],
+            payload["aggregate_id"],
+            payload.get("recipient_user_id"),
+            dict(payload.get("payload") or {}),
+            payload["dedupe_key"],
+        )
+        return _record(row)
+
+    async def list_pending_outbox(self, limit: int) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            SELECT * FROM outbox_events
+             WHERE status IN ('queued', 'failed')
+               AND available_at <= now()
+          ORDER BY created_at
+             LIMIT $1
+            """,
+            limit,
+        )
+        return [_record(row) for row in rows]
+
+    async def claim_outbox(
+        self, worker_id: str, limit: int, lease_seconds: int
+    ) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            WITH candidates AS (
+                SELECT id
+                  FROM outbox_events
+                 WHERE attempts < 5
+                   AND (
+                       (status IN ('queued', 'failed') AND available_at <= now())
+                       OR (status = 'running' AND lease_expires_at < now())
+                   )
+              ORDER BY available_at, created_at
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT $2
+            )
+            UPDATE outbox_events events
+               SET status = 'running',
+                   attempts = events.attempts + 1,
+                   lease_owner = $1,
+                   lease_expires_at = now() + ($3 * interval '1 second'),
+                   updated_at = now()
+              FROM candidates
+             WHERE events.id = candidates.id
+         RETURNING events.*
+            """,
+            worker_id,
+            limit,
+            lease_seconds,
+        )
+        return [_record(row) for row in rows]
+
+    async def complete_outbox(self, event_id: str, worker_id: str) -> bool:
+        result = await self._pool().execute(
+            """
+            UPDATE outbox_events
+               SET status = 'delivered',
+                   lease_owner = NULL,
+                   lease_expires_at = NULL,
+                   delivered_at = now(),
+                   updated_at = now()
+             WHERE id = $1
+               AND status = 'running'
+               AND lease_owner = $2
+            """,
+            event_id,
+            worker_id,
+        )
+        return result.endswith(" 1")
+
+    async def fail_outbox(
+        self,
+        event_id: str,
+        worker_id: str,
+        *,
+        error_message: str,
+        retry: bool,
+        retry_delay_seconds: int = 0,
+    ) -> bool:
+        result = await self._pool().execute(
+            """
+            UPDATE outbox_events
+               SET status = CASE WHEN $4 AND attempts < 5 THEN 'failed' ELSE 'cancelled' END,
+                   available_at = CASE
+                       WHEN $4 THEN now() + ($5 * interval '1 second')
+                       ELSE available_at
+                   END,
+                   lease_owner = NULL,
+                   lease_expires_at = NULL,
+                   last_error = $3,
+                   updated_at = now()
+             WHERE id = $1
+               AND status = 'running'
+               AND lease_owner = $2
+            """,
+            event_id,
+            worker_id,
+            error_message,
+            retry,
+            retry_delay_seconds,
+        )
+        return result.endswith(" 1")
+
+    async def mark_outbox_delivered(self, event_id: str) -> bool:
+        result = await self._pool().execute(
+            """
+            UPDATE outbox_events
+               SET status = 'delivered',
+                   delivered_at = now(),
+                   updated_at = now()
+             WHERE id = $1
+               AND status <> 'delivered'
+            """,
+            event_id,
+        )
+        return result.endswith(" 1")
+
+    def _pool(self) -> asyncpg.Pool:
+        return self.store._pool()
+
+
+class InMemoryArtifactRepository:
+    def __init__(self, store: Any | None = None) -> None:
+        self.store = store
+        self.artifacts: dict[str, dict[str, Any]] = {}
+        self.files: dict[str, list[dict[str, Any]]] = {}
+        self.runs: dict[str, dict[str, Any]] = {}
+        self.findings: dict[str, list[dict[str, Any]]] = {}
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.decisions: dict[str, dict[str, Any]] = {}
+        self.outbox: dict[str, dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    def rebind_store(self, store: Any) -> None:
+        self.store = store
+
+    async def create_artifact(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        async with self._lock:
+            for artifact in self.artifacts.values():
+                if (
+                    artifact["plugin_id"] == payload["plugin_id"]
+                    and artifact["archive_sha256"] == payload["archive_sha256"]
+                ):
+                    return deepcopy(artifact)
+            now = _utc_now()
+            artifact = {
+                "id": str(payload.get("id") or new_domain_id("artifact")),
+                "plugin_id": str(payload["plugin_id"]),
+                "version": str(payload.get("version") or ""),
+                "normalized_version": str(payload.get("normalized_version") or ""),
+                "source_type": str(payload["source_type"]),
+                "source_repo": str(payload["source_repo"]),
+                "source_ref": str(payload.get("source_ref") or ""),
+                "source_commit_sha": str(payload.get("source_commit_sha") or ""),
+                "archive_sha256": str(payload["archive_sha256"]),
+                "tree_sha256": str(payload.get("tree_sha256") or ""),
+                "size_bytes": int(payload.get("size_bytes") or 0),
+                "quarantine_key": str(payload["quarantine_key"]),
+                "published_key": None,
+                "path_suffix": str(payload.get("path_suffix") or secrets.token_hex(5)),
+                "download_url": None,
+                "review_status": ReviewStatus.QUARANTINED.value,
+                "publication_status": PublicationStatus.UNPUBLISHED.value,
+                "risk_level": "none",
+                "base_artifact_id": payload.get("base_artifact_id"),
+                "submitted_by": payload.get("submitted_by"),
+                "submitted_by_snapshot": dict(payload.get("submitted_by_snapshot") or {}),
+                "rejection_code": "",
+                "created_at": now,
+                "updated_at": now,
+                "reviewed_at": None,
+                "published_at": None,
+                "revoked_at": None,
+            }
+            self.artifacts[artifact["id"]] = artifact
+            return deepcopy(artifact)
+
+    async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        artifact = self.artifacts.get(artifact_id)
+        return deepcopy(self._with_plugin(artifact)) if artifact else None
+
+    async def get_artifact_by_sha(
+        self, plugin_id: str, archive_sha256: str
+    ) -> dict[str, Any] | None:
+        artifact = next(
+            (
+                item
+                for item in self.artifacts.values()
+                if item["plugin_id"] == plugin_id and item["archive_sha256"] == archive_sha256
+            ),
+            None,
+        )
+        return deepcopy(self._with_plugin(artifact)) if artifact else None
+
+    async def list_user_artifacts(
+        self, user_id: str, limit: int, offset: int
+    ) -> list[dict[str, Any]]:
+        items = [
+            self._with_plugin(artifact)
+            for artifact in self.artifacts.values()
+            if artifact.get("submitted_by") == user_id
+            or self._plugin_owner(artifact["plugin_id"]) == user_id
+        ]
+        items.sort(key=lambda item: item["created_at"], reverse=True)
+        return deepcopy(items[offset : offset + limit])
+
+    async def list_review_queue(
+        self,
+        *,
+        review_status: str = "",
+        risk_level: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        items = [
+            self._with_plugin(artifact)
+            for artifact in self.artifacts.values()
+            if (not review_status or artifact["review_status"] == review_status)
+            and (not risk_level or artifact["risk_level"] == risk_level)
+        ]
+        items.sort(key=lambda item: item["created_at"])
+        return deepcopy(items[offset : offset + limit])
+
+    async def replace_artifact_files(
+        self,
+        artifact_id: str,
+        files: Sequence[Mapping[str, Any]],
+        tree_sha256: str,
+    ) -> list[dict[str, Any]]:
+        saved = [
+            {
+                **dict(item),
+                "id": str(item.get("id") or new_domain_id("file")),
+                "artifact_id": artifact_id,
+                "created_at": _utc_now(),
+            }
+            for item in files
+        ]
+        self.files[artifact_id] = saved
+        artifact = self.artifacts[artifact_id]
+        artifact["tree_sha256"] = tree_sha256
+        artifact["updated_at"] = _utc_now()
+        return deepcopy(saved)
+
+    async def update_artifact_manifest(
+        self,
+        artifact_id: str,
+        *,
+        version: str,
+        normalized_version: str,
+        tree_sha256: str,
+    ) -> dict[str, Any] | None:
+        artifact = self.artifacts.get(artifact_id)
+        if not artifact or artifact["review_status"] != ReviewStatus.PRECHECKING.value:
+            return None
+        artifact.update(
+            {
+                "version": version,
+                "normalized_version": normalized_version,
+                "tree_sha256": tree_sha256,
+                "updated_at": _utc_now(),
+            }
+        )
+        return deepcopy(artifact)
+
+    async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]:
+        return deepcopy(sorted(self.files.get(artifact_id, []), key=lambda item: item["path"]))
+
+    async def create_review_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        now = _utc_now()
+        run = {
+            "id": str(payload.get("id") or new_domain_id("run")),
+            "artifact_id": str(payload["artifact_id"]),
+            "type": str(payload["type"]),
+            "status": str(payload.get("status") or "queued"),
+            "attempt": int(payload.get("attempt") or 1),
+            "ruleset_version": str(payload.get("ruleset_version") or ""),
+            "model": str(payload.get("model") or ""),
+            "summary": str(payload.get("summary") or ""),
+            "raw_result": dict(payload.get("raw_result") or {}),
+            "raw_result_key": payload.get("raw_result_key"),
+            "error_code": str(payload.get("error_code") or ""),
+            "started_at": now if payload.get("status") == "running" else None,
+            "completed_at": None,
+            "created_at": now,
+        }
+        self.runs[run["id"]] = run
+        return deepcopy(run)
+
+    async def complete_review_run(
+        self, run_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        run = self.runs.get(run_id)
+        if not run:
+            return None
+        run.update(
+            {
+                "status": str(payload["status"]),
+                "summary": str(payload.get("summary") or ""),
+                "raw_result": dict(payload.get("raw_result") or {}),
+                "raw_result_key": payload.get("raw_result_key"),
+                "error_code": str(payload.get("error_code") or ""),
+                "completed_at": _utc_now(),
+            }
+        )
+        return deepcopy(run)
+
+    async def list_review_runs(self, artifact_id: str) -> list[dict[str, Any]]:
+        values = [run for run in self.runs.values() if run["artifact_id"] == artifact_id]
+        return deepcopy(sorted(values, key=lambda item: item["created_at"]))
+
+    async def fail_open_review_runs(
+        self,
+        artifact_id: str,
+        run_type: str,
+        *,
+        error_code: str,
+        summary: str,
+    ) -> int:
+        changed = 0
+        for run in self.runs.values():
+            if (
+                run["artifact_id"] == artifact_id
+                and run["type"] == run_type
+                and run["status"] in {"queued", "running"}
+            ):
+                run.update(
+                    {
+                        "status": "failed",
+                        "error_code": error_code,
+                        "summary": summary,
+                        "completed_at": _utc_now(),
+                    }
+                )
+                changed += 1
+        return changed
+
+    async def replace_findings(
+        self,
+        artifact_id: str,
+        run_id: str,
+        findings: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        incoming_fingerprints = {str(item["fingerprint"]) for item in findings}
+        for existing_run_id, values in list(self.findings.items()):
+            if existing_run_id == run_id:
+                continue
+            self.findings[existing_run_id] = [
+                item
+                for item in values
+                if not (
+                    item["artifact_id"] == artifact_id
+                    and item["fingerprint"] in incoming_fingerprints
+                )
+            ]
+        existing = {
+            item["fingerprint"]: item
+            for values in self.findings.values()
+            for item in values
+            if item["artifact_id"] == artifact_id
+        }
+        saved: list[dict[str, Any]] = []
+        for item in findings:
+            finding = {
+                **existing.get(str(item["fingerprint"]), {}),
+                **dict(item),
+                "id": existing.get(str(item["fingerprint"]), {}).get("id")
+                or item.get("id")
+                or new_domain_id("finding"),
+                "artifact_id": artifact_id,
+                "run_id": run_id,
+                "created_at": _utc_now(),
+            }
+            saved.append(finding)
+        self.findings[run_id] = saved
+        return deepcopy(saved)
+
+    async def list_findings(self, artifact_id: str) -> list[dict[str, Any]]:
+        values = [
+            item
+            for findings in self.findings.values()
+            for item in findings
+            if item["artifact_id"] == artifact_id
+        ]
+        order = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+        values.sort(
+            key=lambda item: (
+                -order.get(str(item.get("severity")), 0),
+                str(item.get("file_path") or ""),
+                int(item.get("line_start") or 0),
+            )
+        )
+        return deepcopy(values)
+
+    async def transition_review_status(
+        self,
+        artifact_id: str,
+        target: str,
+        *,
+        risk_level: str | None = None,
+        rejection_code: str | None = None,
+    ) -> dict[str, Any] | None:
+        artifact = self.artifacts.get(artifact_id)
+        if not artifact:
+            return None
+        validate_review_transition(artifact["review_status"], target)
+        artifact["review_status"] = target
+        if risk_level is not None:
+            artifact["risk_level"] = risk_level
+        if rejection_code is not None:
+            artifact["rejection_code"] = rejection_code
+        artifact["updated_at"] = _utc_now()
+        return deepcopy(artifact)
+
+    async def transition_publication_status(
+        self, artifact_id: str, target: str
+    ) -> dict[str, Any] | None:
+        artifact = self.artifacts.get(artifact_id)
+        if not artifact:
+            return None
+        validate_publication_transition(artifact["publication_status"], target)
+        artifact["publication_status"] = target
+        artifact["updated_at"] = _utc_now()
+        return deepcopy(artifact)
+
+    async def enqueue_job(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        for job in self.jobs.values():
+            if job["idempotency_key"] == payload["idempotency_key"]:
+                return deepcopy(job)
+        now = _utc_now()
+        job = {
+            "id": str(payload.get("id") or new_domain_id("job")),
+            "artifact_id": payload.get("artifact_id"),
+            "type": str(payload["type"]),
+            "status": JobStatus.QUEUED.value,
+            "payload": dict(payload.get("payload") or {}),
+            "attempts": 0,
+            "max_attempts": int(payload.get("max_attempts") or 3),
+            "available_at": payload.get("available_at") or now,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "idempotency_key": str(payload["idempotency_key"]),
+            "last_error_code": "",
+            "last_error": "",
+            "created_at": now,
+            "updated_at": now,
+            "completed_at": None,
+        }
+        self.jobs[job["id"]] = job
+        return deepcopy(job)
+
+    async def claim_jobs(
+        self, worker_id: str, limit: int, lease_seconds: int
+    ) -> list[dict[str, Any]]:
+        async with self._lock:
+            now = datetime.now(UTC)
+            candidates = []
+            for job in self.jobs.values():
+                available = _parse_time(job["available_at"]) <= now
+                expired = job["status"] == "running" and (
+                    not job["lease_expires_at"] or _parse_time(job["lease_expires_at"]) < now
+                )
+                if job["attempts"] < job["max_attempts"] and (
+                    (job["status"] == "queued" and available) or expired
+                ):
+                    candidates.append(job)
+            candidates.sort(key=lambda item: (item["available_at"], item["created_at"]))
+            claimed = candidates[:limit]
+            for job in claimed:
+                job["status"] = JobStatus.RUNNING.value
+                job["attempts"] += 1
+                job["lease_owner"] = worker_id
+                job["lease_expires_at"] = (now + timedelta(seconds=lease_seconds)).isoformat()
+                job["updated_at"] = _utc_now()
+            return deepcopy(claimed)
+
+    async def renew_job_lease(self, job_id: str, worker_id: str, lease_seconds: int) -> bool:
+        job = self.jobs.get(job_id)
+        if not job or job["status"] != "running" or job["lease_owner"] != worker_id:
+            return False
+        job["lease_expires_at"] = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
+        job["updated_at"] = _utc_now()
+        return True
+
+    async def complete_job(self, job_id: str, worker_id: str) -> bool:
+        job = self.jobs.get(job_id)
+        if not job or job["status"] != "running" or job["lease_owner"] != worker_id:
+            return False
+        job.update(
+            {
+                "status": JobStatus.SUCCEEDED.value,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "completed_at": _utc_now(),
+                "updated_at": _utc_now(),
+            }
+        )
+        return True
+
+    async def fail_job(
+        self,
+        job_id: str,
+        worker_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+        retry: bool,
+        retry_delay_seconds: int = 0,
+    ) -> bool:
+        job = self.jobs.get(job_id)
+        if not job or job["status"] != "running" or job["lease_owner"] != worker_id:
+            return False
+        should_retry = retry and job["attempts"] < job["max_attempts"]
+        job.update(
+            {
+                "status": JobStatus.QUEUED.value if should_retry else JobStatus.FAILED.value,
+                "available_at": (
+                    datetime.now(UTC) + timedelta(seconds=retry_delay_seconds)
+                ).isoformat(),
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "last_error_code": error_code,
+                "last_error": error_message,
+                "completed_at": None if should_retry else _utc_now(),
+                "updated_at": _utc_now(),
+            }
+        )
+        return True
+
+    async def decide_artifact(
+        self,
+        artifact_id: str,
+        *,
+        action: str,
+        target_status: str,
+        reason: str,
+        reviewer: Mapping[str, Any] | None,
+        idempotency_key: str,
+        policy_version: str = "p1",
+        risk_level: str | None = None,
+        rejection_code: str | None = None,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            for decision in self.decisions.values():
+                if decision["idempotency_key"] == idempotency_key:
+                    if decision["artifact_id"] != artifact_id:
+                        raise ValueError("idempotency_key_conflict")
+                    artifact = self.artifacts.get(decision["artifact_id"])
+                    return deepcopy(artifact) if artifact else None
+            artifact = self.artifacts.get(artifact_id)
+            if not artifact:
+                return None
+            if artifact["review_status"] in {
+                ReviewStatus.APPROVED.value,
+                ReviewStatus.REJECTED.value,
+            }:
+                raise ArtifactStateError(
+                    "artifact_already_decided",
+                    artifact["review_status"],
+                    target_status,
+                )
+            validate_review_transition(artifact["review_status"], target_status)
+            decision = {
+                "id": new_domain_id("decision"),
+                "artifact_id": artifact_id,
+                "action": action,
+                "from_status": artifact["review_status"],
+                "to_status": target_status,
+                "reason": reason,
+                "reviewer_user_id": (reviewer or {}).get("id"),
+                "reviewer_nickname": _reviewer_name(reviewer),
+                "policy_version": policy_version,
+                "idempotency_key": idempotency_key,
+                "created_at": _utc_now(),
+            }
+            self.decisions[decision["id"]] = decision
+            artifact["review_status"] = target_status
+            if risk_level is not None:
+                artifact["risk_level"] = risk_level
+            if rejection_code is not None:
+                artifact["rejection_code"] = rejection_code
+            artifact["reviewed_at"] = _utc_now()
+            artifact["updated_at"] = _utc_now()
+            return deepcopy(artifact)
+
+    async def approve_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reviewer: Mapping[str, Any],
+        reason: str,
+        expected_repo_version: str,
+        expected_normalized_version: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            for decision in self.decisions.values():
+                if decision["idempotency_key"] == idempotency_key:
+                    if decision["artifact_id"] != artifact_id:
+                        raise ValueError("idempotency_key_conflict")
+                    artifact = self.artifacts.get(decision["artifact_id"])
+                    return deepcopy(artifact) if artifact else None
+            artifact = self.artifacts.get(artifact_id)
+            if not artifact:
+                return None
+            plugin = self._plugin(artifact["plugin_id"]) or {}
+            if artifact["review_status"] != ReviewStatus.PENDING_REVIEW.value:
+                raise ArtifactStateError(
+                    "artifact_not_pending_review",
+                    artifact["review_status"],
+                    ReviewStatus.APPROVED.value,
+                )
+            if str(plugin.get("owner_user_id") or "") == str(reviewer.get("id") or ""):
+                raise ArtifactStateError(
+                    "self_approval_forbidden",
+                    artifact["review_status"],
+                    ReviewStatus.APPROVED.value,
+                )
+            if str(plugin.get("repo_version") or "") != expected_repo_version:
+                raise ValueError("repo_version_changed")
+            if artifact["normalized_version"] != expected_normalized_version:
+                raise ValueError("artifact_version_changed")
+            succeeded = {
+                run["type"]
+                for run in self.runs.values()
+                if run["artifact_id"] == artifact_id and run["status"] == "succeeded"
+            }
+            if not {"precheck", "static"}.issubset(succeeded):
+                raise ValueError("required_review_runs_missing")
+            decision = {
+                "id": new_domain_id("decision"),
+                "artifact_id": artifact_id,
+                "action": "approve",
+                "from_status": artifact["review_status"],
+                "to_status": ReviewStatus.APPROVED.value,
+                "reason": reason,
+                "reviewer_user_id": reviewer.get("id"),
+                "reviewer_nickname": _reviewer_name(reviewer),
+                "policy_version": "p1",
+                "idempotency_key": idempotency_key,
+                "created_at": _utc_now(),
+            }
+            self.decisions[decision["id"]] = decision
+            artifact["review_status"] = ReviewStatus.APPROVED.value
+            artifact["reviewed_at"] = _utc_now()
+            artifact["updated_at"] = _utc_now()
+            now = _utc_now()
+            job = {
+                "id": new_domain_id("job"),
+                "artifact_id": artifact_id,
+                "type": "publish",
+                "status": JobStatus.QUEUED.value,
+                "payload": {"expected_repo_version": expected_repo_version},
+                "attempts": 0,
+                "max_attempts": 5,
+                "available_at": now,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "idempotency_key": f"publish:{artifact_id}",
+                "last_error_code": "",
+                "last_error": "",
+                "created_at": now,
+                "updated_at": now,
+                "completed_at": None,
+            }
+            if not any(
+                item["idempotency_key"] == job["idempotency_key"] for item in self.jobs.values()
+            ):
+                self.jobs[job["id"]] = job
+            return deepcopy(artifact)
+
+    async def request_revoke_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reason: str,
+        reviewer: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            for decision in self.decisions.values():
+                if decision["idempotency_key"] == idempotency_key:
+                    if decision["artifact_id"] != artifact_id:
+                        raise ValueError("idempotency_key_conflict")
+                    artifact = self.artifacts.get(artifact_id)
+                    return deepcopy(artifact) if artifact else None
+            artifact = self.artifacts.get(artifact_id)
+            if not artifact:
+                return None
+            plugin = self._plugin(artifact["plugin_id"])
+            if not plugin or plugin.get("current_artifact_id") != artifact_id:
+                raise ArtifactStateError(
+                    "artifact_not_current_release",
+                    artifact["publication_status"],
+                    PublicationStatus.REVOKING.value,
+                )
+            validate_publication_transition(
+                artifact["publication_status"], PublicationStatus.REVOKING.value
+            )
+            now = _utc_now()
+            decision = {
+                "id": new_domain_id("decision"),
+                "artifact_id": artifact_id,
+                "action": "revoke",
+                "from_status": artifact["publication_status"],
+                "to_status": PublicationStatus.REVOKING.value,
+                "reason": reason,
+                "reviewer_user_id": reviewer.get("id"),
+                "reviewer_nickname": _reviewer_name(reviewer),
+                "policy_version": "p1",
+                "idempotency_key": idempotency_key,
+                "created_at": now,
+            }
+            self.decisions[decision["id"]] = decision
+            artifact["publication_status"] = PublicationStatus.REVOKING.value
+            artifact["updated_at"] = now
+            plugin["status"] = "unlisted"
+            job = {
+                "id": new_domain_id("job"),
+                "artifact_id": artifact_id,
+                "type": "revoke",
+                "status": JobStatus.QUEUED.value,
+                "payload": {"reason": reason},
+                "attempts": 0,
+                "max_attempts": 5,
+                "available_at": now,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "idempotency_key": idempotency_key,
+                "last_error_code": "",
+                "last_error": "",
+                "created_at": now,
+                "updated_at": now,
+                "completed_at": None,
+            }
+            self.jobs[job["id"]] = job
+            return deepcopy(artifact)
+
+    async def publish_artifact(
+        self,
+        artifact_id: str,
+        *,
+        expected_repo_version: str,
+        published_key: str,
+        download_url: str,
+    ) -> dict[str, Any] | None:
+        artifact = self.artifacts.get(artifact_id)
+        if not artifact:
+            return None
+        plugin = self._plugin(artifact["plugin_id"])
+        if not plugin or str(plugin.get("repo_version") or "") != expected_repo_version:
+            raise ValueError("repo_version_changed")
+        for other in self.artifacts.values():
+            if (
+                other["id"] != artifact_id
+                and other["plugin_id"] == artifact["plugin_id"]
+                and other["normalized_version"] == artifact["normalized_version"]
+                and other["publication_status"] == PublicationStatus.PUBLISHED.value
+            ):
+                raise ValueError("published_version_conflict")
+        validate_publication_transition(
+            artifact["publication_status"], PublicationStatus.PUBLISHED.value
+        )
+        artifact.update(
+            {
+                "publication_status": PublicationStatus.PUBLISHED.value,
+                "published_key": published_key,
+                "download_url": download_url,
+                "published_at": _utc_now(),
+                "updated_at": _utc_now(),
+            }
+        )
+        plugin["current_artifact_id"] = artifact_id
+        plugin["status"] = "listed"
+        return deepcopy(artifact)
+
+    async def revoke_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        artifact = self.artifacts.get(artifact_id)
+        if not artifact:
+            return None
+        validate_publication_transition(
+            artifact["publication_status"], PublicationStatus.REVOKED.value
+        )
+        artifact.update(
+            {
+                "publication_status": PublicationStatus.REVOKED.value,
+                "download_url": None,
+                "revoked_at": _utc_now(),
+                "updated_at": _utc_now(),
+            }
+        )
+        plugin = self._plugin(artifact["plugin_id"])
+        if plugin and plugin.get("current_artifact_id") == artifact_id:
+            plugin["current_artifact_id"] = None
+            plugin["status"] = "unlisted"
+        return deepcopy(artifact)
+
+    async def list_current_publications(
+        self, plugin_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        publications: dict[str, dict[str, Any]] = {}
+        for plugin_id in plugin_ids:
+            plugin = self._plugin(plugin_id)
+            artifact = self.artifacts.get(str((plugin or {}).get("current_artifact_id") or ""))
+            if artifact:
+                publications[plugin_id] = deepcopy(
+                    {
+                        **artifact,
+                        "plugin_id": plugin_id,
+                        "repo_version": plugin.get("repo_version", ""),
+                    }
+                )
+        return publications
+
+    async def list_review_decisions(self, artifact_id: str) -> list[dict[str, Any]]:
+        values = [
+            decision
+            for decision in self.decisions.values()
+            if decision["artifact_id"] == artifact_id
+        ]
+        return deepcopy(sorted(values, key=lambda item: item["created_at"]))
+
+    async def record_decision(
+        self,
+        artifact_id: str,
+        *,
+        action: str,
+        from_status: str,
+        to_status: str,
+        reason: str,
+        reviewer: Mapping[str, Any] | None,
+        idempotency_key: str,
+        policy_version: str = "p1",
+    ) -> dict[str, Any]:
+        for decision in self.decisions.values():
+            if decision["idempotency_key"] == idempotency_key:
+                return deepcopy(decision)
+        decision = {
+            "id": new_domain_id("decision"),
+            "artifact_id": artifact_id,
+            "action": action,
+            "from_status": from_status,
+            "to_status": to_status,
+            "reason": reason,
+            "reviewer_user_id": (reviewer or {}).get("id"),
+            "reviewer_nickname": _reviewer_name(reviewer),
+            "policy_version": policy_version,
+            "idempotency_key": idempotency_key,
+            "created_at": _utc_now(),
+        }
+        self.decisions[decision["id"]] = decision
+        return deepcopy(decision)
+
+    async def enqueue_outbox(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        for event in self.outbox.values():
+            if event["dedupe_key"] == payload["dedupe_key"]:
+                return deepcopy(event)
+        now = _utc_now()
+        event = {
+            "id": str(payload.get("id") or new_domain_id("outbox")),
+            "event_type": str(payload["event_type"]),
+            "aggregate_type": str(payload["aggregate_type"]),
+            "aggregate_id": str(payload["aggregate_id"]),
+            "recipient_user_id": payload.get("recipient_user_id"),
+            "payload": dict(payload.get("payload") or {}),
+            "dedupe_key": str(payload["dedupe_key"]),
+            "status": "queued",
+            "attempts": 0,
+            "available_at": now,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "delivered_at": None,
+            "last_error": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.outbox[event["id"]] = event
+        return deepcopy(event)
+
+    async def list_pending_outbox(self, limit: int) -> list[dict[str, Any]]:
+        items = [event for event in self.outbox.values() if event["status"] in {"queued", "failed"}]
+        items.sort(key=lambda item: item["created_at"])
+        return deepcopy(items[:limit])
+
+    async def claim_outbox(
+        self, worker_id: str, limit: int, lease_seconds: int
+    ) -> list[dict[str, Any]]:
+        async with self._lock:
+            now = datetime.now(UTC)
+            candidates = []
+            for event in self.outbox.values():
+                available = _parse_time(event["available_at"]) <= now
+                expired = event["status"] == "running" and (
+                    not event.get("lease_expires_at")
+                    or _parse_time(event["lease_expires_at"]) < now
+                )
+                if event["attempts"] < 5 and (
+                    (event["status"] in {"queued", "failed"} and available) or expired
+                ):
+                    candidates.append(event)
+            candidates.sort(key=lambda item: (item["available_at"], item["created_at"]))
+            claimed = candidates[:limit]
+            for event in claimed:
+                event["status"] = "running"
+                event["attempts"] += 1
+                event["lease_owner"] = worker_id
+                event["lease_expires_at"] = (now + timedelta(seconds=lease_seconds)).isoformat()
+                event["updated_at"] = _utc_now()
+            return deepcopy(claimed)
+
+    async def complete_outbox(self, event_id: str, worker_id: str) -> bool:
+        event = self.outbox.get(event_id)
+        if not event or event["status"] != "running" or event.get("lease_owner") != worker_id:
+            return False
+        event.update(
+            {
+                "status": "delivered",
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "delivered_at": _utc_now(),
+                "updated_at": _utc_now(),
+            }
+        )
+        return True
+
+    async def fail_outbox(
+        self,
+        event_id: str,
+        worker_id: str,
+        *,
+        error_message: str,
+        retry: bool,
+        retry_delay_seconds: int = 0,
+    ) -> bool:
+        event = self.outbox.get(event_id)
+        if not event or event["status"] != "running" or event.get("lease_owner") != worker_id:
+            return False
+        should_retry = retry and event["attempts"] < 5
+        event.update(
+            {
+                "status": "failed" if should_retry else "cancelled",
+                "available_at": (
+                    datetime.now(UTC) + timedelta(seconds=retry_delay_seconds)
+                ).isoformat(),
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "last_error": error_message,
+                "updated_at": _utc_now(),
+            }
+        )
+        return True
+
+    async def mark_outbox_delivered(self, event_id: str) -> bool:
+        event = self.outbox.get(event_id)
+        if not event or event["status"] == "delivered":
+            return False
+        event["status"] = "delivered"
+        event["delivered_at"] = _utc_now()
+        event["updated_at"] = _utc_now()
+        return True
+
+    def _with_plugin(self, artifact: Mapping[str, Any]) -> dict[str, Any]:
+        plugin = self._plugin(str(artifact["plugin_id"])) or {}
+        current = self.artifacts.get(str(plugin.get("current_artifact_id") or "")) or {}
+        return {
+            **artifact,
+            "plugin_name": plugin.get("name", artifact["plugin_id"]),
+            "plugin_repo": plugin.get("repo", artifact.get("source_repo", "")),
+            "repo_version": plugin.get("repo_version", ""),
+            "published_version": current.get("version", ""),
+            "owner_user_id": plugin.get("owner_user_id"),
+            "owner_github_login": plugin.get("owner_github_login", ""),
+        }
+
+    def _plugin(self, plugin_id: str) -> dict[str, Any] | None:
+        if not self.store:
+            return None
+        finder = getattr(self.store, "get_plugin", None)
+        return finder(plugin_id) if finder else None
+
+    def _plugin_owner(self, plugin_id: str) -> str | None:
+        return (self._plugin(plugin_id) or {}).get("owner_user_id")
+
+
+def _record(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): _serialize(value) for key, value in dict(row).items()}
+
+
+def _serialize(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, list):
+        return [_serialize(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _serialize(item) for key, item in value.items()}
+    return value
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _parse_time(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC)
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _reviewer_name(reviewer: Mapping[str, Any] | None) -> str:
+    value = reviewer or {}
+    return str(
+        value.get("github_name")
+        or value.get("github_login")
+        or value.get("internal_username")
+        or ""
+    )

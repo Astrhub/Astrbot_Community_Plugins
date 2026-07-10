@@ -8,7 +8,8 @@
 ## 功能特性
 
 - **浏览与检索**：插件卡片网格、关键词搜索、标签/分类筛选、多种排序（更新时间/星标/点赞/评论/随机）、模糊搜索、分页；插件详情弹窗内浏览 README 及仓库文件（Markdown 渲染、图片预览、目录导航、文本文件查看）。
-- **提交与审核**：插件通过网页表单提交，进入待审核队列；管理员审核上架/下架，下架需填写理由并通知所有者。
+- **插件包与审核**：ZIP 或公开 GitHub 仓库被固定为不可变 artifact，先进入私有隔离区，再执行基础校验、静态扫描和人工复核；只有过审版本才会获得 CDN 链接。
+- **版本工作台**：`/plugin-workbench` 提供作者版本历史、结构化自动审查结果以及管理员待审队列、批准、拒绝、重试发布和安全下架。
 - **GitHub 元数据同步**：后台 worker 周期性抓取仓库 stars、README、版本等信息；支持多 API token 轮转应对速率限制；所有者与管理员可手动触发刷新。
 - **社区互动**：嵌套评论（支持 Markdown + 语法高亮）、插件与评论点赞、Giscus 评论集成；回复与点赞触发站内通知。
 - **身份与角色**：内部核心管理员（用户名/密码登录）+ GitHub OAuth 登录；三级角色（core_admin / admin / user）+ 受信任 GitHub 组织自动提权。
@@ -28,7 +29,7 @@
 |---|---|
 | 前端 | Vue 3.5 + Vite+（Vite Plus）+ TypeScript + Naive UI + Pinia 3 + Vue Router 4；`marked` + `marked-alert` + `DOMPurify` + `highlight.js` 渲染 Markdown；`vue-api-playground` 在线试用 API；`@giscus/vue` 评论 |
 | 后端 | Python 3.11+ · FastAPI · uvicorn · Pydantic 2 · asyncpg · redis-py（异步）· httpx |
-| 存储 | PostgreSQL（持久化业务数据，10 张表）· Redis（登录会话，TTL 自动过期） |
+| 存储 | PostgreSQL（市场、artifact、审查、任务与 outbox）· Redis（登录会话）· 本地私有目录或 S3/R2（隔离包与已发布包） |
 | 部署 | Docker Compose · systemd · uv（Python 包管理）· npm（前端） |
 
 > 前端使用 TypeScript（`<script setup lang="ts">`），类型定义见 `apps/market-web/src/types/index.ts`。API 调用使用原生 `fetch`（`credentials: 'include'` cookie session）；`axios` 仅作为历史依赖保留，当前未被引用。
@@ -44,7 +45,7 @@
 ├── deploy/systemd/      # 裸机部署的 systemd service 与 env 模板
 ├── docs/                # 架构、安全、OpenAPI 文档
 ├── Dockerfile           # 多阶段构建（前端 dist + 后端）
-├── docker-compose.yml   # 单机部署（app + PostgreSQL + Redis）
+├── docker-compose.yml   # 单机部署（app + artifact-worker + PostgreSQL + Redis）
 └── package.json         # 工作区根脚本（dev:api / dev:web / build:web / start:api / test）
 ```
 
@@ -106,6 +107,15 @@ docker compose up -d --build
 - PostgreSQL：host `postgres` / port `5432` / 默认库名、用户、密码均为 `market`（可用 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 覆盖）
 - Redis：host `redis` / port `6379`
 
+启用插件包功能时，先在 `apps/api/.env` 配置 `ARTIFACTS_ENABLED=true`、CDN 与存储，再启动独立 Worker：
+
+```bash
+docker compose --profile artifacts up -d --build
+docker compose logs -f artifact-worker
+```
+
+API 进程不执行插件源码；P0/P1 的 Worker 只读取 ZIP、YAML 和 Python AST。后续 runtime smoke test 也必须继续运行在独立隔离容器中。
+
 容器镜像：`node:24`（前端构建）、`python:3.11` + `uv:0.9.7`（后端）、`postgres:16-alpine`、`redis:7-alpine`。对外端口默认 `8787`，可用 `APP_PORT` 覆盖。
 
 常用命令：
@@ -129,6 +139,7 @@ sudo chown -R astrbot-market:astrbot-market /opt/astrbot-community-plugins
 cd /opt/astrbot-community-plugins
 sudo cp deploy/systemd/astrbot-community-plugins.env.example /etc/astrbot-community-plugins/astrbot-community-plugins.env
 sudo cp deploy/systemd/astrbot-community-plugins.service /etc/systemd/system/
+sudo cp deploy/systemd/astrbot-artifact-worker.service /etc/systemd/system/
 ```
 
 构建与安装依赖：
@@ -160,7 +171,11 @@ systemd service 已启用安全加固（`NoNewPrivileges` / `PrivateTmp` / `Prot
 
 ```bash
 sudo systemctl daemon-reload
+sudo mkdir -p /var/lib/astrbot-market/artifacts
+sudo chown -R astrbot-market:astrbot-market /var/lib/astrbot-market
 sudo systemctl enable --now astrbot-community-plugins
+# 仅在 ARTIFACTS_ENABLED=true 且存储/CDN 配置完整时启用：
+sudo systemctl enable --now astrbot-artifact-worker
 sudo systemctl status astrbot-community-plugins
 journalctl -u astrbot-community-plugins -f
 ```
@@ -175,7 +190,7 @@ journalctl -u astrbot-community-plugins -f
 
 ### CI/CD
 
-`.github/workflows/ci.yml` 仅执行代码质量检查（ruff lint + pytest + 前端 build），**不包含部署步骤**。尚未提供的运维配置：Kubernetes/Helm、Nginx/Caddy 反向代理模板、Terraform/基础设施即代码、Alembic 数据库迁移（当前 schema 由应用启动时自动建表/补齐）。
+`.github/workflows/ci.yml` 仅执行代码质量检查（ruff lint + pytest + 前端 build），**不包含部署步骤**。artifact 表通过带 checksum 和 advisory lock 的版本化 SQL migration 初始化；尚未提供 Kubernetes/Helm、Nginx/Caddy 反向代理模板与 Terraform。
 
 ## 配置
 
@@ -195,8 +210,15 @@ journalctl -u astrbot-community-plugins -f
 | `GITHUB_API_TOKEN` | 空 | 元数据同步用 GitHub token，多 token 用 `,` 分隔自动轮转 |
 | `GITHUB_METADATA_SYNC_ENABLED` / `..._INTERVAL_SECONDS` | `true` / `3600` | 后台元数据同步开关与间隔（5 分钟 ~ 24 小时） |
 | `MARKET_SUBMISSIONS_ENABLED` / `MARKET_COMMENTS_ENABLED` / `MARKET_LIKES_ENABLED` | `true` | 市场功能开关 |
-| `PLUGIN_AUTO_APPROVE_ENABLED` | `false` | 提交后自动上架，跳过审核 |
+| `PLUGIN_AUTO_APPROVE_ENABLED` | `false` | 仅保留给关闭 artifact 功能时的旧提交流程；artifact 流程永不绕过扫描与人工批准 |
 | `MAX_PLUGIN_TAGS` | `8` | 插件最大标签数 |
+| `ARTIFACTS_ENABLED` | `false` | 启用不可变插件包、审查任务和 CDN 发布门控 |
+| `ARTIFACT_STORAGE_BACKEND` | `local` | `local` 或 `s3`（兼容 R2/S3 API） |
+| `ARTIFACT_LOCAL_ROOT` | `/var/lib/astrbot-market/artifacts` | 本地隔离、文本清单与发布对象目录；API/Worker 必须共享 |
+| `ARTIFACT_CDN_BASE_URL` | 空 | 已发布对象的公开 CDN 域名；隔离对象不会使用该域名 |
+| `ARTIFACT_S3_*` / `ARTIFACT_*_BUCKET` | 空 | S3/R2 endpoint、区域、凭据、隔离桶与发布桶 |
+| `ARTIFACT_MAX_UPLOAD_BYTES` / `...UNPACKED...` / `...MAX_FILES` | `32 MiB` / `128 MiB` / `2000` | ZIP 流式接收和预检硬限制 |
+| `ARTIFACT_SUBMISSION_RPM` | `6` | Artifact ZIP/GitHub 提交按用户和来源 IP 的每分钟上限；`0` 关闭限制 |
 | `EMAIL_PROVIDER` | `disabled` | `disabled` / `smtp` / `cloudflare` |
 | `SESSION_MAX_AGE_SECONDS` | `604800` | 会话有效期（默认 7 天） |
 | `COOKIE_SECURE` / `COOKIE_SAME_SITE` | `false` / `Lax` | Cookie 安全属性（生产 HTTPS 应设 `COOKIE_SECURE=true`） |
@@ -248,7 +270,7 @@ AstrBot 可将本市场作为自定义插件源。在 AstrBot WebUI 中添加：
 https://your-market-domain/plugins.json
 ```
 
-数据格式兼容 AstrBot 自定义仓库格式：以插件名为键的 JSON 对象，包含 `name`、`display_name`、`desc`、`author`、`repo`、`tags`、`version`、`logo`、`stars`、`updated_at`、`download_url`、`astrbot_version`、`category`、`support_platforms`。`/plugins-md5.json` 提供 feed 的 MD5 摘要供 AstrBot 源缓存校验。`/v1/astrbot/plugins(.json|-md5.json)` 是带 `v1` 前缀的等价端点。
+数据格式兼容 AstrBot 自定义仓库格式：`repo` 永远保留；`version` 随 GitHub 仓库 metadata 更新；`download_url` 仅在当前已发布 artifact 的规范化版本与仓库版本一致时输出。仓库出现未过审新版本时，旧 CDN 对象仍保留但不会冒充新版本，feed 的 `download_url` 为空，用户仍可选择 GitHub 直连。发布路径固定为 `/{author_id}/{repo_name}/{version}/{plugin_name}-{version}-{suffix}.zip`。
 
 未来的 AstrBot WebUI 插件将通过 API Key 消费本 API，不应在本地重复存储市场状态。
 

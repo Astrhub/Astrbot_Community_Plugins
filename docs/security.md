@@ -87,8 +87,22 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 
 ### 存储边界
 
-- **PostgreSQL**：持久化全部业务数据（用户、插件、评论、点赞、提交、通知、公告、API Key、系统设置）。
+- **PostgreSQL**：持久化业务数据、artifact 状态机、结构化 findings、决策、lease 任务与通知 outbox。
 - **Redis**：**仅**存登录会话 token（带 TTL）。不存储 GitHub 密钥、OAuth 原始令牌等超出登录流程所需的敏感数据。
+- **隔离存储**：上传/GitHub ZIP 与审查文本对象使用私有本地目录或私有 bucket，不生成公开 URL。
+- **发布存储**：只接收已批准 artifact 的原始隔离 ZIP，使用条件创建禁止覆盖；公开 URL 由独立 CDN base URL 组成。
+
+### Artifact 信任边界
+
+- API 只做流式接收、鉴权和任务入队，不解压 ZIP、不 import 插件、不安装 requirements。
+- ZIP/GitHub artifact 提交同时按登录用户和直接来源 IP 做每分钟限流；生产 Redis 不可用时退化为单进程内存计数。
+- `artifact-worker` 在独立进程/容器中执行 P0/P1 的 ZIP 目录检查、YAML safe load、Python AST 与 requirements 静态规则；这些步骤仍不执行插件代码。
+- 预检拒绝路径穿越、绝对路径、符号链接、加密 entry、zip bomb、超限文件/数量、重复路径、缺失或重复 metadata、非法版本/插件名、Git LFS、submodule 与原生可执行制品。
+- GitHub 来源只允许公开 `https://github.com/<owner>/<repo>`，分支/标签必须先解析为 40 位 commit SHA，再从固定 codeload 主机下载。
+- 后续 runtime smoke test 必须使用一次性隔离容器；不得复用 API 进程或当前 P0/P1 worker 进程。
+- LLM 结果只能产生结构化建议，不能成为最终安全背书或绕过人工决策。
+
+发布路径为 `/{author_id}/{repo_name}/{version}/{plugin_name}-{version}-{suffix}.zip`；`suffix` 创建一次并持久化。对象已存在时只有 SHA-256 相同才视为幂等，否则发布失败。
 
 ## 输入验证与内容安全
 
@@ -100,12 +114,14 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 - **标签上限**：受 `MAX_PLUGIN_TAGS`（默认 8）限制。
 - **Markdown 渲染**：前端使用 `DOMPurify` 清理渲染输出，`marked` + `highlight.js` 渲染；审核操作在服务端存储。
 - **评论软删除**：删除根评论会隐藏其回复（`deleted` 标记 + partial index `WHERE deleted = false`），保留审计痕迹。
+- **审查内容最小披露**：P1 API 不提供完整源码接口；仅返回有限 `evidence_excerpt`。状态邮件只包含状态、原因与站内链接，不包含源码或 finding 证据。
 
 ## 网络与部署安全
 
 - **CORS**：`CORS_ORIGIN` 控制允许的前端来源（逗号分隔）；开发态默认允许 `http://127.0.0.1:3000`。生产同源部署时设为站点自身域名。
 - **Cookie**：生产 HTTPS 必须设 `COOKIE_SECURE=true`，配合反向代理（Nginx/Caddy）启用 TLS。
 - **systemd 加固**：`deploy/systemd/` 的 service 启用 `NoNewPrivileges`、`PrivateTmp`、`ProtectSystem=full`，并通过 `ReadWritePaths` 限定仅后端目录可写。
+- **Worker 分离**：Docker 使用 `artifacts` profile 启动独立 Worker；systemd 使用单独 unit。两者通过 PostgreSQL lease 协调，不在 Redis 保存审查状态。
 - **开发认证**：`ENABLE_DEV_AUTH` 生产必须为 `false`，否则任何人可通过 `X-Dev-GitHub-Login` 头伪造登录。Docker 模板（`.env.docker.example`）默认已设 `false`。
 - **OAuth callback URL**：当 GitHub 登录启用时，系统拒绝本地回环 callback，防止开发态配置泄漏到生产（测试 `test_system_settings_reject_local_oauth_callback_when_enabled`）。callback URL 优先级：运行时数据库 options > `.env` > 初始设置。
 

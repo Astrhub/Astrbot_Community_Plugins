@@ -27,6 +27,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
+from .artifacts import build_artifact_runtime
+from .artifacts.routes import build_artifact_router
 from .auth import (
     Role,
     can_edit_plugin,
@@ -180,7 +182,6 @@ PLUGIN_METADATA_SYNC_FIELDS = (
     "version",
     "astrbot_version",
     "category",
-    "download_url",
     "support_platforms",
 )
 OFFICIAL_PLUGIN_CATEGORIES = {
@@ -206,6 +207,8 @@ def create_app(
         openapi_tags=[
             {"name": "plugins", "description": "插件浏览与详情"},
             {"name": "submissions", "description": "插件提交与管理"},
+            {"name": "artifacts", "description": "插件包与自动审查结果"},
+            {"name": "reviews", "description": "插件包人工复核与发布"},
             {"name": "comments", "description": "评论与点赞"},
             {"name": "integration", "description": "AstrBot 插件源"},
             {"name": "auth", "description": "认证与会话"},
@@ -218,6 +221,11 @@ def create_app(
     )
     app.state.settings = settings or load_settings()
     app.state.store = store or create_store(app.state.settings)
+    app.state.artifact_runtime = build_artifact_runtime(
+        app.state.settings,
+        app.state.store,
+        allow_in_memory_artifacts=store is not None,
+    )
     app.state.email_daily_counter = {"date": "", "count": 0}
     app.state.github_api_token_index = 0
     app.state.rate_limit_counters = {}
@@ -227,10 +235,16 @@ def create_app(
         allow_origins=list(app.state.settings.cors_origins),
         allow_credentials=True,
         allow_methods=["*"],
-        allow_headers=["content-type", "authorization", "x-dev-github-login"],
+        allow_headers=[
+            "content-type",
+            "authorization",
+            "x-dev-github-login",
+            "idempotency-key",
+        ],
     )
     app.add_exception_handler(HTTPException, http_exception_handler)
     register_routes(app)
+    app.include_router(build_artifact_router())
     register_market_web_routes(app)
     return app
 
@@ -258,6 +272,7 @@ def create_store(settings: Settings) -> InMemoryMarketStore | PgRedisMarketStore
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await maybe_call_store_lifecycle(app, "connect")
+    await app.state.artifact_runtime.start(app.state.store)
     await bootstrap_internal_core_admin(app)
     sync_task = asyncio.create_task(github_metadata_sync_worker(app))
     try:
@@ -269,6 +284,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except asyncio.CancelledError:
             # Expected during application shutdown after cancelling the sync worker.
             pass
+        await app.state.artifact_runtime.close()
         await maybe_call_store_lifecycle(app, "close")
 
 
@@ -308,13 +324,14 @@ def register_routes(app: FastAPI) -> None:
         summary="健康检查",
         description="返回服务状态，包括数据库和 Redis 连接情况。",
     )
-    async def health(request: Request) -> dict[str, str]:
+    async def health(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
         return {
             "status": "ok",
             "setup": "required" if settings.is_setup_required() else "complete",
             "database": "configured" if settings.database_url else "missing",
             "redis": "configured" if settings.redis_url else "missing",
+            "artifacts": request.app.state.artifact_runtime.public_status(),
         }
 
     @app.get(
@@ -378,6 +395,7 @@ def register_routes(app: FastAPI) -> None:
             payload,
             runtime_config,
         )
+        request.app.state.artifact_runtime.update_settings(request.app.state.settings)
         return {
             "saved": True,
             "restart_required": settings_restart_required(settings, updated_runtime_config),
@@ -897,7 +915,8 @@ def register_routes(app: FastAPI) -> None:
         responses={200: {"description": "插件列表"}},
     )
     async def list_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
-        return {"items": await call_store(request, "list_public_plugins")}
+        plugins = await list_public_plugins_with_artifacts(request)
+        return {"items": [public_market_plugin(plugin) for plugin in plugins]}
 
     @app.get(
         "/plugins.json",
@@ -906,7 +925,7 @@ def register_routes(app: FastAPI) -> None:
         description="返回 AstrBot 插件市场的完整插件源数据（机器可读格式）。无需登录。",
     )
     async def astrbot_plugin_source(request: Request) -> dict[str, dict[str, Any]]:
-        return build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
+        return build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
 
     @app.get(
         "/plugins-md5.json",
@@ -915,13 +934,13 @@ def register_routes(app: FastAPI) -> None:
         description="返回插件源数据的 MD5 校验值，用于增量更新检测。无需登录。",
     )
     async def astrbot_plugin_source_md5(request: Request) -> dict[str, str]:
-        feed = build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
+        feed = build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
         return {"md5": digest_plugin_source(feed)}
 
     @app.get("/v1/astrbot/plugins", tags=["integration"], summary="AstrBot 插件源 v1")
     @app.get("/v1/astrbot/plugins.json", tags=["integration"], summary="AstrBot 插件源 v1")
     async def astrbot_plugin_source_v1(request: Request) -> dict[str, dict[str, Any]]:
-        return build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
+        return build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
 
     @app.get(
         "/v1/astrbot/plugins-md5.json",
@@ -999,6 +1018,9 @@ def register_routes(app: FastAPI) -> None:
     )
     async def submit_plugin(request: Request, payload: PluginSubmission) -> dict[str, Any]:
         user = await require_user(request)
+        muted_until = parse_iso_datetime(user.get("muted_until"))
+        if muted_until and muted_until > datetime.now(UTC):
+            raise error(403, "Muted users cannot submit plugin versions")
         settings = await runtime_settings_for_app(request.app)
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
@@ -1013,6 +1035,27 @@ def register_routes(app: FastAPI) -> None:
                 store=request.app.state.store,
             )
         )
+        artifact_runtime = request.app.state.artifact_runtime
+        if artifact_runtime.available and artifact_runtime.service is not None:
+            try:
+                plugin = await call_store(request, "register_plugin", user, data)
+                artifact = await artifact_runtime.service.submit_github(
+                    plugin=plugin,
+                    user=user,
+                    source_ref="",
+                )
+            except PermissionError as exc:
+                raise error(403, "Plugin is already owned by another user") from exc
+            except Exception as exc:
+                from .artifacts.github_source import GithubSourceError
+                from .artifacts.storage import ArtifactStorageError
+
+                if isinstance(exc, GithubSourceError):
+                    raise error(503 if exc.retryable else 400, str(exc)) from exc
+                if isinstance(exc, ArtifactStorageError):
+                    raise error(413 if exc.code == "archive_too_large" else 400, str(exc)) from exc
+                raise
+            return {**plugin, "artifact": artifact}
         plugin = await call_store(request, "submit_plugin", user, data)
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
@@ -2642,6 +2685,12 @@ async def refresh_plugin_github_metadata_for_plugin(
         return plugin
     if not metadata:
         return plugin
+    repo_version = str(metadata.pop("version", "") or "").strip()
+    metadata.pop("download_url", None)
+    if repo_version:
+        metadata["repo_version"] = repo_version
+        # 保留旧市场 API 的 version 字段，但发布判断只读取 repo_version。
+        metadata["version"] = repo_version
     metadata.update(github_sync_success_metadata(settings, user))
     return await resolve_optional_awaitable(
         app.state.store.update_plugin_metadata(plugin["id"], metadata)
@@ -3267,6 +3316,8 @@ async def activate_setup_store(app: FastAPI, new_store: Any) -> None:
 
     old_store = app.state.store
     app.state.store = new_store
+    app.state.artifact_runtime.update_settings(app.state.settings)
+    await app.state.artifact_runtime.start(new_store)
     if old_store is new_store:
         return
     close = getattr(old_store, "close", None)
@@ -4563,7 +4614,68 @@ def build_astrbot_plugin_source(plugins: list[dict[str, Any]]) -> dict[str, dict
     return dict(sorted(feed.items()))
 
 
+async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str, Any]]:
+    plugins = await call_store(request, "list_public_plugins")
+    runtime = request.app.state.artifact_runtime
+    if not runtime.config.enabled:
+        return plugins
+    publications: dict[str, dict[str, Any]] = {}
+    if runtime.repository is not None:
+        publications = await runtime.repository.list_current_publications(
+            [str(plugin.get("id") or "") for plugin in plugins]
+        )
+    enriched: list[dict[str, Any]] = []
+    for plugin in plugins:
+        publication = publications.get(str(plugin.get("id") or ""), {})
+        feed_version = str(
+            plugin.get("repo_version")
+            or plugin.get("version")
+            or publication.get("version")
+            or "1.0.0"
+        )
+        published_version = str(publication.get("version") or "")
+        published = publication.get("publication_status") == "published"
+        gated_download_url = (
+            str(publication.get("download_url") or "")
+            if published and versions_match(feed_version, published_version)
+            else ""
+        )
+        enriched.append(
+            {
+                **plugin,
+                "_artifact_publication_checked": True,
+                "download_url": gated_download_url,
+                "published_version": published_version,
+                "artifact_download_url": gated_download_url,
+                "artifact_publication_status": publication.get("publication_status") or "",
+            }
+        )
+    return enriched
+
+
+def public_market_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in plugin.items()
+        if not key.startswith("_artifact_") and key != "artifact_download_url"
+    }
+
+
 def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
+    feed_version = str(
+        plugin.get("repo_version")
+        or plugin.get("version")
+        or plugin.get("published_version")
+        or "1.0.0"
+    )
+    download_url = str(plugin.get("download_url") or "")
+    if plugin.get("_artifact_publication_checked"):
+        published_version = str(plugin.get("published_version") or "")
+        matches = versions_match(feed_version, published_version)
+        published = plugin.get("artifact_publication_status") == "published"
+        download_url = (
+            str(plugin.get("artifact_download_url") or "") if matches and published else ""
+        )
     return {
         "name": name,
         "display_name": plugin.get("display_name") or name,
@@ -4575,10 +4687,10 @@ def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
         "tags": plugin.get("tags") if isinstance(plugin.get("tags"), list) else [],
         "stars": int(plugin.get("stars") or 0),
         "updated_at": plugin.get("updated_at") or "",
-        "version": plugin.get("version") or "1.0.0",
+        "version": feed_version,
         "logo": plugin.get("logo") or "",
         "pinned": bool(plugin.get("pinned")),
-        "download_url": plugin.get("download_url") or "",
+        "download_url": download_url,
         "i18n": plugin.get("i18n") if isinstance(plugin.get("i18n"), dict) else {},
         "astrbot_version": plugin.get("astrbot_version") or "",
         "category": plugin.get("category") or "",
@@ -4586,6 +4698,17 @@ def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
         if isinstance(plugin.get("support_platforms"), list)
         else [],
     }
+
+
+def versions_match(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    try:
+        from .artifacts.archive import normalize_version
+
+        return normalize_version(left) == normalize_version(right)
+    except ValueError:
+        return left.strip().lower().removeprefix("v") == right.strip().lower().removeprefix("v")
 
 
 def digest_plugin_source(feed: dict[str, dict[str, Any]]) -> str:

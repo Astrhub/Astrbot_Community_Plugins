@@ -32,6 +32,10 @@ tags:
     description: 核心管理员（core_admin）系统设置与用户/管理员管理
   - name: API Keys
     description: 全局与个人 API Key
+  - name: Artifacts
+    description: 插件包提交、版本历史与结构化自动审查结果
+  - name: Reviews
+    description: 管理员人工决策、发布重试与安全撤回
 paths:
   /health:
     get:
@@ -759,6 +763,107 @@ paths:
       responses:
         "200":
           description: MD5 摘要
+  /v1/plugins/registrations:
+    post:
+      tags: [Artifacts]
+      summary: 登记稳定插件身份
+      security: [{cookieAuth: []}]
+      responses:
+        "200": {description: 已登记或返回现有插件}
+        "403": {description: 仓库/插件所有权不匹配}
+        "503": {description: artifact 功能未就绪}
+  /v1/plugins/{id}/artifacts/upload:
+    post:
+      tags: [Artifacts]
+      summary: 流式上传 ZIP artifact
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/PluginId"}]
+      responses:
+        "202": {description: 已隔离并创建预检任务}
+        "429": {description: 用户或来源 IP 超过 artifact 提交频率限制}
+        "413": {description: 上传超过限制}
+  /v1/plugins/{id}/artifacts/github:
+    post:
+      tags: [Artifacts]
+      summary: 固定公开 GitHub ref 到 commit 并创建 artifact
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/PluginId"}]
+      responses:
+        "202": {description: 已固定 commit、隔离并创建预检任务}
+        "429": {description: 用户或来源 IP 超过 artifact 提交频率限制}
+  /v1/me/artifacts:
+    get:
+      tags: [Artifacts]
+      summary: 当前作者的 artifact 版本历史
+      security: [{cookieAuth: []}]
+      responses:
+        "200": {description: Artifact 分页列表}
+  /v1/artifacts/{artifact_id}:
+    get:
+      tags: [Artifacts]
+      summary: Artifact、runs、findings 与 decisions 详情
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      responses:
+        "200": {description: 结构化审查详情（不含完整源码）}
+        "403": {description: 非作者且非管理员}
+  /v1/artifacts/{artifact_id}/runs:
+    get:
+      tags: [Artifacts]
+      summary: 自动审查运行记录
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      responses:
+        "200": {description: Review runs}
+  /v1/artifacts/{artifact_id}/findings:
+    get:
+      tags: [Artifacts]
+      summary: 结构化 findings
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      responses:
+        "200": {description: Findings（仅有限 evidence excerpt）}
+  /v1/admin/artifacts:
+    get:
+      tags: [Reviews]
+      summary: 管理员 artifact 审查队列
+      security: [{cookieAuth: []}]
+      responses:
+        "200": {description: 可按状态与风险筛选的分页队列}
+        "403": {description: 需要管理员权限}
+  /v1/admin/artifacts/{artifact_id}/approve:
+    post:
+      tags: [Reviews]
+      summary: 人工批准并原子创建发布任务
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      responses:
+        "200": {description: 已批准并排队发布}
+        "409": {description: 状态、强制 runs 或 repo_version 已变化}
+  /v1/admin/artifacts/{artifact_id}/reject:
+    post:
+      tags: [Reviews]
+      summary: 人工拒绝 artifact
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      responses:
+        "200": {description: 已拒绝，不发布 CDN URL}
+  /v1/admin/artifacts/{artifact_id}/retry-publish:
+    post:
+      tags: [Reviews]
+      summary: 重试已批准 artifact 的 CDN 发布
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      responses:
+        "200": {description: 已重新排队}
+  /v1/admin/plugins/{id}/revoke-release:
+    post:
+      tags: [Reviews]
+      summary: 安全撤回当前 CDN artifact
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/PluginId"}]
+      responses:
+        "200": {description: 已原子记录决策、移出插件源并创建撤回任务}
 components:
   parameters:
     PluginId:
@@ -796,6 +901,13 @@ components:
       schema:
         type: string
       description: 通知 ID
+    ArtifactId:
+      in: path
+      name: artifact_id
+      required: true
+      schema:
+        type: string
+      description: 不可变插件包 Artifact ID
   securitySchemes:
     cookieAuth:
       type: apiKey
