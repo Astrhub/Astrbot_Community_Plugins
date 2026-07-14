@@ -47,6 +47,10 @@ class ArtifactStorage(Protocol):
 
     async def put_text_content(self, key: str, content: bytes) -> StoredObject: ...
 
+    async def read_text_content(
+        self, key: str, max_bytes: int, expected_sha256: str = ""
+    ) -> bytes: ...
+
     async def publish_if_absent(
         self, source_key: str, published_key: str, expected_sha256: str
     ) -> StoredObject: ...
@@ -159,6 +163,16 @@ class LocalArtifactStorage:
             temporary.unlink(missing_ok=True)
         return StoredObject(key=key, size_bytes=len(content), sha256=digest)
 
+    async def read_text_content(self, key: str, max_bytes: int, expected_sha256: str = "") -> bytes:
+        source = _safe_path(self.content_root, key)
+        if not source.is_file():
+            raise ArtifactStorageError("content_object_missing", "Private content object not found")
+        if source.stat().st_size > max_bytes:
+            raise ArtifactStorageError("content_object_too_large", "Private content exceeds limit")
+        content = await asyncio.to_thread(_read_file_limited, source, max_bytes)
+        _validate_expected_sha(expected_sha256, hashlib.sha256(content).hexdigest())
+        return content
+
     async def publish_if_absent(
         self, source_key: str, published_key: str, expected_sha256: str
     ) -> StoredObject:
@@ -251,6 +265,30 @@ class S3ArtifactStorage:
             stored,
         )
         return stored
+
+    async def read_text_content(self, key: str, max_bytes: int, expected_sha256: str = "") -> bytes:
+        _validate_object_key(key)
+        stored = await asyncio.to_thread(self._head_object, self.quarantine_bucket, key)
+        if stored is None:
+            raise ArtifactStorageError("content_object_missing", "Private content object not found")
+        if stored.size_bytes > max_bytes:
+            raise ArtifactStorageError("content_object_too_large", "Private content exceeds limit")
+        if expected_sha256 and stored.sha256:
+            _validate_expected_sha(expected_sha256, stored.sha256)
+        response = await asyncio.to_thread(
+            self.client.get_object,
+            Bucket=self.quarantine_bucket,
+            Key=key,
+        )
+        body = response["Body"]
+        content = await asyncio.to_thread(body.read, max_bytes + 1)
+        close = getattr(body, "close", None)
+        if close:
+            close()
+        if len(content) > max_bytes:
+            raise ArtifactStorageError("content_object_too_large", "Private content exceeds limit")
+        _validate_expected_sha(expected_sha256, hashlib.sha256(content).hexdigest())
+        return content
 
     async def publish_if_absent(
         self, source_key: str, published_key: str, expected_sha256: str
@@ -448,6 +486,14 @@ def _file_stat(path: Path, key: str) -> StoredObject:
             size += len(chunk)
             digest.update(chunk)
     return StoredObject(key=key, size_bytes=size, sha256=digest.hexdigest())
+
+
+def _read_file_limited(path: Path, max_bytes: int) -> bytes:
+    with path.open("rb") as handle:
+        content = handle.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ArtifactStorageError("content_object_too_large", "Private content exceeds limit")
+    return content
 
 
 def _validate_expected_sha(expected: str, actual: str) -> None:

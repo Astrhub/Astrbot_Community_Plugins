@@ -897,14 +897,7 @@ class PgAdvancedReviewRepositoryMixin:
         runner_id: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any] | None:
-        status = RuntimeDispatchStatus(str(payload["status"]))
-        if status not in {
-            RuntimeDispatchStatus.SUCCEEDED,
-            RuntimeDispatchStatus.FAILED,
-            RuntimeDispatchStatus.TIMED_OUT,
-            RuntimeDispatchStatus.CANCELLED,
-        }:
-            raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+        status = _validate_runtime_completion_payload(payload)
         row = await self._advanced_pool().fetchrow(
             """
             UPDATE runtime_dispatches
@@ -934,20 +927,106 @@ class PgAdvancedReviewRepositoryMixin:
         )
         return _record(row) if row else None
 
-    async def collect_runtime_dispatch(self, dispatch_id: str) -> dict[str, Any] | None:
-        row = await self._advanced_pool().fetchrow(
+    async def expire_runtime_dispatches(self, limit: int) -> list[dict[str, Any]]:
+        rows = await self._advanced_pool().fetch(
             """
-            UPDATE runtime_dispatches
-               SET collected_at = now(),
+            WITH candidates AS (
+                SELECT id
+                  FROM runtime_dispatches
+                 WHERE status = 'running'
+                   AND attempts >= max_attempts
+                   AND lease_expires_at < now()
+              ORDER BY lease_expires_at, id
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT $1
+            )
+            UPDATE runtime_dispatches dispatch
+               SET status = 'timed_out',
+                   error_code = 'runtime_dispatch_timeout',
+                   error_message = 'Runtime runner exhausted all lease attempts',
+                   lease_owner = NULL,
+                   lease_expires_at = NULL,
+                   completed_at = now(),
                    updated_at = now()
-             WHERE id = $1
-               AND collected_at IS NULL
-               AND status IN ('succeeded', 'failed', 'timed_out')
-         RETURNING *
+              FROM candidates
+             WHERE dispatch.id = candidates.id
+         RETURNING dispatch.*
             """,
-            dispatch_id,
+            limit,
         )
-        return _record(row) if row else None
+        return [_record(row) for row in rows]
+
+    async def collect_runtime_dispatch(
+        self,
+        dispatch_id: str,
+        run_payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        pool = self._advanced_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                dispatch = await connection.fetchrow(
+                    """
+                    SELECT * FROM runtime_dispatches
+                     WHERE id = $1
+                       AND collected_at IS NULL
+                       AND status IN ('succeeded', 'failed', 'timed_out')
+                     FOR UPDATE
+                    """,
+                    dispatch_id,
+                )
+                if not dispatch:
+                    return None
+                if run_payload is not None:
+                    status = str(run_payload["status"])
+                    if status not in {"succeeded", "failed", "timed_out", "cancelled"}:
+                        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                    run = await connection.fetchrow(
+                        """
+                        UPDATE review_runs
+                           SET status = $2,
+                               summary = $3,
+                               raw_result = $4::jsonb,
+                               raw_result_key = $5,
+                               error_code = $6,
+                               output_sha256 = COALESCE(NULLIF($7, ''), output_sha256),
+                               coverage = $8::jsonb,
+                               container_image_digest = COALESCE(
+                                   NULLIF($9, ''), container_image_digest
+                               ),
+                               dependency_snapshot_sha256 = COALESCE(
+                                   NULLIF($10, ''), dependency_snapshot_sha256
+                               ),
+                               worker_id = COALESCE(NULLIF($11, ''), worker_id),
+                               completed_at = now()
+                         WHERE id = $1
+                           AND type = 'runtime'
+                     RETURNING *
+                        """,
+                        dispatch["run_id"],
+                        status,
+                        run_payload.get("summary", ""),
+                        dict(run_payload.get("raw_result") or {}),
+                        run_payload.get("raw_result_key"),
+                        run_payload.get("error_code", ""),
+                        run_payload.get("output_sha256", ""),
+                        dict(run_payload.get("coverage") or {}),
+                        run_payload.get("container_image_digest", ""),
+                        run_payload.get("dependency_snapshot_sha256", ""),
+                        run_payload.get("worker_id", ""),
+                    )
+                    if not run:
+                        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                row = await connection.fetchrow(
+                    """
+                    UPDATE runtime_dispatches
+                       SET collected_at = now(),
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    dispatch_id,
+                )
+        return _record(row)
 
     async def create_review_comment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         pool = self._advanced_pool()
@@ -2040,14 +2119,7 @@ class InMemoryAdvancedReviewRepositoryMixin:
         runner_id: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any] | None:
-        status = RuntimeDispatchStatus(str(payload["status"]))
-        if status not in {
-            RuntimeDispatchStatus.SUCCEEDED,
-            RuntimeDispatchStatus.FAILED,
-            RuntimeDispatchStatus.TIMED_OUT,
-            RuntimeDispatchStatus.CANCELLED,
-        }:
-            raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+        status = _validate_runtime_completion_payload(payload)
         dispatch = self.dispatches.get(dispatch_id)
         if (
             not dispatch
@@ -2073,17 +2145,82 @@ class InMemoryAdvancedReviewRepositoryMixin:
         )
         return deepcopy(dispatch)
 
-    async def collect_runtime_dispatch(self, dispatch_id: str) -> dict[str, Any] | None:
-        dispatch = self.dispatches.get(dispatch_id)
-        if (
-            not dispatch
-            or dispatch.get("collected_at")
-            or dispatch["status"] not in {"succeeded", "failed", "timed_out"}
-        ):
-            return None
-        dispatch["collected_at"] = _utc_now()
-        dispatch["updated_at"] = _utc_now()
-        return deepcopy(dispatch)
+    async def expire_runtime_dispatches(self, limit: int) -> list[dict[str, Any]]:
+        async with self._lock:
+            now = datetime.now(UTC)
+            expired = [
+                dispatch
+                for dispatch in self.dispatches.values()
+                if dispatch["status"] == "running"
+                and dispatch["attempts"] >= dispatch["max_attempts"]
+                and dispatch.get("lease_expires_at")
+                and _parse_time(dispatch["lease_expires_at"]) < now
+            ]
+            expired.sort(key=lambda item: (item["lease_expires_at"], item["id"]))
+            for dispatch in expired[:limit]:
+                dispatch.update(
+                    {
+                        "status": "timed_out",
+                        "error_code": "runtime_dispatch_timeout",
+                        "error_message": "Runtime runner exhausted all lease attempts",
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "completed_at": _utc_now(),
+                        "updated_at": _utc_now(),
+                    }
+                )
+            return deepcopy(expired[:limit])
+
+    async def collect_runtime_dispatch(
+        self,
+        dispatch_id: str,
+        run_payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            dispatch = self.dispatches.get(dispatch_id)
+            if (
+                not dispatch
+                or dispatch.get("collected_at")
+                or dispatch["status"] not in {"succeeded", "failed", "timed_out"}
+            ):
+                return None
+            if run_payload is not None:
+                status = str(run_payload["status"])
+                if status not in {"succeeded", "failed", "timed_out", "cancelled"}:
+                    raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                run = self.runs.get(str(dispatch["run_id"]))
+                if not run or run["type"] != "runtime":
+                    raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                run.update(
+                    {
+                        "status": status,
+                        "summary": str(run_payload.get("summary") or ""),
+                        "raw_result": dict(run_payload.get("raw_result") or {}),
+                        "raw_result_key": run_payload.get("raw_result_key"),
+                        "error_code": str(run_payload.get("error_code") or ""),
+                        "output_sha256": str(
+                            run_payload.get("output_sha256") or run.get("output_sha256") or ""
+                        ),
+                        "coverage": dict(run_payload.get("coverage") or {}),
+                        "container_image_digest": str(
+                            run_payload.get("container_image_digest")
+                            or run.get("container_image_digest")
+                            or ""
+                        ),
+                        "dependency_snapshot_sha256": str(
+                            run_payload.get("dependency_snapshot_sha256")
+                            or run.get("dependency_snapshot_sha256")
+                            or ""
+                        ),
+                        "worker_id": str(
+                            run_payload.get("worker_id") or run.get("worker_id") or ""
+                        ),
+                        "completed_at": _utc_now(),
+                    }
+                )
+            dispatch["collected_at"] = _utc_now()
+            dispatch["updated_at"] = _utc_now()
+            return deepcopy(dispatch)
 
     async def create_review_comment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         async with self._lock:
@@ -2415,6 +2552,42 @@ def _actor_name(actor: Mapping[str, Any]) -> str:
 
 def _record(row: Mapping[str, Any]) -> dict[str, Any]:
     return {str(key): _serialize(value) for key, value in dict(row).items()}
+
+
+def _validate_runtime_completion_payload(
+    payload: Mapping[str, Any],
+) -> RuntimeDispatchStatus:
+    try:
+        status = RuntimeDispatchStatus(str(payload["status"]))
+    except (KeyError, ValueError) as exc:
+        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value) from exc
+    if status not in {
+        RuntimeDispatchStatus.SUCCEEDED,
+        RuntimeDispatchStatus.FAILED,
+        RuntimeDispatchStatus.TIMED_OUT,
+        RuntimeDispatchStatus.CANCELLED,
+    }:
+        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+    result_key = str(payload.get("result_key") or "")
+    result_sha256 = str(payload.get("result_sha256") or "")
+    if bool(result_key) != bool(result_sha256):
+        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+    if result_sha256 and (
+        len(result_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in result_sha256)
+    ):
+        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+    if status == RuntimeDispatchStatus.SUCCEEDED and not result_key:
+        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+    error_code = str(payload.get("error_code") or "")
+    error_message = " ".join(str(payload.get("error_message") or "").split())
+    if len(error_code) > 96 or len(error_message) > 500:
+        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+    if status == RuntimeDispatchStatus.SUCCEEDED and (error_code or error_message):
+        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+    if status in {RuntimeDispatchStatus.FAILED, RuntimeDispatchStatus.TIMED_OUT} and not error_code:
+        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+    return status
 
 
 def _serialize(value: Any) -> Any:

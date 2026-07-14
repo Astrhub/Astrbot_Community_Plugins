@@ -68,24 +68,24 @@
         - *Details*: 运行现有 artifact pipeline 回归、DAG tests、Ruff；确认 P0/P1 默认路径不变后提交。
         - *Requirements*: 全局回归。
 
-- [ ] 4. **Runtime Dispatch 与独立 Runner 服务**
-    - [ ] 4.1. 定义 request/result typed contract
+- [x] 4. **Runtime Dispatch 与独立 Runner 服务**
+    - [x] 4.1. 定义 request/result typed contract
         - *Goal*: 让控制 worker 和 runner 只通过无凭据、可 hash 的 JSON 通信。
         - *Details*: 建立 schema version、artifact SHA、policy/target/limits/network profile、result key；限制字段和输出大小；canonical JSON hash 校验。
         - *Requirements*: FR-202、FR-203、FR-204。
-    - [ ] 4.2. 实现 runtime dispatch claim/lease/result collection
+    - [x] 4.2. 实现 runtime dispatch claim/lease/result collection
         - *Goal*: runner 崩溃或 worker 重启后任务可回收且结果只消费一次。
         - *Details*: 独立 lease owner、expiry、attempt、result hash、collected_at；普通 worker 创建 dispatch 和 reconcile completed dispatch；runner 使用最小权限 repository。
         - *Requirements*: FR-202、FR-221；可靠性。
-    - [ ] 4.3. 新增 `runtime-runner` 独立入口
+    - [x] 4.3. 新增 `runtime-runner` 独立入口
         - *Goal*: 保证 API 和普通 artifact worker 无容器执行代码路径。
         - *Details*: 新增 worker loop、SIGTERM、lease heartbeat、result upload 和 orphan cleanup；模块不能导入市场 API/store；使用专用配置/身份。
         - *Requirements*: FR-202；P2 验收。
-    - [ ] 4.4. 定义 `ContainerExecutor` 和确定性 fake
+    - [x] 4.4. 定义 `ContainerExecutor` 和确定性 fake
         - *Goal*: 隔离容器引擎实现并完整测试失败矩阵。
         - *Details*: Protocol 包含 prepare/install/smoke/attest/cleanup；fake 覆盖 timeout/OOM/crash/cleanup failure；生产实现后续接 rootless Docker。
         - *Requirements*: FR-202、FR-219；可维护性。
-    - [ ] 4.5. 验证进程边界并提交
+    - [x] 4.5. 验证进程边界并提交
         - *Goal*: 证明 API/普通 worker 不执行插件代码。
         - *Details*: 增加 import/command path tests 和静态断言；运行 dispatch/lease/contract tests、Ruff；确认无 Docker socket 配置进入 app/worker 后提交。
         - *Requirements*: 核心原则 1-3；P2 验收。

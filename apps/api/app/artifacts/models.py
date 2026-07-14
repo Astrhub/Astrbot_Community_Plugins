@@ -205,6 +205,7 @@ class ArtifactErrorCode(StrEnum):
     PUBLISHED_VERSION_CONFLICT = "published_version_conflict"
     DECISION_TARGET_MISMATCH = "decision_target_mismatch"
     RUNTIME_RUNNER_UNAVAILABLE = "runtime_runner_unavailable"
+    RUNTIME_REQUEST_INVALID = "runtime_request_invalid"
     RUNTIME_DISPATCH_CONFLICT = "runtime_dispatch_conflict"
     RUNTIME_DISPATCH_TIMEOUT = "runtime_dispatch_timeout"
     RUNTIME_RESULT_INVALID = "runtime_result_invalid"

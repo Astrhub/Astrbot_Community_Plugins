@@ -14,6 +14,7 @@ import pytest
 from app.artifacts.models import ArtifactErrorCode, PublicationStatus, ReviewStatus
 from app.artifacts.policy_service import ReviewPolicyService
 from app.artifacts.repository import PgArtifactRepository
+from app.runtime_runner.repository import PgRuntimeRunnerRepository
 from app.schema_migrations import (
     SchemaMigrationError,
     SqlMigration,
@@ -546,9 +547,11 @@ async def run_advanced_repository_scenario(url: str) -> None:
             await repository.create_runtime_dispatch(
                 {**dispatch_payload, "request_sha256": "0" * 64}
             )
-        claimed = await repository.claim_runtime_dispatches("runner-a", 1, 60)
+        runner_repository = PgRuntimeRunnerRepository(SingleConnectionPool(connection))
+        claimed = await runner_repository.claim_runtime_dispatches("runner-a", 1, 60)
         assert claimed[0]["attempts"] == 1
-        assert await repository.claim_runtime_dispatches("runner-b", 1, 60) == []
+        assert await runner_repository.renew_runtime_dispatch_lease(dispatch["id"], "runner-a", 60)
+        assert await runner_repository.claim_runtime_dispatches("runner-b", 1, 60) == []
         await connection.execute(
             """
             UPDATE runtime_dispatches
@@ -557,20 +560,76 @@ async def run_advanced_repository_scenario(url: str) -> None:
             """,
             dispatch["id"],
         )
-        reclaimed = await repository.claim_runtime_dispatches("runner-b", 1, 60)
+        reclaimed = await runner_repository.claim_runtime_dispatches("runner-b", 1, 60)
         assert reclaimed[0]["attempts"] == 2
-        completed = await repository.complete_runtime_dispatch(
+        completed = await runner_repository.complete_runtime_dispatch(
             dispatch["id"],
             "runner-b",
             {
                 "status": "succeeded",
                 "result_key": "private/runtime-result.json",
                 "result_sha256": "8" * 64,
+                "image_digest": f"sha256:{'9' * 64}",
             },
         )
         assert completed and completed["status"] == "succeeded"
-        assert await repository.collect_runtime_dispatch(dispatch["id"])
+        assert await repository.collect_runtime_dispatch(
+            dispatch["id"],
+            {
+                "status": "succeeded",
+                "summary": "runtime passed",
+                "raw_result": {"dispatch_id": dispatch["id"]},
+                "raw_result_key": "private/runtime-result.json",
+                "output_sha256": "8" * 64,
+                "coverage": {"outcome": "completed", "stage_name": "runtime"},
+                "container_image_digest": f"sha256:{'9' * 64}",
+                "worker_id": "runner-b",
+            },
+        )
         assert await repository.collect_runtime_dispatch(dispatch["id"]) is None
+        runtime_runs = await repository.list_review_runs(first["id"])
+        collected_run = next(item for item in runtime_runs if item["id"] == run["id"])
+        assert collected_run["status"] == "succeeded"
+        assert collected_run["coverage"]["outcome"] == "completed"
+
+        timeout_run = await repository.create_review_run(
+            {
+                "artifact_id": first["id"],
+                "type": "runtime",
+                "status": "queued",
+                "idempotency_key": "runtime-timeout-run",
+            }
+        )
+        timeout_dispatch = await repository.create_runtime_dispatch(
+            {
+                "artifact_id": first["id"],
+                "run_id": timeout_run["id"],
+                "request": {"schema_version": "1", "artifact_sha256": "a" * 64},
+                "request_sha256": "6" * 64,
+                "max_attempts": 1,
+            }
+        )
+        assert await repository.claim_runtime_dispatches("runner-timeout", 1, 60)
+        await connection.execute(
+            """
+            UPDATE runtime_dispatches
+               SET lease_expires_at = now() - interval '1 second'
+             WHERE id = $1
+            """,
+            timeout_dispatch["id"],
+        )
+        expired = await repository.expire_runtime_dispatches(10)
+        assert [item["id"] for item in expired] == [timeout_dispatch["id"]]
+        assert expired[0]["status"] == "timed_out"
+        assert await repository.collect_runtime_dispatch(
+            timeout_dispatch["id"],
+            {
+                "status": "timed_out",
+                "summary": "runtime timed out",
+                "error_code": "runtime_dispatch_timeout",
+                "coverage": {"outcome": "failed", "stage_name": "runtime"},
+            },
+        )
 
         thread = await repository.create_review_comment(
             {

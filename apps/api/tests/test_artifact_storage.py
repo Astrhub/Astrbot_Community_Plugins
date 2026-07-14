@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,10 @@ class FakeS3Client:
     def download_file(self, bucket: str, key: str, filename: str) -> None:
         content, _ = self.objects[(bucket, key)]
         Path(filename).write_bytes(content)
+
+    def get_object(self, *, Bucket: str, Key: str):
+        content, _ = self.objects[(Bucket, Key)]
+        return {"Body": io.BytesIO(content)}
 
     def delete_object(self, *, Bucket: str, Key: str):
         self.objects.pop((Bucket, Key), None)
@@ -185,6 +190,15 @@ def test_s3_storage_uses_conditional_create_and_digest_metadata(tmp_path: Path) 
 
     async def scenario() -> None:
         await storage.put_quarantine(byte_stream(content), source_key, 1024, digest)
+        result_key = "runtime/results/dispatch-1/result.json"
+        result_content = b'{"status":"passed"}'
+        result_sha256 = hashlib.sha256(result_content).hexdigest()
+        await storage.put_text_content(result_key, result_content)
+        assert await storage.read_text_content(result_key, 1024, result_sha256) == result_content
+        with pytest.raises(ArtifactStorageError, match="exceeds limit"):
+            await storage.read_text_content(result_key, 4, result_sha256)
+        with pytest.raises(ArtifactStorageError, match="does not match"):
+            await storage.read_text_content(result_key, 1024, "0" * 64)
         first = await storage.publish_if_absent(source_key, published_key, digest)
         second = await storage.publish_if_absent(source_key, published_key, digest)
         assert first == second
