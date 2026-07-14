@@ -163,6 +163,7 @@ class ArtifactRepository(Protocol):
         self,
         dispatch_id: str,
         run_payload: Mapping[str, Any] | None = None,
+        findings: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any] | None: ...
 
     async def create_review_comment(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...

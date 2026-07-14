@@ -157,9 +157,11 @@ def runtime_result(
                     "author": "Alice",
                 },
                 "import_probe": passed_probe(80),
+                "instance": passed_probe(10),
                 "initialize": passed_probe(40),
                 "startup": {**passed_probe(3000), "ready_ms": 2900},
                 "handlers": {**passed_probe(2), "count": 1, "names": ["hello"]},
+                "hooks": {**passed_probe(2), "count": 0, "names": []},
                 "llm_tools": {**passed_probe(2), "count": 0, "names": []},
                 "failed_plugin": {"present": False},
                 "termination": passed_probe(30),
@@ -229,7 +231,13 @@ async def dispatch_fixture(
 
 
 def test_successful_dispatch_is_collected_once_and_completes_run(tmp_path: Path) -> None:
-    async def scenario() -> tuple[Any, Any, dict[str, Any], LeastPrivilegeRunnerRepository]:
+    async def scenario() -> tuple[
+        Any,
+        Any,
+        dict[str, Any],
+        LeastPrivilegeRunnerRepository,
+        list[dict[str, Any]],
+    ]:
         repository, storage, controller, request, dispatch = await dispatch_fixture(tmp_path)
         runner_repository = LeastPrivilegeRunnerRepository(repository)
         queue = RuntimeRunnerQueue(runner_repository, runner_id="runner-a")
@@ -243,9 +251,10 @@ def test_successful_dispatch_is_collected_once_and_completes_run(tmp_path: Path)
             controller.collect(dispatch["id"]),
         )
         run = next(item for item in repository.runs.values() if item["type"] == "runtime")
-        return completed, (first, second), run, runner_repository
+        findings = await repository.list_findings(request.artifact_id)
+        return completed, (first, second), run, runner_repository, findings
 
-    completed, collections, run, runner_repository = asyncio.run(scenario())
+    completed, collections, run, runner_repository, findings = asyncio.run(scenario())
 
     assert completed["status"] == "succeeded"
     assert {item.state for item in collections} == {
@@ -261,10 +270,11 @@ def test_successful_dispatch_is_collected_once_and_completes_run(tmp_path: Path)
     }
     assert not hasattr(runner_repository, "create_runtime_dispatch")
     assert not hasattr(runner_repository, "collect_runtime_dispatch")
+    assert findings == []
 
 
 def test_failed_gate_produces_failed_dispatch_and_run(tmp_path: Path) -> None:
-    async def scenario() -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    async def scenario() -> tuple[dict[str, Any], Any, dict[str, Any], list[dict[str, Any]]]:
         repository, storage, controller, request, _ = await dispatch_fixture(tmp_path)
         queue = RuntimeRunnerQueue(
             LeastPrivilegeRunnerRepository(repository),
@@ -277,14 +287,18 @@ def test_failed_gate_produces_failed_dispatch_and_run(tmp_path: Path) -> None:
         completed = await queue.complete_result(work, result)
         collected = await controller.collect(work.dispatch_id)
         run = next(item for item in repository.runs.values() if item["type"] == "runtime")
-        return completed, collected, run
+        findings = await repository.list_findings(request.artifact_id)
+        return completed, collected, run, findings
 
-    completed, collected, run = asyncio.run(scenario())
+    completed, collected, run, findings = asyncio.run(scenario())
 
     assert completed["status"] == "failed"
     assert completed["error_code"] == "cleanup_failed"
     assert collected.run_status == "failed"
     assert run["status"] == "failed"
+    assert [(item["rule_id"], item["source"]) for item in findings] == [
+        ("cleanup_failed", "runtime")
+    ]
 
 
 def test_result_identity_mismatch_does_not_complete_dispatch(tmp_path: Path) -> None:
@@ -356,7 +370,7 @@ def test_missing_result_is_retryable_and_not_marked_collected(tmp_path: Path) ->
 
 
 def test_invalid_result_object_is_collected_as_failure(tmp_path: Path) -> None:
-    async def scenario() -> tuple[Any, dict[str, Any]]:
+    async def scenario() -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
         repository, storage, controller, request, dispatch = await dispatch_fixture(tmp_path)
         invalid = b'{"schema_version":"1","tampered":true}'
         invalid_result_key = runtime_result_object_key(request, 1, "f" * 64)
@@ -374,13 +388,16 @@ def test_invalid_result_object_is_collected_as_failure(tmp_path: Path) -> None:
         assert claimed
         collected = await controller.collect(dispatch["id"])
         run = next(item for item in repository.runs.values() if item["type"] == "runtime")
-        return collected, run
+        findings = await repository.list_findings(request.artifact_id)
+        return collected, run, findings
 
-    collected, run = asyncio.run(scenario())
+    collected, run, findings = asyncio.run(scenario())
 
     assert collected.state == CollectionState.COLLECTED
     assert collected.error_code == "runtime_result_invalid"
     assert run["status"] == "failed"
+    assert findings[0]["rule_id"] == "runtime_result_invalid"
+    assert findings[0]["severity"] == "critical"
 
 
 def test_expired_final_lease_is_timed_out_and_collected(tmp_path: Path) -> None:

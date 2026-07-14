@@ -1,0 +1,7 @@
+name: astrbot_plugin_demo
+display_name: Runtime Handler Failure Fixture
+desc: Safe handler registration failure fixture
+version: v1.2.3
+author: Runtime Fixture
+repo: https://github.com/example/astrbot_plugin_demo
+astrbot_version: ">=4.26.5,<4.27.0"

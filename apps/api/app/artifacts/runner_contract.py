@@ -433,9 +433,11 @@ class SmokeResult(ContractModel):
     duration_ms: int = Field(default=0, ge=0, le=3_600_000)
     metadata: MetadataProbeResult
     import_probe: ProbeResult
+    instance: ProbeResult
     initialize: ProbeResult
     startup: StartupProbeResult
     handlers: RegistrationProbeResult
+    hooks: RegistrationProbeResult
     llm_tools: RegistrationProbeResult
     failed_plugin: FailedPluginRecord
     termination: ProbeResult
@@ -460,9 +462,11 @@ class SmokeResult(ContractModel):
         required = (
             self.metadata,
             self.import_probe,
+            self.instance,
             self.initialize,
             self.startup,
             self.handlers,
+            self.hooks,
             self.llm_tools,
             self.termination,
         )

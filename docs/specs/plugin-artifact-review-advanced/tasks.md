@@ -90,28 +90,28 @@
         - *Details*: 增加 import/command path tests 和静态断言；运行 dispatch/lease/contract tests、Ruff；确认无 Docker socket 配置进入 app/worker 后提交。
         - *Requirements*: 核心原则 1-3；P2 验收。
 
-- [ ] 5. **AstrBot 精确版本 Install 与 Smoke Probe**
-    - [ ] 5.1. 实现 runtime target resolver
+- [x] 5. **AstrBot 精确版本 Install 与 Smoke Probe**
+    - [x] 5.1. 实现 runtime target resolver
         - *Goal*: 将 policy exact versions 与 artifact `astrbot_version` 正确求交。
         - *Details*: 禁止 `latest`；保存 AstrBot/Python/image/source snapshot；不把插件 artifact version 与 AstrBot runtime version混淆；版本不相交产生阻断 finding。
         - *Requirements*: FR-204。
-    - [ ] 5.2. 实现 install sandbox
+    - [x] 5.2. 实现 install sandbox
         - *Goal*: 安装精确 AstrBot 和插件依赖并检测核心依赖破坏。
         - *Details*: 创建一次性 venv/volume；`pip install AstrBot==target`、安装 requirements、`pip check`、安装前后核心依赖 snapshot、受限日志和 SBOM；URL 凭据脱敏。
         - *Requirements*: FR-203、FR-218。
-    - [ ] 5.3. 实现 AstrBot 4.26.5 source-backed smoke adapter
+    - [x] 5.3. 实现 AstrBot 4.26.5 source-backed smoke adapter
         - *Goal*: 通过真实 AstrBot lifecycle 验证插件，而不是裸 import。
         - *Details*: 参考 `/root/work/AstrBot` 的 `AstrBotCoreLifecycle.initialize()`、`PluginManager.load()`、`failed_plugin_dict`、`StarMetadata.star_handler_full_names` 和 LLM tool registry；记录 metadata/import/instance/initialize/startup/handler/hook/tool/terminate。
         - *Requirements*: FR-203。
-    - [ ] 5.4. 规范化 runtime findings
+    - [x] 5.4. 规范化 runtime findings
         - *Goal*: 将依赖、导入、初始化和注册错误映射为稳定结构化 finding。
         - *Details*: 定义 error code/severity/deterministic/evidence limit；保存 target/tool/image/dependency hash；原始日志进入私有对象且有大小上限。
         - *Requirements*: FR-203、FR-204、FR-221。
-    - [ ] 5.5. 增加 fixture 和 contract tests
+    - [x] 5.5. 增加 fixture 和 contract tests
         - *Goal*: 覆盖正常插件、依赖冲突、import/initialize/handler/tool/terminate 失败。
         - *Details*: fixture 全部为仓库内安全最小插件，不执行互联网插件；fake executor 测试完整失败矩阵。
         - *Requirements*: P2 验收、可维护性。
-    - [ ] 5.6. 验证并提交 AstrBot smoke 能力
+    - [x] 5.6. 验证并提交 AstrBot smoke 能力
         - *Goal*: 形成可在隔离 engine 中执行的完整 probe。
         - *Details*: 运行 resolver/probe/result validation tests、Ruff；核对源码版本事实和日志脱敏后提交。
         - *Requirements*: FR-203、FR-204。

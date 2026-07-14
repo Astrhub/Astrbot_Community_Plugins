@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from app.artifacts.runtime_findings import normalize_runtime_findings
 from app.runtime_runner.container_executor import (
     ContainerExecutionPipeline,
     ContainerExecutor,
@@ -36,6 +37,69 @@ def test_container_pipeline_runs_all_phases_and_returns_signed_result() -> None:
         "cleanup",
     ]
     assert not fake.resources
+
+
+@pytest.mark.parametrize(
+    ("mode", "install_status", "smoke_code", "finding_code"),
+    [
+        (FakeFailureMode.NONE, "passed", "", ""),
+        (
+            FakeFailureMode.DEPENDENCY_CONFLICT,
+            "failed",
+            "",
+            "astrbot_core_dependency_conflict",
+        ),
+        (FakeFailureMode.IMPORT_FAILURE, "passed", "plugin_import_failed", "plugin_import_failed"),
+        (
+            FakeFailureMode.INITIALIZE_FAILURE,
+            "passed",
+            "plugin_initialize_failed",
+            "plugin_initialize_failed",
+        ),
+        (
+            FakeFailureMode.HANDLER_FAILURE,
+            "passed",
+            "handler_registration_failed",
+            "handler_registration_failed",
+        ),
+        (
+            FakeFailureMode.TOOL_FAILURE,
+            "passed",
+            "llm_tool_registration_failed",
+            "llm_tool_registration_failed",
+        ),
+        (
+            FakeFailureMode.TERMINATION_FAILURE,
+            "passed",
+            "plugin_terminate_failed",
+            "plugin_terminate_failed",
+        ),
+    ],
+)
+def test_fake_executor_plugin_fixture_matrix_produces_valid_structured_findings(
+    mode: FakeFailureMode,
+    install_status: str,
+    smoke_code: str,
+    finding_code: str,
+) -> None:
+    result = asyncio.run(
+        ContainerExecutionPipeline(
+            DeterministicFakeContainerExecutor(default_failure=mode)
+        ).execute(work_item())
+    )
+    findings = normalize_runtime_findings(
+        result,
+        tool_name="deterministic-fake",
+        tool_version="1",
+    )
+
+    assert result.install.status.value == install_status
+    assert result.smoke.error_code == smoke_code
+    assert result.cleanup.status.value == "passed"
+    if finding_code:
+        assert finding_code in {finding.rule_id for finding in findings}
+    else:
+        assert findings == ()
 
 
 @pytest.mark.parametrize(

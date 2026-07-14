@@ -15,8 +15,13 @@ from ..runtime_runner.queue import (
 )
 from .models import ArtifactErrorCode, RuntimeDispatchStatus
 from .repository import ArtifactRepository
+from .runtime_findings import (
+    normalize_runtime_dispatch_failure,
+    normalize_runtime_findings,
+)
 from .runner_contract import (
     MAX_RUNTIME_RESULT_BYTES,
+    RUNTIME_CONTRACT_SCHEMA_VERSION,
     RuntimeDispatchRequest,
     RuntimeDispatchResult,
     contract_sha256,
@@ -161,9 +166,15 @@ class RuntimeDispatchController:
 
         parsed_result: RuntimeDispatchResult | None = None
         validation_error = ""
+        request: RuntimeDispatchRequest | None = None
+        try:
+            request = _validated_dispatch_request(dispatch)
+        except (ValidationError, ValueError):
+            request = None
         if dispatch.get("result_key") and dispatch.get("result_sha256"):
             try:
-                request = _validated_dispatch_request(dispatch)
+                if request is None:
+                    raise ValueError("runtime dispatch request is invalid")
                 expected_result_key = runtime_result_object_key(
                     request,
                     int(dispatch.get("attempts") or 0),
@@ -194,7 +205,31 @@ class RuntimeDispatchController:
             validation_error = ArtifactErrorCode.RUNTIME_RESULT_INVALID.value
 
         run_payload = _collection_run_payload(dispatch, parsed_result, validation_error)
-        collected = await self.repository.collect_runtime_dispatch(dispatch_id, run_payload)
+        normalized_findings = []
+        if parsed_result is not None:
+            normalized_findings.extend(
+                finding.as_repository_payload()
+                for finding in normalize_runtime_findings(
+                    parsed_result,
+                    tool_name="runtime-runner",
+                    tool_version=f"contract-v{RUNTIME_CONTRACT_SCHEMA_VERSION}",
+                )
+            )
+        elif request is not None and run_payload.get("error_code"):
+            normalized_findings.append(
+                normalize_runtime_dispatch_failure(
+                    request,
+                    dispatch_status=status.value,
+                    error_code=str(run_payload["error_code"]),
+                    attempts=int(dispatch.get("attempts") or 0),
+                    tool_version=f"contract-v{RUNTIME_CONTRACT_SCHEMA_VERSION}",
+                ).as_repository_payload()
+            )
+        collected = await self.repository.collect_runtime_dispatch(
+            dispatch_id,
+            run_payload,
+            normalized_findings,
+        )
         if collected is None:
             return RuntimeCollectionResult(
                 CollectionState.ALREADY_COLLECTED,

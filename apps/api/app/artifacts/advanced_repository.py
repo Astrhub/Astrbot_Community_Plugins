@@ -960,6 +960,7 @@ class PgAdvancedReviewRepositoryMixin:
         self,
         dispatch_id: str,
         run_payload: Mapping[str, Any] | None = None,
+        findings: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any] | None:
         pool = self._advanced_pool()
         async with pool.acquire() as connection:
@@ -1016,6 +1017,13 @@ class PgAdvancedReviewRepositoryMixin:
                     )
                     if not run:
                         raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                    for finding in findings:
+                        await _upsert_runtime_finding(
+                            connection,
+                            str(dispatch["artifact_id"]),
+                            str(dispatch["run_id"]),
+                            finding,
+                        )
                 row = await connection.fetchrow(
                     """
                     UPDATE runtime_dispatches
@@ -1461,6 +1469,68 @@ class PgAdvancedReviewRepositoryMixin:
 
     def _advanced_pool(self) -> asyncpg.Pool:
         return self.store._pool()
+
+
+async def _upsert_runtime_finding(
+    connection: Any,
+    artifact_id: str,
+    run_id: str,
+    finding: Mapping[str, Any],
+) -> None:
+    await connection.fetchrow(
+        """
+        INSERT INTO review_findings (
+            id, artifact_id, run_id, fingerprint, rule_id, file_path,
+            line_start, line_end, severity, category, message, suggestion,
+            evidence_excerpt, confidence, status, metadata, source,
+            deterministic, file_id, file_sha256,
+            affects_current_release, correlation
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            $13, $14, $15, $16::jsonb, 'runtime', $17, $18, $19,
+            $20, $21::jsonb
+        )
+        ON CONFLICT (artifact_id, fingerprint) DO UPDATE
+           SET run_id = EXCLUDED.run_id,
+               rule_id = EXCLUDED.rule_id,
+               file_path = EXCLUDED.file_path,
+               line_start = EXCLUDED.line_start,
+               line_end = EXCLUDED.line_end,
+               severity = EXCLUDED.severity,
+               category = EXCLUDED.category,
+               message = EXCLUDED.message,
+               suggestion = EXCLUDED.suggestion,
+               evidence_excerpt = EXCLUDED.evidence_excerpt,
+               confidence = EXCLUDED.confidence,
+               metadata = EXCLUDED.metadata,
+               source = EXCLUDED.source,
+               deterministic = EXCLUDED.deterministic,
+               file_id = EXCLUDED.file_id,
+               file_sha256 = EXCLUDED.file_sha256
+        """,
+        finding.get("id") or new_domain_id("finding"),
+        artifact_id,
+        run_id,
+        finding["fingerprint"],
+        finding.get("rule_id", ""),
+        finding.get("file_path", ""),
+        finding.get("line_start"),
+        finding.get("line_end"),
+        finding["severity"],
+        finding.get("category", ""),
+        finding["message"],
+        finding.get("suggestion", ""),
+        finding.get("evidence_excerpt", ""),
+        finding.get("confidence"),
+        finding.get("status", "open"),
+        dict(finding.get("metadata") or {}),
+        bool(finding.get("deterministic", True)),
+        finding.get("file_id"),
+        finding.get("file_sha256"),
+        bool(finding.get("affects_current_release")),
+        dict(finding.get("correlation") or {}),
+    )
 
 
 class InMemoryAdvancedReviewRepositoryMixin:
@@ -2175,6 +2245,7 @@ class InMemoryAdvancedReviewRepositoryMixin:
         self,
         dispatch_id: str,
         run_payload: Mapping[str, Any] | None = None,
+        findings: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any] | None:
         async with self._lock:
             dispatch = self.dispatches.get(dispatch_id)
@@ -2218,6 +2289,12 @@ class InMemoryAdvancedReviewRepositoryMixin:
                         "completed_at": _utc_now(),
                     }
                 )
+                if findings:
+                    await self.replace_findings(
+                        str(dispatch["artifact_id"]),
+                        str(dispatch["run_id"]),
+                        findings,
+                    )
             dispatch["collected_at"] = _utc_now()
             dispatch["updated_at"] = _utc_now()
             return deepcopy(dispatch)

@@ -585,12 +585,26 @@ async def run_advanced_repository_scenario(url: str) -> None:
                 "container_image_digest": f"sha256:{'9' * 64}",
                 "worker_id": "runner-b",
             },
+            [
+                {
+                    "fingerprint": "a" * 64,
+                    "rule_id": "plugin_initialize_failed",
+                    "severity": "high",
+                    "category": "plugin_lifecycle",
+                    "message": "initialize failed",
+                    "source": "runtime",
+                    "deterministic": True,
+                    "metadata": {"target": "4.26.5"},
+                }
+            ],
         )
         assert await repository.collect_runtime_dispatch(dispatch["id"]) is None
         runtime_runs = await repository.list_review_runs(first["id"])
         collected_run = next(item for item in runtime_runs if item["id"] == run["id"])
         assert collected_run["status"] == "succeeded"
         assert collected_run["coverage"]["outcome"] == "completed"
+        runtime_findings = await repository.list_findings(first["id"])
+        assert any(item["rule_id"] == "plugin_initialize_failed" for item in runtime_findings)
 
         timeout_run = await repository.create_review_run(
             {

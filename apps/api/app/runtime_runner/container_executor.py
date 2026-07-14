@@ -123,6 +123,12 @@ class ContainerExecutionPipeline(RuntimeExecutionService):
 
 class FakeFailureMode(StrEnum):
     NONE = "none"
+    DEPENDENCY_CONFLICT = "dependency_conflict"
+    IMPORT_FAILURE = "import_failure"
+    INITIALIZE_FAILURE = "initialize_failure"
+    HANDLER_FAILURE = "handler_failure"
+    TOOL_FAILURE = "tool_failure"
+    TERMINATION_FAILURE = "termination_failure"
     TIMEOUT = "timeout"
     OOM = "oom"
     CRASH = "crash"
@@ -170,6 +176,41 @@ class DeterministicFakeContainerExecutor:
         snapshot = hashlib.sha256(
             f"{work.request.target.astrbot_version}:{prepared.resolved_python_version}".encode()
         ).hexdigest()
+        if mode == FakeFailureMode.DEPENDENCY_CONFLICT:
+            changed_snapshot = hashlib.sha256(f"{snapshot}:pydantic:1.10.22".encode()).hexdigest()
+            return InstallResult.model_validate(
+                {
+                    "status": "failed",
+                    "duration_ms": 20,
+                    "error_code": "dependency_conflict",
+                    "message": "Plugin requirements conflict with AstrBot dependencies",
+                    "astrbot_version": work.request.target.astrbot_version,
+                    "pip_check": {
+                        "status": "failed",
+                        "duration_ms": 1,
+                        "error_code": "dependency_conflict",
+                        "message": "AstrBot requires pydantic>=2.7",
+                    },
+                    "packages": [
+                        {
+                            "name": "astrbot",
+                            "version": work.request.target.astrbot_version,
+                            "source": "index",
+                        },
+                        {"name": "pydantic", "version": "1.10.22", "source": "index"},
+                    ],
+                    "conflicts": [
+                        {
+                            "package": "pydantic",
+                            "installed_version": "1.10.22",
+                            "requirement": ">=2.7",
+                            "required_by": "AstrBot",
+                        }
+                    ],
+                    "core_before_sha256": snapshot,
+                    "core_after_sha256": changed_snapshot,
+                }
+            )
         return InstallResult.model_validate(
             {
                 "status": "passed",
@@ -195,32 +236,13 @@ class DeterministicFakeContainerExecutor:
         work: RuntimeDispatchWorkItem,
     ) -> SmokeResult:
         self._record("smoke", work)
-        if self._mode(work) == FakeFailureMode.CRASH:
+        mode = self._mode(work)
+        if mode == FakeFailureMode.CRASH:
             raise RuntimeExecutionError(
                 "runtime_container_crashed",
                 "Runtime smoke container exited unexpectedly",
             )
-        passed = {"status": "passed", "duration_ms": 1}
-        return SmokeResult.model_validate(
-            {
-                "status": "passed",
-                "duration_ms": 10,
-                "metadata": {
-                    **passed,
-                    "name": work.request.expected_plugin.name,
-                    "version": work.request.expected_plugin.version,
-                    "author": "Runtime fixture",
-                },
-                "import_probe": passed,
-                "initialize": passed,
-                "startup": {**passed, "ready_ms": 1},
-                "handlers": {**passed, "count": 0, "names": []},
-                "llm_tools": {**passed, "count": 0, "names": []},
-                "failed_plugin": {"present": False},
-                "termination": passed,
-                "violations": [],
-            }
-        )
+        return _fake_smoke_result(work, mode)
 
     async def attest(
         self,
@@ -293,3 +315,126 @@ class DeterministicFakeContainerExecutor:
 
     def _record(self, action: str, work: RuntimeDispatchWorkItem) -> None:
         self.calls.append((action, work.dispatch_id))
+
+
+def _fake_smoke_result(
+    work: RuntimeDispatchWorkItem,
+    mode: FakeFailureMode,
+) -> SmokeResult:
+    passed = {"status": "passed", "duration_ms": 1}
+    skipped = {
+        "status": "skipped",
+        "duration_ms": 0,
+        "error_code": "probe_not_reached",
+        "message": "Probe phase was not reached",
+    }
+    registration_passed = {**passed, "count": 1}
+    plugin_name = work.request.expected_plugin.name
+    payload = {
+        "status": "passed",
+        "duration_ms": 10,
+        "metadata": {
+            **passed,
+            "name": plugin_name,
+            "version": work.request.expected_plugin.version,
+            "author": "Runtime fixture",
+        },
+        "import_probe": passed,
+        "instance": passed,
+        "initialize": passed,
+        "startup": {**passed, "ready_ms": 1},
+        "handlers": {
+            **registration_passed,
+            "names": [f"data.plugins.{plugin_name}.main_runtime_fixture"],
+        },
+        "hooks": {
+            **registration_passed,
+            "names": [f"data.plugins.{plugin_name}.main_on_loaded"],
+        },
+        "llm_tools": {**registration_passed, "names": ["runtime_fixture_tool"]},
+        "failed_plugin": {"present": False},
+        "termination": passed,
+        "violations": [],
+    }
+    error_codes = {
+        FakeFailureMode.IMPORT_FAILURE: "plugin_import_failed",
+        FakeFailureMode.INITIALIZE_FAILURE: "plugin_initialize_failed",
+        FakeFailureMode.HANDLER_FAILURE: "handler_registration_failed",
+        FakeFailureMode.TOOL_FAILURE: "llm_tool_registration_failed",
+        FakeFailureMode.TERMINATION_FAILURE: "plugin_terminate_failed",
+    }
+    error_code = error_codes.get(mode)
+    if error_code is None:
+        return SmokeResult.model_validate(payload)
+
+    failed = {
+        "status": "failed",
+        "duration_ms": 1,
+        "error_code": error_code,
+        "message": "Deterministic plugin fixture failure",
+    }
+    failed_registration = {**failed, "count": 0, "names": []}
+    skipped_registration = {**skipped, "count": 0, "names": []}
+    payload.update(
+        {
+            "status": "failed",
+            "error_code": error_code,
+            "message": "Deterministic plugin fixture did not pass",
+        }
+    )
+    if mode == FakeFailureMode.TERMINATION_FAILURE:
+        payload["termination"] = failed
+        return SmokeResult.model_validate(payload)
+
+    payload.update(
+        {
+            "metadata": skipped,
+            "startup": skipped,
+            "hooks": skipped_registration,
+            "failed_plugin": {
+                "present": True,
+                "error_code": error_code,
+                "message": "AstrBot reported the deterministic fixture as failed",
+            },
+            "termination": passed,
+        }
+    )
+    if mode == FakeFailureMode.IMPORT_FAILURE:
+        payload.update(
+            {
+                "import_probe": failed,
+                "instance": skipped,
+                "initialize": skipped,
+                "handlers": skipped_registration,
+                "llm_tools": skipped_registration,
+            }
+        )
+    elif mode == FakeFailureMode.INITIALIZE_FAILURE:
+        payload.update(
+            {
+                "initialize": failed,
+                "handlers": skipped_registration,
+                "llm_tools": skipped_registration,
+            }
+        )
+    elif mode == FakeFailureMode.HANDLER_FAILURE:
+        payload.update(
+            {
+                "import_probe": failed,
+                "instance": skipped,
+                "initialize": skipped,
+                "handlers": failed_registration,
+                "llm_tools": skipped_registration,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "import_probe": failed,
+                "instance": skipped,
+                "initialize": skipped,
+                "handlers": skipped_registration,
+                "llm_tools": failed_registration,
+            }
+        )
+    return SmokeResult.model_validate(payload)
