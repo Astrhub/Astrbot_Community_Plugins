@@ -64,7 +64,11 @@ class ArtifactRepository(Protocol):
 
     async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]: ...
 
-    async def create_review_policy(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+    async def create_review_policy(
+        self,
+        payload: Mapping[str, Any],
+        event: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
 
     async def get_review_policy(self, policy_id: str) -> dict[str, Any] | None: ...
 
@@ -74,8 +78,37 @@ class ArtifactRepository(Protocol):
 
     async def append_review_policy_event(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
 
+    async def list_review_policy_events(self, policy_id: str) -> list[dict[str, Any]]: ...
+
+    async def transition_review_policy(
+        self,
+        policy_id: str,
+        *,
+        action: str,
+        expected_policy_sha256: str,
+        expected_active_policy_id: str | None,
+        validation_summary: Mapping[str, Any] | None,
+        event: Mapping[str, Any],
+    ) -> dict[str, Any] | None: ...
+
     async def bind_artifact_policy(
         self, artifact_id: str, policy_id: str
+    ) -> dict[str, Any] | None: ...
+
+    async def snapshot_active_review_policy(
+        self,
+        artifact_id: str,
+    ) -> dict[str, Any] | None: ...
+
+    async def migrate_artifact_policy(
+        self,
+        artifact_id: str,
+        target_policy_id: str,
+        *,
+        actor: Mapping[str, Any],
+        reason: str,
+        request_id: str,
+        idempotency_key: str,
     ) -> dict[str, Any] | None: ...
 
     async def update_artifact_review_coverage(
@@ -545,61 +578,85 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         return [_record(row) for row in rows]
 
     async def create_review_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        row = await self._pool().fetchrow(
-            """
-            INSERT INTO review_runs (
-                id, artifact_id, type, status, attempt, ruleset_version,
-                model, summary, raw_result, raw_result_key, error_code, started_at,
-                tool_name, tool_version, policy_version_id, input_sha256,
-                output_sha256, coverage, prompt_version, result_schema_version,
-                container_image_digest, astrbot_version, python_version, platform,
-                dependency_snapshot_sha256, worker_id, idempotency_key
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11,
-                CASE WHEN $4 = 'running' THEN now() ELSE NULL END,
-                $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20,
-                $21, $22, $23, $24, $25, $26
-            )
-            ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
-            DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
-            RETURNING *
-            """,
-            payload.get("id") or new_domain_id("run"),
-            payload["artifact_id"],
-            payload["type"],
-            payload.get("status", "queued"),
-            int(payload.get("attempt") or 1),
-            payload.get("ruleset_version", ""),
-            payload.get("model", ""),
-            payload.get("summary", ""),
-            dict(payload.get("raw_result") or {}),
-            payload.get("raw_result_key"),
-            payload.get("error_code", ""),
-            payload.get("tool_name", ""),
-            payload.get("tool_version", ""),
-            payload.get("policy_version_id"),
-            payload.get("input_sha256", ""),
-            payload.get("output_sha256", ""),
-            dict(payload.get("coverage") or {}),
-            payload.get("prompt_version", ""),
-            payload.get("result_schema_version", ""),
-            payload.get("container_image_digest", ""),
-            payload.get("astrbot_version", ""),
-            payload.get("python_version", ""),
-            payload.get("platform", ""),
-            payload.get("dependency_snapshot_sha256", ""),
-            payload.get("worker_id", ""),
-            payload.get("idempotency_key"),
-        )
+        pool = self._pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                idempotency_key = payload.get("idempotency_key")
+                if idempotency_key:
+                    existing = await connection.fetchrow(
+                        """
+                        SELECT * FROM review_runs
+                         WHERE idempotency_key = $1
+                        """,
+                        idempotency_key,
+                    )
+                    if existing and (
+                        str(existing["artifact_id"]) != str(payload["artifact_id"])
+                        or str(existing["type"]) != str(payload["type"])
+                    ):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                artifact = await connection.fetchrow(
+                    "SELECT policy_version_id FROM plugin_artifacts WHERE id = $1 FOR SHARE",
+                    payload["artifact_id"],
+                )
+                if not artifact:
+                    raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                policy_version_id = _resolved_policy_snapshot(
+                    artifact["policy_version_id"],
+                    payload.get("policy_version_id"),
+                )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO review_runs (
+                        id, artifact_id, type, status, attempt, ruleset_version,
+                        model, summary, raw_result, raw_result_key, error_code, started_at,
+                        tool_name, tool_version, policy_version_id, input_sha256,
+                        output_sha256, coverage, prompt_version, result_schema_version,
+                        container_image_digest, astrbot_version, python_version, platform,
+                        dependency_snapshot_sha256, worker_id, idempotency_key
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11,
+                        CASE WHEN $4 = 'running' THEN now() ELSE NULL END,
+                        $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20,
+                        $21, $22, $23, $24, $25, $26
+                    )
+                    ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+                    DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+                    RETURNING *
+                    """,
+                    payload.get("id") or new_domain_id("run"),
+                    payload["artifact_id"],
+                    payload["type"],
+                    payload.get("status", "queued"),
+                    int(payload.get("attempt") or 1),
+                    payload.get("ruleset_version", ""),
+                    payload.get("model", ""),
+                    payload.get("summary", ""),
+                    dict(payload.get("raw_result") or {}),
+                    payload.get("raw_result_key"),
+                    payload.get("error_code", ""),
+                    payload.get("tool_name", ""),
+                    payload.get("tool_version", ""),
+                    policy_version_id,
+                    payload.get("input_sha256", ""),
+                    payload.get("output_sha256", ""),
+                    dict(payload.get("coverage") or {}),
+                    payload.get("prompt_version", ""),
+                    payload.get("result_schema_version", ""),
+                    payload.get("container_image_digest", ""),
+                    payload.get("astrbot_version", ""),
+                    payload.get("python_version", ""),
+                    payload.get("platform", ""),
+                    payload.get("dependency_snapshot_sha256", ""),
+                    payload.get("worker_id", ""),
+                    payload.get("idempotency_key"),
+                )
         saved = _record(row)
         if (
             str(saved["artifact_id"]) != str(payload["artifact_id"])
             or str(saved["type"]) != str(payload["type"])
-            or (
-                "policy_version_id" in payload
-                and saved.get("policy_version_id") != payload.get("policy_version_id")
-            )
+            or saved.get("policy_version_id") != policy_version_id
         ):
             raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
         return saved
@@ -843,32 +900,55 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         return _record(row)
 
     async def enqueue_job(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        row = await self._pool().fetchrow(
-            """
-            INSERT INTO artifact_jobs (
-                id, artifact_id, type, payload, max_attempts,
-                available_at, idempotency_key, policy_version_id, run_id, stage_name
-            )
-            VALUES (
-                $1, $2, $3, $4::jsonb, $5,
-                COALESCE($6::timestamptz, now()), $7, $8, $9, $10
-            )
-            ON CONFLICT (idempotency_key) DO UPDATE
-               SET idempotency_key = EXCLUDED.idempotency_key
-            RETURNING *
-            """,
-            payload.get("id") or new_domain_id("job"),
-            payload.get("artifact_id"),
-            payload["type"],
-            dict(payload.get("payload") or {}),
-            int(payload.get("max_attempts") or 3),
-            payload.get("available_at"),
-            payload["idempotency_key"],
-            payload.get("policy_version_id"),
-            payload.get("run_id"),
-            payload.get("stage_name", ""),
-        )
-        return _record(row)
+        pool = self._pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                artifact_id = payload.get("artifact_id")
+                policy_version_id = payload.get("policy_version_id")
+                if artifact_id:
+                    artifact = await connection.fetchrow(
+                        "SELECT policy_version_id FROM plugin_artifacts WHERE id = $1 FOR SHARE",
+                        artifact_id,
+                    )
+                    if not artifact:
+                        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                    policy_version_id = _resolved_policy_snapshot(
+                        artifact["policy_version_id"],
+                        policy_version_id,
+                    )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO artifact_jobs (
+                        id, artifact_id, type, payload, max_attempts,
+                        available_at, idempotency_key, policy_version_id, run_id, stage_name
+                    )
+                    VALUES (
+                        $1, $2, $3, $4::jsonb, $5,
+                        COALESCE($6::timestamptz, now()), $7, $8, $9, $10
+                    )
+                    ON CONFLICT (idempotency_key) DO UPDATE
+                       SET idempotency_key = EXCLUDED.idempotency_key
+                    RETURNING *
+                    """,
+                    payload.get("id") or new_domain_id("job"),
+                    artifact_id,
+                    payload["type"],
+                    dict(payload.get("payload") or {}),
+                    int(payload.get("max_attempts") or 3),
+                    payload.get("available_at"),
+                    payload["idempotency_key"],
+                    policy_version_id,
+                    payload.get("run_id"),
+                    payload.get("stage_name", ""),
+                )
+        saved = _record(row)
+        if (
+            str(saved.get("artifact_id") or "") != str(payload.get("artifact_id") or "")
+            or str(saved["type"]) != str(payload["type"])
+            or saved.get("policy_version_id") != policy_version_id
+        ):
+            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+        return saved
 
     async def claim_jobs(
         self, worker_id: str, limit: int, lease_seconds: int
@@ -1023,6 +1103,19 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                 )
                 if not current:
                     return None
+                effective_policy_id = _resolved_policy_snapshot(
+                    current["policy_version_id"],
+                    policy_version_id,
+                )
+                effective_policy_version = policy_version
+                if effective_policy_id:
+                    policy_row = await connection.fetchrow(
+                        "SELECT version FROM review_policies WHERE id = $1",
+                        effective_policy_id,
+                    )
+                    if not policy_row:
+                        raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                    effective_policy_version = str(policy_row["version"])
                 if ReviewStatus(str(current["review_status"])) in TERMINAL_REVIEW_STATUSES:
                     raise ArtifactStateError(
                         ArtifactErrorCode.ARTIFACT_ALREADY_DECIDED,
@@ -1051,10 +1144,10 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     reason,
                     (reviewer or {}).get("id"),
                     _reviewer_name(reviewer),
-                    policy_version,
+                    effective_policy_version,
                     idempotency_key,
                     decision_source,
-                    policy_version_id,
+                    effective_policy_id,
                     list(input_run_ids),
                     list(input_fingerprints),
                     coverage_sha256,
@@ -1149,15 +1242,28 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                 if str(current["normalized_version"] or "") != expected_normalized_version:
                     raise ValueError("artifact_version_changed")
 
+                effective_policy_id = str(current["policy_version_id"] or "") or None
+                effective_policy_version = "p1"
+                if effective_policy_id:
+                    policy_row = await connection.fetchrow(
+                        "SELECT version FROM review_policies WHERE id = $1",
+                        effective_policy_id,
+                    )
+                    if not policy_row:
+                        raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                    effective_policy_version = str(policy_row["version"])
+
                 run_rows = await connection.fetch(
                     """
                     SELECT type, bool_or(status = 'succeeded') AS succeeded
                       FROM review_runs
                      WHERE artifact_id = $1
                        AND type IN ('precheck', 'static')
+                       AND policy_version_id IS NOT DISTINCT FROM $2
                   GROUP BY type
                     """,
                     artifact_id,
+                    effective_policy_id,
                 )
                 succeeded = {str(run["type"]) for run in run_rows if bool(run["succeeded"])}
                 if succeeded != {"precheck", "static"}:
@@ -1167,9 +1273,13 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     """
                     INSERT INTO review_decisions (
                         id, artifact_id, action, from_status, to_status, reason,
-                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key
+                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key,
+                        source, policy_version_id
                     )
-                    VALUES ($1, $2, 'approve', $3, 'approved', $4, $5, $6, 'p1', $7)
+                    VALUES (
+                        $1, $2, 'approve', $3, 'approved', $4, $5, $6,
+                        $7, $8, 'admin', $9
+                    )
                     """,
                     new_domain_id("decision"),
                     artifact_id,
@@ -1177,7 +1287,9 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     reason,
                     reviewer.get("id"),
                     _reviewer_name(reviewer),
+                    effective_policy_version,
                     idempotency_key,
+                    effective_policy_id,
                 )
                 approved = await connection.fetchrow(
                     """
@@ -1203,15 +1315,17 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                 await connection.execute(
                     """
                     INSERT INTO artifact_jobs (
-                        id, artifact_id, type, payload, max_attempts, idempotency_key
+                        id, artifact_id, type, payload, max_attempts, idempotency_key,
+                        policy_version_id
                     )
-                    VALUES ($1, $2, 'publish', $3::jsonb, 5, $4)
+                    VALUES ($1, $2, 'publish', $3::jsonb, 5, $4, $5)
                     ON CONFLICT (idempotency_key) DO NOTHING
                     """,
                     new_domain_id("job"),
                     artifact_id,
                     {"expected_repo_version": expected_repo_version},
                     f"publish:{artifact_id}",
+                    effective_policy_id,
                 )
         return _record(approved)
 
@@ -1254,13 +1368,27 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                 validate_publication_transition(
                     str(current["publication_status"]), PublicationStatus.REVOKING.value
                 )
+                effective_policy_id = str(current["policy_version_id"] or "") or None
+                effective_policy_version = "p1"
+                if effective_policy_id:
+                    policy_row = await connection.fetchrow(
+                        "SELECT version FROM review_policies WHERE id = $1",
+                        effective_policy_id,
+                    )
+                    if not policy_row:
+                        raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                    effective_policy_version = str(policy_row["version"])
                 await connection.execute(
                     """
                     INSERT INTO review_decisions (
                         id, artifact_id, action, from_status, to_status, reason,
-                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key
+                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key,
+                        source, policy_version_id
                     )
-                    VALUES ($1, $2, 'revoke', $3, 'revoking', $4, $5, $6, 'p1', $7)
+                    VALUES (
+                        $1, $2, 'revoke', $3, 'revoking', $4, $5, $6,
+                        $7, $8, 'admin', $9
+                    )
                     """,
                     new_domain_id("decision"),
                     artifact_id,
@@ -1268,7 +1396,9 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     reason,
                     reviewer.get("id"),
                     _reviewer_name(reviewer),
+                    effective_policy_version,
                     idempotency_key,
+                    effective_policy_id,
                 )
                 revoking = await connection.fetchrow(
                     """
@@ -1294,15 +1424,17 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                 await connection.execute(
                     """
                     INSERT INTO artifact_jobs (
-                        id, artifact_id, type, payload, max_attempts, idempotency_key
+                        id, artifact_id, type, payload, max_attempts, idempotency_key,
+                        policy_version_id
                     )
-                    VALUES ($1, $2, 'revoke', $3::jsonb, 5, $4)
+                    VALUES ($1, $2, 'revoke', $3::jsonb, 5, $4, $5)
                     ON CONFLICT (idempotency_key) DO NOTHING
                     """,
                     new_domain_id("job"),
                     artifact_id,
                     {"reason": reason},
                     idempotency_key,
+                    effective_policy_id,
                 )
         return _record(revoking)
 
@@ -1455,6 +1587,25 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     if str(existing["artifact_id"]) != artifact_id:
                         raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     return _record(existing)
+                artifact = await connection.fetchrow(
+                    "SELECT policy_version_id FROM plugin_artifacts WHERE id = $1 FOR SHARE",
+                    artifact_id,
+                )
+                if not artifact:
+                    raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                effective_policy_id = _resolved_policy_snapshot(
+                    artifact["policy_version_id"],
+                    policy_version_id,
+                )
+                effective_policy_version = policy_version
+                if effective_policy_id:
+                    policy_row = await connection.fetchrow(
+                        "SELECT version FROM review_policies WHERE id = $1",
+                        effective_policy_id,
+                    )
+                    if not policy_row:
+                        raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                    effective_policy_version = str(policy_row["version"])
                 row = await connection.fetchrow(
                     """
                     INSERT INTO review_decisions (
@@ -1477,10 +1628,10 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     reason,
                     (reviewer or {}).get("id"),
                     _reviewer_name(reviewer),
-                    policy_version,
+                    effective_policy_version,
                     idempotency_key,
                     decision_source,
-                    policy_version_id,
+                    effective_policy_id,
                     list(input_run_ids),
                     list(input_fingerprints),
                     coverage_sha256,
@@ -1797,17 +1948,31 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         if idempotency_key:
             for existing in self.runs.values():
                 if existing.get("idempotency_key") == idempotency_key:
-                    if (
-                        existing["artifact_id"] != str(payload["artifact_id"])
-                        or existing["type"] != str(payload["type"])
-                        or (
-                            "policy_version_id" in payload
-                            and existing.get("policy_version_id")
-                            != payload.get("policy_version_id")
-                        )
-                    ):
+                    if existing["artifact_id"] != str(payload["artifact_id"]) or existing[
+                        "type"
+                    ] != str(payload["type"]):
                         raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
-                    return deepcopy(existing)
+                    break
+        artifact = self.artifacts.get(str(payload["artifact_id"]))
+        if not artifact:
+            raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+        policy_version_id = _resolved_policy_snapshot(
+            artifact.get("policy_version_id"),
+            payload.get("policy_version_id"),
+        )
+        if idempotency_key:
+            existing = next(
+                (
+                    item
+                    for item in self.runs.values()
+                    if item.get("idempotency_key") == idempotency_key
+                ),
+                None,
+            )
+            if existing:
+                if existing.get("policy_version_id") != policy_version_id:
+                    raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                return deepcopy(existing)
         now = _utc_now()
         run = {
             "id": str(payload.get("id") or new_domain_id("run")),
@@ -1823,7 +1988,7 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             "error_code": str(payload.get("error_code") or ""),
             "tool_name": str(payload.get("tool_name") or ""),
             "tool_version": str(payload.get("tool_version") or ""),
-            "policy_version_id": payload.get("policy_version_id"),
+            "policy_version_id": policy_version_id,
             "input_sha256": str(payload.get("input_sha256") or ""),
             "output_sha256": str(payload.get("output_sha256") or ""),
             "coverage": dict(payload.get("coverage") or {}),
@@ -2032,13 +2197,29 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         return deepcopy(artifact)
 
     async def enqueue_job(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        artifact_id = payload.get("artifact_id")
+        policy_version_id = payload.get("policy_version_id")
+        if artifact_id:
+            artifact = self.artifacts.get(str(artifact_id))
+            if not artifact:
+                raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+            policy_version_id = _resolved_policy_snapshot(
+                artifact.get("policy_version_id"),
+                policy_version_id,
+            )
         for job in self.jobs.values():
             if job["idempotency_key"] == payload["idempotency_key"]:
+                if (
+                    str(job.get("artifact_id") or "") != str(artifact_id or "")
+                    or job["type"] != str(payload["type"])
+                    or job.get("policy_version_id") != policy_version_id
+                ):
+                    raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                 return deepcopy(job)
         now = _utc_now()
         job = {
             "id": str(payload.get("id") or new_domain_id("job")),
-            "artifact_id": payload.get("artifact_id"),
+            "artifact_id": artifact_id,
             "type": str(payload["type"]),
             "status": JobStatus.QUEUED.value,
             "payload": dict(payload.get("payload") or {}),
@@ -2048,7 +2229,7 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             "lease_owner": None,
             "lease_expires_at": None,
             "idempotency_key": str(payload["idempotency_key"]),
-            "policy_version_id": payload.get("policy_version_id"),
+            "policy_version_id": policy_version_id,
             "run_id": payload.get("run_id"),
             "stage_name": str(payload.get("stage_name") or ""),
             "last_error_code": "",
@@ -2173,6 +2354,16 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             artifact = self.artifacts.get(artifact_id)
             if not artifact:
                 return None
+            effective_policy_id = _resolved_policy_snapshot(
+                artifact.get("policy_version_id"),
+                policy_version_id,
+            )
+            effective_policy_version = policy_version
+            if effective_policy_id:
+                policy = self.policies.get(effective_policy_id)
+                if not policy:
+                    raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                effective_policy_version = str(policy["version"])
             if ReviewStatus(artifact["review_status"]) in TERMINAL_REVIEW_STATUSES:
                 raise ArtifactStateError(
                     ArtifactErrorCode.ARTIFACT_ALREADY_DECIDED,
@@ -2189,8 +2380,8 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 "reason": reason,
                 "reviewer_user_id": (reviewer or {}).get("id"),
                 "reviewer_nickname": _reviewer_name(reviewer),
-                "policy_version": policy_version,
-                "policy_version_id": policy_version_id,
+                "policy_version": effective_policy_version,
+                "policy_version_id": effective_policy_id,
                 "source": decision_source,
                 "input_run_ids": list(input_run_ids),
                 "input_fingerprints": list(input_fingerprints),
@@ -2251,10 +2442,19 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 raise ValueError("repo_version_changed")
             if artifact["normalized_version"] != expected_normalized_version:
                 raise ValueError("artifact_version_changed")
+            effective_policy_id = str(artifact.get("policy_version_id") or "") or None
+            effective_policy_version = "p1"
+            if effective_policy_id:
+                policy = self.policies.get(effective_policy_id)
+                if not policy:
+                    raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                effective_policy_version = str(policy["version"])
             succeeded = {
                 run["type"]
                 for run in self.runs.values()
-                if run["artifact_id"] == artifact_id and run["status"] == "succeeded"
+                if run["artifact_id"] == artifact_id
+                and run["status"] == "succeeded"
+                and run.get("policy_version_id") == effective_policy_id
             }
             if not {"precheck", "static"}.issubset(succeeded):
                 raise ValueError("required_review_runs_missing")
@@ -2267,8 +2467,8 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 "reason": reason,
                 "reviewer_user_id": reviewer.get("id"),
                 "reviewer_nickname": _reviewer_name(reviewer),
-                "policy_version": "p1",
-                "policy_version_id": artifact.get("policy_version_id"),
+                "policy_version": effective_policy_version,
+                "policy_version_id": effective_policy_id,
                 "source": "admin",
                 "input_run_ids": [],
                 "input_fingerprints": [],
@@ -2342,6 +2542,13 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 artifact["publication_status"], PublicationStatus.REVOKING.value
             )
             now = _utc_now()
+            effective_policy_id = str(artifact.get("policy_version_id") or "") or None
+            effective_policy_version = "p1"
+            if effective_policy_id:
+                policy = self.policies.get(effective_policy_id)
+                if not policy:
+                    raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                effective_policy_version = str(policy["version"])
             decision = {
                 "id": new_domain_id("decision"),
                 "artifact_id": artifact_id,
@@ -2351,8 +2558,8 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 "reason": reason,
                 "reviewer_user_id": reviewer.get("id"),
                 "reviewer_nickname": _reviewer_name(reviewer),
-                "policy_version": "p1",
-                "policy_version_id": artifact.get("policy_version_id"),
+                "policy_version": effective_policy_version,
+                "policy_version_id": effective_policy_id,
                 "source": "admin",
                 "input_run_ids": [],
                 "input_fingerprints": [],
@@ -2496,6 +2703,19 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 if decision["artifact_id"] != artifact_id:
                     raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                 return deepcopy(decision)
+        artifact = self.artifacts.get(artifact_id)
+        if not artifact:
+            raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+        effective_policy_id = _resolved_policy_snapshot(
+            artifact.get("policy_version_id"),
+            policy_version_id,
+        )
+        effective_policy_version = policy_version
+        if effective_policy_id:
+            policy = self.policies.get(effective_policy_id)
+            if not policy:
+                raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+            effective_policy_version = str(policy["version"])
         decision_source = source or (
             "policy" if action in {"auto_reject", "auto_approve"} else "admin"
         )
@@ -2508,8 +2728,8 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             "reason": reason,
             "reviewer_user_id": (reviewer or {}).get("id"),
             "reviewer_nickname": _reviewer_name(reviewer),
-            "policy_version": policy_version,
-            "policy_version_id": policy_version_id,
+            "policy_version": effective_policy_version,
+            "policy_version_id": effective_policy_id,
             "source": decision_source,
             "input_run_ids": list(input_run_ids),
             "input_fingerprints": list(input_fingerprints),
@@ -2684,6 +2904,14 @@ def _reviewer_name(reviewer: Mapping[str, Any] | None) -> str:
         or value.get("internal_username")
         or ""
     )
+
+
+def _resolved_policy_snapshot(current: Any, requested: Any) -> str | None:
+    current_id = str(current or "") or None
+    requested_id = str(requested or "") or None
+    if requested_id is not None and requested_id != current_id:
+        raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_SNAPSHOT_CONFLICT.value)
+    return current_id
 
 
 def _finding_source_for_run(run_type: str) -> str:

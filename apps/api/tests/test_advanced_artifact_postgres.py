@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 from typing import Any
@@ -11,6 +12,7 @@ import asyncpg
 import pytest
 
 from app.artifacts.models import ArtifactErrorCode, PublicationStatus, ReviewStatus
+from app.artifacts.policy_service import ReviewPolicyService
 from app.artifacts.repository import PgArtifactRepository
 from app.schema_migrations import (
     SchemaMigrationError,
@@ -54,6 +56,14 @@ class RepositoryStore:
         self.pool = SingleConnectionPool(connection)
 
     def _pool(self) -> SingleConnectionPool:
+        return self.pool
+
+
+class PooledRepositoryStore:
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self.pool = pool
+
+    def _pool(self) -> asyncpg.Pool:
         return self.pool
 
 
@@ -112,6 +122,9 @@ async def run_p1_upgrade_scenario(url: str) -> None:
         assert await apply_schema_migrations(connection, [migrations[1]]) == [
             "20260710_002_artifact_advanced_review"
         ]
+        assert await apply_schema_migrations(connection, migrations) == [
+            "20260715_003_review_policy_snapshot"
+        ]
         assert await apply_schema_migrations(connection, migrations) == []
 
         artifact = await connection.fetchrow(
@@ -153,6 +166,242 @@ async def run_p1_upgrade_scenario(url: str) -> None:
 
 def test_advanced_repository_constraints_and_leases_against_postgres() -> None:
     asyncio.run(run_advanced_repository_scenario(database_url()))
+
+
+def test_review_policy_lifecycle_against_postgres() -> None:
+    asyncio.run(run_review_policy_lifecycle_scenario(database_url()))
+
+
+def test_concurrent_review_policy_activation_against_postgres() -> None:
+    asyncio.run(run_concurrent_review_policy_activation_scenario(database_url()))
+
+
+async def run_concurrent_review_policy_activation_scenario(url: str) -> None:
+    schema = f"policy_concurrency_{uuid.uuid4().hex}"
+    control = await asyncpg.connect(url)
+    pool: asyncpg.Pool | None = None
+    try:
+        await control.execute(f"CREATE SCHEMA {schema}")
+        await control.execute(f"SET search_path TO {schema}")
+        await control.set_type_codec(
+            "jsonb",
+            schema="pg_catalog",
+            encoder=json.dumps,
+            decoder=json.loads,
+        )
+        await control.execute(SCHEMA_SQL)
+        await apply_schema_migrations(control)
+        await seed_market(control)
+        pool = await asyncpg.create_pool(
+            url,
+            min_size=2,
+            max_size=4,
+            server_settings={"search_path": schema},
+            init=_configure_json_codec,
+        )
+        repository = PgArtifactRepository(PooledRepositoryStore(pool))
+        service = ReviewPolicyService(repository)
+        actor = {
+            "id": "reviewer-1",
+            "role": "core_admin",
+            "github_login": "reviewer",
+        }
+        base = await service.create_draft(
+            version="concurrent-base",
+            policy=review_policy_payload("4.26.5"),
+            actor=actor,
+            request_id="concurrent-base-create",
+            idempotency_key="concurrent-base-create",
+        )
+        base = await service.activate(
+            base["id"],
+            actor=actor,
+            request_id="concurrent-base-activate",
+            idempotency_key="concurrent-base-activate",
+            reason="Concurrent activation base",
+        )
+
+        candidates: list[dict[str, Any]] = []
+        for index, version in enumerate(("4.27.0", "4.28.0"), start=1):
+            candidate = await service.create_draft(
+                version=f"concurrent-candidate-{index}",
+                policy=review_policy_payload(version),
+                actor=actor,
+                request_id=f"concurrent-candidate-create-{index}",
+                idempotency_key=f"concurrent-candidate-create-{index}",
+            )
+            candidate = await service.validate_draft(
+                candidate["id"],
+                actor=actor,
+                request_id=f"concurrent-candidate-validate-{index}",
+                idempotency_key=f"concurrent-candidate-validate-{index}",
+            )
+            candidates.append(candidate)
+
+        async def activate(candidate: dict[str, Any], index: int) -> dict[str, Any] | None:
+            return await repository.transition_review_policy(
+                candidate["id"],
+                action="activate",
+                expected_policy_sha256=candidate["policy_sha256"],
+                expected_active_policy_id=base["id"],
+                validation_summary=None,
+                event={
+                    "action": "activate",
+                    "actor_user_id": actor["id"],
+                    "actor_nickname": actor["github_login"],
+                    "reason": "Concurrent PostgreSQL activation",
+                    "request_id": f"concurrent-activate-{index}",
+                    "base_version": base["version"],
+                    "diff": {"redacted": True},
+                    "idempotency_key": f"concurrent-activate-{index}",
+                },
+            )
+
+        results = await asyncio.gather(
+            *(activate(candidate, index) for index, candidate in enumerate(candidates)),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(result, dict) for result in results) == 1
+        conflicts = [result for result in results if isinstance(result, ValueError)]
+        assert len(conflicts) == 1
+        assert str(conflicts[0]) == ArtifactErrorCode.REVIEW_POLICY_ACTIVATION_CONFLICT.value
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    "SELECT count(*) FROM review_policies WHERE status = 'active' AND is_default"
+                )
+                == 1
+            )
+    finally:
+        if pool is not None:
+            await pool.close()
+        await control.execute("RESET search_path")
+        await control.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        await control.close()
+
+
+async def _configure_json_codec(connection: asyncpg.Connection) -> None:
+    await connection.set_type_codec(
+        "jsonb",
+        schema="pg_catalog",
+        encoder=json.dumps,
+        decoder=json.loads,
+    )
+
+
+async def run_review_policy_lifecycle_scenario(url: str) -> None:
+    connection, transaction = await begin_isolated_schema(url)
+    try:
+        await apply_schema_migrations(connection)
+        await seed_market(connection)
+        repository = PgArtifactRepository(RepositoryStore(connection))
+        service = ReviewPolicyService(repository)
+        actor = {
+            "id": "reviewer-1",
+            "role": "core_admin",
+            "github_login": "reviewer",
+        }
+
+        first = await service.create_draft(
+            version="policy-service-1",
+            policy=review_policy_payload("4.26.5"),
+            actor=actor,
+            request_id="postgres-policy-create-1",
+            idempotency_key="postgres-policy-create-1",
+        )
+        first = await service.activate(
+            first["id"],
+            actor=actor,
+            request_id="postgres-policy-activate-1",
+            idempotency_key="postgres-policy-activate-1",
+            reason="Activate first PostgreSQL policy",
+        )
+        second = await service.create_draft(
+            version="policy-service-2",
+            policy=review_policy_payload("4.27.0"),
+            actor=actor,
+            request_id="postgres-policy-create-2",
+            idempotency_key="postgres-policy-create-2",
+        )
+        second = await service.activate(
+            second["id"],
+            actor=actor,
+            request_id="postgres-policy-activate-2",
+            idempotency_key="postgres-policy-activate-2",
+            reason="Replace first PostgreSQL policy",
+        )
+
+        first_retired = await repository.get_review_policy(first["id"])
+        assert first_retired and first_retired["status"] == "retired"
+        assert (await repository.get_active_review_policy())["id"] == second["id"]
+
+        artifact = await repository.create_artifact(artifact_payload("d"))
+        artifact = await repository.snapshot_active_review_policy(artifact["id"])
+        assert artifact and artifact["policy_version_id"] == second["id"]
+        old_run = await repository.create_review_run(
+            {
+                "artifact_id": artifact["id"],
+                "type": "precheck",
+                "status": "succeeded",
+                "idempotency_key": "postgres-policy-old-run",
+            }
+        )
+        migrated = await service.migrate_artifact_snapshot(
+            artifact["id"],
+            first["id"],
+            actor=actor,
+            request_id="postgres-artifact-policy-migrate",
+            idempotency_key="postgres-artifact-policy-migrate",
+            reason="Verify PostgreSQL artifact policy migration",
+        )
+        new_run = await repository.create_review_run(
+            {
+                "artifact_id": artifact["id"],
+                "type": "static",
+                "status": "running",
+                "idempotency_key": "postgres-policy-new-run",
+            }
+        )
+        assert old_run["policy_version_id"] == second["id"]
+        assert migrated["policy_version_id"] == first["id"]
+        assert new_run["policy_version_id"] == first["id"]
+        migration_decision = next(
+            decision
+            for decision in await repository.list_review_decisions(artifact["id"])
+            if decision["action"] == "policy_migrate"
+        )
+        assert migration_decision["policy_version_id"] == first["id"]
+        assert (
+            migration_decision["metadata"]["policy_migration"]["invalidates_automated_review"]
+            is True
+        )
+
+        rolled_back = await service.rollback(
+            first["id"],
+            actor=actor,
+            request_id="postgres-policy-rollback-1",
+            idempotency_key="postgres-policy-rollback-1",
+            reason="Rollback PostgreSQL policy",
+        )
+        assert rolled_back["status"] == "active"
+        assert (await repository.get_review_policy(second["id"]))["status"] == "retired"
+        active_count = await connection.fetchval(
+            "SELECT count(*) FROM review_policies WHERE status = 'active' AND is_default"
+        )
+        assert active_count == 1
+
+        events = await repository.list_review_policy_events(first["id"])
+        assert {event["action"] for event in events} >= {
+            "create",
+            "validate",
+            "activate",
+            "retire",
+            "rollback",
+        }
+        assert all(event["diff"].get("redacted") is True for event in events)
+    finally:
+        await transaction.rollback()
+        await connection.close()
 
 
 async def run_advanced_repository_scenario(url: str) -> None:
@@ -539,4 +788,23 @@ def artifact_payload(digest: str) -> dict[str, Any]:
         "quarantine_key": f"artifacts/{digest * 8}/source.zip",
         "submitted_by": "owner-1",
         "submitted_by_snapshot": {"github_login": "alice"},
+    }
+
+
+def review_policy_payload(astrbot_version: str) -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "required_stages": ["static", "runtime", "dependency"],
+        "runtime_targets": [{"astrbot": astrbot_version, "python": "3.12"}],
+        "limits": {
+            "cpu": 1,
+            "memory_mb": 768,
+            "pids": 128,
+            "timeout_seconds": 120,
+        },
+        "network_profiles": {"install": "pypi-only-v1", "smoke": "none"},
+        "llm": {"enabled": False},
+        "malware": {"clamav": False},
+        "dependency": {"enabled": True, "max_severity": "high"},
+        "routing": {"auto_approve": False, "manual_review_at": "low"},
     }

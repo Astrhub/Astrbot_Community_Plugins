@@ -37,6 +37,86 @@ class ApiKey:
 
 
 @dataclass(frozen=True)
+class ArtifactReviewSettings:
+    enabled: bool
+    auto_approve_enabled: bool
+    runtime_enabled: bool
+    runtime_container_image: str
+    llm_enabled: bool
+    llm_config_ref: str
+    llm_provider: str
+    llm_model: str
+    llm_endpoint_url: str
+    llm_api_key: str
+    clamav_enabled: bool
+    clamav_config_ref: str
+    clamav_host: str
+    clamav_port: int
+    yara_enabled: bool
+    yara_ruleset_version: str
+    yara_ruleset_path: str
+    dependency_enabled: bool
+    dependency_config_ref: str
+    dependency_advisory_url: str
+    dependency_api_token: str
+
+    def component_configuration(self) -> dict[str, dict[str, object]]:
+        return {
+            "runtime": _review_component_configuration(
+                self.runtime_enabled,
+                {"runtime_container_image_missing": self.runtime_container_image},
+            ),
+            "llm": _review_component_configuration(
+                self.llm_enabled,
+                {
+                    "llm_config_ref_missing": self.llm_config_ref,
+                    "llm_provider_missing": self.llm_provider,
+                    "llm_model_missing": self.llm_model,
+                    "llm_api_key_missing": self.llm_api_key,
+                },
+            ),
+            "clamav": _review_component_configuration(
+                self.clamav_enabled,
+                {
+                    "clamav_config_ref_missing": self.clamav_config_ref,
+                    "clamav_host_missing": self.clamav_host,
+                },
+            ),
+            "yara": _review_component_configuration(
+                self.yara_enabled,
+                {
+                    "yara_ruleset_version_missing": self.yara_ruleset_version,
+                    "yara_ruleset_path_missing": self.yara_ruleset_path,
+                },
+            ),
+            "dependency": _review_component_configuration(
+                self.dependency_enabled,
+                {
+                    "dependency_config_ref_missing": self.dependency_config_ref,
+                    "dependency_advisory_url_missing": self.dependency_advisory_url,
+                },
+            ),
+        }
+
+    def public_status(self) -> dict[str, object]:
+        components = self.component_configuration()
+        components["policy"] = _review_component_status(
+            enabled=self.enabled,
+            configured=False,
+            ready=False,
+            reasons=["active_policy_unknown"] if self.enabled else [],
+        )
+        return {
+            "enabled": self.enabled,
+            "configured": False,
+            "ready": False,
+            "degraded": self.enabled,
+            "auto_approve_enabled": self.auto_approve_enabled,
+            "components": components,
+        }
+
+
+@dataclass(frozen=True)
 class ArtifactSettings:
     enabled: bool
     storage_backend: str
@@ -58,6 +138,7 @@ class ArtifactSettings:
     job_lease_seconds: int
     worker_poll_seconds: int
     quarantine_retention_days: int
+    review: ArtifactReviewSettings
 
     def validation_errors(self, database_url: str) -> tuple[str, ...]:
         if not self.enabled:
@@ -98,6 +179,7 @@ class ArtifactSettings:
                 "max_file_bytes": self.max_file_bytes,
                 "max_files": self.max_files,
             },
+            "review": self.review.public_status(),
         }
 
 
@@ -302,8 +384,74 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
             quarantine_retention_days=max(
                 1, _int(merged.get("ARTIFACT_QUARANTINE_RETENTION_DAYS"), 30)
             ),
+            review=ArtifactReviewSettings(
+                enabled=_bool(merged.get("ARTIFACT_ADVANCED_REVIEW_ENABLED")),
+                auto_approve_enabled=_bool(
+                    merged.get("ARTIFACT_AUTO_APPROVE_ENABLED"),
+                    default=False,
+                ),
+                runtime_enabled=_bool(merged.get("ARTIFACT_RUNTIME_REVIEW_ENABLED")),
+                runtime_container_image=merged.get("ARTIFACT_RUNTIME_CONTAINER_IMAGE", ""),
+                llm_enabled=_bool(merged.get("ARTIFACT_LLM_REVIEW_ENABLED")),
+                llm_config_ref=merged.get("ARTIFACT_LLM_CONFIG_REF", "config:llm-default"),
+                llm_provider=merged.get("ARTIFACT_LLM_PROVIDER", ""),
+                llm_model=merged.get("ARTIFACT_LLM_MODEL", ""),
+                llm_endpoint_url=merged.get("ARTIFACT_LLM_ENDPOINT_URL", ""),
+                llm_api_key=merged.get("ARTIFACT_LLM_API_KEY", ""),
+                clamav_enabled=_bool(merged.get("ARTIFACT_CLAMAV_ENABLED")),
+                clamav_config_ref=merged.get(
+                    "ARTIFACT_CLAMAV_CONFIG_REF",
+                    "config:clamav-default",
+                ),
+                clamav_host=merged.get("ARTIFACT_CLAMAV_HOST", ""),
+                clamav_port=max(1, min(65535, _int(merged.get("ARTIFACT_CLAMAV_PORT"), 3310))),
+                yara_enabled=_bool(merged.get("ARTIFACT_YARA_ENABLED")),
+                yara_ruleset_version=merged.get("ARTIFACT_YARA_RULESET_VERSION", ""),
+                yara_ruleset_path=merged.get("ARTIFACT_YARA_RULESET_PATH", ""),
+                dependency_enabled=_bool(merged.get("ARTIFACT_DEPENDENCY_REVIEW_ENABLED")),
+                dependency_config_ref=merged.get(
+                    "ARTIFACT_DEPENDENCY_CONFIG_REF",
+                    "config:dependency-default",
+                ),
+                dependency_advisory_url=merged.get("ARTIFACT_DEPENDENCY_ADVISORY_URL", ""),
+                dependency_api_token=merged.get("ARTIFACT_DEPENDENCY_API_TOKEN", ""),
+            ),
         ),
     )
+
+
+def _review_component_configuration(
+    enabled: bool,
+    required: Mapping[str, str],
+) -> dict[str, object]:
+    missing = [code for code, value in required.items() if not str(value or "").strip()]
+    return _review_component_status(
+        enabled=enabled,
+        configured=enabled and not missing,
+        ready=False,
+        reasons=(missing or ["health_unknown"]) if enabled else [],
+    )
+
+
+def _review_component_status(
+    *,
+    enabled: bool,
+    configured: bool,
+    ready: bool,
+    reasons: list[str],
+) -> dict[str, object]:
+    degraded = enabled and not ready
+    status = "disabled"
+    if enabled:
+        status = "ready" if ready else "degraded"
+    return {
+        "enabled": enabled,
+        "configured": configured,
+        "ready": ready,
+        "degraded": degraded,
+        "status": status,
+        "reasons": reasons,
+    }
 
 
 def _normalize_env(env: Mapping[str, str]) -> dict[str, str]:

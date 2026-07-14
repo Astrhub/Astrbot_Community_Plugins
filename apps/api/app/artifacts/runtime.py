@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import ValidationError
+
 from ..config import ArtifactSettings, Settings
 from .archive import ArchivePrechecker
 from .github_source import GithubSourceClient
 from .jobs import ArtifactJobRunner, worker_id
 from .notifications import ArtifactNotificationDispatcher
+from .policy import ReviewPolicyV1, parse_review_policy, review_policy_sha256
 from .repository import InMemoryArtifactRepository, PgArtifactRepository
 from .service import ArtifactService
 from .static_scan import StaticScanner
@@ -31,6 +34,7 @@ class ArtifactRuntime:
     service: Any | None = None
     job_runner: Any | None = None
     _component_errors: list[str] = field(default_factory=list)
+    _tool_health: dict[str, dict[str, object]] = field(default_factory=dict)
 
     @property
     def configuration_errors(self) -> tuple[str, ...]:
@@ -91,6 +95,7 @@ class ArtifactRuntime:
                     lease_seconds=self.config.job_lease_seconds,
                     poll_seconds=self.config.worker_poll_seconds,
                     notification_dispatcher=notifications,
+                    advanced_review_enabled=self.config.review.enabled,
                 )
                 self.attach_components(
                     repository=repository,
@@ -129,6 +134,8 @@ class ArtifactRuntime:
         dispatcher = getattr(self.job_runner, "notification_dispatcher", None)
         if dispatcher is not None:
             dispatcher.settings = settings
+        if self.job_runner is not None:
+            self.job_runner.advanced_review_enabled = self.config.review.enabled
 
     def attach_components(
         self,
@@ -148,6 +155,20 @@ class ArtifactRuntime:
         if code not in self._component_errors:
             self._component_errors.append(code)
 
+    def set_tool_health(
+        self,
+        name: str,
+        *,
+        ready: bool,
+        reason: str = "",
+    ) -> None:
+        if name not in {"runtime", "llm", "clamav", "yara", "dependency"}:
+            raise ValueError("unsupported_review_tool")
+        self._tool_health[name] = {
+            "ready": bool(ready),
+            "reason": str(reason or "").strip(),
+        }
+
     def public_status(self) -> dict[str, object]:
         status = self.config.public_status(self.database_url)
         status.update(
@@ -165,6 +186,85 @@ class ArtifactRuntime:
         )
         return status
 
+    async def health_status(self) -> dict[str, object]:
+        status = self.public_status()
+        status["review"] = await self._review_health_status()
+        return status
+
+    async def _review_health_status(self) -> dict[str, object]:
+        review = self.config.review.public_status()
+        if not self.config.review.enabled:
+            return review
+        if self.repository is None:
+            return _finalize_review_status(
+                review,
+                policy=_health_component(
+                    enabled=True,
+                    configured=False,
+                    ready=False,
+                    reasons=["policy_repository_unavailable"],
+                ),
+                policy_model=None,
+                tool_health=self._tool_health,
+                config=self.config,
+            )
+        try:
+            active = await self.repository.get_active_review_policy()
+        except Exception:
+            return _finalize_review_status(
+                review,
+                policy=_health_component(
+                    enabled=True,
+                    configured=False,
+                    ready=False,
+                    reasons=["active_policy_lookup_failed"],
+                ),
+                policy_model=None,
+                tool_health=self._tool_health,
+                config=self.config,
+            )
+        if not active:
+            return _finalize_review_status(
+                review,
+                policy=_health_component(
+                    enabled=True,
+                    configured=False,
+                    ready=False,
+                    reasons=["active_policy_missing"],
+                ),
+                policy_model=None,
+                tool_health=self._tool_health,
+                config=self.config,
+            )
+
+        policy_model: ReviewPolicyV1 | None = None
+        reasons: list[str] = []
+        try:
+            policy_model = parse_review_policy(active.get("policy") or {})
+        except ValidationError:
+            reasons.append("active_policy_schema_invalid")
+        if policy_model:
+            summary = dict(active.get("validation_summary") or {})
+            if summary.get("valid") is not True:
+                reasons.append("active_policy_not_validated")
+            if str(summary.get("policy_sha256") or "") != str(active.get("policy_sha256") or ""):
+                reasons.append("active_policy_validation_stale")
+            if review_policy_sha256(policy_model) != str(active.get("policy_sha256") or ""):
+                reasons.append("active_policy_hash_mismatch")
+        policy_component = _health_component(
+            enabled=True,
+            configured=not reasons,
+            ready=not reasons,
+            reasons=reasons,
+        )
+        return _finalize_review_status(
+            review,
+            policy=policy_component,
+            policy_model=policy_model if not reasons else None,
+            tool_health=self._tool_health,
+            config=self.config,
+        )
+
 
 def build_artifact_runtime(
     settings: Settings,
@@ -181,3 +281,141 @@ def build_artifact_runtime(
         github_api_token=settings.github_api_token,
         allow_in_memory_artifacts=allow_in_memory_artifacts,
     )
+
+
+def _finalize_review_status(
+    review: dict[str, object],
+    *,
+    policy: dict[str, object],
+    policy_model: ReviewPolicyV1 | None,
+    tool_health: dict[str, dict[str, object]],
+    config: ArtifactSettings,
+) -> dict[str, object]:
+    components = dict(review.get("components") or {})
+    components["policy"] = policy
+    if policy_model:
+        policy_tools = {
+            "runtime": bool(policy_model.runtime_targets),
+            "llm": policy_model.llm.enabled,
+            "clamav": policy_model.malware.clamav,
+            "yara": bool(policy_model.malware.yara_ruleset),
+            "dependency": policy_model.dependency.enabled,
+        }
+        configured = config.review.component_configuration()
+        reference_errors = {
+            "llm": (
+                []
+                if policy_model.llm.provider_config_ref == config.review.llm_config_ref
+                else ["llm_config_ref_mismatch"]
+            ),
+            "clamav": (
+                []
+                if policy_model.malware.clamav_config_ref == config.review.clamav_config_ref
+                else ["clamav_config_ref_mismatch"]
+            ),
+            "yara": (
+                []
+                if not policy_model.malware.yara_ruleset
+                or policy_model.malware.yara_ruleset == config.review.yara_ruleset_version
+                else ["yara_ruleset_version_mismatch"]
+            ),
+            "dependency": (
+                []
+                if policy_model.dependency.advisory_config_ref
+                == config.review.dependency_config_ref
+                else ["dependency_config_ref_mismatch"]
+            ),
+            "runtime": [],
+        }
+        for name, enabled in policy_tools.items():
+            components[name] = _tool_component(
+                name,
+                enabled=enabled,
+                configuration=dict(configured[name]),
+                reference_errors=reference_errors[name],
+                health=tool_health.get(name),
+            )
+
+    enabled_components = [
+        component
+        for component in components.values()
+        if isinstance(component, dict) and component.get("enabled")
+    ]
+    configured_all = bool(policy.get("ready")) and all(
+        bool(component.get("configured")) for component in enabled_components
+    )
+    ready_all = bool(policy.get("ready")) and all(
+        bool(component.get("ready")) for component in enabled_components
+    )
+    review.update(
+        {
+            "configured": configured_all,
+            "ready": ready_all,
+            "degraded": not ready_all,
+            "components": components,
+            "policy_auto_approve_enabled": bool(policy_model and policy_model.routing.auto_approve),
+            "auto_approve_effective": bool(
+                policy_model
+                and policy_model.routing.auto_approve
+                and config.review.auto_approve_enabled
+                and ready_all
+            ),
+        }
+    )
+    return review
+
+
+def _tool_component(
+    name: str,
+    *,
+    enabled: bool,
+    configuration: dict[str, object],
+    reference_errors: list[str],
+    health: dict[str, object] | None,
+) -> dict[str, object]:
+    if not enabled:
+        return _health_component(
+            enabled=False,
+            configured=False,
+            ready=False,
+            reasons=[],
+        )
+    reasons = list(configuration.get("reasons") or [])
+    if not configuration.get("enabled"):
+        reasons = [f"{name}_disabled"]
+    reasons.extend(reference_errors)
+    configured = bool(configuration.get("configured")) and not reference_errors
+    ready = configured and bool((health or {}).get("ready"))
+    if configured and health is None:
+        reasons = ["health_unknown"]
+    elif configured and not ready:
+        reason = str((health or {}).get("reason") or "tool_degraded")
+        reasons = [reason]
+    elif ready:
+        reasons = []
+    return _health_component(
+        enabled=True,
+        configured=configured,
+        ready=ready,
+        reasons=reasons,
+    )
+
+
+def _health_component(
+    *,
+    enabled: bool,
+    configured: bool,
+    ready: bool,
+    reasons: list[str],
+) -> dict[str, object]:
+    status = "disabled"
+    if enabled:
+        status = "ready" if ready else "degraded"
+    return {
+        "enabled": enabled,
+        "configured": configured,
+        "ready": ready,
+        "degraded": enabled and not ready,
+        "status": status,
+        "reasons": reasons,
+    }

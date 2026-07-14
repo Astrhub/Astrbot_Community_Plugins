@@ -9,9 +9,14 @@ import asyncpg
 
 from .models import (
     ArtifactErrorCode,
+    DecisionAction,
     FindingStatus,
     ReviewCommentEventType,
+    ReviewPolicyEventAction,
+    ReviewPolicyStatus,
+    ReviewStatus,
     RuntimeDispatchStatus,
+    TERMINAL_REVIEW_STATUSES,
     new_domain_id,
 )
 
@@ -19,7 +24,11 @@ from .models import (
 class PgAdvancedReviewRepositoryMixin:
     store: Any
 
-    async def create_review_policy(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    async def create_review_policy(
+        self,
+        payload: Mapping[str, Any],
+        event: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         pool = self._advanced_pool()
         async with pool.acquire() as connection:
             async with connection.transaction():
@@ -28,38 +37,46 @@ class PgAdvancedReviewRepositoryMixin:
                     payload["version"],
                 )
                 if existing:
-                    if str(existing["policy_sha256"]) != str(payload["policy_sha256"]):
+                    if (
+                        str(existing["policy_sha256"]) != str(payload["policy_sha256"])
+                        or str(existing["schema_version"]) != str(payload["schema_version"])
+                        or str(existing["base_policy_id"] or "")
+                        != str(payload.get("base_policy_id") or "")
+                    ):
                         raise ValueError(ArtifactErrorCode.REVIEW_POLICY_VERSION_CONFLICT.value)
-                    return _record(existing)
-                row = await connection.fetchrow(
-                    """
-                    INSERT INTO review_policies (
-                        id, version, schema_version, status, is_default, policy,
-                        policy_sha256, base_policy_id, created_by_user_id,
-                        created_by_nickname, validation_summary, validated_at,
-                        activated_at, retired_at
+                    row = existing
+                else:
+                    row = await connection.fetchrow(
+                        """
+                        INSERT INTO review_policies (
+                            id, version, schema_version, status, is_default, policy,
+                            policy_sha256, base_policy_id, created_by_user_id,
+                            created_by_nickname, validation_summary, validated_at,
+                            activated_at, retired_at
+                        )
+                        VALUES (
+                            $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10,
+                            $11::jsonb, $12::timestamptz, $13::timestamptz, $14::timestamptz
+                        )
+                        RETURNING *
+                        """,
+                        payload.get("id") or new_domain_id("policy"),
+                        payload["version"],
+                        payload["schema_version"],
+                        payload.get("status", ReviewPolicyStatus.DRAFT.value),
+                        bool(payload.get("is_default", True)),
+                        dict(payload.get("policy") or {}),
+                        payload["policy_sha256"],
+                        payload.get("base_policy_id"),
+                        payload.get("created_by_user_id"),
+                        payload.get("created_by_nickname", ""),
+                        dict(payload.get("validation_summary") or {}),
+                        _as_datetime(payload.get("validated_at")),
+                        _as_datetime(payload.get("activated_at")),
+                        _as_datetime(payload.get("retired_at")),
                     )
-                    VALUES (
-                        $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10,
-                        $11::jsonb, $12::timestamptz, $13::timestamptz, $14::timestamptz
-                    )
-                    RETURNING *
-                    """,
-                    payload.get("id") or new_domain_id("policy"),
-                    payload["version"],
-                    payload["schema_version"],
-                    payload.get("status", "draft"),
-                    bool(payload.get("is_default", True)),
-                    dict(payload.get("policy") or {}),
-                    payload["policy_sha256"],
-                    payload.get("base_policy_id"),
-                    payload.get("created_by_user_id"),
-                    payload.get("created_by_nickname", ""),
-                    dict(payload.get("validation_summary") or {}),
-                    _as_datetime(payload.get("validated_at")),
-                    _as_datetime(payload.get("activated_at")),
-                    _as_datetime(payload.get("retired_at")),
-                )
+                if event:
+                    await self._insert_review_policy_event(connection, str(row["id"]), event)
         return _record(row)
 
     async def get_review_policy(self, policy_id: str) -> dict[str, Any] | None:
@@ -97,35 +114,295 @@ class PgAdvancedReviewRepositoryMixin:
         pool = self._advanced_pool()
         async with pool.acquire() as connection:
             async with connection.transaction():
-                existing = await connection.fetchrow(
-                    "SELECT * FROM review_policy_events WHERE idempotency_key = $1",
-                    payload["idempotency_key"],
-                )
-                if existing:
-                    if str(existing["policy_id"]) != str(payload["policy_id"]):
-                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
-                    return _record(existing)
-                row = await connection.fetchrow(
-                    """
-                    INSERT INTO review_policy_events (
-                        id, policy_id, action, actor_user_id, actor_nickname,
-                        reason, request_id, base_version, diff, idempotency_key
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-                    RETURNING *
-                    """,
-                    payload.get("id") or new_domain_id("policy_event"),
-                    payload["policy_id"],
-                    payload["action"],
-                    payload.get("actor_user_id"),
-                    payload.get("actor_nickname", ""),
-                    payload.get("reason", ""),
-                    payload["request_id"],
-                    payload.get("base_version", ""),
-                    dict(payload.get("diff") or {}),
-                    payload["idempotency_key"],
+                row = await self._insert_review_policy_event(
+                    connection,
+                    str(payload["policy_id"]),
+                    payload,
                 )
         return _record(row)
+
+    async def list_review_policy_events(self, policy_id: str) -> list[dict[str, Any]]:
+        rows = await self._advanced_pool().fetch(
+            """
+            SELECT * FROM review_policy_events
+             WHERE policy_id = $1
+          ORDER BY created_at ASC, id ASC
+            """,
+            policy_id,
+        )
+        return [_record(row) for row in rows]
+
+    async def transition_review_policy(
+        self,
+        policy_id: str,
+        *,
+        action: str,
+        expected_policy_sha256: str,
+        expected_active_policy_id: str | None,
+        validation_summary: Mapping[str, Any] | None,
+        event: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        normalized_action = ReviewPolicyEventAction(action)
+        if str(event.get("action") or "") != normalized_action.value:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+        pool = self._advanced_pool()
+        try:
+            async with pool.acquire() as connection:
+                async with connection.transaction():
+                    repeated = await connection.fetchrow(
+                        """
+                        SELECT * FROM review_policy_events
+                         WHERE idempotency_key = $1
+                         FOR UPDATE
+                        """,
+                        event["idempotency_key"],
+                    )
+                    if repeated:
+                        self._validate_review_policy_event_identity(
+                            repeated,
+                            policy_id,
+                            normalized_action.value,
+                        )
+                        row = await connection.fetchrow(
+                            "SELECT * FROM review_policies WHERE id = $1",
+                            policy_id,
+                        )
+                        return _record(row) if row else None
+
+                    if normalized_action is ReviewPolicyEventAction.VALIDATE:
+                        row = await self._validate_review_policy_record(
+                            connection,
+                            policy_id,
+                            expected_policy_sha256,
+                            validation_summary,
+                        )
+                    else:
+                        row = await self._transition_review_policy_state(
+                            connection,
+                            policy_id,
+                            action=normalized_action,
+                            expected_policy_sha256=expected_policy_sha256,
+                            expected_active_policy_id=expected_active_policy_id,
+                            event=event,
+                        )
+                    if not row:
+                        return None
+                    await self._insert_review_policy_event(connection, policy_id, event)
+            return _record(row)
+        except asyncpg.UniqueViolationError as exc:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_ACTIVATION_CONFLICT.value) from exc
+
+    async def _validate_review_policy_record(
+        self,
+        connection: asyncpg.Connection,
+        policy_id: str,
+        expected_policy_sha256: str,
+        validation_summary: Mapping[str, Any] | None,
+    ) -> asyncpg.Record | None:
+        row = await connection.fetchrow(
+            "SELECT * FROM review_policies WHERE id = $1 FOR UPDATE",
+            policy_id,
+        )
+        if not row:
+            return None
+        self._validate_review_policy_sha(row, expected_policy_sha256)
+        if str(row["status"]) not in {
+            ReviewPolicyStatus.DRAFT.value,
+            ReviewPolicyStatus.RETIRED.value,
+        }:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+        return await connection.fetchrow(
+            """
+            UPDATE review_policies
+               SET validation_summary = $2::jsonb,
+                   validated_at = now(),
+                   updated_at = now()
+             WHERE id = $1
+         RETURNING *
+            """,
+            policy_id,
+            dict(validation_summary or {}),
+        )
+
+    async def _transition_review_policy_state(
+        self,
+        connection: asyncpg.Connection,
+        policy_id: str,
+        *,
+        action: ReviewPolicyEventAction,
+        expected_policy_sha256: str,
+        expected_active_policy_id: str | None,
+        event: Mapping[str, Any],
+    ) -> asyncpg.Record | None:
+        if action not in {
+            ReviewPolicyEventAction.ACTIVATE,
+            ReviewPolicyEventAction.RETIRE,
+            ReviewPolicyEventAction.ROLLBACK,
+        }:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+
+        await connection.fetch(
+            """
+            SELECT id FROM review_policies
+             WHERE is_default
+          ORDER BY id
+             FOR UPDATE
+            """
+        )
+        row = await connection.fetchrow(
+            "SELECT * FROM review_policies WHERE id = $1 FOR UPDATE",
+            policy_id,
+        )
+        if not row:
+            return None
+        self._validate_review_policy_sha(row, expected_policy_sha256)
+        if not bool(row["is_default"]):
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+
+        active = await connection.fetchrow(
+            """
+            SELECT * FROM review_policies
+             WHERE status = 'active' AND is_default
+             FOR UPDATE
+            """
+        )
+        active_id = str(active["id"]) if active else None
+        if active_id != expected_active_policy_id:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_ACTIVATION_CONFLICT.value)
+
+        if action in {
+            ReviewPolicyEventAction.ACTIVATE,
+            ReviewPolicyEventAction.ROLLBACK,
+        }:
+            expected_status = (
+                ReviewPolicyStatus.DRAFT
+                if action is ReviewPolicyEventAction.ACTIVATE
+                else ReviewPolicyStatus.RETIRED
+            )
+            if str(row["status"]) != expected_status.value or not _policy_validation_is_current(
+                row
+            ):
+                raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+            if active and str(active["id"]) != policy_id:
+                retired = await connection.fetchrow(
+                    """
+                    UPDATE review_policies
+                       SET status = 'retired', retired_at = now(), updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    active["id"],
+                )
+                await self._insert_superseded_policy_event(
+                    connection,
+                    retired,
+                    target=row,
+                    event=event,
+                )
+            return await connection.fetchrow(
+                """
+                UPDATE review_policies
+                   SET status = 'active', activated_at = now(), retired_at = NULL,
+                       updated_at = now()
+                 WHERE id = $1
+             RETURNING *
+                """,
+                policy_id,
+            )
+
+        if str(row["status"]) not in {
+            ReviewPolicyStatus.DRAFT.value,
+            ReviewPolicyStatus.ACTIVE.value,
+        }:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+        return await connection.fetchrow(
+            """
+            UPDATE review_policies
+               SET status = 'retired', retired_at = now(), updated_at = now()
+             WHERE id = $1
+         RETURNING *
+            """,
+            policy_id,
+        )
+
+    async def _insert_superseded_policy_event(
+        self,
+        connection: asyncpg.Connection,
+        retired: Mapping[str, Any],
+        *,
+        target: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> None:
+        payload = {
+            **dict(event),
+            "action": ReviewPolicyEventAction.RETIRE.value,
+            "base_version": str(retired["version"]),
+            "diff": {
+                "redacted": True,
+                "superseded_by_policy_sha256": str(target["policy_sha256"]),
+            },
+            "idempotency_key": (f"{event['idempotency_key']}:retire:{str(retired['id'])}"),
+        }
+        await self._insert_review_policy_event(connection, str(retired["id"]), payload)
+
+    async def _insert_review_policy_event(
+        self,
+        connection: asyncpg.Connection,
+        policy_id: str,
+        payload: Mapping[str, Any],
+    ) -> asyncpg.Record:
+        existing = await connection.fetchrow(
+            """
+            SELECT * FROM review_policy_events
+             WHERE idempotency_key = $1
+             FOR UPDATE
+            """,
+            payload["idempotency_key"],
+        )
+        if existing:
+            self._validate_review_policy_event_identity(
+                existing,
+                policy_id,
+                str(payload["action"]),
+            )
+            return existing
+        return await connection.fetchrow(
+            """
+            INSERT INTO review_policy_events (
+                id, policy_id, action, actor_user_id, actor_nickname,
+                reason, request_id, base_version, diff, idempotency_key
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+            RETURNING *
+            """,
+            payload.get("id") or new_domain_id("policy_event"),
+            policy_id,
+            payload["action"],
+            payload.get("actor_user_id"),
+            payload.get("actor_nickname", ""),
+            payload.get("reason", ""),
+            payload["request_id"],
+            payload.get("base_version", ""),
+            dict(payload.get("diff") or {}),
+            payload["idempotency_key"],
+        )
+
+    @staticmethod
+    def _validate_review_policy_event_identity(
+        event: Mapping[str, Any],
+        policy_id: str,
+        action: str,
+    ) -> None:
+        if str(event["policy_id"]) != policy_id or str(event["action"]) != action:
+            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+
+    @staticmethod
+    def _validate_review_policy_sha(
+        policy: Mapping[str, Any],
+        expected_policy_sha256: str,
+    ) -> None:
+        if str(policy["policy_sha256"]) != expected_policy_sha256:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_VERSION_CONFLICT.value)
 
     async def bind_artifact_policy(
         self,
@@ -156,6 +433,175 @@ class PgAdvancedReviewRepositoryMixin:
                 if not current:
                     return None
                 raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_SNAPSHOT_CONFLICT.value)
+
+    async def snapshot_active_review_policy(
+        self,
+        artifact_id: str,
+    ) -> dict[str, Any] | None:
+        pool = self._advanced_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                artifact = await connection.fetchrow(
+                    "SELECT * FROM plugin_artifacts WHERE id = $1 FOR UPDATE",
+                    artifact_id,
+                )
+                if not artifact:
+                    return None
+                if artifact["policy_version_id"] is not None:
+                    return _record(artifact)
+                if str(artifact["review_status"]) not in {
+                    ReviewStatus.QUARANTINED.value,
+                    ReviewStatus.PRECHECKING.value,
+                    ReviewStatus.PROCESSING_FAILED.value,
+                }:
+                    raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_SNAPSHOT_CONFLICT.value)
+
+                await connection.fetch(
+                    """
+                    SELECT id FROM review_policies
+                     WHERE is_default
+                  ORDER BY id
+                     FOR SHARE
+                    """
+                )
+                policy = await connection.fetchrow(
+                    """
+                    SELECT * FROM review_policies
+                     WHERE status = 'active' AND is_default
+                    """
+                )
+                if not policy or not _policy_validation_is_current(policy):
+                    return _record(artifact)
+                artifact = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET policy_version_id = $2, updated_at = now()
+                     WHERE id = $1
+                       AND policy_version_id IS NULL
+                 RETURNING *
+                    """,
+                    artifact_id,
+                    policy["id"],
+                )
+        return _record(artifact)
+
+    async def migrate_artifact_policy(
+        self,
+        artifact_id: str,
+        target_policy_id: str,
+        *,
+        actor: Mapping[str, Any],
+        reason: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        pool = self._advanced_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                existing = await connection.fetchrow(
+                    "SELECT * FROM review_decisions WHERE idempotency_key = $1 FOR UPDATE",
+                    idempotency_key,
+                )
+                if existing:
+                    if (
+                        str(existing["artifact_id"]) != artifact_id
+                        or str(existing["action"]) != DecisionAction.POLICY_MIGRATE.value
+                        or str(existing["policy_version_id"] or "") != target_policy_id
+                    ):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    artifact = await connection.fetchrow(
+                        "SELECT * FROM plugin_artifacts WHERE id = $1",
+                        artifact_id,
+                    )
+                    return _record(artifact) if artifact else None
+
+                artifact = await connection.fetchrow(
+                    "SELECT * FROM plugin_artifacts WHERE id = $1 FOR UPDATE",
+                    artifact_id,
+                )
+                if not artifact:
+                    return None
+                if ReviewStatus(str(artifact["review_status"])) in TERMINAL_REVIEW_STATUSES:
+                    raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_MIGRATION_FORBIDDEN.value)
+
+                await connection.fetch(
+                    """
+                    SELECT id FROM review_policies
+                     WHERE is_default
+                  ORDER BY id
+                     FOR SHARE
+                    """
+                )
+                target = await connection.fetchrow(
+                    "SELECT * FROM review_policies WHERE id = $1",
+                    target_policy_id,
+                )
+                if (
+                    not target
+                    or str(target["status"])
+                    not in {ReviewPolicyStatus.ACTIVE.value, ReviewPolicyStatus.RETIRED.value}
+                    or not _policy_validation_is_current(target)
+                ):
+                    raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+
+                previous_policy_id = str(artifact["policy_version_id"] or "")
+                if previous_policy_id == target_policy_id:
+                    raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_SNAPSHOT_CONFLICT.value)
+                previous = (
+                    await connection.fetchrow(
+                        "SELECT * FROM review_policies WHERE id = $1",
+                        previous_policy_id,
+                    )
+                    if previous_policy_id
+                    else None
+                )
+                migration = {
+                    "from_policy_version_id": previous_policy_id or None,
+                    "from_policy_sha256": str(previous["policy_sha256"]) if previous else "",
+                    "to_policy_version_id": target_policy_id,
+                    "to_policy_sha256": str(target["policy_sha256"]),
+                    "invalidates_automated_review": True,
+                    "request_id": request_id,
+                }
+                await connection.execute(
+                    """
+                    INSERT INTO review_decisions (
+                        id, artifact_id, action, from_status, to_status, reason,
+                        reviewer_user_id, reviewer_nickname, policy_version,
+                        idempotency_key, source, policy_version_id, metadata
+                    )
+                    VALUES (
+                        $1, $2, 'policy_migrate', $3, $3, $4, $5, $6,
+                        $7, $8, 'admin', $9, $10::jsonb
+                    )
+                    """,
+                    new_domain_id("decision"),
+                    artifact_id,
+                    artifact["review_status"],
+                    reason,
+                    actor.get("id"),
+                    _actor_name(actor),
+                    target["version"],
+                    idempotency_key,
+                    target_policy_id,
+                    {"policy_migration": migration},
+                )
+                artifact = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET policy_version_id = $2,
+                           review_coverage = review_coverage
+                               || jsonb_build_object('policy_migration', $3::jsonb),
+                           automated_review_completed_at = NULL,
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                    target_policy_id,
+                    migration,
+                )
+        return _record(artifact)
 
     async def update_artifact_review_coverage(
         self,
@@ -939,42 +1385,76 @@ class PgAdvancedReviewRepositoryMixin:
 
 
 class InMemoryAdvancedReviewRepositoryMixin:
-    async def create_review_policy(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    async def create_review_policy(
+        self,
+        payload: Mapping[str, Any],
+        event: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         async with self._lock:
-            for policy in self.policies.values():
-                if policy["version"] == payload["version"]:
-                    if policy["policy_sha256"] != payload["policy_sha256"]:
-                        raise ValueError(ArtifactErrorCode.REVIEW_POLICY_VERSION_CONFLICT.value)
-                    return deepcopy(policy)
-            base_policy_id = payload.get("base_policy_id")
-            if base_policy_id and str(base_policy_id) not in self.policies:
-                raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
-            if payload.get("status", "draft") == "active" and payload.get("is_default", True):
-                if any(
-                    policy["status"] == "active" and policy["is_default"]
-                    for policy in self.policies.values()
+            repeated_event = None
+            if event:
+                repeated_event = next(
+                    (
+                        item
+                        for item in self.policy_events.values()
+                        if item["idempotency_key"] == event["idempotency_key"]
+                    ),
+                    None,
+                )
+            policy = next(
+                (item for item in self.policies.values() if item["version"] == payload["version"]),
+                None,
+            )
+            if repeated_event and (
+                not policy
+                or repeated_event["policy_id"] != policy["id"]
+                or repeated_event["action"] != str(event["action"])
+            ):
+                raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+            if policy:
+                if (
+                    policy["policy_sha256"] != payload["policy_sha256"]
+                    or policy["schema_version"] != str(payload["schema_version"])
+                    or str(policy.get("base_policy_id") or "")
+                    != str(payload.get("base_policy_id") or "")
+                ):
+                    raise ValueError(ArtifactErrorCode.REVIEW_POLICY_VERSION_CONFLICT.value)
+            else:
+                base_policy_id = payload.get("base_policy_id")
+                if base_policy_id and str(base_policy_id) not in self.policies:
+                    raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                if (
+                    payload.get("status", ReviewPolicyStatus.DRAFT.value)
+                    == ReviewPolicyStatus.ACTIVE.value
+                    and payload.get("is_default", True)
+                    and any(
+                        item["status"] == ReviewPolicyStatus.ACTIVE.value and item["is_default"]
+                        for item in self.policies.values()
+                    )
                 ):
                     raise ValueError(ArtifactErrorCode.REVIEW_POLICY_ACTIVATION_CONFLICT.value)
-            now = _utc_now()
-            policy = {
-                "id": str(payload.get("id") or new_domain_id("policy")),
-                "version": str(payload["version"]),
-                "schema_version": str(payload["schema_version"]),
-                "status": str(payload.get("status") or "draft"),
-                "is_default": bool(payload.get("is_default", True)),
-                "policy": dict(payload.get("policy") or {}),
-                "policy_sha256": str(payload["policy_sha256"]),
-                "base_policy_id": base_policy_id,
-                "created_by_user_id": payload.get("created_by_user_id"),
-                "created_by_nickname": str(payload.get("created_by_nickname") or ""),
-                "validation_summary": dict(payload.get("validation_summary") or {}),
-                "validated_at": payload.get("validated_at"),
-                "activated_at": payload.get("activated_at"),
-                "retired_at": payload.get("retired_at"),
-                "created_at": now,
-                "updated_at": now,
-            }
-            self.policies[policy["id"]] = policy
+                now = _utc_now()
+                policy = {
+                    "id": str(payload.get("id") or new_domain_id("policy")),
+                    "version": str(payload["version"]),
+                    "schema_version": str(payload["schema_version"]),
+                    "status": str(payload.get("status") or ReviewPolicyStatus.DRAFT.value),
+                    "is_default": bool(payload.get("is_default", True)),
+                    "policy": dict(payload.get("policy") or {}),
+                    "policy_sha256": str(payload["policy_sha256"]),
+                    "base_policy_id": base_policy_id,
+                    "created_by_user_id": payload.get("created_by_user_id"),
+                    "created_by_nickname": str(payload.get("created_by_nickname") or ""),
+                    "validation_summary": dict(payload.get("validation_summary") or {}),
+                    "validated_at": payload.get("validated_at"),
+                    "activated_at": payload.get("activated_at"),
+                    "retired_at": payload.get("retired_at"),
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                self.policies[policy["id"]] = policy
+            if event:
+                self._append_review_policy_event_locked(policy["id"], event)
             return deepcopy(policy)
 
     async def get_review_policy(self, policy_id: str) -> dict[str, Any] | None:
@@ -1004,18 +1484,221 @@ class InMemoryAdvancedReviewRepositoryMixin:
         async with self._lock:
             if str(payload["policy_id"]) not in self.policies:
                 raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
-            for event in self.policy_events.values():
-                if event["idempotency_key"] == payload["idempotency_key"]:
-                    if event["policy_id"] != payload["policy_id"]:
-                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
-                    return deepcopy(event)
-            event = {
-                **dict(payload),
-                "id": str(payload.get("id") or new_domain_id("policy_event")),
-                "created_at": _utc_now(),
-            }
-            self.policy_events[event["id"]] = event
+            event = self._append_review_policy_event_locked(
+                str(payload["policy_id"]),
+                payload,
+            )
             return deepcopy(event)
+
+    async def list_review_policy_events(self, policy_id: str) -> list[dict[str, Any]]:
+        events = [event for event in self.policy_events.values() if event["policy_id"] == policy_id]
+        events.sort(key=lambda item: (item["created_at"], item["id"]))
+        return deepcopy(events)
+
+    async def transition_review_policy(
+        self,
+        policy_id: str,
+        *,
+        action: str,
+        expected_policy_sha256: str,
+        expected_active_policy_id: str | None,
+        validation_summary: Mapping[str, Any] | None,
+        event: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        normalized_action = ReviewPolicyEventAction(action)
+        if str(event.get("action") or "") != normalized_action.value:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+        async with self._lock:
+            repeated = next(
+                (
+                    item
+                    for item in self.policy_events.values()
+                    if item["idempotency_key"] == event["idempotency_key"]
+                ),
+                None,
+            )
+            if repeated:
+                self._validate_review_policy_event_identity(
+                    repeated,
+                    policy_id,
+                    normalized_action.value,
+                )
+                policy = self.policies.get(policy_id)
+                return deepcopy(policy) if policy else None
+
+            policy = self.policies.get(policy_id)
+            if not policy:
+                return None
+            self._validate_review_policy_sha(policy, expected_policy_sha256)
+            now = _utc_now()
+            if normalized_action is ReviewPolicyEventAction.VALIDATE:
+                if policy["status"] not in {
+                    ReviewPolicyStatus.DRAFT.value,
+                    ReviewPolicyStatus.RETIRED.value,
+                }:
+                    raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+                policy["validation_summary"] = dict(validation_summary or {})
+                policy["validated_at"] = now
+                policy["updated_at"] = now
+            else:
+                self._transition_review_policy_state_locked(
+                    policy,
+                    action=normalized_action,
+                    expected_active_policy_id=expected_active_policy_id,
+                    event=event,
+                    now=now,
+                )
+            self._append_review_policy_event_locked(policy_id, event)
+            return deepcopy(policy)
+
+    def _transition_review_policy_state_locked(
+        self,
+        policy: dict[str, Any],
+        *,
+        action: ReviewPolicyEventAction,
+        expected_active_policy_id: str | None,
+        event: Mapping[str, Any],
+        now: str,
+    ) -> None:
+        if action not in {
+            ReviewPolicyEventAction.ACTIVATE,
+            ReviewPolicyEventAction.RETIRE,
+            ReviewPolicyEventAction.ROLLBACK,
+        }:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+        if not policy["is_default"]:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+        active = next(
+            (
+                item
+                for item in self.policies.values()
+                if item["status"] == ReviewPolicyStatus.ACTIVE.value and item["is_default"]
+            ),
+            None,
+        )
+        active_id = str(active["id"]) if active else None
+        if active_id != expected_active_policy_id:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_ACTIVATION_CONFLICT.value)
+
+        if action in {
+            ReviewPolicyEventAction.ACTIVATE,
+            ReviewPolicyEventAction.ROLLBACK,
+        }:
+            expected_status = (
+                ReviewPolicyStatus.DRAFT
+                if action is ReviewPolicyEventAction.ACTIVATE
+                else ReviewPolicyStatus.RETIRED
+            )
+            if policy["status"] != expected_status.value or not _policy_validation_is_current(
+                policy
+            ):
+                raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+            if active and active["id"] != policy["id"]:
+                retire_key = f"{event['idempotency_key']}:retire:{active['id']}"
+                repeated_retire = next(
+                    (
+                        item
+                        for item in self.policy_events.values()
+                        if item["idempotency_key"] == retire_key
+                    ),
+                    None,
+                )
+                if repeated_retire:
+                    self._validate_review_policy_event_identity(
+                        repeated_retire,
+                        str(active["id"]),
+                        ReviewPolicyEventAction.RETIRE.value,
+                    )
+                active["status"] = ReviewPolicyStatus.RETIRED.value
+                active["retired_at"] = now
+                active["updated_at"] = now
+                self._append_superseded_policy_event_locked(active, target=policy, event=event)
+            policy["status"] = ReviewPolicyStatus.ACTIVE.value
+            policy["activated_at"] = now
+            policy["retired_at"] = None
+            policy["updated_at"] = now
+            return
+
+        if policy["status"] not in {
+            ReviewPolicyStatus.DRAFT.value,
+            ReviewPolicyStatus.ACTIVE.value,
+        }:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+        policy["status"] = ReviewPolicyStatus.RETIRED.value
+        policy["retired_at"] = now
+        policy["updated_at"] = now
+
+    def _append_superseded_policy_event_locked(
+        self,
+        retired: Mapping[str, Any],
+        *,
+        target: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> None:
+        payload = {
+            **dict(event),
+            "action": ReviewPolicyEventAction.RETIRE.value,
+            "base_version": str(retired["version"]),
+            "diff": {
+                "redacted": True,
+                "superseded_by_policy_sha256": str(target["policy_sha256"]),
+            },
+            "idempotency_key": f"{event['idempotency_key']}:retire:{retired['id']}",
+        }
+        self._append_review_policy_event_locked(str(retired["id"]), payload)
+
+    def _append_review_policy_event_locked(
+        self,
+        policy_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        existing = next(
+            (
+                event
+                for event in self.policy_events.values()
+                if event["idempotency_key"] == payload["idempotency_key"]
+            ),
+            None,
+        )
+        if existing:
+            self._validate_review_policy_event_identity(
+                existing,
+                policy_id,
+                str(payload["action"]),
+            )
+            return existing
+        event = {
+            "id": str(payload.get("id") or new_domain_id("policy_event")),
+            "policy_id": policy_id,
+            "action": str(payload["action"]),
+            "actor_user_id": payload.get("actor_user_id"),
+            "actor_nickname": str(payload.get("actor_nickname") or ""),
+            "reason": str(payload.get("reason") or ""),
+            "request_id": str(payload["request_id"]),
+            "base_version": str(payload.get("base_version") or ""),
+            "diff": deepcopy(dict(payload.get("diff") or {})),
+            "idempotency_key": str(payload["idempotency_key"]),
+            "created_at": _utc_now(),
+        }
+        self.policy_events[event["id"]] = event
+        return event
+
+    @staticmethod
+    def _validate_review_policy_event_identity(
+        event: Mapping[str, Any],
+        policy_id: str,
+        action: str,
+    ) -> None:
+        if str(event["policy_id"]) != policy_id or str(event["action"]) != action:
+            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+
+    @staticmethod
+    def _validate_review_policy_sha(
+        policy: Mapping[str, Any],
+        expected_policy_sha256: str,
+    ) -> None:
+        if str(policy["policy_sha256"]) != expected_policy_sha256:
+            raise ValueError(ArtifactErrorCode.REVIEW_POLICY_VERSION_CONFLICT.value)
 
     async def bind_artifact_policy(
         self,
@@ -1032,6 +1715,119 @@ class InMemoryAdvancedReviewRepositoryMixin:
             if current not in {None, policy_id}:
                 raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_SNAPSHOT_CONFLICT.value)
             artifact["policy_version_id"] = policy_id
+            artifact["updated_at"] = _utc_now()
+            return deepcopy(artifact)
+
+    async def snapshot_active_review_policy(
+        self,
+        artifact_id: str,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            artifact = self.artifacts.get(artifact_id)
+            if not artifact:
+                return None
+            if artifact.get("policy_version_id") is not None:
+                return deepcopy(artifact)
+            if artifact["review_status"] not in {
+                ReviewStatus.QUARANTINED.value,
+                ReviewStatus.PRECHECKING.value,
+                ReviewStatus.PROCESSING_FAILED.value,
+            }:
+                raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_SNAPSHOT_CONFLICT.value)
+            policy = next(
+                (
+                    item
+                    for item in self.policies.values()
+                    if item["status"] == ReviewPolicyStatus.ACTIVE.value and item["is_default"]
+                ),
+                None,
+            )
+            if not policy or not _policy_validation_is_current(policy):
+                return deepcopy(artifact)
+            artifact["policy_version_id"] = policy["id"]
+            artifact["updated_at"] = _utc_now()
+            return deepcopy(artifact)
+
+    async def migrate_artifact_policy(
+        self,
+        artifact_id: str,
+        target_policy_id: str,
+        *,
+        actor: Mapping[str, Any],
+        reason: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            existing = next(
+                (
+                    decision
+                    for decision in self.decisions.values()
+                    if decision["idempotency_key"] == idempotency_key
+                ),
+                None,
+            )
+            if existing:
+                if (
+                    existing["artifact_id"] != artifact_id
+                    or existing["action"] != DecisionAction.POLICY_MIGRATE.value
+                    or str(existing.get("policy_version_id") or "") != target_policy_id
+                ):
+                    raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                artifact = self.artifacts.get(artifact_id)
+                return deepcopy(artifact) if artifact else None
+
+            artifact = self.artifacts.get(artifact_id)
+            if not artifact:
+                return None
+            if ReviewStatus(artifact["review_status"]) in TERMINAL_REVIEW_STATUSES:
+                raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_MIGRATION_FORBIDDEN.value)
+            target = self.policies.get(target_policy_id)
+            if (
+                not target
+                or target["status"]
+                not in {ReviewPolicyStatus.ACTIVE.value, ReviewPolicyStatus.RETIRED.value}
+                or not _policy_validation_is_current(target)
+            ):
+                raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
+            previous_policy_id = str(artifact.get("policy_version_id") or "")
+            if previous_policy_id == target_policy_id:
+                raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_SNAPSHOT_CONFLICT.value)
+            previous = self.policies.get(previous_policy_id)
+            migration = {
+                "from_policy_version_id": previous_policy_id or None,
+                "from_policy_sha256": str(previous["policy_sha256"]) if previous else "",
+                "to_policy_version_id": target_policy_id,
+                "to_policy_sha256": str(target["policy_sha256"]),
+                "invalidates_automated_review": True,
+                "request_id": request_id,
+            }
+            decision = {
+                "id": new_domain_id("decision"),
+                "artifact_id": artifact_id,
+                "action": DecisionAction.POLICY_MIGRATE.value,
+                "from_status": artifact["review_status"],
+                "to_status": artifact["review_status"],
+                "reason": reason,
+                "reviewer_user_id": actor.get("id"),
+                "reviewer_nickname": _actor_name(actor),
+                "policy_version": target["version"],
+                "policy_version_id": target_policy_id,
+                "source": "admin",
+                "input_run_ids": [],
+                "input_fingerprints": [],
+                "coverage_sha256": "",
+                "metadata": {"policy_migration": deepcopy(migration)},
+                "idempotency_key": idempotency_key,
+                "created_at": _utc_now(),
+            }
+            self.decisions[decision["id"]] = decision
+            artifact["policy_version_id"] = target_policy_id
+            artifact["review_coverage"] = {
+                **dict(artifact.get("review_coverage") or {}),
+                "policy_migration": migration,
+            }
+            artifact["automated_review_completed_at"] = None
             artifact["updated_at"] = _utc_now()
             return deepcopy(artifact)
 
@@ -1598,6 +2394,23 @@ def _finding_event_type(
     if not bool(current.get("affects_current_release")) and affects_current_release:
         return "current_release_linked"
     return "correlation_changed"
+
+
+def _policy_validation_is_current(policy: Mapping[str, Any]) -> bool:
+    summary = dict(policy["validation_summary"] or {})
+    return (
+        bool(policy["validated_at"])
+        and summary.get("valid") is True
+        and str(summary.get("policy_sha256") or "") == str(policy["policy_sha256"])
+    )
+
+
+def _actor_name(actor: Mapping[str, Any]) -> str:
+    for key in ("nickname", "github_name", "github_login", "username", "id"):
+        value = str(actor.get(key) or "").strip()
+        if value:
+            return value[:120]
+    return "core_admin"
 
 
 def _record(row: Mapping[str, Any]) -> dict[str, Any]:

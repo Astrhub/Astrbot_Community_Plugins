@@ -24,24 +24,24 @@
         - *Details*: 运行 Ruff、迁移/Repository/状态机测试、`git diff --check`；审查 SQL 和敏感信息后提交，提交信息使用现有 imperative 风格。
         - *Requirements*: 全局回归、完成定义。
 
-- [ ] 2. **版本化 Review Policy 与配置基础**
-    - [ ] 2.1. 定义 policy schema 和跨字段校验
+- [x] 2. **版本化 Review Policy 与配置基础**
+    - [x] 2.1. 定义 policy schema 和跨字段校验
         - *Goal*: 用一个不可变 policy snapshot 表达阶段、阈值、版本、资源、网络和路由规则。
         - *Details*: Pydantic/JSON Schema 覆盖 required stages、AstrBot/Python exact versions、limits、network profiles、LLM budget、malware/dependency thresholds、category 和 routing；密钥仅保存 config reference。
         - *Requirements*: FR-204、FR-208、FR-219、FR-220。
-    - [ ] 2.2. 实现 draft/validate/activate/retire/rollback
+    - [x] 2.2. 实现 draft/validate/activate/retire/rollback
         - *Goal*: 只有核心管理员能原子切换 active policy。
         - *Details*: activation 使用行锁和 partial unique index；保存 actor、reason、request ID、base version 和脱敏 diff；无效 draft 不影响 current active。
         - *Requirements*: FR-220、FR-223；P4 验收。
-    - [ ] 2.3. 在 artifact 首阶段固定 policy snapshot
+    - [x] 2.3. 在 artifact 首阶段固定 policy snapshot
         - *Goal*: active policy 后续变化不污染在途 artifact 和历史 run。
         - *Details*: precheck 开始时原子写 `policy_version_id`；stage/run/decision 引用相同 snapshot；只有核心管理员显式迁移可改变并留下 decision/event。
         - *Requirements*: FR-208、FR-220。
-    - [ ] 2.4. 增加配置与健康状态骨架
+    - [x] 2.4. 增加配置与健康状态骨架
         - *Goal*: 以 fail-visible 方式表达 runtime、LLM、malware、dependency 和 policy 是否 configured/ready/degraded。
         - *Details*: 扩展 `ArtifactSettings` 和 `/health` 摘要，不返回 endpoint、bucket、规则正文或 token；auto approve 默认关闭。
         - *Requirements*: FR-221；安全、兼容性。
-    - [ ] 2.5. 验证并提交 policy 基础
+    - [x] 2.5. 验证并提交 policy 基础
         - *Goal*: 独立交付可测试的策略控制面。
         - *Details*: 运行 schema/权限/并发 activation/health tests、Ruff 和 OpenAPI 过滤测试；差异自审后提交。
         - *Requirements*: FR-220、FR-221、FR-223。

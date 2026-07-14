@@ -48,7 +48,9 @@ def test_advanced_review_enum_contract_keeps_critical_as_risk_only() -> None:
         "llm_summary",
         "routing",
     } <= {item.value for item in ReviewRunType}
-    assert {"auto_approve", "request_changes"} <= {item.value for item in DecisionAction}
+    assert {"auto_approve", "request_changes", "policy_migrate"} <= {
+        item.value for item in DecisionAction
+    }
 
 
 @pytest.mark.parametrize(
@@ -125,6 +127,8 @@ def test_advanced_review_error_codes_are_stable() -> None:
         "comment_version_conflict",
         "review_policy_invalid",
         "review_policy_activation_conflict",
+        "review_policy_unavailable",
+        "artifact_policy_migration_forbidden",
         "malware_scan_unknown",
         "vulnerability_data_stale",
         "stable_release_correlation_required",

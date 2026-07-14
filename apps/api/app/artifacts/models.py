@@ -96,6 +96,7 @@ class DecisionAction(StrEnum):
     RETRY_PUBLISH = "retry_publish"
     REVOKE = "revoke"
     EMERGENCY_OVERRIDE = "emergency_override"
+    POLICY_MIGRATE = "policy_migrate"
 
 
 class FindingSeverity(StrEnum):
@@ -230,7 +231,9 @@ class ArtifactErrorCode(StrEnum):
     REVIEW_POLICY_INVALID = "review_policy_invalid"
     REVIEW_POLICY_VERSION_CONFLICT = "review_policy_version_conflict"
     REVIEW_POLICY_ACTIVATION_CONFLICT = "review_policy_activation_conflict"
+    REVIEW_POLICY_UNAVAILABLE = "review_policy_unavailable"
     ARTIFACT_POLICY_SNAPSHOT_CONFLICT = "artifact_policy_snapshot_conflict"
+    ARTIFACT_POLICY_MIGRATION_FORBIDDEN = "artifact_policy_migration_forbidden"
     MALWARE_SCAN_UNKNOWN = "malware_scan_unknown"
     VULNERABILITY_DATA_STALE = "vulnerability_data_stale"
     STABLE_RELEASE_CORRELATION_REQUIRED = "stable_release_correlation_required"

@@ -331,7 +331,7 @@ def register_routes(app: FastAPI) -> None:
             "setup": "required" if settings.is_setup_required() else "complete",
             "database": "configured" if settings.database_url else "missing",
             "redis": "configured" if settings.redis_url else "missing",
-            "artifacts": request.app.state.artifact_runtime.public_status(),
+            "artifacts": await request.app.state.artifact_runtime.health_status(),
         }
 
     @app.get(

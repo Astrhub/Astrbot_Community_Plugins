@@ -11,6 +11,7 @@ import pytest
 from app.artifacts.archive import ArchivePrechecker, PrecheckError
 from app.artifacts.github_source import GithubSourceClient
 from app.artifacts.jobs import ArtifactJobRunner
+from app.artifacts.policy_service import ReviewPolicyService
 from app.artifacts.repository import InMemoryArtifactRepository
 from app.artifacts.service import ArtifactService
 from app.artifacts.static_scan import StaticScanner
@@ -46,6 +47,25 @@ def plugin_zip(
         for path, content in (extra_files or {}).items():
             archive.writestr(f"{prefix}{path}", content)
     return output.getvalue()
+
+
+def advanced_policy_payload(astrbot_version: str) -> dict:
+    return {
+        "schema_version": "1",
+        "required_stages": ["static"],
+        "runtime_targets": [],
+        "limits": {
+            "cpu": 1,
+            "memory_mb": 768,
+            "pids": 128,
+            "timeout_seconds": 120,
+        },
+        "network_profiles": {"install": "pypi-only-v1", "smoke": "none"},
+        "llm": {"enabled": False},
+        "malware": {"clamav": False},
+        "dependency": {"enabled": False},
+        "routing": {"auto_approve": False, "manual_review_at": "low"},
+    }
 
 
 async def byte_stream(payload: bytes):
@@ -468,6 +488,105 @@ def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: P
     assert changed_feed["version"] == "v1.1.0"
     assert changed_feed["repo"] == "https://github.com/alice/astrbot_plugin_demo"
     assert changed_feed["download_url"] == ""
+
+
+def test_advanced_precheck_fixes_policy_before_active_policy_changes(tmp_path: Path) -> None:
+    async def scenario() -> tuple[dict, dict, list[dict], dict]:
+        settings = load_settings(
+            {
+                "ARTIFACTS_ENABLED": "true",
+                "ARTIFACT_LOCAL_ROOT": str(tmp_path / "policy-storage"),
+                "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+                "DATABASE_URL": "postgresql://example.invalid/market",
+            }
+        )
+        store = InMemoryMarketStore()
+        owner = store.upsert_github_user({"id": "100", "login": "alice", "name": "Alice"})
+        plugin = store.register_plugin(
+            owner,
+            {
+                "name": "astrbot_plugin_demo",
+                "display_name": "Demo",
+                "desc": "Demo plugin",
+                "author": "Alice",
+                "repo": "https://github.com/alice/astrbot_plugin_demo",
+                "tags": [],
+                "category": "other",
+            },
+        )
+        repository = InMemoryArtifactRepository(store)
+        storage = LocalArtifactStorage(
+            settings.artifacts.local_root,
+            settings.artifacts.cdn_base_url,
+        )
+        artifact_service = ArtifactService(
+            repository=repository,
+            storage=storage,
+            github=GithubSourceClient(),
+            max_upload_bytes=settings.artifacts.max_upload_bytes,
+        )
+        policy_service = ReviewPolicyService(repository)
+        actor = {"id": "core", "role": "core_admin", "username": "core"}
+
+        async def activate_policy(version: str, astrbot_version: str, index: int) -> dict:
+            draft = await policy_service.create_draft(
+                version=version,
+                policy=advanced_policy_payload(astrbot_version),
+                actor=actor,
+                request_id=f"pipeline-policy-create-{index}",
+                idempotency_key=f"pipeline-policy-create-{index}",
+            )
+            return await policy_service.activate(
+                draft["id"],
+                actor=actor,
+                request_id=f"pipeline-policy-activate-{index}",
+                idempotency_key=f"pipeline-policy-activate-{index}",
+                reason=f"Activate pipeline policy {index}",
+            )
+
+        await activate_policy("pipeline-policy-1", "4.26.5", 1)
+        runner = ArtifactJobRunner(
+            repository=repository,
+            storage=storage,
+            prechecker=ArchivePrechecker(settings.artifacts),
+            scanner=StaticScanner(),
+            worker_id="policy-worker",
+            lease_seconds=60,
+            poll_seconds=1,
+            advanced_review_enabled=True,
+        )
+        try:
+            submitted = await artifact_service.submit_upload(
+                plugin=plugin,
+                user=owner,
+                stream=byte_stream(plugin_zip()),
+            )
+            assert await runner.run_once() == 1
+            after_precheck = await repository.get_artifact(submitted["id"])
+            assert after_precheck
+            static_job = next(
+                job for job in repository.jobs.values() if job["type"] == "static_scan"
+            )
+
+            second_policy = await activate_policy("pipeline-policy-2", "4.27.0", 2)
+            assert await runner.run_once() == 1
+            pending = await repository.get_artifact(submitted["id"])
+            assert pending
+            return (
+                pending,
+                static_job,
+                await repository.list_review_runs(submitted["id"]),
+                second_policy,
+            )
+        finally:
+            await artifact_service.close()
+
+    artifact, static_job, runs, active_policy = asyncio.run(scenario())
+
+    assert artifact["review_status"] == "pending_review"
+    assert artifact["policy_version_id"] == static_job["policy_version_id"]
+    assert {run["policy_version_id"] for run in runs} == {artifact["policy_version_id"]}
+    assert artifact["policy_version_id"] != active_policy["id"]
 
 
 def test_terminal_precheck_failure_closes_run_and_marks_processing_failed(tmp_path: Path) -> None:

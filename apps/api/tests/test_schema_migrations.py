@@ -104,6 +104,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
     assert [item.version for item in migrations] == [
         "20260710_001_artifact_foundation",
         "20260710_002_artifact_advanced_review",
+        "20260715_003_review_policy_snapshot",
     ]
     sql = migrations[0].sql
     for table in (
@@ -163,6 +164,14 @@ def test_artifact_advanced_review_migration_declares_required_schema() -> None:
     assert "enforce_runtime_dispatch_run_artifact" in sql
 
 
+def test_review_policy_snapshot_migration_adds_explicit_migration_audit_action() -> None:
+    sql = discover_schema_migrations()[2].sql
+
+    assert "'policy_migrate'" in sql
+    assert "review_decisions_policy_migrate_reason_check" in sql
+    assert "review_decisions_policy_migration_idx" in sql
+
+
 def test_artifact_migrations_against_postgres() -> None:
     database_url = os.getenv("ASTRBOT_TEST_DATABASE_URL", "")
     if not database_url:
@@ -185,6 +194,7 @@ async def run_artifact_migrations(database_url: str) -> None:
         assert first == [
             "20260710_001_artifact_foundation",
             "20260710_002_artifact_advanced_review",
+            "20260715_003_review_policy_snapshot",
         ]
         assert second == []
         table_names = await connection.fetch(

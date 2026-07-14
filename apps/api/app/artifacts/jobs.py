@@ -51,6 +51,7 @@ class ArtifactJobRunner:
         lease_seconds: int,
         poll_seconds: int,
         notification_dispatcher: ArtifactNotificationDispatcher | None = None,
+        advanced_review_enabled: bool = False,
     ) -> None:
         self.repository = repository
         self.storage = storage
@@ -60,6 +61,7 @@ class ArtifactJobRunner:
         self.lease_seconds = lease_seconds
         self.poll_seconds = poll_seconds
         self.notification_dispatcher = notification_dispatcher
+        self.advanced_review_enabled = advanced_review_enabled
         self._stopping = asyncio.Event()
         self._handlers: dict[str, Callable[[Mapping[str, Any]], Awaitable[None]]] = {
             JobType.PRECHECK.value: self._run_precheck,
@@ -218,9 +220,25 @@ class ArtifactJobRunner:
 
     async def _run_precheck(self, job: Mapping[str, Any]) -> None:
         artifact = await self._artifact_for_job(job)
-        await self.repository.transition_review_status(
+        transitioned = await self.repository.transition_review_status(
             artifact["id"], ReviewStatus.PRECHECKING.value
         )
+        if not transitioned:
+            raise JobExecutionError(
+                "artifact_state_changed",
+                "Artifact left precheck state",
+                retryable=False,
+            )
+        artifact = transitioned
+        if self.advanced_review_enabled:
+            snapshot = await self.repository.snapshot_active_review_policy(str(artifact["id"]))
+            if not snapshot or not snapshot.get("policy_version_id"):
+                raise JobExecutionError(
+                    "review_policy_unavailable",
+                    "No validated active review policy is available",
+                    retryable=False,
+                )
+            artifact = snapshot
         run = await self.repository.create_review_run(
             {
                 "artifact_id": artifact["id"],
@@ -228,6 +246,7 @@ class ArtifactJobRunner:
                 "status": "running",
                 "attempt": int(job.get("attempts") or 1),
                 "ruleset_version": "p1.1",
+                "policy_version_id": artifact.get("policy_version_id"),
             }
         )
         with tempfile.TemporaryDirectory(prefix="artifact-precheck-") as directory:
@@ -267,6 +286,7 @@ class ArtifactJobRunner:
                     reason=str(exc),
                     reviewer=None,
                     idempotency_key=f"precheck-reject:{artifact['id']}",
+                    policy_version_id=artifact.get("policy_version_id"),
                     risk_level=risk,
                     rejection_code=exc.code,
                 )
@@ -343,6 +363,7 @@ class ArtifactJobRunner:
                 "type": JobType.STATIC_SCAN.value,
                 "max_attempts": 3,
                 "idempotency_key": f"static:{artifact['id']}",
+                "policy_version_id": artifact.get("policy_version_id"),
             }
         )
 
@@ -354,6 +375,18 @@ class ArtifactJobRunner:
                 "Artifact is not ready for static scan",
                 retryable=False,
             )
+        if self.advanced_review_enabled and not artifact.get("policy_version_id"):
+            raise JobExecutionError(
+                "review_policy_unavailable",
+                "Artifact has no fixed review policy snapshot",
+                retryable=False,
+            )
+        if job.get("policy_version_id") != artifact.get("policy_version_id"):
+            raise JobExecutionError(
+                "artifact_policy_snapshot_conflict",
+                "Static job policy does not match the artifact snapshot",
+                retryable=False,
+            )
         run = await self.repository.create_review_run(
             {
                 "artifact_id": artifact["id"],
@@ -361,6 +394,7 @@ class ArtifactJobRunner:
                 "status": "running",
                 "attempt": int(job.get("attempts") or 1),
                 "ruleset_version": RULESET_VERSION,
+                "policy_version_id": artifact.get("policy_version_id"),
             }
         )
         files = await self.repository.list_artifact_files(str(artifact["id"]))
@@ -391,6 +425,7 @@ class ArtifactJobRunner:
                 reason="静态扫描发现 critical 风险",
                 reviewer=None,
                 idempotency_key=f"static-critical-reject:{artifact['id']}",
+                policy_version_id=artifact.get("policy_version_id"),
                 risk_level=risk_level,
                 rejection_code="critical_static_finding",
             )
