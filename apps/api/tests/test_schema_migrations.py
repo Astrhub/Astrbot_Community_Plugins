@@ -101,7 +101,10 @@ def test_schema_migrations_reject_duplicate_versions() -> None:
 def test_artifact_foundation_migration_declares_required_schema() -> None:
     migrations = discover_schema_migrations()
 
-    assert [item.version for item in migrations] == ["20260710_001_artifact_foundation"]
+    assert [item.version for item in migrations] == [
+        "20260710_001_artifact_foundation",
+        "20260710_002_artifact_advanced_review",
+    ]
     sql = migrations[0].sql
     for table in (
         "plugin_artifacts",
@@ -119,15 +122,56 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
     assert "market_plugins_current_artifact_fk" in sql
 
 
-def test_artifact_foundation_migration_against_postgres() -> None:
+def test_artifact_advanced_review_migration_declares_required_schema() -> None:
+    migrations = discover_schema_migrations()
+
+    sql = migrations[1].sql
+    for table in (
+        "artifact_file_diffs",
+        "artifact_dependency_edges",
+        "runtime_dispatches",
+        "review_finding_events",
+        "review_comments",
+        "review_comment_events",
+        "review_policies",
+        "review_policy_events",
+        "artifact_sboms",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    for column in ("suggested_category", "category_confidence", "category_reason"):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in sql
+    for column in (
+        "policy_version_id",
+        "supersedes_artifact_id",
+        "review_coverage",
+        "automated_review_completed_at",
+    ):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in sql
+    for index in (
+        "review_policies_active_default_idx",
+        "artifact_file_diffs_identity_idx",
+        "artifact_dependency_edges_identity_idx",
+        "runtime_dispatches_active_run_idx",
+        "review_runs_idempotency_idx",
+    ):
+        assert index in sql
+    assert "'changes_requested'" in sql
+    assert "'auto_approve'" in sql
+    assert "'request_changes'" in sql
+    assert "'runtime_dispatch'" in sql
+    assert "enforce_plugin_artifact_lineage_same_plugin" in sql
+    assert "enforce_runtime_dispatch_run_artifact" in sql
+
+
+def test_artifact_migrations_against_postgres() -> None:
     database_url = os.getenv("ASTRBOT_TEST_DATABASE_URL", "")
     if not database_url:
         pytest.skip("Set ASTRBOT_TEST_DATABASE_URL to run migration integration test")
 
-    asyncio.run(run_artifact_foundation_migration(database_url))
+    asyncio.run(run_artifact_migrations(database_url))
 
 
-async def run_artifact_foundation_migration(database_url: str) -> None:
+async def run_artifact_migrations(database_url: str) -> None:
     connection = await asyncpg.connect(database_url)
     transaction = connection.transaction()
     await transaction.start()
@@ -138,7 +182,10 @@ async def run_artifact_foundation_migration(database_url: str) -> None:
         first = await apply_schema_migrations(connection)
         second = await apply_schema_migrations(connection)
 
-        assert first == ["20260710_001_artifact_foundation"]
+        assert first == [
+            "20260710_001_artifact_foundation",
+            "20260710_002_artifact_advanced_review",
+        ]
         assert second == []
         table_names = await connection.fetch(
             """
@@ -157,6 +204,15 @@ async def run_artifact_foundation_migration(database_url: str) -> None:
             "review_decisions",
             "artifact_jobs",
             "outbox_events",
+            "artifact_file_diffs",
+            "artifact_dependency_edges",
+            "runtime_dispatches",
+            "review_finding_events",
+            "review_comments",
+            "review_comment_events",
+            "review_policies",
+            "review_policy_events",
+            "artifact_sboms",
             "market_schema_migrations",
         } <= tables
         plugin_columns = await connection.fetch(
@@ -168,7 +224,62 @@ async def run_artifact_foundation_migration(database_url: str) -> None:
             """
         )
         columns = {str(row["column_name"]) for row in plugin_columns}
-        assert {"repo_version", "current_artifact_id", "category", "category_source"} <= columns
+        assert {
+            "repo_version",
+            "current_artifact_id",
+            "category",
+            "category_source",
+            "suggested_category",
+            "category_confidence",
+            "category_reason",
+        } <= columns
+
+        artifact_columns = await connection.fetch(
+            """
+            SELECT column_name
+              FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'plugin_artifacts'
+            """
+        )
+        assert {
+            "policy_version_id",
+            "supersedes_artifact_id",
+            "review_coverage",
+            "automated_review_completed_at",
+        } <= {str(row["column_name"]) for row in artifact_columns}
+
+        run_columns = await connection.fetch(
+            """
+            SELECT column_name
+              FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'review_runs'
+            """
+        )
+        assert {
+            "tool_name",
+            "tool_version",
+            "policy_version_id",
+            "input_sha256",
+            "output_sha256",
+            "coverage",
+            "queued_at",
+        } <= {str(row["column_name"]) for row in run_columns}
+
+        index_rows = await connection.fetch(
+            """
+            SELECT indexname
+              FROM pg_indexes
+             WHERE schemaname = current_schema()
+            """
+        )
+        indexes = {str(row["indexname"]) for row in index_rows}
+        assert {
+            "review_policies_active_default_idx",
+            "artifact_file_diffs_identity_idx",
+            "runtime_dispatches_active_run_idx",
+        } <= indexes
     finally:
         await transaction.rollback()
         await connection.close()

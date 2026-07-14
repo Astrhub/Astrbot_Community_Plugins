@@ -2,24 +2,24 @@
 
 ## Implementation Tasks
 
-- [ ] 1. **高级审查数据模型与状态机**
-    - [ ] 1.1. 创建 advanced review 版本化迁移
+- [x] 1. **高级审查数据模型与状态机**
+    - [x] 1.1. 创建 advanced review 版本化迁移
         - *Goal*: 为 P2-P4 建立向前兼容、可审计的数据基础。
         - *Details*: 新增 `20260710_002_artifact_advanced_review.sql`；扩展 artifact/files/runs/findings/jobs/decisions；创建 diff、dependency edges、runtime dispatch、comments/events、policies/events、SBOM 表；为 FK、check、partial unique index 和查询路径建立约束。
         - *Requirements*: FR-202、FR-209、FR-212、FR-213、FR-214、FR-220、FR-223；数据需求、可靠性。
-    - [ ] 1.2. 扩展领域枚举和转换
+    - [x] 1.2. 扩展领域枚举和转换
         - *Goal*: 让新增状态和动作具有单一服务端来源。
         - *Details*: 新增 `changes_requested`、`auto_approve`、`request_changes` 和高级 job types；保持旧 P0/P1 值有效；`critical` 继续只作为 risk level；更新 review/publication transitions 和稳定错误码。
         - *Requirements*: FR-208、FR-213、FR-215；兼容性。
-    - [ ] 1.3. 扩展 Repository Protocol 与 PG/内存实现
+    - [x] 1.3. 扩展 Repository Protocol 与 PG/内存实现
         - *Goal*: 以事务接口覆盖新表和并发动作。
         - *Details*: 增加 policy snapshot、stage run、runtime dispatch、diff/graph、comments/events、history source、finding status/correlation 和 SBOM 操作；批量查询避免 N+1；内存实现与生产语义一致但不替代 PG 约束。
         - *Requirements*: FR-202、FR-209 至 FR-215、FR-220、FR-223。
-    - [ ] 1.4. 增加迁移、约束和状态机测试
+    - [x] 1.4. 增加迁移、约束和状态机测试
         - *Goal*: 证明 P1 数据升级、重复迁移、并发唯一性和非法转换安全。
         - *Details*: 覆盖空库、P1 schema、checksum、FK 删除策略、active policy 唯一、dispatch lease、comment version、decision 幂等和旧状态兼容。
         - *Requirements*: 全局回归、可靠性、可维护性。
-    - [ ] 1.5. 验证并提交数据基础
+    - [x] 1.5. 验证并提交数据基础
         - *Goal*: 形成第一个可回滚的高级审查提交。
         - *Details*: 运行 Ruff、迁移/Repository/状态机测试、`git diff --check`；审查 SQL 和敏感信息后提交，提交信息使用现有 imperative 风格。
         - *Requirements*: 全局回归、完成定义。

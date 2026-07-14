@@ -9,12 +9,19 @@ from typing import Any, Protocol
 
 import asyncpg
 
+from .advanced_repository import (
+    InMemoryAdvancedReviewRepositoryMixin,
+    PgAdvancedReviewRepositoryMixin,
+)
 from .models import (
+    ArtifactErrorCode,
     ArtifactStateError,
     JobStatus,
     PublicationStatus,
     ReviewStatus,
+    TERMINAL_REVIEW_STATUSES,
     new_domain_id,
+    review_target_for_decision,
     validate_publication_transition,
     validate_review_transition,
 )
@@ -56,6 +63,90 @@ class ArtifactRepository(Protocol):
     ) -> dict[str, Any] | None: ...
 
     async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def create_review_policy(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def get_review_policy(self, policy_id: str) -> dict[str, Any] | None: ...
+
+    async def get_active_review_policy(self) -> dict[str, Any] | None: ...
+
+    async def list_review_policies(self, limit: int, offset: int) -> list[dict[str, Any]]: ...
+
+    async def append_review_policy_event(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def bind_artifact_policy(
+        self, artifact_id: str, policy_id: str
+    ) -> dict[str, Any] | None: ...
+
+    async def update_artifact_review_coverage(
+        self,
+        artifact_id: str,
+        coverage: Mapping[str, Any],
+        *,
+        automated_review_completed: bool = False,
+    ) -> dict[str, Any] | None: ...
+
+    async def replace_artifact_diffs(
+        self,
+        artifact_id: str,
+        base_artifact_id: str | None,
+        *,
+        current_tree_sha256: str,
+        base_tree_sha256: str | None,
+        diffs: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_artifact_diffs(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def replace_dependency_edges(
+        self,
+        artifact_id: str,
+        *,
+        tree_sha256: str,
+        edges: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]: ...
+
+    async def list_dependency_edges(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def create_runtime_dispatch(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def get_runtime_dispatch(self, dispatch_id: str) -> dict[str, Any] | None: ...
+
+    async def claim_runtime_dispatches(
+        self, runner_id: str, limit: int, lease_seconds: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def renew_runtime_dispatch_lease(
+        self, dispatch_id: str, runner_id: str, lease_seconds: int
+    ) -> bool: ...
+
+    async def complete_runtime_dispatch(
+        self, dispatch_id: str, runner_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    async def collect_runtime_dispatch(self, dispatch_id: str) -> dict[str, Any] | None: ...
+
+    async def create_review_comment(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def append_review_comment_event(
+        self, thread_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    async def list_review_comments(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def lock_review_comments(self, artifact_id: str) -> int: ...
+
+    async def update_finding_state(
+        self, finding_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    async def list_finding_events(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def create_artifact_sbom(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    async def list_artifact_sboms(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def get_review_history_sources(self, artifact_id: str) -> dict[str, Any]: ...
 
     async def create_review_run(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
 
@@ -124,6 +215,12 @@ class ArtifactRepository(Protocol):
         reviewer: Mapping[str, Any] | None,
         idempotency_key: str,
         policy_version: str = "p1",
+        policy_version_id: str | None = None,
+        source: str | None = None,
+        input_run_ids: Sequence[str] = (),
+        input_fingerprints: Sequence[str] = (),
+        coverage_sha256: str = "",
+        metadata: Mapping[str, Any] | None = None,
         risk_level: str | None = None,
         rejection_code: str | None = None,
     ) -> dict[str, Any] | None: ...
@@ -176,6 +273,12 @@ class ArtifactRepository(Protocol):
         reviewer: Mapping[str, Any] | None,
         idempotency_key: str,
         policy_version: str = "p1",
+        policy_version_id: str | None = None,
+        source: str | None = None,
+        input_run_ids: Sequence[str] = (),
+        input_fingerprints: Sequence[str] = (),
+        coverage_sha256: str = "",
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     async def enqueue_outbox(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
@@ -201,7 +304,7 @@ class ArtifactRepository(Protocol):
     async def mark_outbox_delivered(self, event_id: str) -> bool: ...
 
 
-class PgArtifactRepository:
+class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
     def __init__(self, store: Any) -> None:
         self.store = store
 
@@ -217,11 +320,13 @@ class PgArtifactRepository:
                 id, plugin_id, version, normalized_version, source_type, source_repo,
                 source_ref, source_commit_sha, archive_sha256, tree_sha256, size_bytes,
                 quarantine_key, path_suffix, submitted_by, submitted_by_snapshot,
-                base_artifact_id
+                base_artifact_id, supersedes_artifact_id, policy_version_id,
+                review_coverage, suggested_category, category_confidence,
+                category_reason
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15::jsonb, $16
+                $14, $15::jsonb, $16, $17, $18, $19::jsonb, $20, $21, $22
             )
             ON CONFLICT (plugin_id, archive_sha256) DO UPDATE
                SET plugin_id = EXCLUDED.plugin_id
@@ -243,6 +348,12 @@ class PgArtifactRepository:
             payload.get("submitted_by"),
             dict(payload.get("submitted_by_snapshot") or {}),
             payload.get("base_artifact_id"),
+            payload.get("supersedes_artifact_id"),
+            payload.get("policy_version_id"),
+            dict(payload.get("review_coverage") or {}),
+            payload.get("suggested_category", ""),
+            payload.get("category_confidence"),
+            payload.get("category_reason", ""),
         )
         return _record(row)
 
@@ -362,9 +473,13 @@ class PgArtifactRepository:
                         """
                         INSERT INTO artifact_files (
                             id, artifact_id, path, language, mime_type, sha256,
-                            size_bytes, line_count, is_text, content_key, flags
+                            size_bytes, line_count, is_text, content_key, flags,
+                            is_entrypoint, is_reachable, graph_status, scan_summary
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+                        VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                            $11::jsonb, $12, $13, $14, $15::jsonb
+                        )
                         RETURNING *
                         """,
                         item.get("id") or new_domain_id("file"),
@@ -378,6 +493,10 @@ class PgArtifactRepository:
                         bool(item.get("is_text")),
                         item.get("content_key"),
                         dict(item.get("flags") or {}),
+                        bool(item.get("is_entrypoint")),
+                        bool(item.get("is_reachable")),
+                        item.get("graph_status", "not_analyzed"),
+                        dict(item.get("scan_summary") or {}),
                     )
                     inserted.append(_record(row))
                 await connection.execute(
@@ -430,12 +549,20 @@ class PgArtifactRepository:
             """
             INSERT INTO review_runs (
                 id, artifact_id, type, status, attempt, ruleset_version,
-                model, summary, raw_result, raw_result_key, error_code, started_at
+                model, summary, raw_result, raw_result_key, error_code, started_at,
+                tool_name, tool_version, policy_version_id, input_sha256,
+                output_sha256, coverage, prompt_version, result_schema_version,
+                container_image_digest, astrbot_version, python_version, platform,
+                dependency_snapshot_sha256, worker_id, idempotency_key
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11,
-                CASE WHEN $4 = 'running' THEN now() ELSE NULL END
+                CASE WHEN $4 = 'running' THEN now() ELSE NULL END,
+                $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20,
+                $21, $22, $23, $24, $25, $26
             )
+            ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+            DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
             RETURNING *
             """,
             payload.get("id") or new_domain_id("run"),
@@ -449,8 +576,33 @@ class PgArtifactRepository:
             dict(payload.get("raw_result") or {}),
             payload.get("raw_result_key"),
             payload.get("error_code", ""),
+            payload.get("tool_name", ""),
+            payload.get("tool_version", ""),
+            payload.get("policy_version_id"),
+            payload.get("input_sha256", ""),
+            payload.get("output_sha256", ""),
+            dict(payload.get("coverage") or {}),
+            payload.get("prompt_version", ""),
+            payload.get("result_schema_version", ""),
+            payload.get("container_image_digest", ""),
+            payload.get("astrbot_version", ""),
+            payload.get("python_version", ""),
+            payload.get("platform", ""),
+            payload.get("dependency_snapshot_sha256", ""),
+            payload.get("worker_id", ""),
+            payload.get("idempotency_key"),
         )
-        return _record(row)
+        saved = _record(row)
+        if (
+            str(saved["artifact_id"]) != str(payload["artifact_id"])
+            or str(saved["type"]) != str(payload["type"])
+            or (
+                "policy_version_id" in payload
+                and saved.get("policy_version_id") != payload.get("policy_version_id")
+            )
+        ):
+            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+        return saved
 
     async def complete_review_run(
         self, run_id: str, payload: Mapping[str, Any]
@@ -463,6 +615,13 @@ class PgArtifactRepository:
                    raw_result = $4::jsonb,
                    raw_result_key = $5,
                    error_code = $6,
+                   output_sha256 = COALESCE(NULLIF($7, ''), output_sha256),
+                   coverage = COALESCE($8::jsonb, coverage),
+                   container_image_digest = COALESCE(NULLIF($9, ''), container_image_digest),
+                   dependency_snapshot_sha256 = COALESCE(
+                       NULLIF($10, ''), dependency_snapshot_sha256
+                   ),
+                   worker_id = COALESCE(NULLIF($11, ''), worker_id),
                    completed_at = now()
              WHERE id = $1
          RETURNING *
@@ -473,6 +632,11 @@ class PgArtifactRepository:
             dict(payload.get("raw_result") or {}),
             payload.get("raw_result_key"),
             payload.get("error_code", ""),
+            payload.get("output_sha256", ""),
+            dict(payload["coverage"]) if "coverage" in payload else None,
+            payload.get("container_image_digest", ""),
+            payload.get("dependency_snapshot_sha256", ""),
+            payload.get("worker_id", ""),
         )
         return _record(row) if row else None
 
@@ -518,18 +682,28 @@ class PgArtifactRepository:
         saved: list[dict[str, Any]] = []
         async with self._pool().acquire() as connection:
             async with connection.transaction():
-                await connection.execute("DELETE FROM review_findings WHERE run_id = $1", run_id)
+                run = await connection.fetchrow(
+                    "SELECT type FROM review_runs WHERE id = $1 AND artifact_id = $2",
+                    run_id,
+                    artifact_id,
+                )
+                if not run:
+                    raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                default_source = _finding_source_for_run(str(run["type"]))
                 for finding in findings:
                     row = await connection.fetchrow(
                         """
                         INSERT INTO review_findings (
                             id, artifact_id, run_id, fingerprint, rule_id, file_path,
                             line_start, line_end, severity, category, message, suggestion,
-                            evidence_excerpt, confidence, status, metadata
+                            evidence_excerpt, confidence, status, metadata, source,
+                            deterministic, file_id, file_sha256,
+                            affects_current_release, correlation
                         )
                         VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                            $13, $14, $15, $16::jsonb
+                            $13, $14, $15, $16::jsonb, $17, $18, $19, $20,
+                            $21, $22::jsonb
                         )
                         ON CONFLICT (artifact_id, fingerprint) DO UPDATE
                            SET run_id = EXCLUDED.run_id,
@@ -543,7 +717,11 @@ class PgArtifactRepository:
                                suggestion = EXCLUDED.suggestion,
                                evidence_excerpt = EXCLUDED.evidence_excerpt,
                                confidence = EXCLUDED.confidence,
-                               metadata = EXCLUDED.metadata
+                               metadata = EXCLUDED.metadata,
+                               source = EXCLUDED.source,
+                               deterministic = EXCLUDED.deterministic,
+                               file_id = EXCLUDED.file_id,
+                               file_sha256 = EXCLUDED.file_sha256
                         RETURNING *
                         """,
                         finding.get("id") or new_domain_id("finding"),
@@ -562,8 +740,30 @@ class PgArtifactRepository:
                         finding.get("confidence"),
                         finding.get("status", "open"),
                         dict(finding.get("metadata") or {}),
+                        finding.get("source", default_source),
+                        bool(finding.get("deterministic", default_source != "llm")),
+                        finding.get("file_id"),
+                        finding.get("file_sha256"),
+                        bool(finding.get("affects_current_release")),
+                        dict(finding.get("correlation") or {}),
                     )
                     saved.append(_record(row))
+                incoming_fingerprints = [str(item["fingerprint"]) for item in findings]
+                if incoming_fingerprints:
+                    await connection.execute(
+                        """
+                        DELETE FROM review_findings
+                         WHERE run_id = $1
+                           AND NOT (fingerprint = ANY($2::text[]))
+                        """,
+                        run_id,
+                        incoming_fingerprints,
+                    )
+                else:
+                    await connection.execute(
+                        "DELETE FROM review_findings WHERE run_id = $1",
+                        run_id,
+                    )
         return saved
 
     async def list_findings(self, artifact_id: str) -> list[dict[str, Any]]:
@@ -647,11 +847,11 @@ class PgArtifactRepository:
             """
             INSERT INTO artifact_jobs (
                 id, artifact_id, type, payload, max_attempts,
-                available_at, idempotency_key
+                available_at, idempotency_key, policy_version_id, run_id, stage_name
             )
             VALUES (
                 $1, $2, $3, $4::jsonb, $5,
-                COALESCE($6::timestamptz, now()), $7
+                COALESCE($6::timestamptz, now()), $7, $8, $9, $10
             )
             ON CONFLICT (idempotency_key) DO UPDATE
                SET idempotency_key = EXCLUDED.idempotency_key
@@ -664,6 +864,9 @@ class PgArtifactRepository:
             int(payload.get("max_attempts") or 3),
             payload.get("available_at"),
             payload["idempotency_key"],
+            payload.get("policy_version_id"),
+            payload.get("run_id"),
+            payload.get("stage_name", ""),
         )
         return _record(row)
 
@@ -787,9 +990,21 @@ class PgArtifactRepository:
         reviewer: Mapping[str, Any] | None,
         idempotency_key: str,
         policy_version: str = "p1",
+        policy_version_id: str | None = None,
+        source: str | None = None,
+        input_run_ids: Sequence[str] = (),
+        input_fingerprints: Sequence[str] = (),
+        coverage_sha256: str = "",
+        metadata: Mapping[str, Any] | None = None,
         risk_level: str | None = None,
         rejection_code: str | None = None,
     ) -> dict[str, Any] | None:
+        expected_target = review_target_for_decision(action)
+        if expected_target is not None and expected_target.value != target_status:
+            raise ValueError(ArtifactErrorCode.DECISION_TARGET_MISMATCH.value)
+        decision_source = source or (
+            "policy" if action in {"auto_reject", "auto_approve"} else "admin"
+        )
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 existing = await connection.fetchrow(
@@ -808,12 +1023,9 @@ class PgArtifactRepository:
                 )
                 if not current:
                     return None
-                if str(current["review_status"]) in {
-                    ReviewStatus.APPROVED.value,
-                    ReviewStatus.REJECTED.value,
-                }:
+                if ReviewStatus(str(current["review_status"])) in TERMINAL_REVIEW_STATUSES:
                     raise ArtifactStateError(
-                        "artifact_already_decided",
+                        ArtifactErrorCode.ARTIFACT_ALREADY_DECIDED,
                         str(current["review_status"]),
                         target_status,
                     )
@@ -822,9 +1034,14 @@ class PgArtifactRepository:
                     """
                     INSERT INTO review_decisions (
                         id, artifact_id, action, from_status, to_status, reason,
-                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key
+                        reviewer_user_id, reviewer_nickname, policy_version, idempotency_key,
+                        source, policy_version_id, input_run_ids, input_fingerprints,
+                        coverage_sha256, metadata
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13::text[], $14::text[], $15, $16::jsonb
+                    )
                     """,
                     new_domain_id("decision"),
                     artifact_id,
@@ -836,6 +1053,12 @@ class PgArtifactRepository:
                     _reviewer_name(reviewer),
                     policy_version,
                     idempotency_key,
+                    decision_source,
+                    policy_version_id,
+                    list(input_run_ids),
+                    list(input_fingerprints),
+                    coverage_sha256,
+                    dict(metadata or {}),
                 )
                 row = await connection.fetchrow(
                     """
@@ -852,6 +1075,16 @@ class PgArtifactRepository:
                     target_status,
                     risk_level,
                     rejection_code,
+                )
+                await connection.execute(
+                    """
+                    UPDATE review_comments
+                       SET locked_at = COALESCE(locked_at, now()),
+                           updated_at = now()
+                     WHERE artifact_id = $1
+                       AND locked_at IS NULL
+                    """,
+                    artifact_id,
                 )
         return _record(row)
 
@@ -954,6 +1187,16 @@ class PgArtifactRepository:
                            updated_at = now()
                      WHERE id = $1
                  RETURNING *
+                    """,
+                    artifact_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE review_comments
+                       SET locked_at = COALESCE(locked_at, now()),
+                           updated_at = now()
+                     WHERE artifact_id = $1
+                       AND locked_at IS NULL
                     """,
                     artifact_id,
                 )
@@ -1191,29 +1434,58 @@ class PgArtifactRepository:
         reviewer: Mapping[str, Any] | None,
         idempotency_key: str,
         policy_version: str = "p1",
+        policy_version_id: str | None = None,
+        source: str | None = None,
+        input_run_ids: Sequence[str] = (),
+        input_fingerprints: Sequence[str] = (),
+        coverage_sha256: str = "",
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        row = await self._pool().fetchrow(
-            """
-            INSERT INTO review_decisions (
-                id, artifact_id, action, from_status, to_status, reason,
-                reviewer_user_id, reviewer_nickname, policy_version, idempotency_key
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (idempotency_key) DO UPDATE
-               SET idempotency_key = EXCLUDED.idempotency_key
-            RETURNING *
-            """,
-            new_domain_id("decision"),
-            artifact_id,
-            action,
-            from_status,
-            to_status,
-            reason,
-            (reviewer or {}).get("id"),
-            _reviewer_name(reviewer),
-            policy_version,
-            idempotency_key,
+        decision_source = source or (
+            "policy" if action in {"auto_reject", "auto_approve"} else "admin"
         )
+        pool = self._pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                existing = await connection.fetchrow(
+                    "SELECT * FROM review_decisions WHERE idempotency_key = $1",
+                    idempotency_key,
+                )
+                if existing:
+                    if str(existing["artifact_id"]) != artifact_id:
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    return _record(existing)
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO review_decisions (
+                        id, artifact_id, action, from_status, to_status, reason,
+                        reviewer_user_id, reviewer_nickname, policy_version,
+                        idempotency_key, source, policy_version_id, input_run_ids,
+                        input_fingerprints, coverage_sha256, metadata
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13::text[], $14::text[], $15, $16::jsonb
+                    )
+                    RETURNING *
+                    """,
+                    new_domain_id("decision"),
+                    artifact_id,
+                    action,
+                    from_status,
+                    to_status,
+                    reason,
+                    (reviewer or {}).get("id"),
+                    _reviewer_name(reviewer),
+                    policy_version,
+                    idempotency_key,
+                    decision_source,
+                    policy_version_id,
+                    list(input_run_ids),
+                    list(input_fingerprints),
+                    coverage_sha256,
+                    dict(metadata or {}),
+                )
         return _record(row)
 
     async def enqueue_outbox(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1353,7 +1625,7 @@ class PgArtifactRepository:
         return self.store._pool()
 
 
-class InMemoryArtifactRepository:
+class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
     def __init__(self, store: Any | None = None) -> None:
         self.store = store
         self.artifacts: dict[str, dict[str, Any]] = {}
@@ -1363,6 +1635,15 @@ class InMemoryArtifactRepository:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.decisions: dict[str, dict[str, Any]] = {}
         self.outbox: dict[str, dict[str, Any]] = {}
+        self.policies: dict[str, dict[str, Any]] = {}
+        self.policy_events: dict[str, dict[str, Any]] = {}
+        self.diffs: dict[str, list[dict[str, Any]]] = {}
+        self.dependency_edges: dict[str, list[dict[str, Any]]] = {}
+        self.dispatches: dict[str, dict[str, Any]] = {}
+        self.review_comments: dict[str, dict[str, Any]] = {}
+        self.comment_events: dict[str, dict[str, Any]] = {}
+        self.finding_events: dict[str, dict[str, Any]] = {}
+        self.sboms: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
     def rebind_store(self, store: Any) -> None:
@@ -1397,8 +1678,15 @@ class InMemoryArtifactRepository:
                 "publication_status": PublicationStatus.UNPUBLISHED.value,
                 "risk_level": "none",
                 "base_artifact_id": payload.get("base_artifact_id"),
+                "supersedes_artifact_id": payload.get("supersedes_artifact_id"),
+                "policy_version_id": payload.get("policy_version_id"),
+                "review_coverage": dict(payload.get("review_coverage") or {}),
+                "automated_review_completed_at": None,
                 "submitted_by": payload.get("submitted_by"),
                 "submitted_by_snapshot": dict(payload.get("submitted_by_snapshot") or {}),
+                "suggested_category": str(payload.get("suggested_category") or ""),
+                "category_confidence": payload.get("category_confidence"),
+                "category_reason": str(payload.get("category_reason") or ""),
                 "rejection_code": "",
                 "created_at": now,
                 "updated_at": now,
@@ -1466,6 +1754,10 @@ class InMemoryArtifactRepository:
                 **dict(item),
                 "id": str(item.get("id") or new_domain_id("file")),
                 "artifact_id": artifact_id,
+                "is_entrypoint": bool(item.get("is_entrypoint")),
+                "is_reachable": bool(item.get("is_reachable")),
+                "graph_status": str(item.get("graph_status") or "not_analyzed"),
+                "scan_summary": dict(item.get("scan_summary") or {}),
                 "created_at": _utc_now(),
             }
             for item in files
@@ -1501,6 +1793,21 @@ class InMemoryArtifactRepository:
         return deepcopy(sorted(self.files.get(artifact_id, []), key=lambda item: item["path"]))
 
     async def create_review_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        idempotency_key = payload.get("idempotency_key")
+        if idempotency_key:
+            for existing in self.runs.values():
+                if existing.get("idempotency_key") == idempotency_key:
+                    if (
+                        existing["artifact_id"] != str(payload["artifact_id"])
+                        or existing["type"] != str(payload["type"])
+                        or (
+                            "policy_version_id" in payload
+                            and existing.get("policy_version_id")
+                            != payload.get("policy_version_id")
+                        )
+                    ):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    return deepcopy(existing)
         now = _utc_now()
         run = {
             "id": str(payload.get("id") or new_domain_id("run")),
@@ -1514,6 +1821,22 @@ class InMemoryArtifactRepository:
             "raw_result": dict(payload.get("raw_result") or {}),
             "raw_result_key": payload.get("raw_result_key"),
             "error_code": str(payload.get("error_code") or ""),
+            "tool_name": str(payload.get("tool_name") or ""),
+            "tool_version": str(payload.get("tool_version") or ""),
+            "policy_version_id": payload.get("policy_version_id"),
+            "input_sha256": str(payload.get("input_sha256") or ""),
+            "output_sha256": str(payload.get("output_sha256") or ""),
+            "coverage": dict(payload.get("coverage") or {}),
+            "prompt_version": str(payload.get("prompt_version") or ""),
+            "result_schema_version": str(payload.get("result_schema_version") or ""),
+            "container_image_digest": str(payload.get("container_image_digest") or ""),
+            "astrbot_version": str(payload.get("astrbot_version") or ""),
+            "python_version": str(payload.get("python_version") or ""),
+            "platform": str(payload.get("platform") or ""),
+            "dependency_snapshot_sha256": str(payload.get("dependency_snapshot_sha256") or ""),
+            "worker_id": str(payload.get("worker_id") or ""),
+            "idempotency_key": idempotency_key,
+            "queued_at": now,
             "started_at": now if payload.get("status") == "running" else None,
             "completed_at": None,
             "created_at": now,
@@ -1534,6 +1857,23 @@ class InMemoryArtifactRepository:
                 "raw_result": dict(payload.get("raw_result") or {}),
                 "raw_result_key": payload.get("raw_result_key"),
                 "error_code": str(payload.get("error_code") or ""),
+                "output_sha256": str(
+                    payload.get("output_sha256") or run.get("output_sha256") or ""
+                ),
+                "coverage": (
+                    dict(payload["coverage"])
+                    if "coverage" in payload
+                    else dict(run.get("coverage") or {})
+                ),
+                "container_image_digest": str(
+                    payload.get("container_image_digest") or run.get("container_image_digest") or ""
+                ),
+                "dependency_snapshot_sha256": str(
+                    payload.get("dependency_snapshot_sha256")
+                    or run.get("dependency_snapshot_sha256")
+                    or ""
+                ),
+                "worker_id": str(payload.get("worker_id") or run.get("worker_id") or ""),
                 "completed_at": _utc_now(),
             }
         )
@@ -1575,6 +1915,10 @@ class InMemoryArtifactRepository:
         run_id: str,
         findings: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, Any]]:
+        run = self.runs.get(run_id)
+        if not run or run["artifact_id"] != artifact_id:
+            raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+        default_source = _finding_source_for_run(str(run["type"]))
         incoming_fingerprints = {str(item["fingerprint"]) for item in findings}
         for existing_run_id, values in list(self.findings.items()):
             if existing_run_id == run_id:
@@ -1603,6 +1947,36 @@ class InMemoryArtifactRepository:
                 or new_domain_id("finding"),
                 "artifact_id": artifact_id,
                 "run_id": run_id,
+                "source": str(item.get("source") or default_source),
+                "deterministic": bool(item.get("deterministic", default_source != "llm")),
+                "file_id": item.get("file_id"),
+                "file_sha256": item.get("file_sha256"),
+                "affects_current_release": bool(
+                    existing.get(str(item["fingerprint"]), {}).get(
+                        "affects_current_release",
+                        item.get("affects_current_release", False),
+                    )
+                ),
+                "correlation": dict(
+                    existing.get(str(item["fingerprint"]), {}).get("correlation")
+                    or item.get("correlation")
+                    or {}
+                ),
+                "status": str(
+                    existing.get(str(item["fingerprint"]), {}).get("status")
+                    or item.get("status")
+                    or "open"
+                ),
+                "status_actor_user_id": existing.get(str(item["fingerprint"]), {}).get(
+                    "status_actor_user_id"
+                ),
+                "status_actor_nickname": str(
+                    existing.get(str(item["fingerprint"]), {}).get("status_actor_nickname") or ""
+                ),
+                "status_updated_at": existing.get(str(item["fingerprint"]), {}).get(
+                    "status_updated_at"
+                ),
+                "version": int(existing.get(str(item["fingerprint"]), {}).get("version") or 1),
                 "created_at": _utc_now(),
             }
             saved.append(finding)
@@ -1674,6 +2048,9 @@ class InMemoryArtifactRepository:
             "lease_owner": None,
             "lease_expires_at": None,
             "idempotency_key": str(payload["idempotency_key"]),
+            "policy_version_id": payload.get("policy_version_id"),
+            "run_id": payload.get("run_id"),
+            "stage_name": str(payload.get("stage_name") or ""),
             "last_error_code": "",
             "last_error": "",
             "created_at": now,
@@ -1771,9 +2148,21 @@ class InMemoryArtifactRepository:
         reviewer: Mapping[str, Any] | None,
         idempotency_key: str,
         policy_version: str = "p1",
+        policy_version_id: str | None = None,
+        source: str | None = None,
+        input_run_ids: Sequence[str] = (),
+        input_fingerprints: Sequence[str] = (),
+        coverage_sha256: str = "",
+        metadata: Mapping[str, Any] | None = None,
         risk_level: str | None = None,
         rejection_code: str | None = None,
     ) -> dict[str, Any] | None:
+        expected_target = review_target_for_decision(action)
+        if expected_target is not None and expected_target.value != target_status:
+            raise ValueError(ArtifactErrorCode.DECISION_TARGET_MISMATCH.value)
+        decision_source = source or (
+            "policy" if action in {"auto_reject", "auto_approve"} else "admin"
+        )
         async with self._lock:
             for decision in self.decisions.values():
                 if decision["idempotency_key"] == idempotency_key:
@@ -1784,12 +2173,9 @@ class InMemoryArtifactRepository:
             artifact = self.artifacts.get(artifact_id)
             if not artifact:
                 return None
-            if artifact["review_status"] in {
-                ReviewStatus.APPROVED.value,
-                ReviewStatus.REJECTED.value,
-            }:
+            if ReviewStatus(artifact["review_status"]) in TERMINAL_REVIEW_STATUSES:
                 raise ArtifactStateError(
-                    "artifact_already_decided",
+                    ArtifactErrorCode.ARTIFACT_ALREADY_DECIDED,
                     artifact["review_status"],
                     target_status,
                 )
@@ -1804,6 +2190,12 @@ class InMemoryArtifactRepository:
                 "reviewer_user_id": (reviewer or {}).get("id"),
                 "reviewer_nickname": _reviewer_name(reviewer),
                 "policy_version": policy_version,
+                "policy_version_id": policy_version_id,
+                "source": decision_source,
+                "input_run_ids": list(input_run_ids),
+                "input_fingerprints": list(input_fingerprints),
+                "coverage_sha256": coverage_sha256,
+                "metadata": dict(metadata or {}),
                 "idempotency_key": idempotency_key,
                 "created_at": _utc_now(),
             }
@@ -1815,6 +2207,11 @@ class InMemoryArtifactRepository:
                 artifact["rejection_code"] = rejection_code
             artifact["reviewed_at"] = _utc_now()
             artifact["updated_at"] = _utc_now()
+            now = _utc_now()
+            for thread in self.review_comments.values():
+                if thread["artifact_id"] == artifact_id and not thread.get("locked_at"):
+                    thread["locked_at"] = now
+                    thread["updated_at"] = now
             return deepcopy(artifact)
 
     async def approve_artifact(
@@ -1871,6 +2268,12 @@ class InMemoryArtifactRepository:
                 "reviewer_user_id": reviewer.get("id"),
                 "reviewer_nickname": _reviewer_name(reviewer),
                 "policy_version": "p1",
+                "policy_version_id": artifact.get("policy_version_id"),
+                "source": "admin",
+                "input_run_ids": [],
+                "input_fingerprints": [],
+                "coverage_sha256": "",
+                "metadata": {},
                 "idempotency_key": idempotency_key,
                 "created_at": _utc_now(),
             }
@@ -1879,6 +2282,10 @@ class InMemoryArtifactRepository:
             artifact["reviewed_at"] = _utc_now()
             artifact["updated_at"] = _utc_now()
             now = _utc_now()
+            for thread in self.review_comments.values():
+                if thread["artifact_id"] == artifact_id and not thread.get("locked_at"):
+                    thread["locked_at"] = now
+                    thread["updated_at"] = now
             job = {
                 "id": new_domain_id("job"),
                 "artifact_id": artifact_id,
@@ -1891,6 +2298,9 @@ class InMemoryArtifactRepository:
                 "lease_owner": None,
                 "lease_expires_at": None,
                 "idempotency_key": f"publish:{artifact_id}",
+                "policy_version_id": artifact.get("policy_version_id"),
+                "run_id": None,
+                "stage_name": "publish",
                 "last_error_code": "",
                 "last_error": "",
                 "created_at": now,
@@ -1942,6 +2352,12 @@ class InMemoryArtifactRepository:
                 "reviewer_user_id": reviewer.get("id"),
                 "reviewer_nickname": _reviewer_name(reviewer),
                 "policy_version": "p1",
+                "policy_version_id": artifact.get("policy_version_id"),
+                "source": "admin",
+                "input_run_ids": [],
+                "input_fingerprints": [],
+                "coverage_sha256": "",
+                "metadata": {},
                 "idempotency_key": idempotency_key,
                 "created_at": now,
             }
@@ -1961,6 +2377,9 @@ class InMemoryArtifactRepository:
                 "lease_owner": None,
                 "lease_expires_at": None,
                 "idempotency_key": idempotency_key,
+                "policy_version_id": artifact.get("policy_version_id"),
+                "run_id": None,
+                "stage_name": "revoke",
                 "last_error_code": "",
                 "last_error": "",
                 "created_at": now,
@@ -2065,10 +2484,21 @@ class InMemoryArtifactRepository:
         reviewer: Mapping[str, Any] | None,
         idempotency_key: str,
         policy_version: str = "p1",
+        policy_version_id: str | None = None,
+        source: str | None = None,
+        input_run_ids: Sequence[str] = (),
+        input_fingerprints: Sequence[str] = (),
+        coverage_sha256: str = "",
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         for decision in self.decisions.values():
             if decision["idempotency_key"] == idempotency_key:
+                if decision["artifact_id"] != artifact_id:
+                    raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                 return deepcopy(decision)
+        decision_source = source or (
+            "policy" if action in {"auto_reject", "auto_approve"} else "admin"
+        )
         decision = {
             "id": new_domain_id("decision"),
             "artifact_id": artifact_id,
@@ -2079,6 +2509,12 @@ class InMemoryArtifactRepository:
             "reviewer_user_id": (reviewer or {}).get("id"),
             "reviewer_nickname": _reviewer_name(reviewer),
             "policy_version": policy_version,
+            "policy_version_id": policy_version_id,
+            "source": decision_source,
+            "input_run_ids": list(input_run_ids),
+            "input_fingerprints": list(input_fingerprints),
+            "coverage_sha256": coverage_sha256,
+            "metadata": dict(metadata or {}),
             "idempotency_key": idempotency_key,
             "created_at": _utc_now(),
         }
@@ -2248,3 +2684,15 @@ def _reviewer_name(reviewer: Mapping[str, Any] | None) -> str:
         or value.get("internal_username")
         or ""
     )
+
+
+def _finding_source_for_run(run_type: str) -> str:
+    if run_type == "precheck":
+        return "precheck"
+    if run_type == "runtime":
+        return "runtime"
+    if run_type.startswith("llm_"):
+        return "llm"
+    if run_type in {"clamav", "yara", "dependency"}:
+        return run_type
+    return "static"
