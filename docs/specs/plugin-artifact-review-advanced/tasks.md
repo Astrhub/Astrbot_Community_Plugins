@@ -116,28 +116,28 @@
         - *Details*: 运行 resolver/probe/result validation tests、Ruff；核对源码版本事实和日志脱敏后提交。
         - *Requirements*: FR-203、FR-204。
 
-- [ ] 6. **Rootless Docker 执行、网络隔离与真实 Runtime 门禁**
-    - [ ] 6.1. 实现 Docker `ContainerExecutor`
+- [x] 6. **Rootless Docker 执行、网络隔离与真实 Runtime 门禁**
+    - [x] 6.1. 实现 Docker `ContainerExecutor`
         - *Goal*: 用结构化 argv 创建一次性 install/smoke 容器。
         - *Details*: non-root、read-only rootfs、cap-drop all、no-new-privileges、seccomp、CPU/memory/PID/time/tmpfs 限制；禁止 privileged、host namespace 和 artifact 输入 shell 拼接。
         - *Requirements*: FR-202、FR-219。
-    - [ ] 6.2. 实现 install/smoke 独立网络 profile
+    - [x] 6.2. 实现 install/smoke 独立网络 profile
         - *Goal*: install 仅访问批准包源，smoke 默认无网络。
         - *Details*: 基础设施层阻止私网、metadata、宿主回环、站点 PostgreSQL/Redis、对象管理端；生成 network attestation；无法证明时 runtime degraded/failed。
         - *Requirements*: FR-219。
-    - [ ] 6.3. 实现强制 cleanup 和 orphan reconciler
+    - [x] 6.3. 实现强制 cleanup 和 orphan reconciler
         - *Goal*: 成功、失败、timeout、cancel 和 runner crash 后无残留容器/volume/network。
         - *Details*: 所有资源带 dispatch label；cleanup 独立记录；未确认 cleanup 阻止 auto approve；定期扫描并清理过期资源。
         - *Requirements*: FR-202、FR-221。
-    - [ ] 6.4. 增加 Compose opt-in runner profile
+    - [x] 6.4. 增加 Compose opt-in runner profile
         - *Goal*: 本地可重复运行真实 smoke，生产配置明确最小权限前置。
         - *Details*: app/artifact-worker 不挂 socket；runner 使用独立 service/config；开发 root socket 降级明确标记非生产；提供 rootless/Kubernetes 运维说明。
         - *Requirements*: FR-202、FR-219；部署。
-    - [ ] 6.5. 执行真实安全 fixture
+    - [x] 6.5. 执行真实安全 fixture
         - *Goal*: 获取 P2 必需的非 mock 证据。
         - *Details*: 运行正常/冲突/import failure fixtures；验证外网、metadata、host、postgres、redis 不可达；验证资源销毁和 structured result。
         - *Requirements*: P2 验收、全局回归。
-    - [ ] 6.6. 验证并提交 runtime runner
+    - [x] 6.6. 验证并提交 runtime runner
         - *Goal*: 只有真实隔离门禁通过后交付 runtime 阶段。
         - *Details*: 运行 unit/integration/Compose config/Ruff；记录 image digest 和测试结果，差异自审后提交。
         - *Requirements*: FR-202 至 FR-204、FR-219。

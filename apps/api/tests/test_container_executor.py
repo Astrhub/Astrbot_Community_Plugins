@@ -115,17 +115,20 @@ def test_fake_executor_failure_modes_are_deterministic(
     expected_code: str,
     expected_exception: type[BaseException],
 ) -> None:
-    async def scenario() -> BaseException:
+    async def scenario() -> tuple[BaseException, set[str], list[tuple[str, str]]]:
+        fake = DeterministicFakeContainerExecutor(default_failure=mode)
         pipeline = ContainerExecutionPipeline(
-            DeterministicFakeContainerExecutor(default_failure=mode)
+            fake
         )
         with pytest.raises(expected_exception) as raised:
             await pipeline.execute(work_item())
         await pipeline.cleanup_dispatch(work_item())
-        return raised.value
+        return raised.value, fake.resources, fake.calls
 
-    error = asyncio.run(scenario())
+    error, resources, calls = asyncio.run(scenario())
     assert getattr(error, "code", "") == expected_code
+    assert not resources
+    assert ("cleanup", "dispatch_01") in calls
 
 
 def test_cleanup_failure_remains_a_failed_gate_until_orphan_cleanup() -> None:
@@ -145,7 +148,7 @@ def test_cleanup_failure_remains_a_failed_gate_until_orphan_cleanup() -> None:
     assert removed == 1
 
 
-def test_pipeline_abort_and_cleanup_are_idempotent_after_crash() -> None:
+def test_pipeline_cleanup_is_idempotent_after_crash() -> None:
     async def scenario() -> tuple[list[tuple[str, str]], set[str]]:
         fake = DeterministicFakeContainerExecutor(default_failure=FakeFailureMode.CRASH)
         pipeline = ContainerExecutionPipeline(fake)
@@ -159,5 +162,33 @@ def test_pipeline_abort_and_cleanup_are_idempotent_after_crash() -> None:
 
     calls, resources = asyncio.run(scenario())
 
-    assert ("abort", "dispatch_01") in calls
+    assert calls.count(("cleanup", "dispatch_01")) == 1
+    assert ("abort", "dispatch_01") not in calls
+    assert not resources
+
+
+def test_pipeline_cancellation_still_runs_cleanup() -> None:
+    class BlockingSmokeExecutor(DeterministicFakeContainerExecutor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def smoke(self, prepared, work):
+            self._record("smoke", work)
+            self.started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled smoke should not return")
+
+    async def scenario() -> tuple[list[tuple[str, str]], set[str]]:
+        fake = BlockingSmokeExecutor()
+        pipeline = ContainerExecutionPipeline(fake)
+        running = asyncio.create_task(pipeline.execute(work_item()))
+        await asyncio.wait_for(fake.started.wait(), timeout=1)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        return fake.calls, fake.resources
+
+    calls, resources = asyncio.run(scenario())
+    assert ("cleanup", "dispatch_01") in calls
     assert not resources

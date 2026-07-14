@@ -122,6 +122,7 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 - **Cookie**：生产 HTTPS 必须设 `COOKIE_SECURE=true`，配合反向代理（Nginx/Caddy）启用 TLS。
 - **systemd 加固**：`deploy/systemd/` 的 service 启用 `NoNewPrivileges`、`PrivateTmp`、`ProtectSystem=full`，并通过 `ReadWritePaths` 限定仅后端目录可写。
 - **Worker 分离**：Docker 使用 `artifacts` profile 启动独立 Worker；systemd 使用单独 unit。两者通过 PostgreSQL lease 协调，不在 Redis 保存审查状态。
+- **Runtime Runner 分离**：生产 runner 使用独立 rootless engine 和最小权限数据库角色；Compose `runtime-runner` profile 的 root socket 只用于本地降级验证，不能报告为生产级隔离。详见 [runtime-runner.md](runtime-runner.md)。
 - **开发认证**：`ENABLE_DEV_AUTH` 生产必须为 `false`，否则任何人可通过 `X-Dev-GitHub-Login` 头伪造登录。Docker 模板（`.env.docker.example`）默认已设 `false`。
 - **OAuth callback URL**：当 GitHub 登录启用时，系统拒绝本地回环 callback，防止开发态配置泄漏到生产（测试 `test_system_settings_reject_local_oauth_callback_when_enabled`）。callback URL 优先级：运行时数据库 options > `.env` > 初始设置。
 

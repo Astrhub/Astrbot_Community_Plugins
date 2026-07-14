@@ -114,7 +114,9 @@ docker compose --profile artifacts up -d --build
 docker compose logs -f artifact-worker
 ```
 
-API 进程不执行插件源码；P0/P1 的 Worker 只读取 ZIP、YAML 和 Python AST。后续 runtime smoke test 也必须继续运行在独立隔离容器中。
+API 进程不执行插件源码；P0/P1 的 Worker 只读取 ZIP、YAML 和 Python AST。runtime smoke
+test 使用独立 runner 和一次性容器，部署边界见
+[docs/runtime-runner.md](docs/runtime-runner.md)。
 
 容器镜像：`node:24`（前端构建）、`python:3.11` + `uv:0.9.7`（后端）、`postgres:16-alpine`、`redis:7-alpine`。对外端口默认 `8787`，可用 `APP_PORT` 覆盖。
 

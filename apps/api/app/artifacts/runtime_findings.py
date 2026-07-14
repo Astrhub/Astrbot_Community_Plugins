@@ -218,7 +218,14 @@ def normalize_runtime_findings(
             "critical"
             if any(
                 marker in violation.category
-                for marker in ("credential", "metadata_endpoint", "private_network", "escape")
+                for marker in (
+                    "credential",
+                    "metadata_endpoint",
+                    "private_network",
+                    "docker_socket",
+                    "smoke_network",
+                    "escape",
+                )
             )
             else "high"
         )

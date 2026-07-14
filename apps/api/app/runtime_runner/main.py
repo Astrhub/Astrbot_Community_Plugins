@@ -21,7 +21,7 @@ async def run_runtime_runner() -> None:
     repository = await PgRuntimeRunnerRepository.connect(settings.database_url)
     executor = None
     try:
-        executor = build_runtime_execution_service(settings.executor_backend)
+        executor = build_runtime_execution_service(settings)
         queue = RuntimeRunnerQueue(repository, runner_id=settings.runner_id)
         writer = LocalRuntimeResultWriter(settings.result_root)
         worker = RuntimeRunnerWorker(

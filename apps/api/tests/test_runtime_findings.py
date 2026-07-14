@@ -100,6 +100,28 @@ def test_smoke_phase_failures_skip_unreached_phases_and_preserve_distinct_code()
     assert findings[0].deterministic
 
 
+@pytest.mark.parametrize("category", ["docker_socket_exposed", "smoke_network_access"])
+def test_runtime_isolation_violations_are_critical(category: str) -> None:
+    payload = runtime_result().model_dump(mode="json")
+    payload.pop("result_sha256")
+    payload["smoke"]["violations"] = [
+        {
+            "phase": "smoke",
+            "category": category,
+            "message": "runtime isolation boundary was reachable",
+            "count": 1,
+        }
+    ]
+    result = build_runtime_dispatch_result(payload)
+
+    findings = normalize(result)
+
+    assert len(findings) == 1
+    assert findings[0].rule_id == category
+    assert findings[0].severity == "critical"
+    assert findings[0].deterministic
+
+
 def test_target_resolution_finding_keeps_plugin_and_runtime_versions_separate() -> None:
     review_policy = policy(("4.26.5", "3.12"))
     resolver = RuntimeTargetResolver(

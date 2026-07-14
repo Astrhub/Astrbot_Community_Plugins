@@ -79,10 +79,32 @@ class ContainerExecutionPipeline(RuntimeExecutionService):
                 "Prepared runtime does not match the claimed dispatch",
             )
         self._prepared[work.dispatch_id] = prepared
-        install = await self.executor.install(prepared, work)
-        smoke = await self.executor.smoke(prepared, work)
-        attestation = await self.executor.attest(prepared, work)
-        cleanup = await self.executor.cleanup(prepared, work)
+        try:
+            install = await self.executor.install(prepared, work)
+            smoke = await self.executor.smoke(prepared, work)
+            attestation = await self.executor.attest(prepared, work)
+        except BaseException as phase_error:
+            try:
+                cleanup = await self.executor.cleanup(prepared, work)
+            except BaseException as cleanup_error:
+                raise RuntimeExecutionError(
+                    "runtime_cleanup_failed",
+                    "Runtime resources could not be confirmed as removed",
+                ) from cleanup_error
+            if cleanup.status.value != "passed":
+                raise RuntimeExecutionError(
+                    "runtime_cleanup_failed",
+                    "Runtime resources could not be confirmed as removed",
+                ) from phase_error
+            self._prepared.pop(work.dispatch_id, None)
+            raise
+        try:
+            cleanup = await self.executor.cleanup(prepared, work)
+        except BaseException as exc:
+            raise RuntimeExecutionError(
+                "runtime_cleanup_failed",
+                "Runtime resources could not be confirmed as removed",
+            ) from exc
         if cleanup.status.value == "passed":
             self._prepared.pop(work.dispatch_id, None)
         return build_runtime_dispatch_result(

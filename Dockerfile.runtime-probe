@@ -1,0 +1,35 @@
+ARG RUNTIME_PYTHON_IMAGE=python:3.12.10-slim-bookworm
+FROM ${RUNTIME_PYTHON_IMAGE}
+
+ARG PYPI_INDEX_URL=""
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/runtime-probe \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_INPUT=1
+
+RUN if [ -n "$PYPI_INDEX_URL" ]; then \
+        python -m pip install --no-cache-dir --index-url "$PYPI_INDEX_URL" \
+            packaging==26.2 pydantic==2.13.4; \
+    else \
+        python -m pip install --no-cache-dir packaging==26.2 pydantic==2.13.4; \
+    fi \
+    && mkdir -p /opt/runtime-probe/app/artifacts \
+        /opt/runtime-probe/app/runtime_runner/probe /runtime/input \
+    && chmod 0755 /opt/runtime-probe /runtime /runtime/input
+
+COPY --chown=65532:65532 apps/api/app/__init__.py /opt/runtime-probe/app/__init__.py
+COPY --chown=65532:65532 apps/api/app/artifacts/__init__.py \
+    /opt/runtime-probe/app/artifacts/__init__.py
+COPY --chown=65532:65532 apps/api/app/artifacts/runner_contract.py \
+    /opt/runtime-probe/app/artifacts/runner_contract.py
+COPY --chown=65532:65532 apps/api/app/runtime_runner/__init__.py \
+    /opt/runtime-probe/app/runtime_runner/__init__.py
+COPY --chown=65532:65532 apps/api/app/runtime_runner/probe/ \
+    /opt/runtime-probe/app/runtime_runner/probe/
+
+WORKDIR /opt/runtime-probe
+USER 65532:65532
+LABEL org.opencontainers.image.title="AstrBot runtime probe" \
+      org.opencontainers.image.version="1" \
+      org.opencontainers.image.python.version="3.12.10"

@@ -22,6 +22,10 @@ from app.runtime_runner.container_executor import (
     DeterministicFakeContainerExecutor,
     FakeFailureMode,
 )
+from app.runtime_runner.execution import (
+    RuntimeExecutionService,
+    build_runtime_execution_service,
+)
 from app.runtime_runner.queue import RuntimeDispatchWorkItem, RuntimeRunnerQueue
 from app.runtime_runner.storage import LocalRuntimeResultWriter, RuntimeResultStorageError
 from app.runtime_runner.worker import RuntimeRunnerWorker
@@ -66,6 +70,30 @@ def test_runner_config_uses_only_dedicated_environment_and_redacts_database_url(
     assert "database_url" not in settings.public_summary()
 
 
+def test_runner_config_builds_rootless_docker_backend_without_exposing_mounts(
+    tmp_path: Path,
+) -> None:
+    settings = load_runtime_runner_settings(
+        {
+            "RUNTIME_RUNNER_DATABASE_URL": "postgresql://runner@db/market",
+            "RUNTIME_RUNNER_EXECUTOR_BACKEND": "rootless-docker",
+            "RUNTIME_RUNNER_DOCKER_HOST": "unix:///run/user/1000/docker.sock",
+            "RUNTIME_RUNNER_DOCKER_IMAGE_REPOSITORY": "registry.example/runtime-probe",
+            "RUNTIME_RUNNER_ARTIFACT_ROOT": str(tmp_path),
+            "RUNTIME_RUNNER_INSTALL_NETWORK": "runtime-install-v1",
+        }
+    )
+    service = build_runtime_execution_service(settings)
+    summary = settings.public_summary()
+
+    assert isinstance(service, RuntimeExecutionService)
+    assert summary["container_isolation"] == "rootless-required"
+    assert summary["image_pinning"] == "digest"
+    assert "docker_host" not in summary
+    assert "artifact" not in " ".join(summary)
+    asyncio.run(service.close())
+
+
 @pytest.mark.parametrize(
     ("name", "value", "code"),
     [
@@ -77,6 +105,36 @@ def test_runner_config_uses_only_dedicated_environment_and_redacts_database_url(
             "runtime_runner_result_storage_backend_unsupported",
         ),
         ("RUNTIME_RUNNER_RESULT_ROOT", "relative", "runtime_runner_result_root_not_absolute"),
+        (
+            "RUNTIME_RUNNER_DOCKER_HOST",
+            "tcp://127.0.0.1:2375",
+            "runtime_runner_docker_host_invalid",
+        ),
+        (
+            "RUNTIME_RUNNER_DOCKER_IMAGE_REPOSITORY",
+            "registry/repo@latest",
+            "runtime_runner_docker_image_repository_invalid",
+        ),
+        (
+            "RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT",
+            "sometimes",
+            "runtime_runner_allow_rootful_development_invalid",
+        ),
+        (
+            "RUNTIME_RUNNER_PACKAGE_INDEX_URL",
+            "https://user:secret@pypi.org/simple",
+            "runtime_runner_package_index_url_invalid",
+        ),
+        (
+            "RUNTIME_RUNNER_INSTALL_PROXY_URL",
+            "http://user:secret@astrbot-runtime-package-proxy:3128",
+            "runtime_runner_install_proxy_url_invalid",
+        ),
+        (
+            "RUNTIME_RUNNER_ORPHAN_TTL_SECONDS",
+            "60",
+            "runtime_runner_orphan_ttl_seconds_out_of_range",
+        ),
     ],
 )
 def test_runner_config_rejects_invalid_boundaries(name: str, value: str, code: str) -> None:

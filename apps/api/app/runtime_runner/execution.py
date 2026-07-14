@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 from typing import Protocol, runtime_checkable
 
 from ..artifacts.runner_contract import RuntimeDispatchResult
 from .queue import RuntimeDispatchWorkItem
+
+if TYPE_CHECKING:
+    from .config import RuntimeRunnerSettings
 
 _ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
 
@@ -31,8 +35,19 @@ class RuntimeExecutionService(Protocol):
     async def close(self) -> None: ...
 
 
-def build_runtime_execution_service(backend: str) -> RuntimeExecutionService:
+def build_runtime_execution_service(settings: RuntimeRunnerSettings) -> RuntimeExecutionService:
+    if settings.executor_backend == "rootless-docker":
+        from .container_executor import ContainerExecutionPipeline
+        from .docker_cli import DockerCli
+        from .docker_executor import DockerContainerExecutor, DockerExecutorConfiguration
+
+        return ContainerExecutionPipeline(
+            DockerContainerExecutor(
+                DockerCli(binary=settings.docker_binary, host=settings.docker_host),
+                DockerExecutorConfiguration.from_runner_settings(settings),
+            )
+        )
     raise RuntimeExecutionError(
         "runtime_executor_unavailable",
-        f"Runtime executor backend '{backend}' is not available in this build",
+        f"Runtime executor backend '{settings.executor_backend}' is not available in this build",
     )

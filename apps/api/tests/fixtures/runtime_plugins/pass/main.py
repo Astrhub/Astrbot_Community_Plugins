@@ -16,6 +16,11 @@ class RuntimeFixturePlugin(star.Star):
 
     @llm_tool("runtime_fixture_tool")
     async def runtime_fixture_tool(self, query: str) -> str:
+        """Return the fixture query.
+
+        Args:
+            query(string): Fixture input.
+        """
         return query
 
     async def terminate(self) -> None:
