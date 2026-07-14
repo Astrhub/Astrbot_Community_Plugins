@@ -219,6 +219,8 @@ class ArtifactRepository(Protocol):
 
     async def enqueue_job(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
 
+    async def list_artifact_jobs(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
     async def claim_jobs(
         self, worker_id: str, limit: int, lease_seconds: int
     ) -> list[dict[str, Any]]: ...
@@ -610,7 +612,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     INSERT INTO review_runs (
                         id, artifact_id, type, status, attempt, ruleset_version,
                         model, summary, raw_result, raw_result_key, error_code, started_at,
-                        tool_name, tool_version, policy_version_id, input_sha256,
+                        completed_at, tool_name, tool_version, policy_version_id, input_sha256,
                         output_sha256, coverage, prompt_version, result_schema_version,
                         container_image_digest, astrbot_version, python_version, platform,
                         dependency_snapshot_sha256, worker_id, idempotency_key
@@ -618,6 +620,11 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11,
                         CASE WHEN $4 = 'running' THEN now() ELSE NULL END,
+                        CASE
+                            WHEN $4 IN ('succeeded', 'failed', 'timed_out', 'cancelled')
+                            THEN now()
+                            ELSE NULL
+                        END,
                         $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20,
                         $21, $22, $23, $24, $25, $26
                     )
@@ -949,6 +956,13 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         ):
             raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
         return saved
+
+    async def list_artifact_jobs(self, artifact_id: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            "SELECT * FROM artifact_jobs WHERE artifact_id = $1 ORDER BY created_at",
+            artifact_id,
+        )
+        return [_record(row) for row in rows]
 
     async def claim_jobs(
         self, worker_id: str, limit: int, lease_seconds: int
@@ -2003,7 +2017,12 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             "idempotency_key": idempotency_key,
             "queued_at": now,
             "started_at": now if payload.get("status") == "running" else None,
-            "completed_at": None,
+            "completed_at": (
+                now
+                if str(payload.get("status") or "queued")
+                in {"succeeded", "failed", "timed_out", "cancelled"}
+                else None
+            ),
             "created_at": now,
         }
         self.runs[run["id"]] = run
@@ -2240,6 +2259,10 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         }
         self.jobs[job["id"]] = job
         return deepcopy(job)
+
+    async def list_artifact_jobs(self, artifact_id: str) -> list[dict[str, Any]]:
+        values = [job for job in self.jobs.values() if job.get("artifact_id") == artifact_id]
+        return deepcopy(sorted(values, key=lambda item: item["created_at"]))
 
     async def claim_jobs(
         self, worker_id: str, limit: int, lease_seconds: int

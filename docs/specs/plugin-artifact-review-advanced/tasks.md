@@ -46,24 +46,24 @@
         - *Details*: 运行 schema/权限/并发 activation/health tests、Ruff 和 OpenAPI 过滤测试；差异自审后提交。
         - *Requirements*: FR-220、FR-221、FR-223。
 
-- [ ] 3. **可恢复的高级审查 DAG**
-    - [ ] 3.1. 从 `ArtifactJobRunner` 抽取 stage handlers
+- [x] 3. **可恢复的高级审查 DAG**
+    - [x] 3.1. 从 `ArtifactJobRunner` 抽取 stage handlers
         - *Goal*: 防止 runtime/LLM/security 阶段继续堆入单一 jobs.py。
         - *Details*: 建立 `ReviewStage`/`StageContext`/`StageOutcome`；保留 P1 handler 行为；统一 completed/blocked/degraded/retryable/terminal 语义。
         - *Requirements*: FR-208、FR-221；可维护性。
-    - [ ] 3.2. 实现 DAG readiness 和幂等入队
+    - [x] 3.2. 实现 DAG readiness 和幂等入队
         - *Goal*: 根据固定 policy 只运行满足依赖的阶段，并最终唯一进入 routing。
         - *Details*: 每 stage 使用 artifact/policy/tool version 幂等键；重试创建新 run attempt；硬阻断可跳过成本阶段但保存 coverage reason；worker crash 后可恢复。
         - *Requirements*: FR-202、FR-205 至 FR-208、FR-216 至 FR-220。
-    - [ ] 3.3. 调整 static 完成后的流程
+    - [x] 3.3. 调整 static 完成后的流程
         - *Goal*: static 不再直接无条件进入人工队列，而是启动高级 DAG。
         - *Details*: 高级功能关闭时保持 P1 `pending_review`；启用时入队 diff/malware/runtime 等 policy stages；critical 静态 finding 继续确定性拒绝。
         - *Requirements*: FR-208；兼容性。
-    - [ ] 3.4. 增加 stage DAG truth-table 与恢复测试
+    - [x] 3.4. 增加 stage DAG truth-table 与恢复测试
         - *Goal*: 证明成功、阻断、降级、重试、跳过和重复领取不会误通过。
         - *Details*: 覆盖 feature flag 组合、policy changes、worker crash、重复 callback、缺失 run 和 route 只创建一次。
         - *Requirements*: FR-208、FR-221；可靠性。
-    - [ ] 3.5. 验证并提交 orchestration
+    - [x] 3.5. 验证并提交 orchestration
         - *Goal*: 形成后续工具统一接入点。
         - *Details*: 运行现有 artifact pipeline 回归、DAG tests、Ruff；确认 P0/P1 默认路径不变后提交。
         - *Requirements*: 全局回归。
