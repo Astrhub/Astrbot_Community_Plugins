@@ -161,6 +161,17 @@ def test_local_result_writer_is_bounded_immutable_and_path_safe(tmp_path: Path) 
         with pytest.raises(RuntimeResultStorageError) as oversized:
             await writer.put_result("runtime/results/b.json", b"too-large", max_bytes=2)
         assert oversized.value.code == "runtime_result_too_large"
+        assert (
+            await writer.read_text_content(
+                "runtime/results/a.json",
+                10,
+                first.sha256,
+            )
+            == b"{}"
+        )
+        with pytest.raises(RuntimeResultStorageError) as drift:
+            await writer.read_text_content("runtime/results/a.json", 10, "0" * 64)
+        assert drift.value.code == "runtime_result_sha256_mismatch"
         return first, second
 
     first, second = asyncio.run(scenario())
@@ -189,7 +200,45 @@ def test_worker_uploads_result_before_completing_dispatch(tmp_path: Path) -> Non
 
     assert completion["status"] == "succeeded"
     assert completion["result_sha256"] == result.result_sha256
+    assert result.install.sbom_key is not None
+    assert (tmp_path / result.install.sbom_key).is_file()
     assert ("cleanup_orphans", "") in fake.calls
+
+
+class RejectingSbomWriter(LocalRuntimeResultWriter):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.keys: list[str] = []
+
+    async def put_result(self, key: str, content: bytes, *, max_bytes: int):
+        self.keys.append(key)
+        if key.endswith(".cdx.json"):
+            raise RuntimeResultStorageError(
+                "runtime_result_conflict",
+                "Runtime SBOM key already contains different content",
+            )
+        return await super().put_result(key, content, max_bytes=max_bytes)
+
+
+def test_worker_does_not_publish_result_when_sbom_sidecar_conflicts(tmp_path: Path) -> None:
+    async def scenario():
+        repository = FakeRunnerRepository()
+        writer = RejectingSbomWriter(tmp_path)
+        worker = RuntimeRunnerWorker(
+            queue=RuntimeRunnerQueue(repository, runner_id="runner-test"),
+            result_writer=writer,
+            executor=ContainerExecutionPipeline(DeterministicFakeContainerExecutor()),
+            settings=runner_settings(tmp_path),
+        )
+        await worker.run_once()
+        return repository, writer
+
+    repository, writer = asyncio.run(scenario())
+
+    assert writer.keys and writer.keys[0].endswith(".cdx.json")
+    assert len(writer.keys) == 1
+    assert repository.completions[0]["status"] == "failed"
+    assert repository.completions[0]["error_code"] == "runtime_result_conflict"
 
 
 @pytest.mark.parametrize(

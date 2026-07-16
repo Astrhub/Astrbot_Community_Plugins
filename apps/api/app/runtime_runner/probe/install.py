@@ -6,15 +6,16 @@ import platform
 import re
 import sys
 import time
-import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from ...artifacts.requirements_parser import RequirementsParseError, parse_requirements
 from ...artifacts.runner_contract import (
     DependencyConflict,
     InstallResult,
@@ -23,19 +24,47 @@ from ...artifacts.runner_contract import (
     ProbeStatus,
     RuntimeDispatchRequest,
 )
+from ...artifacts.sbom import build_cyclonedx_sbom
 from .command import CommandResult, CommandRunner, redact_probe_text
 
-_REQUIREMENTS_MAX_BYTES = 256 * 1024
-_UNSAFE_REQUIREMENT = re.compile(
-    r"(?:[a-z][a-z0-9+.-]*://|git\+|hg\+|svn\+|bzr\+|--|^-|\s@\s)",
-    re.IGNORECASE,
-)
 _PIP_CONFLICT = re.compile(
     r"^(?P<package>[A-Za-z0-9_.-]+)\s+(?P<installed>[^\s]+)\s+has requirement\s+"
     r"(?P<requirement>.+?),\s+but you have\s+(?P<actual>[A-Za-z0-9_.-]+)\s+"
     r"(?P<actual_version>[^.\s]+(?:\.[^.\s]+)*)\.?$",
     re.IGNORECASE,
 )
+_PACKAGE_SNAPSHOT_SCRIPT = r"""
+import importlib.metadata as metadata
+import json
+
+installed = []
+for distribution in metadata.distributions():
+    direct = distribution.read_text("direct_url.json")
+    source = "index"
+    if direct:
+        try:
+            value = json.loads(direct)
+            url = str(value.get("url") or "").casefold()
+            if isinstance(value.get("vcs_info"), dict):
+                source = "vcs"
+            elif isinstance(value.get("dir_info"), dict) or url.startswith("file:"):
+                source = "local"
+            elif url.startswith(("http://", "https://")):
+                source = "direct_url"
+            else:
+                source = "unknown"
+        except (TypeError, ValueError):
+            source = "unknown"
+    installed.append({
+        "metadata": {
+            "name": distribution.metadata.get("Name", ""),
+            "version": distribution.version,
+            "requires_dist": list(distribution.requires or ()),
+        },
+        "source": source,
+    })
+print(json.dumps({"version": "1", "installed": installed}, separators=(",", ":")))
+""".strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +129,12 @@ class InstallSandbox:
         venv_python = venv_root / "bin" / "python"
         command_limit = request.limits.max_log_bytes
 
-        async def run(phase: str, argv: Sequence[str]) -> CommandResult:
+        async def run(
+            phase: str,
+            argv: Sequence[str],
+            *,
+            log_output: bool = True,
+        ) -> CommandResult:
             nonlocal logs_truncated
             result = await self.runner.run(
                 argv,
@@ -109,7 +143,7 @@ class InstallSandbox:
                 timeout_seconds=request.limits.timeout_seconds,
                 max_output_bytes=command_limit,
             )
-            if result.output:
+            if result.output and log_output:
                 log_parts.append(f"[{phase}]\n{redact_probe_text(result.output)}")
             logs_truncated = logs_truncated or result.truncated
             return result
@@ -150,7 +184,9 @@ class InstallSandbox:
                 logs_truncated,
                 max_log_bytes=command_limit,
             )
-        before_command = await run("snapshot-before", _pip_list_argv(venv_python))
+        before_command = await run(
+            "snapshot-before", _package_snapshot_argv(venv_python), log_output=False
+        )
         before = _parse_package_snapshot(before_command)
         if before is None:
             return _command_failure(
@@ -195,7 +231,9 @@ class InstallSandbox:
             "pip-check",
             (str(venv_python), "-m", "pip", "check", "--disable-pip-version-check"),
         )
-        after_command = await run("snapshot-after", _pip_list_argv(venv_python))
+        after_command = await run(
+            "snapshot-after", _package_snapshot_argv(venv_python), log_output=False
+        )
         after = _parse_package_snapshot(after_command)
         if after is None:
             return _command_failure(
@@ -237,6 +275,7 @@ class InstallSandbox:
             error_code=error_code,
             message=message,
             astrbot_version=request.target.astrbot_version,
+            requirements_sha256=requirements_sha256,
             pip_check=(
                 ProbeResult(status=ProbeStatus.PASSED, duration_ms=pip_check.duration_ms)
                 if pip_check.succeeded
@@ -255,6 +294,7 @@ class InstallSandbox:
             conflicts=tuple(conflicts[:500]),
             core_before_sha256=before_sha256,
             core_after_sha256=after_sha256,
+            sbom_sha256=sbom_sha256,
         )
         logs, final_truncated = _bounded_logs(log_parts, request.limits.max_log_bytes)
         return InstallProbeOutput(
@@ -269,46 +309,20 @@ class InstallSandbox:
 
 def _validate_requirements(path: Path) -> str:
     try:
-        stat = path.lstat()
+        path.lstat()
     except FileNotFoundError:
         return ""
-    if path.is_symlink() or not path.is_file() or stat.st_size > _REQUIREMENTS_MAX_BYTES:
+    if path.is_symlink() or not path.is_file():
         raise ValueError("requirements.txt must be a bounded regular file")
     content = path.read_bytes()
-    if b"\x00" in content:
-        raise ValueError("requirements.txt contains unsupported binary content")
     try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("requirements.txt must use UTF-8") from exc
-    for line in _logical_requirement_lines(text):
-        if _UNSAFE_REQUIREMENT.search(line):
-            raise ValueError("requirements.txt cannot contain URLs, VCS sources, or pip options")
-        try:
-            requirement = Requirement(line)
-        except InvalidRequirement as exc:
-            raise ValueError("requirements.txt contains an invalid requirement") from exc
-        if requirement.url:
-            raise ValueError("requirements.txt cannot contain direct URL dependencies")
-    return hashlib.sha256(content).hexdigest() if content.strip() else ""
-
-
-def _logical_requirement_lines(value: str) -> tuple[str, ...]:
-    lines: list[str] = []
-    pending = ""
-    for raw_line in value.splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        pending += line
-        if pending.endswith("\\"):
-            pending = pending[:-1].strip() + " "
-            continue
-        lines.append(pending.strip())
-        pending = ""
-    if pending:
-        raise ValueError("requirements.txt has an incomplete continuation")
-    return tuple(lines)
+        parsed = parse_requirements(content)
+    except RequirementsParseError as exc:
+        raise ValueError(f"requirements.txt is invalid: {exc.code}") from exc
+    if parsed.diagnostics:
+        codes = ",".join(sorted({item.code for item in parsed.diagnostics}))
+        raise ValueError(f"requirements.txt contains unsupported declarations: {codes}")
+    return parsed.content_sha256
 
 
 def _validate_python_target(target: str, actual: str) -> None:
@@ -321,14 +335,11 @@ def _validate_python_target(target: str, actual: str) -> None:
         raise ValueError("container Python version does not match the runtime target")
 
 
-def _pip_list_argv(python: Path) -> tuple[str, ...]:
+def _package_snapshot_argv(python: Path) -> tuple[str, ...]:
     return (
         str(python),
-        "-m",
-        "pip",
-        "list",
-        "--format=json",
-        "--disable-pip-version-check",
+        "-c",
+        _PACKAGE_SNAPSHOT_SCRIPT,
     )
 
 
@@ -339,25 +350,74 @@ def _parse_package_snapshot(result: CommandResult) -> dict[str, InstalledPackage
         payload = json.loads(result.output)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, list) or len(payload) > 2000:
+    installed = payload.get("installed") if isinstance(payload, Mapping) else None
+    if not isinstance(installed, list) or len(installed) > 2000:
         return None
-    packages: dict[str, InstalledPackage] = {}
+    pending: dict[str, tuple[str, str, tuple[str, ...]]] = {}
     try:
-        for item in payload:
+        for item in installed:
             if not isinstance(item, Mapping):
                 return None
-            package = InstalledPackage(
-                name=str(item.get("name") or ""),
-                version=str(item.get("version") or ""),
-                source="unknown",
-            )
-            key = canonicalize_name(package.name)
-            if key in packages:
+            metadata = item.get("metadata")
+            if not isinstance(metadata, Mapping):
                 return None
-            packages[key] = package
+            name = str(metadata.get("name") or "")
+            version = str(metadata.get("version") or "")
+            key = canonicalize_name(name)
+            if not key or key in pending:
+                return None
+            requires_dist = metadata.get("requires_dist") or []
+            if not isinstance(requires_dist, list) or len(requires_dist) > 500:
+                return None
+            requires: set[str] = set()
+            for value in requires_dist:
+                if not isinstance(value, str):
+                    return None
+                try:
+                    requires.add(canonicalize_name(Requirement(value).name))
+                except InvalidRequirement:
+                    return None
+            pending[key] = (name, version, tuple(sorted(requires)))
     except ValueError:
         return None
+    packages: dict[str, InstalledPackage] = {}
+    for item in installed:
+        assert isinstance(item, Mapping)
+        metadata = item["metadata"]
+        assert isinstance(metadata, Mapping)
+        key = canonicalize_name(str(metadata["name"]))
+        name, version, requires = pending[key]
+        package = InstalledPackage(
+            name=name,
+            version=version,
+            source=(
+                str(item.get("source"))
+                if item.get("source") in {"index", "direct_url", "vcs", "local", "unknown"}
+                else _installed_source(item.get("direct_url"))
+            ),
+            requires=tuple(dependency for dependency in requires if dependency in pending),
+        )
+        packages[key] = package
     return dict(sorted(packages.items()))
+
+
+def _installed_source(value: object) -> str:
+    if value is None:
+        return "index"
+    if not isinstance(value, Mapping):
+        return "unknown"
+    if isinstance(value.get("vcs_info"), Mapping):
+        return "vcs"
+    raw_url = str(value.get("url") or "")
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return "unknown"
+    if parsed.scheme == "file" or isinstance(value.get("dir_info"), Mapping):
+        return "local"
+    if parsed.scheme in {"http", "https"}:
+        return "direct_url"
+    return "unknown"
 
 
 def _snapshot_sha256(packages: Mapping[str, InstalledPackage]) -> str:
@@ -432,35 +492,7 @@ def _write_sbom(
     astrbot_version: str,
     packages: tuple[InstalledPackage, ...],
 ) -> tuple[Path, str]:
-    components = [
-        {
-            "type": "library",
-            "name": package.name,
-            "version": package.version,
-            "purl": f"pkg:pypi/{canonicalize_name(package.name)}@{package.version}",
-        }
-        for package in packages
-    ]
-    component_hash = hashlib.sha256(
-        json.dumps(components, ensure_ascii=True, sort_keys=True).encode()
-    ).hexdigest()
-    payload = {
-        "bomFormat": "CycloneDX",
-        "specVersion": "1.5",
-        "serialNumber": f"urn:uuid:{uuid.UUID(component_hash[:32])}",
-        "version": 1,
-        "metadata": {
-            "component": {"type": "application", "name": "AstrBot", "version": astrbot_version}
-        },
-        "components": components,
-    }
-    content = json.dumps(
-        payload,
-        ensure_ascii=True,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
+    content = build_cyclonedx_sbom(astrbot_version, packages)
     output = workspace / "output"
     output.mkdir(mode=0o700, exist_ok=True)
     path = output / "sbom.cdx.json"
@@ -487,6 +519,7 @@ def _command_failure(
         duration_ms=_duration_ms(started),
         error_code=code,
         message="Runtime dependency installation did not complete",
+        requirements_sha256=requirements_sha256,
         pip_check=ProbeResult(
             status=ProbeStatus.SKIPPED,
             error_code="dependency_check_not_run",
@@ -520,6 +553,7 @@ def _failure_output(
             duration_ms=_duration_ms(started),
             error_code=error_code,
             message=redact_probe_text(message, maximum=500),
+            requirements_sha256=requirements_sha256,
             pip_check=ProbeResult(
                 status=ProbeStatus.SKIPPED,
                 error_code="dependency_check_not_run",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import stat
 import zipfile
 from pathlib import Path
@@ -343,7 +344,11 @@ def test_static_findings_have_stable_fingerprints_and_lines(tmp_path: Path) -> N
     archive_path.write_bytes(
         plugin_zip(
             main_source="value = 'input'\nresult = eval(value)\n",
-            extra_files={"requirements.txt": "demo @ https://example.invalid/demo.whl\n"},
+            extra_files={
+                "requirements.txt": (
+                    "demo @ https://user:private@example.invalid/demo.whl?token=secret\n"
+                )
+            },
         )
     )
     result = ArchivePrechecker(load_settings({}).artifacts).inspect(
@@ -357,6 +362,9 @@ def test_static_findings_have_stable_fingerprints_and_lines(tmp_path: Path) -> N
     assert {item["fingerprint"] for item in first} == {item["fingerprint"] for item in second}
     assert any(item["rule_id"] == "PY001" and item["line_start"] == 2 for item in first)
     assert any(item["rule_id"] == "REQ001" and item["line_start"] == 1 for item in first)
+    serialized = json.dumps(first)
+    for secret in ("private", "token=secret", "example.invalid"):
+        assert secret not in serialized
 
 
 def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: Path) -> None:

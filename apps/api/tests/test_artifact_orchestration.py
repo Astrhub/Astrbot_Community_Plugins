@@ -419,6 +419,75 @@ def test_succeeded_job_without_terminal_run_is_failed_not_completed() -> None:
     assert sum(job["type"] == JobType.ROUTE_REVIEW.value for job in jobs) == 1
 
 
+def test_runtime_collect_with_wrong_dispatch_id_does_not_keep_unit_running() -> None:
+    async def scenario() -> tuple[Any, list[dict[str, Any]]]:
+        policy = _policy_payload(
+            [ReviewPolicyStage.STATIC, ReviewPolicyStage.RUNTIME, ReviewPolicyStage.DEPENDENCY],
+            runtime_targets=[{"astrbot": "4.26.5", "python": "3.12"}],
+        )
+        repository, artifact, policy_record = await _review_fixture(policy)
+        runtime_tool = StageToolSnapshot("runtime-contract-v1:test")
+        orchestrator = ReviewOrchestrator(
+            repository,
+            tool_snapshots={
+                ReviewPolicyStage.RUNTIME: runtime_tool,
+                ReviewPolicyStage.DEPENDENCY: StageToolSnapshot("dependency-db-v1"),
+            },
+        )
+        await orchestrator.reconcile(artifact["id"])
+        dispatch_job = next(
+            item
+            for item in await repository.claim_jobs("runtime-worker", 10, 60)
+            if item["type"] == JobType.RUNTIME_DISPATCH.value
+        )
+        run = await repository.create_review_run(
+            {
+                "artifact_id": artifact["id"],
+                "type": "runtime",
+                "status": "running",
+                "attempt": 1,
+                "tool_name": "runtime-runner",
+                "tool_version": runtime_tool.version,
+                "policy_version_id": policy_record["id"],
+                "container_image_digest": f"sha256:{'c' * 64}",
+                "astrbot_version": "4.26.5",
+                "python_version": "3.12",
+                "coverage": {
+                    "outcome": "running",
+                    "stage_name": "runtime:4.26.5:python-3.12",
+                },
+            }
+        )
+        await repository.enqueue_job(
+            {
+                "artifact_id": artifact["id"],
+                "type": JobType.RUNTIME_COLLECT.value,
+                "payload": {
+                    "stage": "runtime",
+                    "stage_name": "runtime:4.26.5:python-3.12",
+                    "dispatch_id": "runtime_wrong_dispatch",
+                    "run_id": run["id"],
+                    "poll": 0,
+                },
+                "max_attempts": 3,
+                "idempotency_key": "runtime-collect-wrong-dispatch",
+                "policy_version_id": policy_record["id"],
+                "run_id": run["id"],
+                "stage_name": "runtime:4.26.5:python-3.12",
+            }
+        )
+        assert await repository.complete_job(dispatch_job["id"], "runtime-worker")
+        result = await orchestrator.reconcile(artifact["id"])
+        return result, await repository.list_review_runs(artifact["id"])
+
+    result, runs = asyncio.run(scenario())
+
+    assert result.stage_states["runtime"] == StageState.FAILED
+    assert result.stage_states["dependency"] == StageState.SKIPPED
+    dependency = next(run for run in runs if run["type"] == "dependency")
+    assert dependency["coverage"]["reason"] == "upstream_failed"
+
+
 def test_routing_ack_loss_is_idempotently_recovered() -> None:
     async def scenario() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         repository, artifact, _ = await _review_fixture(_policy_payload([ReviewPolicyStage.STATIC]))

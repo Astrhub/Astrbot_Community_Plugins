@@ -4,9 +4,9 @@ import asyncio
 import logging
 from contextlib import suppress
 
-from ..artifacts.runner_contract import RuntimeDispatchResult, runtime_result_object_key
+from ..artifacts.runner_contract import runtime_result_object_key
 from .config import RuntimeRunnerSettings
-from .execution import RuntimeExecutionError, RuntimeExecutionService
+from .execution import RuntimeExecutionError, RuntimeExecutionOutput, RuntimeExecutionService
 from .queue import (
     RunnerTerminalStatus,
     RuntimeDispatchWorkItem,
@@ -79,7 +79,8 @@ class RuntimeRunnerWorker:
 
     async def _process_work(self, work: RuntimeDispatchWorkItem) -> None:
         try:
-            result = await self._execute_with_heartbeat(work)
+            output = await self._execute_with_heartbeat(work)
+            result = output.result
             content = result.model_dump_json().encode("utf-8")
             renewed = await self.queue.renew(
                 work,
@@ -87,6 +88,17 @@ class RuntimeRunnerWorker:
             )
             if not renewed:
                 raise _LeaseLost
+            for private_object in output.private_objects:
+                stored = await self.result_writer.put_result(
+                    private_object.key,
+                    private_object.content,
+                    max_bytes=private_object.max_bytes,
+                )
+                if stored.sha256 != private_object.sha256:
+                    raise RuntimeResultStorageError(
+                        "runtime_result_sha256_mismatch",
+                        "Runtime private object storage returned a different digest",
+                    )
             result_key = runtime_result_object_key(
                 work.request,
                 work.attempt,
@@ -157,7 +169,7 @@ class RuntimeRunnerWorker:
     async def _execute_with_heartbeat(
         self,
         work: RuntimeDispatchWorkItem,
-    ) -> RuntimeDispatchResult:
+    ) -> RuntimeExecutionOutput:
         execution = asyncio.create_task(self.executor.execute(work))
         heartbeat = asyncio.create_task(self._wait_for_lease_loss(work))
         try:
@@ -176,7 +188,12 @@ class RuntimeRunnerWorker:
                 with suppress(asyncio.CancelledError):
                     await execution
                 raise _LeaseLost
-            return execution.result()
+            result = execution.result()
+            return (
+                result
+                if isinstance(result, RuntimeExecutionOutput)
+                else RuntimeExecutionOutput(result=result)
+            )
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):

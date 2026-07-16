@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from ..runtime_runner.storage import RuntimeResultStorageError
 from ..runtime_runner.queue import (
     RuntimeDispatchWorkItem,
     RuntimeRunnerQueue,
@@ -28,8 +29,10 @@ from .runner_contract import (
     runtime_result_error_code,
     runtime_result_object_key,
     runtime_result_passed,
+    runtime_sbom_object_key,
     validate_runtime_result_identity,
 )
+from .sbom import MAX_SBOM_BYTES, ValidatedSbom, validate_cyclonedx_sbom
 from .storage import ArtifactStorageError
 
 __all__ = [
@@ -161,10 +164,9 @@ class RuntimeDispatchController:
         status = RuntimeDispatchStatus(str(dispatch["status"]))
         if status in {RuntimeDispatchStatus.QUEUED, RuntimeDispatchStatus.RUNNING}:
             return RuntimeCollectionResult(CollectionState.WAITING, dispatch_id, run_id=run_id)
-        if status == RuntimeDispatchStatus.CANCELLED:
-            return RuntimeCollectionResult(CollectionState.CANCELLED, dispatch_id, run_id=run_id)
-
         parsed_result: RuntimeDispatchResult | None = None
+        validated_sbom: ValidatedSbom | None = None
+        sbom_payload: dict[str, Any] | None = None
         validation_error = ""
         request: RuntimeDispatchRequest | None = None
         try:
@@ -191,6 +193,35 @@ class RuntimeDispatchController:
                 validate_runtime_result_identity(request, parsed_result)
                 if parsed_result.result_sha256 != str(dispatch["result_sha256"]):
                     raise ValueError("runtime result digest differs from dispatch")
+                if parsed_result.install.sbom_key and parsed_result.install.sbom_sha256:
+                    expected_sbom_key = runtime_sbom_object_key(
+                        request,
+                        int(dispatch.get("attempts") or 0),
+                        parsed_result.install.sbom_sha256,
+                    )
+                    if parsed_result.install.sbom_key != expected_sbom_key:
+                        raise ValueError("runtime SBOM key differs from its request")
+                    sbom_content = await self.result_storage.read_text_content(
+                        expected_sbom_key,
+                        MAX_SBOM_BYTES,
+                        parsed_result.install.sbom_sha256,
+                    )
+                    validated_sbom = validate_cyclonedx_sbom(
+                        sbom_content,
+                        astrbot_version=parsed_result.install.astrbot_version,
+                        packages=parsed_result.install.packages,
+                        expected_sha256=parsed_result.install.sbom_sha256,
+                    )
+                    sbom_payload = {
+                        "artifact_id": dispatch["artifact_id"],
+                        "run_id": run_id,
+                        "format": validated_sbom.format,
+                        "document_sha256": validated_sbom.document_sha256,
+                        "object_key": expected_sbom_key,
+                        "package_count": validated_sbom.package_count,
+                        "generator": validated_sbom.generator,
+                        "tool_version": validated_sbom.tool_version,
+                    }
             except ArtifactStorageError as exc:
                 if exc.code == "content_object_missing":
                     raise RuntimeDispatchServiceError(
@@ -199,12 +230,25 @@ class RuntimeDispatchController:
                         retryable=True,
                     ) from exc
                 validation_error = ArtifactErrorCode.RUNTIME_RESULT_INVALID.value
+            except RuntimeResultStorageError as exc:
+                if exc.code == "content_object_missing":
+                    raise RuntimeDispatchServiceError(
+                        "runtime_result_unavailable",
+                        "Runtime private object is not available yet",
+                        retryable=True,
+                    ) from exc
+                validation_error = ArtifactErrorCode.RUNTIME_RESULT_INVALID.value
             except (ValidationError, ValueError):
                 validation_error = ArtifactErrorCode.RUNTIME_RESULT_INVALID.value
         elif status == RuntimeDispatchStatus.SUCCEEDED:
             validation_error = ArtifactErrorCode.RUNTIME_RESULT_INVALID.value
 
-        run_payload = _collection_run_payload(dispatch, parsed_result, validation_error)
+        run_payload = _collection_run_payload(
+            dispatch,
+            parsed_result,
+            validation_error,
+            validated_sbom,
+        )
         normalized_findings = []
         if parsed_result is not None:
             normalized_findings.extend(
@@ -229,6 +273,7 @@ class RuntimeDispatchController:
             dispatch_id,
             run_payload,
             normalized_findings,
+            sbom_payload,
         )
         if collected is None:
             return RuntimeCollectionResult(
@@ -327,6 +372,7 @@ def _collection_run_payload(
     dispatch: Mapping[str, Any],
     result: RuntimeDispatchResult | None,
     validation_error: str,
+    sbom: ValidatedSbom | None = None,
 ) -> dict[str, Any]:
     dispatch_status = RuntimeDispatchStatus(str(dispatch["status"]))
     passed = (
@@ -370,6 +416,16 @@ def _collection_run_payload(
         raw_result["statuses"] = statuses
         raw_result["target"] = result.target.model_dump(mode="json")
         coverage["statuses"] = statuses
+    if sbom is not None:
+        sbom_summary = {
+            "format": sbom.format,
+            "document_sha256": sbom.document_sha256,
+            "package_count": sbom.package_count,
+            "generator": sbom.generator,
+            "tool_version": sbom.tool_version,
+        }
+        raw_result["sbom"] = sbom_summary
+        coverage["sbom"] = sbom_summary
     return {
         "status": status,
         "summary": summary,

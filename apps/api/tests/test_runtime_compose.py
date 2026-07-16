@@ -16,10 +16,15 @@ def test_runtime_compose_profile_keeps_socket_out_of_trusted_control_plane() -> 
     for name in ("app", "artifact-worker"):
         volumes = " ".join(str(item) for item in services[name].get("volumes", []))
         assert "docker.sock" not in volumes
+    app_volumes = " ".join(str(item) for item in services["app"].get("volumes", []))
+    worker_volumes = " ".join(str(item) for item in services["artifact-worker"].get("volumes", []))
+    assert "runtime-results" not in app_volumes
+    assert "runtime-results:/var/lib/astrbot-runtime-results:ro" in worker_volumes
     runner = services["runtime-runner"]
     runner_volumes = " ".join(str(item) for item in runner["volumes"])
     assert runner["profiles"] == ["runtime-runner"]
     assert "/var/run/docker.sock:/var/run/docker.sock" in runner_volumes
+    assert "runtime-results:/var/lib/astrbot-runtime-results" in runner_volumes
     assert runner["environment"]["RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT"] == "true"
     assert runner["environment"]["RUNTIME_RUNNER_EXECUTOR_BACKEND"] == "rootless-docker"
     assert runner["read_only"] is True
@@ -35,9 +40,7 @@ def test_runtime_compose_network_matches_fail_closed_policy_contract() -> None:
     assert network["name"] == "astrbot-runtime-install"
     assert network["internal"] is True
     assert network["driver"] == "bridge"
-    assert network["driver_opts"][
-        "com.docker.network.bridge.enable_ip_masquerade"
-    ] == "false"
+    assert network["driver_opts"]["com.docker.network.bridge.enable_ip_masquerade"] == "false"
     assert network["labels"] == required_network_labels(
         "pypi-only-v1",
         "https://pypi.org/simple",

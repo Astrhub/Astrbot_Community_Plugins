@@ -4,22 +4,18 @@ import ast
 import hashlib
 import re
 import zipfile
-from collections import defaultdict
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
 from .archive import ArchiveMember
 from .models import highest_risk
+from .requirements_parser import RequirementsParseError, parse_requirements
 
 RULESET_VERSION = "p1.1"
 URL_PATTERN = re.compile(r"https?://", re.IGNORECASE)
 LONG_ENCODED_PATTERN = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
 SENSITIVE_PATTERN = re.compile(
     r"(?:\.ssh|\.aws|credentials|id_rsa|private[_-]?key|api[_-]?key|access[_-]?token)",
-    re.IGNORECASE,
-)
-DIRECT_REQUIREMENT_PATTERN = re.compile(
-    r"^(?:-e\s+|--editable\s+|(?:git|hg|svn|bzr)\+|https?://|file:|\.{0,2}/)",
     re.IGNORECASE,
 )
 
@@ -192,44 +188,55 @@ def _scan_python(path: str, source: str) -> list[dict[str, Any]]:
 
 
 def _scan_requirements(path: str, source: str) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    packages: dict[str, list[tuple[int, str]]] = defaultdict(list)
-    for line_number, raw_line in enumerate(source.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if DIRECT_REQUIREMENT_PATTERN.search(line) or " @ " in line:
-            findings.append(
-                _finding(
-                    rule_id="REQ001",
-                    severity="high",
-                    category="dependency_source",
-                    path=path,
-                    line=line_number,
-                    message="requirements 包含 VCS、URL、editable 或本地路径依赖",
-                    suggestion="改用 PyPI 上带固定版本范围的依赖",
-                    evidence=_limited_excerpt(line),
-                )
+    try:
+        parsed = parse_requirements(source)
+    except RequirementsParseError as exc:
+        return [
+            _finding(
+                rule_id="REQ003",
+                severity="high",
+                category="dependency_manifest",
+                path=path,
+                line=None,
+                message="requirements 文件无法安全解析",
+                suggestion="使用 UTF-8 和标准 PEP 508 依赖声明",
+                evidence=f"code={exc.code}",
             )
-        name_match = re.match(r"^([A-Za-z0-9_.-]+)", line)
-        if name_match:
-            normalized = re.sub(r"[-_.]+", "-", name_match.group(1)).lower()
-            packages[normalized].append((line_number, line))
-    for package, declarations in packages.items():
-        unique = {line for _, line in declarations}
-        if len(unique) <= 1:
-            continue
-        line_number, line = declarations[-1]
+        ]
+
+    findings: list[dict[str, Any]] = []
+    for diagnostic in parsed.diagnostics:
+        is_conflict = diagnostic.code == "dependency_declaration_conflict"
+        is_source = diagnostic.code in {
+            "dependency_direct_url",
+            "dependency_vcs_source",
+            "dependency_local_source",
+            "dependency_editable_source",
+            "dependency_source_option",
+            "dependency_option_invalid",
+        }
         findings.append(
             _finding(
-                rule_id="REQ002",
-                severity="medium",
-                category="dependency_conflict",
+                rule_id="REQ002" if is_conflict else ("REQ001" if is_source else "REQ003"),
+                severity="medium" if is_conflict else "high",
+                category=(
+                    "dependency_conflict"
+                    if is_conflict
+                    else ("dependency_source" if is_source else "dependency_manifest")
+                ),
                 path=path,
-                line=line_number,
-                message=f"依赖 {package} 存在多个不一致声明",
-                suggestion="合并为单一、可解析的版本范围",
-                evidence=_limited_excerpt(line),
+                line=diagnostic.line_number or None,
+                message=(
+                    f"依赖 {diagnostic.name} 存在多个不一致声明"
+                    if is_conflict and diagnostic.name
+                    else diagnostic.message
+                ),
+                suggestion=(
+                    "合并为单一、可解析的版本范围"
+                    if is_conflict
+                    else "仅使用受信任索引中的标准 PEP 508 依赖声明"
+                ),
+                evidence=diagnostic.evidence,
             )
         )
     return findings

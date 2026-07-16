@@ -257,11 +257,38 @@ class DependencyPolicy(FrozenPolicyModel):
     on_unavailable: ToolFailureAction = ToolFailureAction.MANUAL_REVIEW
     allow_direct_urls: bool = False
     allow_vcs: bool = False
+    denied_licenses: tuple[str, ...] = ()
+    private_package_prefixes: tuple[str, ...] = ()
 
     @field_validator("advisory_config_ref")
     @classmethod
     def validate_advisory_reference(cls, value: str) -> str:
         return _config_reference(value)
+
+    @field_validator("denied_licenses")
+    @classmethod
+    def normalize_denied_licenses(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(sorted({item.strip() for item in value if item.strip()}))
+        if any(
+            len(item) > 128 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+()\- ]*", item)
+            for item in normalized
+        ):
+            raise ValueError("denied dependency licenses must be bounded public identifiers")
+        return normalized
+
+    @field_validator("private_package_prefixes")
+    @classmethod
+    def normalize_private_prefixes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(
+            sorted(
+                {re.sub(r"[-_.]+", "-", item.strip().casefold()) for item in value if item.strip()}
+            )
+        )
+        if any(
+            len(item) > 64 or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", item) for item in normalized
+        ):
+            raise ValueError("private package prefixes must use normalized package characters")
+        return normalized
 
     @model_validator(mode="after")
     def validate_severity_threshold(self) -> Self:

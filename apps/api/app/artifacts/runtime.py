@@ -6,7 +6,19 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..config import ArtifactReviewSettings, ArtifactSettings, Settings
+from ..config import (
+    ArtifactReviewSettings,
+    ArtifactSettings,
+    Settings,
+    runtime_image_digest,
+)
+from ..runtime_runner.storage import LocalRuntimeResultWriter
+from .advisory import (
+    DependencyAdvisoryProvider,
+    HttpsDependencyAdvisoryProvider,
+    LocalDependencyAdvisoryProvider,
+    UnavailableDependencyAdvisoryProvider,
+)
 from .archive import ArchivePrechecker
 from .category import OpenAICompatibleCategoryProvider
 from .github_source import GithubSourceClient
@@ -23,6 +35,7 @@ from .malware import (
 from .notifications import ArtifactNotificationDispatcher
 from .policy import ReviewPolicyV1, parse_review_policy, review_policy_sha256
 from .repository import InMemoryArtifactRepository, PgArtifactRepository
+from .runtime_dispatch import RuntimeDispatchController
 from .service import ArtifactService
 from .static_scan import StaticScanner
 from .storage import create_artifact_storage
@@ -105,6 +118,24 @@ class ArtifactRuntime:
                     self.config.review,
                     enabled=self.worker_execution_enabled,
                 )
+                runtime_result_storage = None
+                runtime_controller = None
+                runtime_digest = ""
+                if self.worker_execution_enabled and self.config.review.runtime_enabled:
+                    runtime_digest = runtime_image_digest(
+                        self.config.review.runtime_container_image
+                    )
+                    result_root = Path(self.config.review.runtime_result_root)
+                    if runtime_digest and result_root.is_absolute():
+                        runtime_result_storage = LocalRuntimeResultWriter(result_root)
+                        runtime_controller = RuntimeDispatchController(
+                            repository,
+                            runtime_result_storage,
+                        )
+                dependency_provider = _dependency_provider(
+                    self.config.review,
+                    enabled=self.worker_execution_enabled,
+                )
                 job_runner = ArtifactJobRunner(
                     repository=repository,
                     storage=storage,
@@ -121,6 +152,10 @@ class ArtifactRuntime:
                     llm_provider_config_ref=self.config.review.llm_config_ref,
                     clamav_scanner=clamav_scanner,
                     yara_scanner=yara_scanner,
+                    runtime_controller=runtime_controller,
+                    runtime_image_digest=runtime_digest,
+                    runtime_result_storage=runtime_result_storage,
+                    dependency_provider=dependency_provider,
                 )
                 self.attach_components(
                     repository=repository,
@@ -376,6 +411,42 @@ def _malware_scanners(
         except (OSError, ValueError):
             yara = UnavailableYaraScanner("yara_ruleset_unavailable")
     return clamav, yara
+
+
+def _dependency_provider(
+    review: ArtifactReviewSettings,
+    *,
+    enabled: bool,
+) -> DependencyAdvisoryProvider | None:
+    if not enabled or not review.dependency_enabled:
+        return None
+    if review.dependency_advisory_path:
+        try:
+            return LocalDependencyAdvisoryProvider.from_file(
+                review.dependency_advisory_path,
+                config_ref=review.dependency_config_ref,
+            )
+        except (OSError, ValueError):
+            return UnavailableDependencyAdvisoryProvider(
+                "dependency_advisory_snapshot_unavailable",
+                config_ref=review.dependency_config_ref,
+            )
+    if review.dependency_advisory_url:
+        try:
+            return HttpsDependencyAdvisoryProvider(
+                review.dependency_advisory_url,
+                api_token=review.dependency_api_token,
+                config_ref=review.dependency_config_ref,
+            )
+        except ValueError:
+            return UnavailableDependencyAdvisoryProvider(
+                "dependency_advisory_configuration_invalid",
+                config_ref=review.dependency_config_ref,
+            )
+    return UnavailableDependencyAdvisoryProvider(
+        "dependency_advisory_source_missing",
+        config_ref=review.dependency_config_ref,
+    )
 
 
 def _finalize_review_status(

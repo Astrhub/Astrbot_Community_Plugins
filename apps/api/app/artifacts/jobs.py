@@ -7,6 +7,10 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from typing import Any
 
+from .advisory import (
+    DependencyAdvisoryProvider,
+    UnavailableDependencyAdvisoryProvider,
+)
 from .category import CategoryProvider, CategorySuggestionService, UnavailableCategoryProvider
 from .diff import DIFF_TOOL_VERSION, ArtifactDiffService
 from .import_graph import IMPORT_GRAPH_TOOL_VERSION, ImportGraphService
@@ -28,10 +32,12 @@ from .notifications import ArtifactNotificationDispatcher
 from .orchestration import ReviewOrchestrator, StageToolSnapshot, review_run_type_for_job
 from .policy import ReviewPolicyStage
 from .repository import ArtifactRepository
+from .runtime_dispatch import RuntimeDispatchController
 from .stages import (
     CategoryStage,
     ClamAvStage,
     DiffGraphStage,
+    DependencyStage,
     LlmFileStage,
     LlmPackageStage,
     LlmSummaryStage,
@@ -42,6 +48,8 @@ from .stages import (
     StaticScanStage,
     YaraStage,
     RoutingStage,
+    RuntimeCollectStage,
+    RuntimeDispatchStage,
 )
 from .static_scan import StaticScanner
 from .summary_review import SummaryReviewService
@@ -54,6 +62,10 @@ from .storage import (
 )
 
 LOGGER = logging.getLogger(__name__)
+_LEASE_PRESERVING_REVIEW_JOBS = {
+    JobType.RUNTIME_DISPATCH.value,
+    JobType.RUNTIME_COLLECT.value,
+}
 
 
 class JobExecutionError(RuntimeError):
@@ -85,6 +97,10 @@ class ArtifactJobRunner:
         llm_retry_delay_seconds: float = 0.25,
         clamav_scanner: ClamAvScanner | None = None,
         yara_scanner: YaraScanner | None = None,
+        runtime_controller: RuntimeDispatchController | None = None,
+        runtime_image_digest: str = "",
+        runtime_result_storage: object | None = None,
+        dependency_provider: DependencyAdvisoryProvider | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
@@ -99,6 +115,13 @@ class ArtifactJobRunner:
         self.llm_provider = llm_provider or UnavailableStructuredLlmProvider()
         self.clamav_scanner = clamav_scanner or UnavailableClamAvScanner()
         self.yara_scanner = yara_scanner or UnavailableYaraScanner()
+        self.runtime_controller = runtime_controller
+        self.runtime_result_storage = runtime_result_storage
+        self.dependency_provider = dependency_provider or UnavailableDependencyAdvisoryProvider()
+        runtime_stage = RuntimeDispatchStage(
+            runtime_controller,
+            image_digest=runtime_image_digest,
+        )
         tool_snapshots: dict[ReviewPolicyStage, StageToolSnapshot] = {}
         tool_snapshots[ReviewPolicyStage.DIFF] = StageToolSnapshot(DIFF_TOOL_VERSION)
         tool_snapshots[ReviewPolicyStage.IMPORT_GRAPH] = StageToolSnapshot(
@@ -127,6 +150,25 @@ class ArtifactJobRunner:
                 ready=self.yara_scanner.ready,
                 reason=self.yara_scanner.unavailable_reason,
             )
+        runtime_ready = runtime_controller is not None and runtime_image_digest.startswith(
+            "sha256:"
+        )
+        tool_snapshots[ReviewPolicyStage.RUNTIME] = StageToolSnapshot(
+            runtime_stage.version,
+            ready=runtime_ready,
+            reason="" if runtime_ready else "runtime_runner_unavailable",
+        )
+        dependency_ready = self.dependency_provider.ready and runtime_result_storage is not None
+        tool_snapshots[ReviewPolicyStage.DEPENDENCY] = StageToolSnapshot(
+            self.dependency_provider.version,
+            ready=dependency_ready,
+            reason=(
+                ""
+                if dependency_ready
+                else self.dependency_provider.unavailable_reason
+                or "dependency_runtime_evidence_unavailable"
+            ),
+        )
         self.review_orchestrator = review_orchestrator or ReviewOrchestrator(
             repository,
             tool_snapshots=tool_snapshots,
@@ -138,6 +180,9 @@ class ArtifactJobRunner:
             DiffGraphStage(ArtifactDiffService(), ImportGraphService()),
             ClamAvStage(self.clamav_scanner),
             YaraStage(self.yara_scanner),
+            runtime_stage,
+            RuntimeCollectStage(runtime_controller),
+            DependencyStage(self.dependency_provider, runtime_result_storage),
             RoutingStage(),
         ]
         default_stages.append(
@@ -199,6 +244,7 @@ class ArtifactJobRunner:
             self.llm_provider,
             self.clamav_scanner,
             self.yara_scanner,
+            self.dependency_provider,
         ):
             if id(provider) in closed:
                 continue
@@ -309,12 +355,26 @@ class ArtifactJobRunner:
             return
         run_type = review_run_type_for_job(job)
         if run_type:
-            await self.repository.fail_open_review_runs(
-                artifact_id,
-                run_type,
-                error_code=error_code,
-                summary=_safe_error(error),
-            )
+            run_id = ""
+            if job_type in _LEASE_PRESERVING_REVIEW_JOBS:
+                if will_retry:
+                    return
+                run_id = await self._runtime_run_id_for_job(job)
+            if run_id:
+                await self.repository.fail_open_review_runs(
+                    artifact_id,
+                    run_type,
+                    error_code=error_code,
+                    summary=_safe_error(error),
+                    run_id=run_id,
+                )
+            elif job_type not in _LEASE_PRESERVING_REVIEW_JOBS:
+                await self.repository.fail_open_review_runs(
+                    artifact_id,
+                    run_type,
+                    error_code=error_code,
+                    summary=_safe_error(error),
+                )
             if will_retry:
                 return
             artifact = await self.repository.get_artifact(artifact_id)
@@ -358,6 +418,35 @@ class ArtifactJobRunner:
                         extra,
                     )
 
+    async def _runtime_run_id_for_job(self, job: Mapping[str, Any]) -> str:
+        artifact_id = str(job.get("artifact_id") or "")
+        policy_version_id = str(job.get("policy_version_id") or "")
+        payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+        explicit_run_id = str(job.get("run_id") or payload.get("run_id") or "")
+        stage_name = str(job.get("stage_name") or payload.get("stage_name") or "")
+        target = payload.get("target") if isinstance(payload.get("target"), Mapping) else {}
+        runs = await self.repository.list_review_runs(artifact_id)
+        matches = []
+        for run in runs:
+            coverage = run.get("coverage") if isinstance(run.get("coverage"), Mapping) else {}
+            if (
+                run.get("type") != "runtime"
+                or run.get("status") not in {"queued", "running"}
+                or str(run.get("policy_version_id") or "") != policy_version_id
+                or (explicit_run_id and str(run.get("id") or "") != explicit_run_id)
+                or (stage_name and str(coverage.get("stage_name") or "") != stage_name)
+                or (
+                    target
+                    and (
+                        str(run.get("astrbot_version") or "") != str(target.get("astrbot") or "")
+                        or str(run.get("python_version") or "") != str(target.get("python") or "")
+                    )
+                )
+            ):
+                continue
+            matches.append(str(run["id"]))
+        return matches[0] if len(matches) == 1 else ""
+
     async def _renew_lease(self, job_id: str, stop: asyncio.Event) -> None:
         interval = max(10, self.lease_seconds // 3)
         while not stop.is_set():
@@ -378,7 +467,7 @@ class ArtifactJobRunner:
                 "Unsupported artifact review stage",
                 retryable=False,
             )
-        if int(job.get("attempts") or 1) > 1:
+        if int(job.get("attempts") or 1) > 1 and job_type not in _LEASE_PRESERVING_REVIEW_JOBS:
             run_type = review_run_type_for_job(job)
             if run_type:
                 await self.repository.fail_open_review_runs(

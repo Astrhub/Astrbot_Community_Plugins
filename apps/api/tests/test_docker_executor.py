@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.artifacts.runner_contract import InstallResult, SmokeResult
+from app.artifacts.sbom import build_cyclonedx_sbom
 from app.runtime_runner.container_executor import ContainerExecutor
 from app.runtime_runner.docker_cli import DockerCli, DockerCommandResult
 from app.runtime_runner.docker_executor import (
@@ -70,9 +71,7 @@ class FakeDockerClient:
                     "Driver": "bridge",
                     "Scope": "local",
                     "Internal": self.network_valid,
-                    "Options": {
-                        "com.docker.network.bridge.enable_ip_masquerade": "false"
-                    },
+                    "Options": {"com.docker.network.bridge.enable_ip_masquerade": "false"},
                     "Labels": required_network_labels(
                         "pypi-only-v1",
                         "https://pypi.org/simple",
@@ -97,11 +96,12 @@ class FakeDockerClient:
             stdout = "{}"
         elif arguments[0] == "run" and "emit" in arguments:
             phase = arguments[-1]
-            stdout = (
-                _install_result().model_dump_json()
-                if phase == "install"
-                else _smoke_result().model_dump_json()
-            )
+            if phase == "install":
+                stdout = _install_result().model_dump_json()
+            elif phase == "sbom":
+                stdout = _sbom_content().decode()
+            else:
+                stdout = _smoke_result().model_dump_json()
         elif arguments[0] == "run" and "platform.python_version()" in arguments[-1]:
             stdout = "3.12.10\n"
         elif arguments[:3] in {
@@ -149,7 +149,8 @@ def test_docker_executor_uses_structured_hardened_phase_commands(tmp_path: Path)
     prepared, install, smoke, attestation, cleanup, repeated_cleanup = asyncio.run(scenario())
 
     assert prepared.resolved_python_version == "3.12.10"
-    assert install.status.value == "passed"
+    assert install.result.status.value == "passed"
+    assert install.sbom == _sbom_content()
     assert smoke.status.value == "passed"
     assert attestation.status.value == "passed"
     assert cleanup.status.value == "passed"
@@ -167,9 +168,7 @@ def test_docker_executor_uses_structured_hardened_phase_commands(tmp_path: Path)
         if call[0] == "run" and call[-1] == "install" and "emit" not in call
     )
     smoke_run = next(
-        call
-        for call in commands
-        if call[0] == "run" and call[-1] == "smoke" and "emit" not in call
+        call for call in commands if call[0] == "run" and call[-1] == "smoke" and "emit" not in call
     )
     for command in (install_run, smoke_run):
         assert "--interactive" in command
@@ -271,10 +270,15 @@ class OrphanDockerClient(FakeDockerClient):
             return _docker_result("astrbot-old-container\nastrbot-new-container\n")
         if arguments[:2] == ("volume", "ls"):
             return _docker_result("astrbot-old-volume\nastrbot-new-volume\n")
-        if len(arguments) >= 3 and arguments[1] == "inspect" and arguments[0] in {
-            "container",
-            "volume",
-        }:
+        if (
+            len(arguments) >= 3
+            and arguments[1] == "inspect"
+            and arguments[0]
+            in {
+                "container",
+                "volume",
+            }
+        ):
             created_at = "1000" if "old" in arguments[2] else "9000"
             return _docker_result(
                 json.dumps(
@@ -341,6 +345,7 @@ def _work_with_artifact(root: Path) -> RuntimeDispatchWorkItem:
 
 def _install_result() -> InstallResult:
     digest = hashlib.sha256(b"runtime-dependencies").hexdigest()
+    sbom_sha256 = hashlib.sha256(_sbom_content()).hexdigest()
     return InstallResult.model_validate(
         {
             "status": "passed",
@@ -350,7 +355,17 @@ def _install_result() -> InstallResult:
             "conflicts": [],
             "core_before_sha256": digest,
             "core_after_sha256": digest,
+            "sbom_sha256": sbom_sha256,
         }
+    )
+
+
+def _sbom_content() -> bytes:
+    from app.artifacts.runner_contract import InstalledPackage
+
+    return build_cyclonedx_sbom(
+        "4.26.5",
+        (InstalledPackage(name="AstrBot", version="4.26.5"),),
     )
 
 

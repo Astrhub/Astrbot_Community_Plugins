@@ -48,8 +48,26 @@ def command(
     )
 
 
-def package_list(*pairs: tuple[str, str]) -> str:
-    return json.dumps([{"name": name, "version": version} for name, version in pairs])
+def package_list(
+    *pairs: tuple[str, str],
+    requires: Mapping[str, list[str]] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "version": "1",
+            "pip_version": "25.1",
+            "installed": [
+                {
+                    "metadata": {
+                        "name": name,
+                        "version": version,
+                        "requires_dist": (requires or {}).get(name, []),
+                    }
+                }
+                for name, version in pairs
+            ],
+        }
+    )
 
 
 def prepare_paths(
@@ -72,6 +90,7 @@ def test_install_probe_uses_exact_argv_and_emits_dependency_snapshots_and_sbom(
         ("AstrBot", "4.26.5"),
         ("demo-lib", "1.0.0"),
         ("fastapi", "1.1.0"),
+        requires={"demo-lib": ["fastapi>=1"]},
     )
     runner = FakeCommandRunner(
         [command(), command(), command(before), command(), command(), command(after)]
@@ -90,13 +109,19 @@ def test_install_probe_uses_exact_argv_and_emits_dependency_snapshots_and_sbom(
     assert output.result.astrbot_version == "4.26.5"
     assert output.result.core_before_sha256 != output.result.core_after_sha256
     assert output.requirements_sha256
+    assert output.result.requirements_sha256 == output.requirements_sha256
+    assert output.result.sbom_sha256 == output.sbom_sha256
     assert output.sbom_path and output.sbom_path.is_file()
     assert output.sbom_sha256
     sbom = json.loads(output.sbom_path.read_text(encoding="utf-8"))
     assert sbom["bomFormat"] == "CycloneDX"
     assert sbom["specVersion"] == "1.5"
+    demo_dependency = next(item for item in sbom["dependencies"] if "demo-lib" in item["ref"])
+    assert demo_dependency["dependsOn"] == ["pkg:pypi/fastapi@1.1.0"]
     assert runner.calls[1][-1] == "AstrBot==4.26.5"
     assert runner.calls[3][-2:] == ("--requirement", str(plugin / "requirements.txt"))
+    assert runner.calls[2][1] == "-c"
+    assert "importlib.metadata" in runner.calls[2][2]
     assert all("shell" not in call for argv in runner.calls for call in argv)
 
 

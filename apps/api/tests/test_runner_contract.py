@@ -13,6 +13,7 @@ from app.artifacts.runner_contract import (
     build_runtime_dispatch_result,
     canonical_contract_json,
     runtime_result_object_key,
+    runtime_sbom_object_key,
     runtime_result_sha256,
 )
 
@@ -75,9 +76,15 @@ def result_payload() -> dict:
         "install": {
             **passed_probe(1200),
             "astrbot_version": "4.26.5",
+            "requirements_sha256": "9" * 64,
             "pip_check": passed_probe(20),
             "packages": [
-                {"name": "astrbot", "version": "4.26.5", "source": "index"},
+                {
+                    "name": "astrbot",
+                    "version": "4.26.5",
+                    "source": "index",
+                    "requires": ["demo-lib"],
+                },
                 {"name": "demo-lib", "version": "1.0.0", "source": "index"},
             ],
             "conflicts": [],
@@ -151,6 +158,9 @@ def test_result_object_keys_are_unique_per_attempt_and_content() -> None:
     assert len({first, retry, changed}) == 3
     assert first.startswith(f"{request.result_key}/attempt-1-")
 
+    sbom = runtime_sbom_object_key(request, 1, "e" * 64)
+    assert sbom == f"{request.result_key}/attempt-1-sbom-{'e' * 64}.cdx.json"
+
 
 @pytest.mark.parametrize(
     ("path", "value"),
@@ -221,8 +231,13 @@ def test_result_enforces_lifecycle_consistency_and_paired_object_hashes() -> Non
 
     unpaired_sbom = result_payload()
     unpaired_sbom["install"].pop("sbom_sha256")
-    with pytest.raises(ValidationError, match="SBOM key and sha256"):
+    with pytest.raises(ValidationError, match="SBOM key requires"):
         build_runtime_dispatch_result(unpaired_sbom)
+
+    unsigned_sbom = result_payload()
+    unsigned_sbom["install"].pop("sbom_key")
+    with pytest.raises(ValidationError, match="signed SBOM"):
+        build_runtime_dispatch_result(unsigned_sbom)
 
 
 def test_result_rejects_credentials_even_inside_bounded_error_text() -> None:

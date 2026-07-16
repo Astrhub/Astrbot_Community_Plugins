@@ -453,7 +453,7 @@ def test_configured_runtime_stays_degraded_until_real_health_is_reported() -> No
                 "ARTIFACT_LOCAL_ROOT": "/tmp/artifacts",
                 "ARTIFACT_ADVANCED_REVIEW_ENABLED": "true",
                 "ARTIFACT_RUNTIME_REVIEW_ENABLED": "true",
-                "ARTIFACT_RUNTIME_CONTAINER_IMAGE": "astrbot-runtime@sha256:1234",
+                "ARTIFACT_RUNTIME_CONTAINER_IMAGE": f"astrbot-runtime@sha256:{'1' * 64}",
                 "DATABASE_URL": "postgresql://example.invalid/market",
             }
         )

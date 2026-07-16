@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -9,10 +10,12 @@ import pytest
 
 from app.artifacts.repository import InMemoryArtifactRepository
 from app.artifacts.runner_contract import (
+    InstalledPackage,
     RuntimeDispatchRequest,
     RuntimeDispatchResult,
     build_runtime_dispatch_result,
     runtime_result_object_key,
+    runtime_sbom_object_key,
 )
 from app.artifacts.runtime_dispatch import (
     CollectionState,
@@ -22,6 +25,7 @@ from app.artifacts.runtime_dispatch import (
     RuntimeRunnerQueue,
 )
 from app.artifacts.storage import LocalArtifactStorage
+from app.artifacts.sbom import build_cyclonedx_sbom
 
 
 class LeastPrivilegeRunnerRepository:
@@ -107,6 +111,11 @@ def runtime_result(
     dispatch_id: str = "dispatch_01",
     cleanup_failed: bool = False,
 ) -> RuntimeDispatchResult:
+    packages = [{"name": "astrbot", "version": "4.26.5"}]
+    package_models = tuple(InstalledPackage.model_validate(item) for item in packages)
+    sbom = build_cyclonedx_sbom("4.26.5", package_models)
+    sbom_sha256 = hashlib.sha256(sbom).hexdigest()
+    request = runtime_request(dispatch_id=dispatch_id)
     cleanup: dict[str, Any]
     if cleanup_failed:
         cleanup = {
@@ -141,11 +150,14 @@ def runtime_result(
             "install": {
                 **passed_probe(1200),
                 "astrbot_version": "4.26.5",
+                "requirements_sha256": "9" * 64,
                 "pip_check": passed_probe(20),
-                "packages": [{"name": "astrbot", "version": "4.26.5"}],
+                "packages": packages,
                 "conflicts": [],
                 "core_before_sha256": "d" * 64,
                 "core_after_sha256": "d" * 64,
+                "sbom_key": runtime_sbom_object_key(request, 1, sbom_sha256),
+                "sbom_sha256": sbom_sha256,
             },
             "smoke": {
                 "status": "passed",
@@ -181,6 +193,10 @@ def runtime_result(
             "cleanup": cleanup,
         }
     )
+
+
+def runtime_sbom(result: RuntimeDispatchResult) -> bytes:
+    return build_cyclonedx_sbom(result.install.astrbot_version, result.install.packages)
 
 
 async def dispatch_fixture(
@@ -243,6 +259,8 @@ def test_successful_dispatch_is_collected_once_and_completes_run(tmp_path: Path)
         queue = RuntimeRunnerQueue(runner_repository, runner_id="runner-a")
         work = (await queue.claim(limit=1, lease_seconds=60))[0]
         result = runtime_result()
+        assert result.install.sbom_key is not None
+        await storage.put_text_content(result.install.sbom_key, runtime_sbom(result))
         result_key = runtime_result_object_key(request, work.attempt, result.result_sha256)
         await storage.put_text_content(result_key, result.model_dump_json().encode())
         completed = await queue.complete_result(work, result)
@@ -252,9 +270,10 @@ def test_successful_dispatch_is_collected_once_and_completes_run(tmp_path: Path)
         )
         run = next(item for item in repository.runs.values() if item["type"] == "runtime")
         findings = await repository.list_findings(request.artifact_id)
-        return completed, (first, second), run, runner_repository, findings
+        sboms = await repository.list_artifact_sboms(request.artifact_id)
+        return completed, (first, second), run, runner_repository, findings, sboms
 
-    completed, collections, run, runner_repository, findings = asyncio.run(scenario())
+    completed, collections, run, runner_repository, findings, sboms = asyncio.run(scenario())
 
     assert completed["status"] == "succeeded"
     assert {item.state for item in collections} == {
@@ -271,6 +290,8 @@ def test_successful_dispatch_is_collected_once_and_completes_run(tmp_path: Path)
     assert not hasattr(runner_repository, "create_runtime_dispatch")
     assert not hasattr(runner_repository, "collect_runtime_dispatch")
     assert findings == []
+    assert sboms[0]["document_sha256"] == run["raw_result"]["sbom"]["document_sha256"]
+    assert sboms[0]["package_count"] == 1
 
 
 def test_failed_gate_produces_failed_dispatch_and_run(tmp_path: Path) -> None:
@@ -282,6 +303,8 @@ def test_failed_gate_produces_failed_dispatch_and_run(tmp_path: Path) -> None:
         )
         work = (await queue.claim(limit=1, lease_seconds=60))[0]
         result = runtime_result(cleanup_failed=True)
+        assert result.install.sbom_key is not None
+        await storage.put_text_content(result.install.sbom_key, runtime_sbom(result))
         result_key = runtime_result_object_key(request, work.attempt, result.result_sha256)
         await storage.put_text_content(result_key, result.model_dump_json().encode())
         completed = await queue.complete_result(work, result)
@@ -398,6 +421,32 @@ def test_invalid_result_object_is_collected_as_failure(tmp_path: Path) -> None:
     assert run["status"] == "failed"
     assert findings[0]["rule_id"] == "runtime_result_invalid"
     assert findings[0]["severity"] == "critical"
+
+
+def test_tampered_sbom_is_collected_as_failure_without_sbom_record(tmp_path: Path) -> None:
+    async def scenario():
+        repository, storage, controller, request, dispatch = await dispatch_fixture(tmp_path)
+        queue = RuntimeRunnerQueue(
+            LeastPrivilegeRunnerRepository(repository),
+            runner_id="runner-a",
+        )
+        work = (await queue.claim(limit=1, lease_seconds=60))[0]
+        result = runtime_result()
+        assert result.install.sbom_key is not None
+        await storage.put_text_content(result.install.sbom_key, b'{"tampered":true}')
+        result_key = runtime_result_object_key(request, work.attempt, result.result_sha256)
+        await storage.put_text_content(result_key, result.model_dump_json().encode())
+        await queue.complete_result(work, result)
+        collected = await controller.collect(dispatch["id"])
+        run = next(item for item in repository.runs.values() if item["type"] == "runtime")
+        sboms = await repository.list_artifact_sboms(request.artifact_id)
+        return collected, run, sboms
+
+    collected, run, sboms = asyncio.run(scenario())
+
+    assert collected.error_code == "runtime_result_invalid"
+    assert run["status"] == "failed"
+    assert sboms == []
 
 
 def test_expired_final_lease_is_timed_out_and_collected(tmp_path: Path) -> None:

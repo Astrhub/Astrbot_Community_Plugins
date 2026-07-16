@@ -39,9 +39,11 @@ services:
         condition: service_healthy
     environment:
       APP_ENV_FILE: /app/apps/api/.env
+      ARTIFACT_RUNTIME_RESULT_ROOT: /var/lib/astrbot-runtime-results
     volumes:
       - ./apps/api/.env:/app/apps/api/.env
       - artifact-data:/var/lib/astrbot-market/artifacts
+      - runtime-results:/var/lib/astrbot-runtime-results:ro
 
   runtime-probe-image:
     profiles: ["runtime-runner"]

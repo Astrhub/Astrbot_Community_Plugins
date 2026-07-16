@@ -10,11 +10,17 @@ from ..artifacts.runner_contract import (
     CleanupResult,
     InstallResult,
     NetworkAttestation,
-    RuntimeDispatchResult,
     SmokeResult,
     build_runtime_dispatch_result,
+    runtime_sbom_object_key,
 )
-from .execution import RuntimeExecutionError, RuntimeExecutionService
+from ..artifacts.sbom import MAX_SBOM_BYTES, build_cyclonedx_sbom
+from .execution import (
+    RuntimeExecutionError,
+    RuntimeExecutionOutput,
+    RuntimeExecutionService,
+    RuntimePrivateObject,
+)
 from .queue import RuntimeDispatchWorkItem
 
 
@@ -25,6 +31,22 @@ class PreparedRuntime:
     resolved_python_version: str
 
 
+@dataclass(frozen=True, slots=True)
+class InstallExecutionOutput:
+    result: InstallResult
+    sbom: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if self.sbom is None:
+            if self.result.sbom_sha256 is not None:
+                raise ValueError("runtime_install_sbom_content_missing")
+            return
+        if self.result.sbom_sha256 is None:
+            raise ValueError("runtime_install_sbom_sha256_missing")
+        if hashlib.sha256(self.sbom).hexdigest() != self.result.sbom_sha256:
+            raise ValueError("runtime_install_sbom_sha256_invalid")
+
+
 @runtime_checkable
 class ContainerExecutor(Protocol):
     async def prepare(self, work: RuntimeDispatchWorkItem) -> PreparedRuntime: ...
@@ -33,7 +55,7 @@ class ContainerExecutor(Protocol):
         self,
         prepared: PreparedRuntime,
         work: RuntimeDispatchWorkItem,
-    ) -> InstallResult: ...
+    ) -> InstallExecutionOutput | InstallResult: ...
 
     async def smoke(
         self,
@@ -71,7 +93,7 @@ class ContainerExecutionPipeline(RuntimeExecutionService):
         self.executor = executor
         self._prepared: dict[str, PreparedRuntime] = {}
 
-    async def execute(self, work: RuntimeDispatchWorkItem) -> RuntimeDispatchResult:
+    async def execute(self, work: RuntimeDispatchWorkItem) -> RuntimeExecutionOutput:
         prepared = await self.executor.prepare(work)
         if prepared.dispatch_id != work.dispatch_id:
             raise RuntimeExecutionError(
@@ -80,7 +102,27 @@ class ContainerExecutionPipeline(RuntimeExecutionService):
             )
         self._prepared[work.dispatch_id] = prepared
         try:
-            install = await self.executor.install(prepared, work)
+            install_output = await self.executor.install(prepared, work)
+            if isinstance(install_output, InstallResult):
+                install_output = InstallExecutionOutput(install_output)
+            install = install_output.result
+            private_objects: tuple[RuntimePrivateObject, ...] = ()
+            if install_output.sbom is not None:
+                assert install.sbom_sha256 is not None
+                sbom_key = runtime_sbom_object_key(
+                    work.request,
+                    work.attempt,
+                    install.sbom_sha256,
+                )
+                install = install.model_copy(update={"sbom_key": sbom_key})
+                private_objects = (
+                    RuntimePrivateObject(
+                        key=sbom_key,
+                        content=install_output.sbom,
+                        sha256=install.sbom_sha256,
+                        max_bytes=MAX_SBOM_BYTES,
+                    ),
+                )
             smoke = await self.executor.smoke(prepared, work)
             attestation = await self.executor.attest(prepared, work)
         except BaseException as phase_error:
@@ -107,7 +149,7 @@ class ContainerExecutionPipeline(RuntimeExecutionService):
             ) from exc
         if cleanup.status.value == "passed":
             self._prepared.pop(work.dispatch_id, None)
-        return build_runtime_dispatch_result(
+        result = build_runtime_dispatch_result(
             {
                 "schema_version": work.request.schema_version,
                 "dispatch_id": work.dispatch_id,
@@ -122,6 +164,7 @@ class ContainerExecutionPipeline(RuntimeExecutionService):
                 "cleanup": cleanup.model_dump(mode="json"),
             }
         )
+        return RuntimeExecutionOutput(result=result, private_objects=private_objects)
 
     async def abort(self, work: RuntimeDispatchWorkItem) -> None:
         prepared = self._prepared.get(work.dispatch_id)
@@ -185,7 +228,7 @@ class DeterministicFakeContainerExecutor:
         self,
         prepared: PreparedRuntime,
         work: RuntimeDispatchWorkItem,
-    ) -> InstallResult:
+    ) -> InstallExecutionOutput:
         self._record("install", work)
         mode = self._mode(work)
         if mode == FakeFailureMode.TIMEOUT:
@@ -200,13 +243,14 @@ class DeterministicFakeContainerExecutor:
         ).hexdigest()
         if mode == FakeFailureMode.DEPENDENCY_CONFLICT:
             changed_snapshot = hashlib.sha256(f"{snapshot}:pydantic:1.10.22".encode()).hexdigest()
-            return InstallResult.model_validate(
+            result = InstallResult.model_validate(
                 {
                     "status": "failed",
                     "duration_ms": 20,
                     "error_code": "dependency_conflict",
                     "message": "Plugin requirements conflict with AstrBot dependencies",
                     "astrbot_version": work.request.target.astrbot_version,
+                    "requirements_sha256": "9" * 64,
                     "pip_check": {
                         "status": "failed",
                         "duration_ms": 1,
@@ -233,11 +277,13 @@ class DeterministicFakeContainerExecutor:
                     "core_after_sha256": changed_snapshot,
                 }
             )
-        return InstallResult.model_validate(
+            return _fake_install_output(result)
+        result = InstallResult.model_validate(
             {
                 "status": "passed",
                 "duration_ms": 20,
                 "astrbot_version": work.request.target.astrbot_version,
+                "requirements_sha256": "9" * 64,
                 "pip_check": {"status": "passed", "duration_ms": 1},
                 "packages": [
                     {
@@ -251,6 +297,7 @@ class DeterministicFakeContainerExecutor:
                 "core_after_sha256": snapshot,
             }
         )
+        return _fake_install_output(result)
 
     async def smoke(
         self,
@@ -337,6 +384,12 @@ class DeterministicFakeContainerExecutor:
 
     def _record(self, action: str, work: RuntimeDispatchWorkItem) -> None:
         self.calls.append((action, work.dispatch_id))
+
+
+def _fake_install_output(result: InstallResult) -> InstallExecutionOutput:
+    sbom = build_cyclonedx_sbom(result.astrbot_version, result.packages)
+    signed = result.model_copy(update={"sbom_sha256": hashlib.sha256(sbom).hexdigest()})
+    return InstallExecutionOutput(result=signed, sbom=sbom)
 
 
 def _fake_smoke_result(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ class ArtifactReviewSettings:
     auto_approve_enabled: bool
     runtime_enabled: bool
     runtime_container_image: str
+    runtime_result_root: str
     llm_enabled: bool
     llm_config_ref: str
     llm_provider: str
@@ -63,6 +65,7 @@ class ArtifactReviewSettings:
     dependency_enabled: bool
     dependency_config_ref: str
     dependency_advisory_url: str
+    dependency_advisory_path: str
     dependency_api_token: str
 
     def component_configuration(self) -> dict[str, dict[str, object]]:
@@ -111,11 +114,49 @@ class ArtifactReviewSettings:
             and not _valid_timestamp(self.yara_ruleset_activated_at)
         ):
             yara = _degraded_review_component(yara, "yara_ruleset_activation_invalid")
+        runtime = _review_component_configuration(
+            self.runtime_enabled,
+            {
+                "runtime_container_image_missing": self.runtime_container_image,
+                "runtime_result_root_missing": self.runtime_result_root,
+            },
+        )
+        if self.runtime_enabled and not _valid_runtime_image_reference(
+            self.runtime_container_image
+        ):
+            runtime = _degraded_review_component(runtime, "runtime_container_image_invalid")
+        if self.runtime_enabled and not Path(self.runtime_result_root).is_absolute():
+            runtime = _degraded_review_component(runtime, "runtime_result_root_invalid")
+        dependency = _review_component_configuration(
+            self.dependency_enabled,
+            {"dependency_config_ref_missing": self.dependency_config_ref},
+        )
+        if self.dependency_enabled and not (
+            self.dependency_advisory_path or self.dependency_advisory_url
+        ):
+            dependency = _degraded_review_component(
+                dependency,
+                "dependency_advisory_source_missing",
+            )
+        if self.dependency_advisory_path and self.dependency_advisory_url:
+            dependency = _degraded_review_component(
+                dependency,
+                "dependency_advisory_source_ambiguous",
+            )
+        if self.dependency_advisory_path and not Path(self.dependency_advisory_path).is_absolute():
+            dependency = _degraded_review_component(
+                dependency,
+                "dependency_advisory_path_invalid",
+            )
+        if self.dependency_advisory_url and not _valid_dependency_endpoint(
+            self.dependency_advisory_url
+        ):
+            dependency = _degraded_review_component(
+                dependency,
+                "dependency_advisory_url_invalid",
+            )
         return {
-            "runtime": _review_component_configuration(
-                self.runtime_enabled,
-                {"runtime_container_image_missing": self.runtime_container_image},
-            ),
+            "runtime": runtime,
             "llm": llm,
             "clamav": _review_component_configuration(
                 self.clamav_enabled,
@@ -125,13 +166,7 @@ class ArtifactReviewSettings:
                 },
             ),
             "yara": yara,
-            "dependency": _review_component_configuration(
-                self.dependency_enabled,
-                {
-                    "dependency_config_ref_missing": self.dependency_config_ref,
-                    "dependency_advisory_url_missing": self.dependency_advisory_url,
-                },
-            ),
+            "dependency": dependency,
         }
 
     def public_status(self) -> dict[str, object]:
@@ -428,6 +463,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                 ),
                 runtime_enabled=_bool(merged.get("ARTIFACT_RUNTIME_REVIEW_ENABLED")),
                 runtime_container_image=merged.get("ARTIFACT_RUNTIME_CONTAINER_IMAGE", ""),
+                runtime_result_root=merged.get(
+                    "ARTIFACT_RUNTIME_RESULT_ROOT",
+                    "/var/lib/astrbot-runtime-results",
+                ),
                 llm_enabled=_bool(merged.get("ARTIFACT_LLM_REVIEW_ENABLED")),
                 llm_config_ref=merged.get("ARTIFACT_LLM_CONFIG_REF", "config:llm-default"),
                 llm_provider=merged.get("ARTIFACT_LLM_PROVIDER", ""),
@@ -455,6 +494,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                     "config:dependency-default",
                 ),
                 dependency_advisory_url=merged.get("ARTIFACT_DEPENDENCY_ADVISORY_URL", ""),
+                dependency_advisory_path=merged.get(
+                    "ARTIFACT_DEPENDENCY_ADVISORY_PATH",
+                    "",
+                ),
                 dependency_api_token=merged.get("ARTIFACT_DEPENDENCY_API_TOKEN", ""),
             ),
         ),
@@ -528,6 +571,52 @@ def _valid_llm_endpoint(value: str) -> bool:
         and not parsed.query
         and not parsed.fragment
     )
+
+
+def _valid_runtime_image_reference(value: str) -> bool:
+    normalized = value.strip()
+    if normalized.startswith("sha256:"):
+        return bool(re.fullmatch(r"sha256:[a-f0-9]{64}", normalized))
+    if normalized.count("@") != 1 or "://" in normalized or "?" in normalized or "#" in normalized:
+        return False
+    repository, digest = normalized.rsplit("@", 1)
+    return bool(
+        repository
+        and len(repository) <= 255
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", repository)
+        and ".." not in repository
+        and "//" not in repository
+        and re.fullmatch(r"sha256:[a-f0-9]{64}", digest)
+    )
+
+
+def runtime_image_digest(value: str) -> str:
+    normalized = value.strip()
+    if not _valid_runtime_image_reference(normalized):
+        return ""
+    return normalized.rsplit("@", 1)[-1]
+
+
+def _valid_dependency_endpoint(value: str) -> bool:
+    try:
+        parsed = urlsplit(value.strip())
+        parsed.port
+    except ValueError:
+        return False
+    if not (
+        parsed.scheme == "https"
+        and parsed.hostname
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+    ):
+        return False
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        return True
+    return address.is_global
 
 
 def _valid_public_identifier(value: str) -> bool:

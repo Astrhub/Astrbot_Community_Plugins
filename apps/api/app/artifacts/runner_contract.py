@@ -8,6 +8,8 @@ from enum import StrEnum
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 RUNTIME_CONTRACT_SCHEMA_VERSION = "1"
@@ -351,6 +353,7 @@ class InstalledPackage(ContractModel):
     name: str = Field(min_length=1, max_length=128)
     version: str = Field(min_length=1, max_length=128)
     source: Literal["index", "direct_url", "vcs", "local", "unknown"] = "index"
+    requires: tuple[str, ...] = Field(default=(), max_length=500)
 
     @field_validator("name")
     @classmethod
@@ -362,7 +365,20 @@ class InstalledPackage(ContractModel):
     @field_validator("version")
     @classmethod
     def validate_package_version(cls, value: str) -> str:
-        return _bounded_text(value, label="Package version", maximum=128)
+        normalized = _bounded_text(value, label="Package version", maximum=128)
+        try:
+            Version(normalized)
+        except InvalidVersion as exc:
+            raise ValueError("Installed package version is invalid") from exc
+        return normalized
+
+    @field_validator("requires")
+    @classmethod
+    def validate_requires(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(sorted({canonicalize_name(item) for item in value}))
+        if any(not _PACKAGE_NAME.fullmatch(item) for item in normalized):
+            raise ValueError("Installed package dependency name is invalid")
+        return normalized
 
 
 class DependencyConflict(ContractModel):
@@ -386,6 +402,7 @@ class DependencyConflict(ContractModel):
 
 class InstallResult(ProbeResult):
     astrbot_version: str = Field(default="", max_length=32)
+    requirements_sha256: str = Field(default="", max_length=64)
     pip_check: ProbeResult
     packages: tuple[InstalledPackage, ...] = Field(default=(), max_length=2000)
     conflicts: tuple[DependencyConflict, ...] = Field(default=(), max_length=500)
@@ -401,7 +418,23 @@ class InstallResult(ProbeResult):
             raise ValueError("Installed AstrBot version must be exact")
         return value
 
-    @field_validator("core_before_sha256", "core_after_sha256")
+    @field_validator("packages")
+    @classmethod
+    def normalize_packages(
+        cls,
+        value: tuple[InstalledPackage, ...],
+    ) -> tuple[InstalledPackage, ...]:
+        names = [canonicalize_name(item.name) for item in value]
+        if len(names) != len(set(names)):
+            raise ValueError("Installed package graph contains duplicate package names")
+        return tuple(
+            sorted(
+                value,
+                key=lambda item: (canonicalize_name(item.name), Version(item.version)),
+            )
+        )
+
+    @field_validator("requirements_sha256", "core_before_sha256", "core_after_sha256")
     @classmethod
     def validate_core_hash(cls, value: str) -> str:
         return _validate_sha256(value, "core dependency snapshot", allow_empty=True)
@@ -418,13 +451,15 @@ class InstallResult(ProbeResult):
 
     @model_validator(mode="after")
     def validate_install_result(self) -> Self:
-        if (self.sbom_key is None) != (self.sbom_sha256 is None):
-            raise ValueError("SBOM key and sha256 must be provided together")
+        if self.sbom_key is not None and self.sbom_sha256 is None:
+            raise ValueError("SBOM key requires a sha256")
         if self.status == ProbeStatus.PASSED:
             if not self.astrbot_version or self.pip_check.status != ProbeStatus.PASSED:
                 raise ValueError("Passed installs require AstrBot and a passed pip check")
             if not self.core_before_sha256 or not self.core_after_sha256:
                 raise ValueError("Passed installs require both core dependency snapshots")
+            if not self.packages or self.conflicts:
+                raise ValueError("Passed installs require a complete conflict-free package graph")
         return self
 
 
@@ -587,6 +622,12 @@ class _RuntimeDispatchResultPayload(ContractModel):
     def validate_result_payload(self) -> Self:
         if (self.logs_key is None) != (self.logs_sha256 is None):
             raise ValueError("Log key and sha256 must be provided together")
+        if self.install.status == ProbeStatus.PASSED and (
+            self.install.sbom_key is None or self.install.sbom_sha256 is None
+        ):
+            raise ValueError("Passed runtime results require a signed SBOM object")
+        if (self.install.sbom_key is None) != (self.install.sbom_sha256 is None):
+            raise ValueError("Final runtime SBOM key and sha256 must be provided together")
         _validate_contract_boundary(self, MAX_RUNTIME_RESULT_BYTES)
         return self
 
@@ -700,6 +741,30 @@ def runtime_result_object_key(
         raise ValueError("Runtime result attempt is outside the supported range")
     digest = _validate_sha256(result_sha256, "result_sha256")
     return _validate_object_key(f"{request.result_key}/attempt-{attempt}-{digest}.json")
+
+
+def runtime_dispatch_id(
+    run_id: str,
+    artifact_id: str,
+    astrbot_version: str,
+    python_version: str,
+    image_digest: str,
+) -> str:
+    digest = hashlib.sha256(
+        "\x00".join((run_id, artifact_id, astrbot_version, python_version, image_digest)).encode()
+    ).hexdigest()
+    return f"runtime_{digest[:40]}"
+
+
+def runtime_sbom_object_key(
+    request: RuntimeDispatchRequest,
+    attempt: int,
+    sbom_sha256: str,
+) -> str:
+    if attempt < 1 or attempt > 1000:
+        raise ValueError("Runtime SBOM attempt is outside the supported range")
+    digest = _validate_sha256(sbom_sha256, "sbom_sha256")
+    return _validate_object_key(f"{request.result_key}/attempt-{attempt}-sbom-{digest}.cdx.json")
 
 
 def _validate_contract_boundary(value: BaseModel, maximum_bytes: int) -> None:

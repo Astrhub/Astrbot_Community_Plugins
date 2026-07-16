@@ -64,7 +64,10 @@ def test_real_docker_runtime_fixture_matrix(
             ),
         )
         try:
-            result = await ContainerExecutionPipeline(executor).execute(work)
+            output = await ContainerExecutionPipeline(executor).execute(work)
+            result = output.result
+            assert output.private_objects
+            assert output.private_objects[0].key == result.install.sbom_key
             findings = normalize_runtime_findings(
                 result,
                 tool_name="docker-runtime-integration",
@@ -173,9 +176,7 @@ def _fixture_work(root: Path, scenario: str, image_digest: str) -> RuntimeDispat
             "artifact_sha256": hashlib.sha256(payload).hexdigest(),
             "artifact_size_bytes": len(payload),
             "quarantine_key": f"artifacts/{dispatch_id}/source.zip",
-            "target": runtime_request().target.model_copy(
-                update={"image_digest": image_digest}
-            ),
+            "target": runtime_request().target.model_copy(update={"image_digest": image_digest}),
             "limits": runtime_request(timeout_seconds=600).limits.model_copy(
                 update={"memory_mb": 2048, "pids": 256, "tmpfs_mb": 1024}
             ),

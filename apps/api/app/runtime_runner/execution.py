@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import re
-from typing import TYPE_CHECKING
-from typing import Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..artifacts.runner_contract import RuntimeDispatchResult
 from .queue import RuntimeDispatchWorkItem
@@ -22,9 +23,39 @@ class RuntimeExecutionError(RuntimeError):
         self.code = code
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimePrivateObject:
+    key: str
+    content: bytes
+    sha256: str
+    max_bytes: int
+
+    def __post_init__(self) -> None:
+        if not self.key or self.max_bytes < 1 or not self.content:
+            raise ValueError("runtime_private_object_invalid")
+        if len(self.content) > self.max_bytes:
+            raise ValueError("runtime_private_object_too_large")
+        if hashlib.sha256(self.content).hexdigest() != self.sha256:
+            raise ValueError("runtime_private_object_sha256_invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeExecutionOutput:
+    result: RuntimeDispatchResult
+    private_objects: tuple[RuntimePrivateObject, ...] = ()
+
+    def __post_init__(self) -> None:
+        keys = [item.key for item in self.private_objects]
+        if len(keys) != len(set(keys)):
+            raise ValueError("runtime_private_object_key_duplicate")
+
+
 @runtime_checkable
 class RuntimeExecutionService(Protocol):
-    async def execute(self, work: RuntimeDispatchWorkItem) -> RuntimeDispatchResult: ...
+    async def execute(
+        self,
+        work: RuntimeDispatchWorkItem,
+    ) -> RuntimeExecutionOutput | RuntimeDispatchResult: ...
 
     async def abort(self, work: RuntimeDispatchWorkItem) -> None: ...
 

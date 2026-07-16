@@ -27,6 +27,7 @@ from ...artifacts.runner_contract import (
     RuntimeViolation,
     SmokeResult,
 )
+from ...artifacts.sbom import MAX_SBOM_BYTES
 from .command import SubprocessCommandRunner, redact_probe_text
 from .install import InstallSandbox
 
@@ -36,6 +37,7 @@ _REQUEST_PATH = _RUNTIME_ROOT / "request.json"
 _LAYOUT_PATH = _RUNTIME_ROOT / "layout.json"
 _OUTPUT_ROOT = _RUNTIME_ROOT / "output"
 _PRIVATE_ROOT = _RUNTIME_ROOT / "private"
+_SBOM_PATH = _PRIVATE_ROOT / "sbom.cdx.json"
 _RESULT_PATHS = {
     "install": _OUTPUT_ROOT / "install-result.json",
     "smoke": _OUTPUT_ROOT / "smoke-result.json",
@@ -59,7 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "action",
         choices=("stage", "install", "smoke", "smoke-inner", "emit"),
     )
-    parser.add_argument("phase", nargs="?", choices=("install", "smoke"))
+    parser.add_argument("phase", nargs="?", choices=("install", "smoke", "sbom"))
     arguments = parser.parse_args(argv)
     if arguments.action == "emit":
         if not arguments.phase:
@@ -108,6 +110,19 @@ async def _run_install(request: RuntimeDispatchRequest) -> None:
             plugin_root=plugin_root,
         )
         result = output.result
+        if output.sbom_path is not None:
+            sbom = output.sbom_path.read_bytes()
+            if (
+                not output.sbom_sha256
+                or len(sbom) > MAX_SBOM_BYTES
+                or hashlib.sha256(sbom).hexdigest() != output.sbom_sha256
+                or result.sbom_sha256 != output.sbom_sha256
+            ):
+                raise ProbeEntrypointError(
+                    "runtime_sbom_invalid",
+                    "Runtime install SBOM failed its private object boundary",
+                )
+            _write_private(_SBOM_PATH, sbom, maximum=MAX_SBOM_BYTES)
         _write_private(
             _PRIVATE_ROOT / "install.log",
             output.logs.encode("utf-8", errors="replace"),
@@ -197,10 +212,14 @@ async def _run_smoke_inner() -> int:
             )
         payload = result.model_dump_json().encode()
     except Exception:
-        payload = _failed_smoke(
-            "astrbot_lifecycle_failed",
-            "AstrBot lifecycle subprocess failed",
-        ).model_dump_json().encode()
+        payload = (
+            _failed_smoke(
+                "astrbot_lifecycle_failed",
+                "AstrBot lifecycle subprocess failed",
+            )
+            .model_dump_json()
+            .encode()
+        )
     framed = _RESULT_MARKER + base64.b64encode(payload) + b"\n"
     os.write(1, framed)
     return 0
@@ -427,12 +446,13 @@ def _write_private(path: Path, payload: bytes, *, maximum: int = 64 * 1024) -> N
 
 
 def _emit(phase: str) -> int:
-    path = _RESULT_PATHS[phase]
+    path = _SBOM_PATH if phase == "sbom" else _RESULT_PATHS[phase]
+    maximum = MAX_SBOM_BYTES if phase == "sbom" else MAX_RUNTIME_RESULT_BYTES
     try:
         payload = path.read_bytes()
     except OSError:
         return 2
-    if not payload or len(payload) > MAX_RUNTIME_RESULT_BYTES:
+    if not payload or len(payload) > maximum:
         return 2
     sys.stdout.buffer.write(payload)
     return 0

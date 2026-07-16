@@ -19,16 +19,18 @@ def test_container_pipeline_runs_all_phases_and_returns_signed_result() -> None:
     async def scenario() -> tuple[object, DeterministicFakeContainerExecutor]:
         fake = DeterministicFakeContainerExecutor()
         assert isinstance(fake, ContainerExecutor)
-        result = await ContainerExecutionPipeline(fake).execute(work_item())
-        return result, fake
+        output = await ContainerExecutionPipeline(fake).execute(work_item())
+        return output, fake
 
-    result, fake = asyncio.run(scenario())
+    output, fake = asyncio.run(scenario())
+    result = output.result
 
     assert result.dispatch_id == "dispatch_01"
     assert result.target.resolved_python_version == "3.12.0"
     assert result.install.astrbot_version == "4.26.5"
     assert result.smoke.metadata.name == "astrbot_plugin_demo"
     assert result.cleanup.status.value == "passed"
+    assert output.private_objects[0].key == result.install.sbom_key
     assert [name for name, _ in fake.calls] == [
         "prepare",
         "install",
@@ -82,11 +84,12 @@ def test_fake_executor_plugin_fixture_matrix_produces_valid_structured_findings(
     smoke_code: str,
     finding_code: str,
 ) -> None:
-    result = asyncio.run(
+    output = asyncio.run(
         ContainerExecutionPipeline(
             DeterministicFakeContainerExecutor(default_failure=mode)
         ).execute(work_item())
     )
+    result = output.result
     findings = normalize_runtime_findings(
         result,
         tool_name="deterministic-fake",
@@ -117,9 +120,7 @@ def test_fake_executor_failure_modes_are_deterministic(
 ) -> None:
     async def scenario() -> tuple[BaseException, set[str], list[tuple[str, str]]]:
         fake = DeterministicFakeContainerExecutor(default_failure=mode)
-        pipeline = ContainerExecutionPipeline(
-            fake
-        )
+        pipeline = ContainerExecutionPipeline(fake)
         with pytest.raises(expected_exception) as raised:
             await pipeline.execute(work_item())
         await pipeline.cleanup_dispatch(work_item())
@@ -135,10 +136,10 @@ def test_cleanup_failure_remains_a_failed_gate_until_orphan_cleanup() -> None:
     async def scenario() -> tuple[object, int, set[str]]:
         fake = DeterministicFakeContainerExecutor(default_failure=FakeFailureMode.CLEANUP_FAILURE)
         pipeline = ContainerExecutionPipeline(fake)
-        result = await pipeline.execute(work_item())
+        output = await pipeline.execute(work_item())
         resources_before = set(fake.resources)
         removed = await pipeline.cleanup_orphans()
-        return result, removed, resources_before
+        return output.result, removed, resources_before
 
     result, removed, resources_before = asyncio.run(scenario())
 

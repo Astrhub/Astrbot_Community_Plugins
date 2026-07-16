@@ -1289,6 +1289,16 @@ async def run_advanced_repository_scenario(url: str) -> None:
                     "metadata": {"target": "4.26.5"},
                 }
             ],
+            {
+                "artifact_id": first["id"],
+                "run_id": run["id"],
+                "format": "cyclonedx-json",
+                "document_sha256": "c" * 64,
+                "object_key": "private/runtime-sbom-collect.json",
+                "package_count": 2,
+                "generator": "astrbot-runtime-install",
+                "tool_version": "cyclonedx-canonical-v1",
+            },
         )
         assert await repository.collect_runtime_dispatch(dispatch["id"]) is None
         runtime_runs = await repository.list_review_runs(first["id"])
@@ -1297,6 +1307,20 @@ async def run_advanced_repository_scenario(url: str) -> None:
         assert collected_run["coverage"]["outcome"] == "completed"
         runtime_findings = await repository.list_findings(first["id"])
         assert any(item["rule_id"] == "plugin_initialize_failed" for item in runtime_findings)
+        runtime_sboms = await repository.list_artifact_sboms(first["id"])
+        assert any(item["run_id"] == run["id"] for item in runtime_sboms)
+        with pytest.raises(ValueError, match=ArtifactErrorCode.RUNTIME_RESULT_INVALID.value):
+            await repository.create_artifact_sbom(
+                {
+                    "artifact_id": first["id"],
+                    "run_id": run["id"],
+                    "format": "cyclonedx-json",
+                    "document_sha256": "c" * 64,
+                    "object_key": "private/different-runtime-sbom.json",
+                    "package_count": 2,
+                    "generator": "astrbot-runtime-install",
+                }
+            )
 
         timeout_run = await repository.create_review_run(
             {
@@ -1335,6 +1359,88 @@ async def run_advanced_repository_scenario(url: str) -> None:
                 "error_code": "runtime_dispatch_timeout",
                 "coverage": {"outcome": "failed", "stage_name": "runtime"},
             },
+        )
+
+        terminal_run = await repository.create_review_run(
+            {
+                "artifact_id": first["id"],
+                "type": "runtime",
+                "status": "running",
+                "policy_version_id": policy["id"],
+                "idempotency_key": "runtime-terminal-collect-guard",
+            }
+        )
+        terminal_dispatch = await repository.create_runtime_dispatch(
+            {
+                "artifact_id": first["id"],
+                "run_id": terminal_run["id"],
+                "request": {"schema_version": "1", "artifact_sha256": "a" * 64},
+                "request_sha256": "5" * 64,
+            }
+        )
+        assert await repository.cancel_runtime_dispatch(
+            terminal_dispatch["id"],
+            error_code="runtime_cancelled",
+            error_message="runtime was cancelled",
+        )
+        assert await repository.complete_review_run(
+            terminal_run["id"],
+            {
+                "status": "failed",
+                "summary": "runtime already failed",
+                "error_code": "runtime_cancelled",
+                "coverage": {"outcome": "failed", "stage_name": "runtime"},
+            },
+        )
+        with pytest.raises(ValueError, match=ArtifactErrorCode.RUNTIME_RESULT_INVALID.value):
+            await repository.collect_runtime_dispatch(
+                terminal_dispatch["id"],
+                {
+                    "status": "failed",
+                    "summary": "must not overwrite a terminal run",
+                    "error_code": "runtime_cancelled",
+                    "coverage": {"outcome": "failed", "stage_name": "runtime"},
+                },
+            )
+        guarded_dispatch = await repository.get_runtime_dispatch(terminal_dispatch["id"])
+        assert guarded_dispatch and guarded_dispatch["collected_at"] is None
+
+        targeted_run = await repository.create_review_run(
+            {
+                "artifact_id": first["id"],
+                "type": "runtime",
+                "status": "running",
+                "policy_version_id": policy["id"],
+                "idempotency_key": "runtime-targeted-failure",
+            }
+        )
+        sibling_run = await repository.create_review_run(
+            {
+                "artifact_id": first["id"],
+                "type": "runtime",
+                "status": "running",
+                "policy_version_id": policy["id"],
+                "idempotency_key": "runtime-sibling-stays-open",
+            }
+        )
+        assert (
+            await repository.fail_open_review_runs(
+                first["id"],
+                "runtime",
+                error_code="runtime_collect_failed",
+                summary="one target failed",
+                run_id=targeted_run["id"],
+            )
+            == 1
+        )
+        targeted_runs = await repository.list_review_runs(first["id"])
+        assert (
+            next(item for item in targeted_runs if item["id"] == targeted_run["id"])["status"]
+            == "failed"
+        )
+        assert (
+            next(item for item in targeted_runs if item["id"] == sibling_run["id"])["status"]
+            == "running"
         )
 
         thread = await repository.create_review_comment(

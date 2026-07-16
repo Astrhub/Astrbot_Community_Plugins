@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import secrets
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -36,6 +37,16 @@ class RuntimeResultWriter(Protocol):
     ) -> RuntimeStoredResult: ...
 
 
+@runtime_checkable
+class RuntimeResultReader(Protocol):
+    async def read_text_content(
+        self,
+        key: str,
+        max_bytes: int,
+        expected_sha256: str = "",
+    ) -> bytes: ...
+
+
 class LocalRuntimeResultWriter:
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root).expanduser().resolve()
@@ -48,6 +59,83 @@ class LocalRuntimeResultWriter:
         max_bytes: int,
     ) -> RuntimeStoredResult:
         return await asyncio.to_thread(self._put_result, key, content, max_bytes)
+
+    async def read_text_content(
+        self,
+        key: str,
+        max_bytes: int,
+        expected_sha256: str = "",
+    ) -> bytes:
+        return await asyncio.to_thread(
+            self._read_text_content,
+            key,
+            max_bytes,
+            expected_sha256,
+        )
+
+    def _read_text_content(
+        self,
+        key: str,
+        max_bytes: int,
+        expected_sha256: str,
+    ) -> bytes:
+        if max_bytes < 1:
+            raise RuntimeResultStorageError(
+                "runtime_result_too_large",
+                "Runtime result read limit is invalid",
+            )
+        destination = self._destination(key)
+        try:
+            resolved_root = self.root.resolve(strict=True)
+            resolved_parent = destination.parent.resolve(strict=True)
+            resolved_parent.relative_to(resolved_root)
+        except FileNotFoundError as exc:
+            raise RuntimeResultStorageError(
+                "content_object_missing",
+                "Runtime private object is not available",
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise RuntimeResultStorageError(
+                "runtime_result_object_invalid",
+                "Runtime private object parent cannot be resolved safely",
+            ) from exc
+        try:
+            descriptor = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError as exc:
+            raise RuntimeResultStorageError(
+                "content_object_missing",
+                "Runtime private object is not available",
+            ) from exc
+        except OSError as exc:
+            raise RuntimeResultStorageError(
+                "runtime_result_object_invalid",
+                "Runtime private object cannot be opened safely",
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
+                raise RuntimeResultStorageError(
+                    "runtime_result_too_large",
+                    "Runtime private object exceeds its configured byte limit",
+                )
+            with os.fdopen(descriptor, "rb") as stream:
+                descriptor = -1
+                content = stream.read(max_bytes + 1)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        if len(content) > max_bytes:
+            raise RuntimeResultStorageError(
+                "runtime_result_too_large",
+                "Runtime private object exceeds its configured byte limit",
+            )
+        digest = hashlib.sha256(content).hexdigest()
+        if expected_sha256 and digest != expected_sha256:
+            raise RuntimeResultStorageError(
+                "runtime_result_sha256_mismatch",
+                "Runtime private object digest does not match its signed reference",
+            )
+        return content
 
     def _put_result(self, key: str, content: bytes, max_bytes: int) -> RuntimeStoredResult:
         if max_bytes < 1 or len(content) > max_bytes:

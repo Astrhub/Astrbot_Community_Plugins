@@ -23,6 +23,10 @@ COPY --chown=65532:65532 apps/api/app/artifacts/__init__.py \
     /opt/runtime-probe/app/artifacts/__init__.py
 COPY --chown=65532:65532 apps/api/app/artifacts/runner_contract.py \
     /opt/runtime-probe/app/artifacts/runner_contract.py
+COPY --chown=65532:65532 apps/api/app/artifacts/requirements_parser.py \
+    /opt/runtime-probe/app/artifacts/requirements_parser.py
+COPY --chown=65532:65532 apps/api/app/artifacts/sbom.py \
+    /opt/runtime-probe/app/artifacts/sbom.py
 COPY --chown=65532:65532 apps/api/app/runtime_runner/__init__.py \
     /opt/runtime-probe/app/runtime_runner/__init__.py
 COPY --chown=65532:65532 apps/api/app/runtime_runner/probe/ \

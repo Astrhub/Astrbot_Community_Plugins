@@ -1104,11 +1104,39 @@ class PgAdvancedReviewRepositoryMixin:
         )
         return [_record(row) for row in rows]
 
+    async def cancel_runtime_dispatch(
+        self,
+        dispatch_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> dict[str, Any] | None:
+        row = await self._advanced_pool().fetchrow(
+            """
+            UPDATE runtime_dispatches
+               SET status = 'cancelled',
+                   error_code = $2,
+                   error_message = $3,
+                   lease_owner = NULL,
+                   lease_expires_at = NULL,
+                   completed_at = now(),
+                   updated_at = now()
+             WHERE id = $1
+               AND status IN ('queued', 'running')
+         RETURNING *
+            """,
+            dispatch_id,
+            error_code,
+            error_message,
+        )
+        return _record(row) if row else None
+
     async def collect_runtime_dispatch(
         self,
         dispatch_id: str,
         run_payload: Mapping[str, Any] | None = None,
         findings: Sequence[Mapping[str, Any]] = (),
+        sbom_payload: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         pool = self._advanced_pool()
         async with pool.acquire() as connection:
@@ -1118,7 +1146,7 @@ class PgAdvancedReviewRepositoryMixin:
                     SELECT * FROM runtime_dispatches
                      WHERE id = $1
                        AND collected_at IS NULL
-                       AND status IN ('succeeded', 'failed', 'timed_out')
+                       AND status IN ('succeeded', 'failed', 'timed_out', 'cancelled')
                      FOR UPDATE
                     """,
                     dispatch_id,
@@ -1149,6 +1177,7 @@ class PgAdvancedReviewRepositoryMixin:
                                completed_at = now()
                          WHERE id = $1
                            AND type = 'runtime'
+                           AND status IN ('queued', 'running')
                      RETURNING *
                         """,
                         dispatch["run_id"],
@@ -1172,6 +1201,35 @@ class PgAdvancedReviewRepositoryMixin:
                             str(dispatch["run_id"]),
                             finding,
                         )
+                    if sbom_payload is not None:
+                        if str(sbom_payload.get("artifact_id") or "") != str(
+                            dispatch["artifact_id"]
+                        ) or str(sbom_payload.get("run_id") or "") != str(dispatch["run_id"]):
+                            raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                        saved_sbom = await connection.fetchrow(
+                            """
+                            INSERT INTO artifact_sboms (
+                                id, artifact_id, run_id, format, document_sha256,
+                                object_key, package_count, generator, tool_version
+                            )
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            ON CONFLICT (artifact_id, run_id, format, document_sha256)
+                            DO UPDATE SET document_sha256 = EXCLUDED.document_sha256
+                              WHERE artifact_sboms.object_key = EXCLUDED.object_key
+                            RETURNING object_key
+                            """,
+                            sbom_payload.get("id") or new_domain_id("sbom"),
+                            sbom_payload["artifact_id"],
+                            sbom_payload["run_id"],
+                            sbom_payload["format"],
+                            sbom_payload["document_sha256"],
+                            sbom_payload["object_key"],
+                            int(sbom_payload.get("package_count") or 0),
+                            sbom_payload["generator"],
+                            sbom_payload.get("tool_version", ""),
+                        )
+                        if not saved_sbom:
+                            raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
                 row = await connection.fetchrow(
                     """
                     UPDATE runtime_dispatches
@@ -1645,6 +1703,7 @@ class PgAdvancedReviewRepositoryMixin:
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (artifact_id, run_id, format, document_sha256)
                     DO UPDATE SET document_sha256 = EXCLUDED.document_sha256
+                      WHERE artifact_sboms.object_key = EXCLUDED.object_key
                     RETURNING *
                     """,
                     payload.get("id") or new_domain_id("sbom"),
@@ -1657,6 +1716,8 @@ class PgAdvancedReviewRepositoryMixin:
                     payload["generator"],
                     payload.get("tool_version", ""),
                 )
+                if not row:
+                    raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
         return _record(row)
 
     async def list_artifact_sboms(self, artifact_id: str) -> list[dict[str, Any]]:
@@ -2855,18 +2916,43 @@ class InMemoryAdvancedReviewRepositoryMixin:
                 )
             return deepcopy(expired[:limit])
 
+    async def cancel_runtime_dispatch(
+        self,
+        dispatch_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            dispatch = self.dispatches.get(dispatch_id)
+            if not dispatch or dispatch["status"] not in {"queued", "running"}:
+                return None
+            dispatch.update(
+                {
+                    "status": "cancelled",
+                    "error_code": error_code,
+                    "error_message": error_message,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "completed_at": _utc_now(),
+                    "updated_at": _utc_now(),
+                }
+            )
+            return deepcopy(dispatch)
+
     async def collect_runtime_dispatch(
         self,
         dispatch_id: str,
         run_payload: Mapping[str, Any] | None = None,
         findings: Sequence[Mapping[str, Any]] = (),
+        sbom_payload: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         async with self._lock:
             dispatch = self.dispatches.get(dispatch_id)
             if (
                 not dispatch
                 or dispatch.get("collected_at")
-                or dispatch["status"] not in {"succeeded", "failed", "timed_out"}
+                or dispatch["status"] not in {"succeeded", "failed", "timed_out", "cancelled"}
             ):
                 return None
             if run_payload is not None:
@@ -2874,7 +2960,11 @@ class InMemoryAdvancedReviewRepositoryMixin:
                 if status not in {"succeeded", "failed", "timed_out", "cancelled"}:
                     raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
                 run = self.runs.get(str(dispatch["run_id"]))
-                if not run or run["type"] != "runtime":
+                if (
+                    not run
+                    or run["type"] != "runtime"
+                    or run["status"] not in {"queued", "running"}
+                ):
                     raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
                 run.update(
                     {
@@ -2909,6 +2999,12 @@ class InMemoryAdvancedReviewRepositoryMixin:
                         str(dispatch["run_id"]),
                         findings,
                     )
+                if sbom_payload is not None:
+                    if str(sbom_payload.get("artifact_id") or "") != str(
+                        dispatch["artifact_id"]
+                    ) or str(sbom_payload.get("run_id") or "") != str(dispatch["run_id"]):
+                        raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                    await self.create_artifact_sbom(sbom_payload)
             dispatch["collected_at"] = _utc_now()
             dispatch["updated_at"] = _utc_now()
             return deepcopy(dispatch)
@@ -3189,6 +3285,8 @@ class InMemoryAdvancedReviewRepositoryMixin:
                 and sbom["format"] == payload["format"]
                 and sbom["document_sha256"] == payload["document_sha256"]
             ):
+                if sbom["object_key"] != payload["object_key"]:
+                    raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
                 return deepcopy(sbom)
         sbom = {
             **dict(payload),

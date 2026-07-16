@@ -19,8 +19,9 @@ from ..artifacts.runner_contract import (
     ProbeStatus,
     SmokeResult,
 )
+from ..artifacts.sbom import MAX_SBOM_BYTES
 from .config import RuntimeRunnerSettings
-from .container_executor import ContainerExecutor, PreparedRuntime
+from .container_executor import ContainerExecutor, InstallExecutionOutput, PreparedRuntime
 from .docker_cli import DockerCommandClient, DockerCommandResult
 from .execution import RuntimeExecutionError
 from .network_policy import DockerNetworkPolicy, NetworkPolicySnapshot
@@ -149,9 +150,7 @@ class DockerContainerExecutor(ContainerExecutor):
     async def prepare(self, work: RuntimeDispatchWorkItem) -> PreparedRuntime:
         rootless = await self._ensure_engine()
         artifact_path = self._artifact_path(work)
-        network_policy = await self.network_policy.verify(
-            work.request.install_network_profile
-        )
+        network_policy = await self.network_policy.verify(work.request.install_network_profile)
         image_ref = self._image_reference(work.request.target.image_digest)
         await self._ensure_image(image_ref, work)
         resource_id = _resource_name(work)
@@ -198,7 +197,7 @@ class DockerContainerExecutor(ContainerExecutor):
         self,
         prepared: PreparedRuntime,
         work: RuntimeDispatchWorkItem,
-    ) -> InstallResult:
+    ) -> InstallExecutionOutput:
         state = self._state(prepared, work)
         name = f"{state.volume_name}-install"
         state.container_names.add(name)
@@ -218,11 +217,26 @@ class DockerContainerExecutor(ContainerExecutor):
         _require_success(executed, "runtime_install_container_failed")
         payload = await self._read_result(state, work, "install")
         try:
-            return InstallResult.model_validate_json(payload)
+            result = InstallResult.model_validate_json(payload)
         except ValidationError as exc:
             raise RuntimeExecutionError(
                 "runtime_result_invalid",
                 "Install container returned an invalid structured result",
+            ) from exc
+        sbom = None
+        if result.sbom_sha256 is not None:
+            sbom = await self._read_private_object(
+                state,
+                work,
+                phase="sbom",
+                maximum=MAX_SBOM_BYTES,
+            )
+        try:
+            return InstallExecutionOutput(result=result, sbom=sbom)
+        except ValueError as exc:
+            raise RuntimeExecutionError(
+                "runtime_sbom_invalid",
+                "Install container returned an invalid SBOM sidecar",
             ) from exc
 
     async def smoke(
@@ -429,7 +443,9 @@ class DockerContainerExecutor(ContainerExecutor):
         identities = {str(image.get("Id") or "")} if isinstance(image, dict) else set()
         if isinstance(repo_digests, list):
             identities.update(str(item) for item in repo_digests)
-        if not any(identity == digest or identity.endswith(f"@{digest}") for identity in identities):
+        if not any(
+            identity == digest or identity.endswith(f"@{digest}") for identity in identities
+        ):
             raise RuntimeExecutionError(
                 "runtime_image_digest_mismatch",
                 "Runtime image identity does not match the pinned digest",
@@ -566,6 +582,51 @@ class DockerContainerExecutor(ContainerExecutor):
         state.container_names.discard(name)
         return result.stdout
 
+    async def _read_private_object(
+        self,
+        state: _DockerRuntimeState,
+        work: RuntimeDispatchWorkItem,
+        *,
+        phase: str,
+        maximum: int,
+    ) -> bytes:
+        name = f"{state.volume_name}-{phase}-object"
+        state.container_names.add(name)
+        argv = self._base_run_argv(
+            state,
+            work,
+            name=name,
+            network="none",
+            remove=True,
+            writable_volume=False,
+        )
+        argv.extend(
+            (
+                "--mount",
+                f"type=volume,src={state.volume_name},dst=/runtime,readonly,volume-nocopy",
+                state.image_ref,
+                "/usr/local/bin/python",
+                "-m",
+                _PROBE_MODULE,
+                "emit",
+                phase,
+            )
+        )
+        emitted = await self.client.execute(
+            tuple(argv),
+            timeout_seconds=30,
+            max_output_bytes=maximum,
+        )
+        _require_success(emitted, "runtime_private_object_unavailable")
+        content = emitted.stdout.encode("utf-8")
+        if emitted.truncated or not content or len(content) > maximum:
+            raise RuntimeExecutionError(
+                "runtime_private_object_invalid",
+                "Runtime private object exceeded its bounded output contract",
+            )
+        state.container_names.discard(name)
+        return content
+
     def _phase_run_argv(
         self,
         state: _DockerRuntimeState,
@@ -659,10 +720,7 @@ class DockerContainerExecutor(ContainerExecutor):
             "--stop-timeout",
             "5",
             "--tmpfs",
-            (
-                f"/tmp:rw,noexec,nosuid,nodev,size={limits.tmpfs_mb}m,"
-                "uid=65532,gid=65532,mode=700"
-            ),
+            (f"/tmp:rw,noexec,nosuid,nodev,size={limits.tmpfs_mb}m,uid=65532,gid=65532,mode=700"),
             "--env",
             "HOME=/tmp",
             "--env",
@@ -798,7 +856,9 @@ class DockerContainerExecutor(ContainerExecutor):
         if (
             not isinstance(labels, dict)
             or labels.get("astrbot.runtime.managed") != "true"
-            or not all(isinstance(key, str) and isinstance(value, str) for key, value in labels.items())
+            or not all(
+                isinstance(key, str) and isinstance(value, str) for key, value in labels.items()
+            )
         ):
             raise RuntimeExecutionError(
                 "runtime_orphan_cleanup_failed",

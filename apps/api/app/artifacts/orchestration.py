@@ -11,6 +11,7 @@ from typing import Any
 from .models import JobStatus, JobType, ReviewRunStatus, ReviewStatus
 from .policy import ReviewPolicyStage, ReviewPolicyV1, parse_review_policy
 from .repository import ArtifactRepository
+from .runner_contract import runtime_dispatch_id
 
 ROUTING_STAGE_NAME = "routing"
 ROUTING_TOOL_VERSION = "routing-v1"
@@ -296,6 +297,14 @@ class ReviewOrchestrator:
             synthetic = bool((latest_run.get("coverage") or {}).get("synthetic"))
             if run_state in TERMINAL_STAGE_STATES and not (synthetic and active_job):
                 return run_state
+            if run_state == StageState.RUNNING and _active_runtime_collect_job(
+                artifact_id,
+                unit,
+                policy_version_id,
+                latest_run,
+                jobs,
+            ):
+                return StageState.RUNNING
         if active_job:
             return StageState.RUNNING
         if matching_job is not None:
@@ -526,6 +535,39 @@ def _run_state(run: Mapping[str, Any]) -> StageState:
     if status in {ReviewRunStatus.QUEUED.value, ReviewRunStatus.RUNNING.value}:
         return StageState.RUNNING
     return StageState.FAILED
+
+
+def _active_runtime_collect_job(
+    artifact_id: str,
+    unit: _StageUnit,
+    policy_version_id: str,
+    run: Mapping[str, Any],
+    jobs: Sequence[Mapping[str, Any]],
+) -> bool:
+    if unit.stage != ReviewPolicyStage.RUNTIME:
+        return False
+    run_id = str(run.get("id") or "")
+    if not run_id:
+        return False
+    expected_dispatch_id = runtime_dispatch_id(
+        run_id,
+        artifact_id,
+        str(run.get("astrbot_version") or ""),
+        str(run.get("python_version") or ""),
+        str(run.get("container_image_digest") or ""),
+    )
+    for job in reversed(jobs):
+        payload = job.get("payload") if isinstance(job.get("payload"), Mapping) else {}
+        if (
+            job.get("type") == JobType.RUNTIME_COLLECT.value
+            and str(job.get("policy_version_id") or "") == policy_version_id
+            and str(job.get("run_id") or payload.get("run_id") or "") == run_id
+            and str(job.get("stage_name") or payload.get("stage_name") or "") == unit.name
+            and str(payload.get("dispatch_id") or "") == expected_dispatch_id
+            and job.get("status") in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}
+        ):
+            return True
+    return False
 
 
 def _aggregate_stage_state(

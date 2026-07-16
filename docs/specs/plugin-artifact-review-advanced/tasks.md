@@ -388,28 +388,28 @@
         - *Details*: 运行 unit/contract/DAG/routing/Ruff/Compose tests，记录病毒库/ruleset 测试快照后提交。
         - *Requirements*: FR-216、FR-217。
 
-- [ ] 18. **依赖解析、SBOM 与漏洞风险**
-    - [ ] 18.1. 实现 requirements 规范解析
+- [x] 18. **依赖解析、SBOM 与漏洞风险**
+    - [x] 18.1. 实现 requirements 规范解析
         - *Goal*: 结构化名称、specifier、marker、extra、source 和 hash。
         - *Details*: 保留 direct URL/VCS/local/editable 阻断；识别 dependency confusion/withdrawn/license policy inputs；不执行 requirement 内容。
         - *Requirements*: FR-218。
-    - [ ] 18.2. 消费 install sandbox 最终依赖图和 SBOM
+    - [x] 18.2. 消费 install sandbox 最终依赖图和 SBOM
         - *Goal*: 审查真实安装结果而非仅声明文本。
         - *Details*: 验证 SBOM SHA/format/generator；私有保存正文；比较 AstrBot core snapshots 和 `pip check`；生成 normalized packages。
         - *Requirements*: FR-203、FR-218。
-    - [ ] 18.3. 实现 vulnerability/advisory adapter
+    - [x] 18.3. 实现 vulnerability/advisory adapter
         - *Goal*: 保存 advisory、affected range、fixed version、source 和 data timestamp。
         - *Details*: Protocol 支持本地 snapshot/外部服务；缓存绑定数据库版本；stale/not_queried/error 不显示 no vulnerabilities。
         - *Requirements*: FR-218、FR-221。
-    - [ ] 18.4. 接入 policy/routing/findings
+    - [x] 18.4. 接入 policy/routing/findings
         - *Goal*: 按确定性严重度和数据新鲜度阻断或人工复核。
         - *Details*: core dependency downgrade 和 policy critical/high 规则；同 dependency evidence 可用于 stable correlation；保存 snapshot hash。
         - *Requirements*: FR-208、FR-215、FR-218、FR-220。
-    - [ ] 18.5. 增加 parser/SBOM/advisory tests
+    - [x] 18.5. 增加 parser/SBOM/advisory tests
         - *Goal*: 覆盖 marker/extra/direct、known advisory/fix、stale/unavailable 和 core conflict。
         - *Details*: 使用固定本地 advisory fixture，避免实时数据库让测试不确定。
         - *Requirements*: P4 验收。
-    - [ ] 18.6. 验证并提交 dependency security
+    - [x] 18.6. 验证并提交 dependency security
         - *Goal*: 完成依赖安全闭环后提交。
         - *Details*: 运行 unit/contract/runtime/DAG/routing/Ruff tests，检查 SBOM/URL 凭据不泄露后提交。
         - *Requirements*: FR-218。

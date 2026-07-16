@@ -187,6 +187,14 @@ class ArtifactRepository(Protocol):
         self, dispatch_id: str, runner_id: str, payload: Mapping[str, Any]
     ) -> dict[str, Any] | None: ...
 
+    async def cancel_runtime_dispatch(
+        self,
+        dispatch_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> dict[str, Any] | None: ...
+
     async def expire_runtime_dispatches(self, limit: int) -> list[dict[str, Any]]: ...
 
     async def collect_runtime_dispatch(
@@ -194,6 +202,7 @@ class ArtifactRepository(Protocol):
         dispatch_id: str,
         run_payload: Mapping[str, Any] | None = None,
         findings: Sequence[Mapping[str, Any]] = (),
+        sbom_payload: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None: ...
 
     async def create_review_comment(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
@@ -262,6 +271,7 @@ class ArtifactRepository(Protocol):
         *,
         error_code: str,
         summary: str,
+        run_id: str = "",
     ) -> int: ...
 
     async def replace_findings(
@@ -922,6 +932,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         *,
         error_code: str,
         summary: str,
+        run_id: str = "",
     ) -> int:
         result = await self._pool().execute(
             """
@@ -932,12 +943,14 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                    completed_at = now()
              WHERE artifact_id = $1
                AND type = $2
+               AND ($5 = '' OR id = $5)
                AND status IN ('queued', 'running')
             """,
             artifact_id,
             run_type,
             error_code,
             summary,
+            run_id,
         )
         return int(result.rsplit(" ", 1)[-1])
 
@@ -2727,12 +2740,14 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         *,
         error_code: str,
         summary: str,
+        run_id: str = "",
     ) -> int:
         changed = 0
         for run in self.runs.values():
             if (
                 run["artifact_id"] == artifact_id
                 and run["type"] == run_type
+                and (not run_id or run["id"] == run_id)
                 and run["status"] in {"queued", "running"}
             ):
                 run.update(
