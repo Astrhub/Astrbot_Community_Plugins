@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { computed, shallowRef } from "vue";
+import { computed, shallowRef, watch } from "vue";
 import { NAlert, NButton, NCard, NInput, NSelect, NTabPane, NTabs } from "naive-ui";
 import type { Plugin } from "@/types";
+import type { PluginArtifact } from "@/types/artifacts";
 
 const props = defineProps<{
   plugins: Plugin[];
   submitting: boolean;
+  supersedesArtifact?: PluginArtifact | null;
 }>();
 
 const emit = defineEmits<{
-  upload: [payload: { pluginId: string; file: File }];
-  github: [payload: { pluginId: string; sourceRef: string }];
+  upload: [payload: { pluginId: string; file: File; supersedesArtifactId: string }];
+  github: [payload: { pluginId: string; sourceRef: string; supersedesArtifactId: string }];
 }>();
 
 const pluginId = shallowRef("");
@@ -22,6 +24,23 @@ const pluginOptions = computed(() =>
     value: String(plugin.id),
   })),
 );
+const isResubmission = computed(
+  () => props.supersedesArtifact?.review_status === "changes_requested",
+);
+const title = computed(() => (isResubmission.value ? "重新提交修订版" : "提交新版本"));
+
+watch(
+  () => [props.supersedesArtifact?.id, props.plugins] as const,
+  () => {
+    const artifact = props.supersedesArtifact;
+    if (!artifact) return;
+    const plugin = props.plugins.find(
+      (item) => String(item.id) === artifact.plugin_id || item.name === artifact.plugin_id,
+    );
+    if (plugin) pluginId.value = String(plugin.id);
+  },
+  { immediate: true },
+);
 
 function handleFileChange(event: Event): void {
   const input = event.target as HTMLInputElement;
@@ -30,17 +49,28 @@ function handleFileChange(event: Event): void {
 
 function submitUpload(): void {
   if (!pluginId.value || !selectedFile.value) return;
-  emit("upload", { pluginId: pluginId.value, file: selectedFile.value });
+  emit("upload", {
+    pluginId: pluginId.value,
+    file: selectedFile.value,
+    supersedesArtifactId: isResubmission.value ? props.supersedesArtifact?.id || "" : "",
+  });
 }
 
 function submitGithub(): void {
   if (!pluginId.value) return;
-  emit("github", { pluginId: pluginId.value, sourceRef: sourceRef.value.trim() });
+  emit("github", {
+    pluginId: pluginId.value,
+    sourceRef: sourceRef.value.trim(),
+    supersedesArtifactId: isResubmission.value ? props.supersedesArtifact?.id || "" : "",
+  });
 }
 </script>
 
 <template>
-  <NCard class="submission-panel" size="small" title="提交新版本">
+  <NCard class="submission-panel" size="small" :title="title">
+    <NAlert v-if="isResubmission" class="submission-panel__notice" type="warning" :bordered="false">
+      将为 {{ supersedesArtifact?.version }} 创建新的不可变 Artifact，并保留原版本、评论和审查历史。
+    </NAlert>
     <NAlert v-if="!plugins.length" type="info" :bordered="false">
       请先登记插件或在原提交页完成插件身份登记。
     </NAlert>
@@ -51,6 +81,8 @@ function submitGithub(): void {
         :options="pluginOptions"
         filterable
         placeholder="选择要更新的插件"
+        aria-label="选择要提交版本的插件"
+        :disabled="isResubmission"
       />
       <NTabs type="segment" animated>
         <NTabPane name="upload" tab="上传 ZIP">
@@ -65,7 +97,7 @@ function submitGithub(): void {
               :disabled="!pluginId || !selectedFile"
               @click="submitUpload"
             >
-              上传并进入隔离审查
+              {{ isResubmission ? "重新提交 ZIP" : "上传并进入隔离审查" }}
             </NButton>
           </div>
         </NTabPane>
@@ -82,7 +114,7 @@ function submitGithub(): void {
               :disabled="!pluginId"
               @click="submitGithub"
             >
-              固定 commit 并提交
+              {{ isResubmission ? "重新提交 GitHub 引用" : "固定 commit 并提交" }}
             </NButton>
           </div>
         </NTabPane>
@@ -93,11 +125,15 @@ function submitGithub(): void {
 
 <style scoped>
 .submission-panel {
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .submission-panel__plugin {
   margin-bottom: 14px;
+}
+
+.submission-panel__notice {
+  margin-bottom: 12px;
 }
 
 .submission-panel__form {

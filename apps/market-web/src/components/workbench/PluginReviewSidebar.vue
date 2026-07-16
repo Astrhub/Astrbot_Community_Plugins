@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { NEmpty, NSelect, NSpin, NTag } from "naive-ui";
-import type { PluginArtifact } from "@/types/artifacts";
+import type { ArtifactRiskLevel, PluginArtifact } from "@/types/artifacts";
 import {
   REVIEW_STATUS_LABELS,
   RISK_LABELS,
@@ -13,6 +13,7 @@ defineProps<{
   artifacts: PluginArtifact[];
   selectedId: string;
   statusFilter: string;
+  riskFilter: ArtifactRiskLevel | "";
   loading: boolean;
   isAdmin: boolean;
 }>();
@@ -20,16 +21,28 @@ defineProps<{
 defineEmits<{
   select: [artifactId: string];
   statusChange: [status: string];
+  riskChange: [risk: ArtifactRiskLevel | ""];
 }>();
 
 const statusOptions = [
   { label: "全部状态", value: "" },
+  { label: "隔离中", value: "quarantined" },
+  { label: "基础校验", value: "prechecking" },
   { label: "待人工审查", value: "pending_review" },
   { label: "需要修改", value: "changes_requested" },
   { label: "处理中", value: "scanning" },
   { label: "已批准", value: "approved" },
   { label: "已拒绝", value: "rejected" },
+  { label: "已撤回", value: "withdrawn" },
   { label: "处理失败", value: "processing_failed" },
+];
+const riskOptions = [
+  { label: "全部风险", value: "" },
+  { label: "严重风险", value: "critical" },
+  { label: "高风险", value: "high" },
+  { label: "中风险", value: "medium" },
+  { label: "低风险", value: "low" },
+  { label: "无命中", value: "none" },
 ];
 </script>
 
@@ -37,13 +50,23 @@ const statusOptions = [
   <section class="review-sidebar" aria-label="Artifact 列表">
     <div class="review-sidebar__toolbar">
       <strong>{{ isAdmin ? "待审队列" : "我的版本" }}</strong>
-      <NSelect
-        size="small"
-        :value="statusFilter"
-        :options="statusOptions"
-        aria-label="筛选审查状态"
-        @update:value="$emit('statusChange', String($event || ''))"
-      />
+      <div class="review-sidebar__filters">
+        <NSelect
+          size="small"
+          :value="statusFilter"
+          :options="statusOptions"
+          aria-label="筛选审查状态"
+          @update:value="$emit('statusChange', String($event || ''))"
+        />
+        <NSelect
+          v-if="isAdmin"
+          size="small"
+          :value="riskFilter"
+          :options="riskOptions"
+          aria-label="筛选风险等级"
+          @update:value="$emit('riskChange', ($event || '') as ArtifactRiskLevel | '')"
+        />
+      </div>
     </div>
     <NSpin :show="loading">
       <div v-if="artifacts.length" class="review-sidebar__list">
@@ -53,6 +76,7 @@ const statusOptions = [
           type="button"
           class="artifact-row"
           :class="{ 'artifact-row--selected': artifact.id === selectedId }"
+          :aria-current="artifact.id === selectedId ? 'true' : undefined"
           @click="$emit('select', artifact.id)"
         >
           <span class="artifact-row__title">
@@ -90,6 +114,12 @@ const statusOptions = [
   gap: 10px;
   padding: 18px;
   border-bottom: 1px solid var(--border-base);
+}
+
+.review-sidebar__filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
 }
 
 .review-sidebar__list {
@@ -144,7 +174,7 @@ const statusOptions = [
 @media (max-width: 860px) {
   .review-sidebar {
     position: static;
-    max-height: 360px;
+    max-height: none;
   }
 }
 </style>

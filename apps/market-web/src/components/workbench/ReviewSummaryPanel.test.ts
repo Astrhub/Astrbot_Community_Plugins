@@ -63,6 +63,7 @@ function detailFixture(): ArtifactDetail {
         deterministic: false,
         advisory: true,
         label: "自动审查建议",
+        version: 1,
         created_at: "2026-07-10T00:00:00Z",
       },
     ],
@@ -81,5 +82,25 @@ describe("ReviewSummaryPanel", () => {
     expect(wrapper.text()).toContain("manual_review");
     expect(wrapper.text()).toContain("finding_requires_manual_review");
     expect(wrapper.text()).not.toContain("绝对安全");
+  });
+
+  it("emits the structured finding instead of constructing a path client-side", async () => {
+    const detail = detailFixture();
+    detail.findings[0] = {
+      ...detail.findings[0]!,
+      file_path: "main.py",
+      line_start: 12,
+      line_end: 14,
+    };
+    const wrapper = mount(ReviewSummaryPanel, {
+      props: { detail, loading: false },
+    });
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("定位"))
+      ?.trigger("click");
+
+    expect(wrapper.emitted("openFinding")).toEqual([[detail.findings[0]]]);
   });
 });

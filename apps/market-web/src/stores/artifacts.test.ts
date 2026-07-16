@@ -78,8 +78,8 @@ describe("useArtifactStore", () => {
     const store = useArtifactStore();
     const archive = new File(["zip"], "plugin.zip", { type: "application/zip" });
 
-    await store.submitUpload("plugin/id", archive);
-    await store.submitGithub("plugin/id", "release-v1");
+    await store.submitUpload("plugin/id", archive, "artifact-old");
+    await store.submitGithub("plugin/id", "release-v1", "artifact-old");
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
@@ -90,8 +90,11 @@ describe("useArtifactStore", () => {
     expect(uploadInit.method).toBe("POST");
     expect(uploadInit.body).toBeInstanceOf(FormData);
     expect((uploadInit.body as FormData).get("file")).toBe(archive);
+    expect((uploadInit.body as FormData).get("supersedes_artifact_id")).toBe("artifact-old");
     const githubInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
-    expect(githubInit.body).toBe(JSON.stringify({ source_ref: "release-v1" }));
+    expect(githubInit.body).toBe(
+      JSON.stringify({ source_ref: "release-v1", supersedes_artifact_id: "artifact-old" }),
+    );
     expect(store.submitting).toBe(false);
   });
 
@@ -155,5 +158,108 @@ describe("useArtifactStore", () => {
     );
     expect(store.detail?.artifact.review_status).toBe("changes_requested");
     expect(store.deciding).toBe(false);
+  });
+
+  it("does not let a completed decision refresh overwrite a newly selected artifact", async () => {
+    const artifactA = {
+      id: "artifact/A",
+      plugin_id: "astrbot_plugin_demo",
+      version: "v1.0.0",
+      normalized_version: "1.0.0",
+      source_type: "upload",
+      archive_sha256: "a".repeat(64),
+      size_bytes: 128,
+      review_status: "pending_review",
+      publication_status: "unpublished",
+      risk_level: "high",
+      created_at: "2026-07-10T00:00:00Z",
+      updated_at: "2026-07-10T00:00:00Z",
+    };
+    const artifactB = {
+      ...artifactA,
+      id: "artifact/B",
+      version: "v2.0.0",
+      normalized_version: "2.0.0",
+      risk_level: "low",
+    };
+    let resolveDecision: ((response: Response) => void) | undefined;
+    const decision = new Promise<Response>((resolve) => {
+      resolveDecision = resolve;
+    });
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      requestedUrls.push(url);
+      if (init?.method === "POST") return decision;
+      const artifact = url.endsWith("artifact%2FB") ? artifactB : artifactA;
+      return new Response(JSON.stringify({ artifact, runs: [], findings: [], decisions: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const store = useArtifactStore();
+
+    await store.loadDetail("artifact/A");
+    const pendingDecision = store.reject("artifact/A", "存在严重风险");
+    await store.loadDetail("artifact/B");
+    resolveDecision?.(
+      new Response(JSON.stringify({ artifact: { ...artifactA, review_status: "rejected" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await pendingDecision;
+
+    expect(store.detail?.artifact.id).toBe("artifact/B");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(requestedUrls[0]).toContain("artifact%2FA");
+    expect(requestedUrls[1]).toContain("artifact%2FA/reject");
+  });
+
+  it("keeps the newest queue filter result when an older request finishes last", async () => {
+    let resolveOlder: ((response: Response) => void) | undefined;
+    const older = new Promise<Response>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const highRisk = {
+      id: "artifact-high",
+      plugin_id: "astrbot_plugin_demo",
+      version: "v1.0.0",
+      normalized_version: "1.0.0",
+      source_type: "upload",
+      archive_sha256: "a".repeat(64),
+      size_bytes: 128,
+      review_status: "pending_review",
+      publication_status: "unpublished",
+      risk_level: "high",
+      created_at: "2026-07-10T00:00:00Z",
+      updated_at: "2026-07-10T00:00:00Z",
+    };
+    const criticalRisk = { ...highRisk, id: "artifact-critical", risk_level: "critical" };
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(older)
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ items: [criticalRisk] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const store = useArtifactStore();
+
+    const olderRequest = store.loadQueue({ riskLevel: "high" });
+    await store.loadQueue({ riskLevel: "critical" });
+    resolveOlder?.(
+      new Response(JSON.stringify({ items: [highRisk] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await olderRequest;
+
+    expect(store.items.map((item) => item.id)).toEqual(["artifact-critical"]);
+    expect(store.loadingList).toBe(false);
   });
 });

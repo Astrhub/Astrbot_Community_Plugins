@@ -336,32 +336,32 @@
         - *Details*: 运行 history/correlation/revoke/feed/notification tests、Ruff 后提交。
         - *Requirements*: FR-214、FR-215。
 
-- [ ] 16. **完整 Plugin Workbench UI**
-    - [ ] 16.1. 建立 review workspace typed state
+- [x] 16. **完整 Plugin Workbench UI**
+    - [x] 16.1. 建立 review workspace typed state
         - *Goal*: route query 是选择权威，Pinia 只保存服务端实体和加载状态。
         - *Details*: 保留 `stores/artifacts.ts`；新增 review workspace store/composables；不保存 ZIP、整包源码、raw prompt/log；使用 Composition API 和 `<script setup lang="ts">`。
         - *Requirements*: FR-224；前端规范。
-    - [ ] 16.2. 实现 `ReviewFileBrowser` 和 `ReviewDiffViewer`
+    - [x] 16.2. 实现 `ReviewFileBrowser` 和 `ReviewDiffViewer`
         - *Goal*: 稳定布局中浏览受限文本、binary metadata 和 hunks。
         - *Details*: 行分页、loading/error/truncated、base/current mode、行选择；用 text interpolation/DOM text，不使用未清洗 `v-html`。
         - *Requirements*: FR-211、FR-224。
-    - [ ] 16.3. 实现 `ReviewCommentThread` 和 `ReviewHistoryTimeline`
+    - [x] 16.3. 实现 `ReviewCommentThread` 和 `ReviewHistoryTimeline`
         - *Goal*: 支持回复、已处理、resolve/reopen、locked 状态和 cursor history。
         - *Details*: typed emits；busy/optimistic conflict/error；不解析评论 Markdown/mention；显示 actor snapshots。
         - *Requirements*: FR-212、FR-214、FR-224。
-    - [ ] 16.4. 扩展 `ReviewDecisionPanel`
+    - [x] 16.4. 扩展 `ReviewDecisionPanel`
         - *Goal*: 管理员执行 approve/reject/request changes/stable revoke，作者重新提交。
         - *Details*: 图标按钮和明确 tooltip；角色/状态决定可见性；理由 modal；后端错误是权威；避免重复提交。
         - *Requirements*: FR-213、FR-215、FR-224。
-    - [ ] 16.5. 完善桌面/移动布局和无障碍
+    - [x] 16.5. 完善桌面/移动布局和无障碍
         - *Goal*: 高密度审查工具在常见 viewport 无重叠和文本溢出。
         - *Details*: 桌面 sidebar/header/main/thread；窄屏 drawer+tabs；固定 line gutter、minmax/overflow；键盘 focus、aria labels、非颜色唯一状态。
         - *Requirements*: FR-224；可用性。
-    - [ ] 16.6. 增加组件/store/路由行为测试
+    - [x] 16.6. 增加组件/store/路由行为测试
         - *Goal*: 覆盖 file/diff/comment/history/decision/深链和窄屏状态。
         - *Details*: Vue Test Utils/Pinia，断言可见行为/emits；异步用 `flushPromises`；恶意文本不执行。
         - *Requirements*: P3 验收、前端测试策略。
-    - [ ] 16.7. 验证并提交 P3 工作台
+    - [x] 16.7. 验证并提交 P3 工作台
         - *Goal*: P3 后端能力形成完整作者/管理员体验。
         - *Details*: 运行 `vp check`、Vitest/build、API permission tests；使用桌面/移动截图检查重叠和文本，再提交。
         - *Requirements*: FR-224、P3 验收。

@@ -1,7 +1,18 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { NAlert, NCard, NDescriptions, NDescriptionsItem, NEmpty, NSpin, NTag } from "naive-ui";
-import type { ArtifactDetail } from "@/types/artifacts";
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NDescriptions,
+  NDescriptionsItem,
+  NEmpty,
+  NIcon,
+  NSpin,
+  NTag,
+} from "naive-ui";
+import { CodeSlashOutline } from "@vicons/ionicons5";
+import type { ArtifactDetail, ArtifactFinding } from "@/types/artifacts";
 import {
   PUBLICATION_STATUS_LABELS,
   REVIEW_STATUS_LABELS,
@@ -15,6 +26,9 @@ import {
 const props = defineProps<{
   detail: ArtifactDetail | null;
   loading: boolean;
+}>();
+defineEmits<{
+  openFinding: [finding: ArtifactFinding];
 }>();
 
 const sortedFindings = computed(() => {
@@ -185,6 +199,19 @@ function runTool(run: ArtifactDetail["runs"][number]): string {
                 >{{ finding.file_path || "包级发现"
                 }}<template v-if="finding.line_start">:{{ finding.line_start }}</template></span
               >
+              <NButton
+                v-if="finding.file_path"
+                class="finding-item__locate"
+                quaternary
+                size="tiny"
+                aria-label="在文件浏览器中定位风险发现"
+                @click="$emit('openFinding', finding)"
+              >
+                <template #icon
+                  ><NIcon><CodeSlashOutline /></NIcon
+                ></template>
+                定位
+              </NButton>
             </div>
             <p>{{ finding.message }}</p>
             <p v-if="finding.suggestion" class="finding-item__suggestion">
@@ -264,6 +291,10 @@ function runTool(run: ArtifactDetail["runs"][number]): string {
   border-radius: 6px;
   background: var(--code-color);
   white-space: pre-wrap;
+}
+
+.finding-item__locate {
+  margin-left: auto;
 }
 
 @media (max-width: 720px) {

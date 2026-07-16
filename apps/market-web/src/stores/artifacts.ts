@@ -22,6 +22,9 @@ export const useArtifactStore = defineStore("artifacts", () => {
   const submitting = shallowRef(false);
   const deciding = shallowRef(false);
   const selectedArtifact = computed(() => detail.value?.artifact ?? null);
+  let listRequest = 0;
+  let detailRequest = 0;
+  let detailTargetId = "";
 
   function apiBaseUrl(): string {
     return usePluginStore().apiBaseUrl;
@@ -47,17 +50,20 @@ export const useArtifactStore = defineStore("artifacts", () => {
   }
 
   async function loadMine(): Promise<PluginArtifact[]> {
+    const requestId = ++listRequest;
     loadingList.value = true;
     try {
       const payload = await request<{ items: PluginArtifact[] }>("/v1/me/artifacts");
-      items.value = payload.items || [];
-      return items.value;
+      const result = payload.items || [];
+      if (requestId === listRequest) items.value = result;
+      return result;
     } finally {
-      loadingList.value = false;
+      if (requestId === listRequest) loadingList.value = false;
     }
   }
 
   async function loadQueue(filters: QueueFilters = {}): Promise<PluginArtifact[]> {
+    const requestId = ++listRequest;
     loadingList.value = true;
     try {
       const query = new URLSearchParams();
@@ -65,28 +71,39 @@ export const useArtifactStore = defineStore("artifacts", () => {
       if (filters.riskLevel) query.set("risk_level", filters.riskLevel);
       const suffix = query.size ? `?${query.toString()}` : "";
       const payload = await request<{ items: PluginArtifact[] }>(`/v1/admin/artifacts${suffix}`);
-      items.value = payload.items || [];
-      return items.value;
+      const result = payload.items || [];
+      if (requestId === listRequest) items.value = result;
+      return result;
     } finally {
-      loadingList.value = false;
+      if (requestId === listRequest) loadingList.value = false;
     }
   }
 
   async function loadDetail(artifactId: string): Promise<ArtifactDetail> {
+    const requestId = ++detailRequest;
+    detailTargetId = artifactId;
     loadingDetail.value = true;
     try {
-      detail.value = await request<ArtifactDetail>(`/v1/artifacts/${artifactId}`);
-      return detail.value;
+      const payload = await request<ArtifactDetail>(
+        "/v1/artifacts/" + encodeURIComponent(artifactId),
+      );
+      if (requestId === detailRequest && detailTargetId === artifactId) detail.value = payload;
+      return payload;
     } finally {
-      loadingDetail.value = false;
+      if (requestId === detailRequest) loadingDetail.value = false;
     }
   }
 
-  async function submitUpload(pluginId: string, file: File): Promise<PluginArtifact> {
+  async function submitUpload(
+    pluginId: string,
+    file: File,
+    supersedesArtifactId = "",
+  ): Promise<PluginArtifact> {
     submitting.value = true;
     try {
       const body = new FormData();
       body.set("file", file);
+      if (supersedesArtifactId) body.set("supersedes_artifact_id", supersedesArtifactId);
       const payload = await request<{ artifact: PluginArtifact }>(
         `/v1/plugins/${encodeURIComponent(pluginId)}/artifacts/upload`,
         { method: "POST", body },
@@ -97,7 +114,11 @@ export const useArtifactStore = defineStore("artifacts", () => {
     }
   }
 
-  async function submitGithub(pluginId: string, sourceRef = ""): Promise<PluginArtifact> {
+  async function submitGithub(
+    pluginId: string,
+    sourceRef = "",
+    supersedesArtifactId = "",
+  ): Promise<PluginArtifact> {
     submitting.value = true;
     try {
       const payload = await request<{ artifact: PluginArtifact }>(
@@ -105,7 +126,10 @@ export const useArtifactStore = defineStore("artifacts", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ source_ref: sourceRef }),
+          body: JSON.stringify({
+            source_ref: sourceRef,
+            ...(supersedesArtifactId ? { supersedes_artifact_id: supersedesArtifactId } : {}),
+          }),
         },
       );
       return payload.artifact;
@@ -134,14 +158,14 @@ export const useArtifactStore = defineStore("artifacts", () => {
     deciding.value = true;
     try {
       const payload = await request<{ artifact: PluginArtifact }>(
-        `/v1/admin/artifacts/${artifactId}/${action}`,
+        `/v1/admin/artifacts/${encodeURIComponent(artifactId)}/${action}`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ reason }),
         },
       );
-      await loadDetail(artifactId);
+      if (!detailTargetId || detailTargetId === artifactId) await loadDetail(artifactId);
       return payload.artifact;
     } finally {
       deciding.value = false;
@@ -151,8 +175,10 @@ export const useArtifactStore = defineStore("artifacts", () => {
   async function retryPublish(artifactId: string): Promise<void> {
     deciding.value = true;
     try {
-      await request(`/v1/admin/artifacts/${artifactId}/retry-publish`, { method: "POST" });
-      await loadDetail(artifactId);
+      await request(`/v1/admin/artifacts/${encodeURIComponent(artifactId)}/retry-publish`, {
+        method: "POST",
+      });
+      if (!detailTargetId || detailTargetId === artifactId) await loadDetail(artifactId);
     } finally {
       deciding.value = false;
     }
@@ -172,7 +198,10 @@ export const useArtifactStore = defineStore("artifacts", () => {
   }
 
   function clearDetail(): void {
+    detailRequest += 1;
+    detailTargetId = "";
     detail.value = null;
+    loadingDetail.value = false;
   }
 
   return {
