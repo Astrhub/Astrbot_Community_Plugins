@@ -113,24 +113,7 @@ class ArtifactContentService:
         line_limit: int,
     ) -> dict[str, Any]:
         self._line_page(start_line, line_limit)
-        current = await self._current_artifact(artifact)
-        artifact_id = str(current["id"])
-        selected_row = await self.repository.get_artifact_file(artifact_id, file_id)
-        if selected_row is None:
-            raise ArtifactContentError(
-                ArtifactErrorCode.ARTIFACT_FILE_NOT_FOUND.value,
-                "Artifact file does not exist",
-                status_code=404,
-            )
-        rows = await self.repository.list_artifact_files(artifact_id)
-        files = self._validated_manifest(current, rows)
-        item = next((value for value in files if value.id == file_id), None)
-        if item is None or not _same_file_identity(selected_row, item):
-            raise ArtifactContentError(
-                ArtifactErrorCode.ARTIFACT_FILE_SHA_CHANGED.value,
-                "Artifact file metadata changed",
-                status_code=409,
-            )
+        current, selected_row, item = await self.resolve_file(artifact, file_id)
         if not item.is_text or not item.content_key:
             raise ArtifactContentError(
                 ArtifactErrorCode.ARTIFACT_FILE_NOT_TEXT.value,
@@ -185,6 +168,31 @@ class ArtifactContentService:
         )
         await self._verify_file_unchanged(current, item)
         return response
+
+    async def resolve_file(
+        self,
+        artifact: Mapping[str, Any],
+        file_id: str,
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], ArtifactManifestFile]:
+        current = await self._current_artifact(artifact)
+        artifact_id = str(current["id"])
+        selected_row = await self.repository.get_artifact_file(artifact_id, file_id)
+        if selected_row is None:
+            raise ArtifactContentError(
+                ArtifactErrorCode.ARTIFACT_FILE_NOT_FOUND.value,
+                "Artifact file does not exist",
+                status_code=404,
+            )
+        rows = await self.repository.list_artifact_files(artifact_id)
+        files = self._validated_manifest(current, rows)
+        item = next((value for value in files if value.id == file_id), None)
+        if item is None or not _same_file_identity(selected_row, item):
+            raise ArtifactContentError(
+                ArtifactErrorCode.ARTIFACT_FILE_SHA_CHANGED.value,
+                "Artifact file metadata changed",
+                status_code=409,
+            )
+        return current, selected_row, item
 
     async def list_diffs(
         self,

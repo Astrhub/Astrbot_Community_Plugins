@@ -1188,14 +1188,35 @@ class PgAdvancedReviewRepositoryMixin:
         pool = self._advanced_pool()
         async with pool.acquire() as connection:
             async with connection.transaction():
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    payload["idempotency_key"],
+                )
                 existing = await connection.fetchrow(
                     "SELECT * FROM review_comments WHERE idempotency_key = $1",
                     payload["idempotency_key"],
                 )
                 if existing:
-                    if str(existing["artifact_id"]) != str(payload["artifact_id"]):
+                    create_event = await connection.fetchrow(
+                        """
+                        SELECT * FROM review_comment_events
+                         WHERE thread_id = $1 AND type = 'create'
+                      ORDER BY created_at, id
+                         LIMIT 1
+                        """,
+                        existing["id"],
+                    )
+                    if not _same_comment_creation(existing, create_event, payload):
                         raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     return _record(existing)
+                artifact = await connection.fetchrow(
+                    "SELECT review_status FROM plugin_artifacts WHERE id = $1 FOR UPDATE",
+                    payload["artifact_id"],
+                )
+                if not artifact:
+                    raise ValueError(ArtifactErrorCode.COMMENT_LINE_INVALID.value)
+                if ReviewStatus(str(artifact["review_status"])) in TERMINAL_REVIEW_STATUSES:
+                    raise ValueError(ArtifactErrorCode.COMMENT_THREAD_LOCKED.value)
                 thread_id = str(payload.get("id") or new_domain_id("comment"))
                 row = await connection.fetchrow(
                     """
@@ -1261,25 +1282,42 @@ class PgAdvancedReviewRepositoryMixin:
         pool = self._advanced_pool()
         async with pool.acquire() as connection:
             async with connection.transaction():
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    payload["idempotency_key"],
+                )
                 existing_event = await connection.fetchrow(
-                    "SELECT thread_id FROM review_comment_events WHERE idempotency_key = $1",
+                    "SELECT * FROM review_comment_events WHERE idempotency_key = $1",
                     payload["idempotency_key"],
                 )
                 if existing_event:
-                    if str(existing_event["thread_id"]) != thread_id:
+                    if not _same_comment_event(existing_event, thread_id, payload):
                         raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     existing_thread = await connection.fetchrow(
                         "SELECT * FROM review_comments WHERE id = $1",
                         thread_id,
                     )
                     return _record(existing_thread) if existing_thread else None
+                thread_identity = await connection.fetchrow(
+                    "SELECT artifact_id FROM review_comments WHERE id = $1",
+                    thread_id,
+                )
+                if not thread_identity:
+                    return None
+                artifact = await connection.fetchrow(
+                    "SELECT review_status FROM plugin_artifacts WHERE id = $1 FOR UPDATE",
+                    thread_identity["artifact_id"],
+                )
                 thread = await connection.fetchrow(
                     "SELECT * FROM review_comments WHERE id = $1 FOR UPDATE",
                     thread_id,
                 )
-                if not thread:
+                if not artifact or not thread:
                     return None
-                if thread["locked_at"] is not None:
+                if (
+                    ReviewStatus(str(artifact["review_status"])) in TERMINAL_REVIEW_STATUSES
+                    or thread["locked_at"] is not None
+                ):
                     raise ValueError(ArtifactErrorCode.COMMENT_THREAD_LOCKED.value)
                 expected_version = int(payload["expected_version"])
                 if int(thread["version"]) != expected_version:
@@ -1348,7 +1386,57 @@ class PgAdvancedReviewRepositoryMixin:
                 )
         return _record(row)
 
-    async def list_review_comments(self, artifact_id: str) -> list[dict[str, Any]]:
+    async def get_review_comment(
+        self,
+        artifact_id: str,
+        thread_id: str,
+        *,
+        event_limit: int = 20,
+    ) -> dict[str, Any] | None:
+        pool = self._advanced_pool()
+        async with pool.acquire() as connection:
+            thread = await connection.fetchrow(
+                "SELECT * FROM review_comments WHERE artifact_id = $1 AND id = $2",
+                artifact_id,
+                thread_id,
+            )
+            if not thread:
+                return None
+            events = await connection.fetch(
+                """
+                SELECT * FROM review_comment_events
+                 WHERE artifact_id = $1 AND thread_id = $2
+              ORDER BY created_at DESC, id DESC
+                 LIMIT $3
+                """,
+                artifact_id,
+                thread_id,
+                event_limit,
+            )
+            event_count = await connection.fetchval(
+                """
+                SELECT count(*) FROM review_comment_events
+                 WHERE artifact_id = $1 AND thread_id = $2
+                """,
+                artifact_id,
+                thread_id,
+            )
+        selected = [_record(event) for event in reversed(events)]
+        return {
+            **_record(thread),
+            "events": selected,
+            "event_count": int(event_count or 0),
+            "events_truncated": int(event_count or 0) > len(selected),
+        }
+
+    async def list_review_comments(
+        self,
+        artifact_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        event_limit: int = 20,
+    ) -> list[dict[str, Any]]:
         pool = self._advanced_pool()
         async with pool.acquire() as connection:
             threads = await connection.fetch(
@@ -1356,23 +1444,65 @@ class PgAdvancedReviewRepositoryMixin:
                 SELECT * FROM review_comments
                  WHERE artifact_id = $1
               ORDER BY file_path, line_start, created_at, id
+                 LIMIT $2 OFFSET $3
                 """,
                 artifact_id,
+                limit,
+                offset,
             )
+            thread_ids = [str(thread["id"]) for thread in threads]
+            if not thread_ids:
+                return []
             events = await connection.fetch(
                 """
-                SELECT * FROM review_comment_events
-                 WHERE artifact_id = $1
-              ORDER BY created_at, id
+                SELECT selected.*
+                  FROM unnest($2::text[]) AS target(thread_id)
+            CROSS JOIN LATERAL (
+                        SELECT * FROM review_comment_events event
+                         WHERE event.artifact_id = $1
+                           AND event.thread_id = target.thread_id
+                      ORDER BY event.created_at DESC, event.id DESC
+                         LIMIT $3
+                    ) AS selected
                 """,
                 artifact_id,
+                thread_ids,
+                event_limit,
+            )
+            counts = await connection.fetch(
+                """
+                SELECT thread_id, count(*) AS total
+                  FROM review_comment_events
+                 WHERE artifact_id = $1
+                   AND thread_id = ANY($2::text[])
+              GROUP BY thread_id
+                """,
+                artifact_id,
+                thread_ids,
             )
         grouped: dict[str, list[dict[str, Any]]] = {}
         for event in events:
             grouped.setdefault(str(event["thread_id"]), []).append(_record(event))
+        event_counts = {str(item["thread_id"]): int(item["total"]) for item in counts}
+        for values in grouped.values():
+            values.sort(key=lambda item: (item["created_at"], item["id"]))
         return [
-            {**_record(thread), "events": grouped.get(str(thread["id"]), [])} for thread in threads
+            {
+                **_record(thread),
+                "events": grouped.get(str(thread["id"]), []),
+                "event_count": event_counts.get(str(thread["id"]), 0),
+                "events_truncated": event_counts.get(str(thread["id"]), 0)
+                > len(grouped.get(str(thread["id"]), [])),
+            }
+            for thread in threads
         ]
+
+    async def count_review_comments(self, artifact_id: str) -> int:
+        value = await self._advanced_pool().fetchrow(
+            "SELECT count(*) AS total FROM review_comments WHERE artifact_id = $1",
+            artifact_id,
+        )
+        return int(value["total"] if value else 0)
 
     async def lock_review_comments(self, artifact_id: str) -> int:
         result = await self._advanced_pool().execute(
@@ -2532,18 +2662,31 @@ class InMemoryAdvancedReviewRepositoryMixin:
 
     async def create_review_comment(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         async with self._lock:
-            if str(payload["artifact_id"]) not in self.artifacts:
+            artifact = self.artifacts.get(str(payload["artifact_id"]))
+            if artifact is None:
                 raise ValueError(ArtifactErrorCode.COMMENT_LINE_INVALID.value)
+            file_artifact_id = str(payload["artifact_id"])
+            if str(payload.get("side") or "") == "base":
+                file_artifact_id = str(artifact.get("base_artifact_id") or "")
             if payload.get("file_id") and not any(
-                file["id"] == payload["file_id"]
-                for file in self.files.get(str(payload["artifact_id"]), [])
+                file["id"] == payload["file_id"] for file in self.files.get(file_artifact_id, [])
             ):
                 raise ValueError(ArtifactErrorCode.COMMENT_LINE_INVALID.value)
             for thread in self.review_comments.values():
                 if thread["idempotency_key"] == payload["idempotency_key"]:
-                    if thread["artifact_id"] != payload["artifact_id"]:
+                    create_event = next(
+                        (
+                            event
+                            for event in self.comment_events.values()
+                            if event["thread_id"] == thread["id"] and event["type"] == "create"
+                        ),
+                        None,
+                    )
+                    if not _same_comment_creation(thread, create_event, payload):
                         raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     return deepcopy(thread)
+            if ReviewStatus(str(artifact["review_status"])) in TERMINAL_REVIEW_STATUSES:
+                raise ValueError(ArtifactErrorCode.COMMENT_THREAD_LOCKED.value)
             now = _utc_now()
             thread = {
                 "id": str(payload.get("id") or new_domain_id("comment")),
@@ -2601,14 +2744,19 @@ class InMemoryAdvancedReviewRepositoryMixin:
         async with self._lock:
             for event in self.comment_events.values():
                 if event["idempotency_key"] == payload["idempotency_key"]:
-                    if event["thread_id"] != thread_id:
+                    if not _same_comment_event(event, thread_id, payload):
                         raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     thread = self.review_comments.get(thread_id)
                     return deepcopy(thread) if thread else None
             thread = self.review_comments.get(thread_id)
             if not thread:
                 return None
-            if thread.get("locked_at"):
+            artifact = self.artifacts.get(str(thread["artifact_id"]))
+            if (
+                artifact is None
+                or ReviewStatus(str(artifact["review_status"])) in TERMINAL_REVIEW_STATUSES
+                or thread.get("locked_at")
+            ):
                 raise ValueError(ArtifactErrorCode.COMMENT_THREAD_LOCKED.value)
             expected_version = int(payload["expected_version"])
             if int(thread["version"]) != expected_version:
@@ -2641,7 +2789,40 @@ class InMemoryAdvancedReviewRepositoryMixin:
             self.comment_events[event["id"]] = event
             return deepcopy(thread)
 
-    async def list_review_comments(self, artifact_id: str) -> list[dict[str, Any]]:
+    async def get_review_comment(
+        self,
+        artifact_id: str,
+        thread_id: str,
+        *,
+        event_limit: int = 20,
+    ) -> dict[str, Any] | None:
+        thread = self.review_comments.get(thread_id)
+        if not thread or thread["artifact_id"] != artifact_id:
+            return None
+        all_events = sorted(
+            (
+                deepcopy(event)
+                for event in self.comment_events.values()
+                if event["artifact_id"] == artifact_id and event["thread_id"] == thread_id
+            ),
+            key=lambda item: (item["created_at"], item["id"]),
+        )
+        events = all_events[-event_limit:]
+        return {
+            **deepcopy(thread),
+            "events": events,
+            "event_count": len(all_events),
+            "events_truncated": len(events) < len(all_events),
+        }
+
+    async def list_review_comments(
+        self,
+        artifact_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        event_limit: int = 20,
+    ) -> list[dict[str, Any]]:
         events_by_thread: dict[str, list[dict[str, Any]]] = {}
         for event in sorted(
             self.comment_events.values(),
@@ -2650,7 +2831,12 @@ class InMemoryAdvancedReviewRepositoryMixin:
             if event["artifact_id"] == artifact_id:
                 events_by_thread.setdefault(event["thread_id"], []).append(deepcopy(event))
         threads = [
-            {**deepcopy(thread), "events": events_by_thread.get(thread["id"], [])}
+            {
+                **deepcopy(thread),
+                "events": events_by_thread.get(thread["id"], [])[-event_limit:],
+                "event_count": len(events_by_thread.get(thread["id"], [])),
+                "events_truncated": len(events_by_thread.get(thread["id"], [])) > event_limit,
+            }
             for thread in self.review_comments.values()
             if thread["artifact_id"] == artifact_id
         ]
@@ -2662,7 +2848,12 @@ class InMemoryAdvancedReviewRepositoryMixin:
                 item["id"],
             )
         )
-        return threads
+        return threads[offset : offset + limit]
+
+    async def count_review_comments(self, artifact_id: str) -> int:
+        return sum(
+            1 for thread in self.review_comments.values() if thread["artifact_id"] == artifact_id
+        )
 
     async def lock_review_comments(self, artifact_id: str) -> int:
         changed = 0
@@ -2895,6 +3086,49 @@ def _policy_validation_is_current(policy: Mapping[str, Any]) -> bool:
         bool(policy["validated_at"])
         and summary.get("valid") is True
         and str(summary.get("policy_sha256") or "") == str(policy["policy_sha256"])
+    )
+
+
+def _same_comment_creation(
+    existing: Mapping[str, Any],
+    event: Mapping[str, Any] | None,
+    payload: Mapping[str, Any],
+) -> bool:
+    if event is None:
+        return False
+    return (
+        str(existing.get("artifact_id") or "") == str(payload.get("artifact_id") or "")
+        and (str(existing.get("source_thread_id") or "") or None)
+        == (str(payload.get("source_thread_id") or "") or None)
+        and (str(existing.get("file_id") or "") or None)
+        == (str(payload.get("file_id") or "") or None)
+        and str(existing.get("file_path") or "") == str(payload.get("file_path") or "")
+        and str(existing.get("file_sha256") or "") == str(payload.get("file_sha256") or "")
+        and str(existing.get("side") or "") == str(payload.get("side") or "")
+        and int(existing.get("line_start") or 0) == int(payload.get("line_start") or 0)
+        and int(existing.get("line_end") or 0) == int(payload.get("line_end") or 0)
+        and str(existing.get("body") or "") == str(payload.get("body") or "")
+        and (str(existing.get("reviewer_user_id") or "") or None)
+        == (str(payload.get("reviewer_user_id") or "") or None)
+        and str(existing.get("reviewer_role") or "") == str(payload.get("reviewer_role") or "")
+        and dict(event.get("metadata") or {}) == dict(payload.get("metadata") or {})
+    )
+
+
+def _same_comment_event(
+    existing: Mapping[str, Any],
+    thread_id: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    return (
+        str(existing.get("thread_id") or "") == thread_id
+        and str(existing.get("type") or "") == str(payload.get("type") or "")
+        and str(existing.get("body") or "") == str(payload.get("body") or "")
+        and (str(existing.get("actor_user_id") or "") or None)
+        == (str(payload.get("actor_user_id") or "") or None)
+        and str(existing.get("actor_role") or "") == str(payload.get("actor_role") or "")
+        and int(existing.get("expected_version") or 0) == int(payload.get("expected_version") or 0)
+        and dict(existing.get("metadata") or {}) == dict(payload.get("metadata") or {})
     )
 
 

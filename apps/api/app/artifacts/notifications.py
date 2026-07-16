@@ -109,6 +109,7 @@ class ArtifactNotificationDispatcher:
         artifact_id = str(payload.get("artifact_id") or event.get("aggregate_id") or "")
         link = self._workbench_link(artifact_id)
         reason = str(payload.get("reason") or payload.get("code") or "").strip()
+        email_body = f"{body}\n查看详情：{link}"
         full_body = f"{body}\n"
         if reason:
             full_body += f"原因：{reason}\n"
@@ -124,6 +125,7 @@ class ArtifactNotificationDispatcher:
                     event_type=str(event["event_type"]),
                     title=title,
                     body=full_body,
+                    email_body=email_body,
                     artifact_id=artifact_id,
                     email_preference="email_notify_unlist"
                     if event.get("event_type") == "artifact_revoked"
@@ -141,6 +143,7 @@ class ArtifactNotificationDispatcher:
                     event_type="artifact_pending_review",
                     title="[待审队列] 有新的插件版本待复核",
                     body=full_body,
+                    email_body=email_body,
                     artifact_id=artifact_id,
                     email_preference="email_notify_pending_review",
                 )
@@ -153,6 +156,7 @@ class ArtifactNotificationDispatcher:
         event_type: str,
         title: str,
         body: str,
+        email_body: str,
         artifact_id: str,
         email_preference: str,
     ) -> None:
@@ -178,7 +182,7 @@ class ArtifactNotificationDispatcher:
             self.settings,
             receiver=receiver,
             subject=f"{self.settings.site_name} - {title}",
-            content=body,
+            content=email_body,
         )
 
     def _workbench_link(self, artifact_id: str) -> str:

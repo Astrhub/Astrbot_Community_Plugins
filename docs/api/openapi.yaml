@@ -775,7 +775,7 @@ paths:
   /v1/plugins/{id}/artifacts/upload:
     post:
       tags: [Artifacts]
-      summary: 流式上传 ZIP artifact
+      summary: 流式上传 ZIP artifact；可关联要求修改的 supersedes artifact
       security: [{cookieAuth: []}]
       parameters: [{$ref: "#/components/parameters/PluginId"}]
       responses:
@@ -785,7 +785,7 @@ paths:
   /v1/plugins/{id}/artifacts/github:
     post:
       tags: [Artifacts]
-      summary: 固定公开 GitHub ref 到 commit 并创建 artifact
+      summary: 固定公开 GitHub ref 到 commit 并创建 artifact；可关联 supersedes artifact
       security: [{cookieAuth: []}]
       parameters: [{$ref: "#/components/parameters/PluginId"}]
       responses:
@@ -872,6 +872,40 @@ paths:
       responses:
         "200": {description: 结构化纯文本 hunks；Cache-Control no-store}
         "409": {description: Diff object、file SHA 或两端 tree 已漂移}
+  /v1/artifacts/{artifact_id}/comments:
+    get:
+      tags: [Artifacts]
+      summary: 分页查看行级审查线程和追加事件
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {in: query, name: limit, schema: {type: integer, default: 20}}
+        - {in: query, name: offset, schema: {type: integer, default: 0}}
+      responses:
+        "200": {description: 纯文本评论投影；不含用户 ID、幂等键或私有对象 key；Cache-Control no-store}
+        "403": {description: 非作者且非管理员}
+  /v1/artifacts/{artifact_id}/comments/{thread_id}/replies:
+    post:
+      tags: [Artifacts]
+      summary: 作者或管理员以 optimistic version 回复线程
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {$ref: "#/components/parameters/ReviewThreadId"}
+      responses:
+        "200": {description: 已追加 reply event}
+        "409": {description: 版本冲突或线程已被最终决定锁定}
+  /v1/artifacts/{artifact_id}/comments/{thread_id}/author-addressed:
+    post:
+      tags: [Artifacts]
+      summary: 作者标记审查意见已处理；不等同于管理员 resolve
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {$ref: "#/components/parameters/ReviewThreadId"}
+      responses:
+        "200": {description: 已追加 author_addressed event}
+        "403": {description: 只有 artifact 作者可执行}
   /v1/admin/artifacts:
     get:
       tags: [Reviews]
@@ -880,6 +914,49 @@ paths:
       responses:
         "200": {description: 可按状态与风险筛选的分页队列}
         "403": {description: 需要管理员权限}
+  /v1/admin/artifacts/{artifact_id}/comments:
+    post:
+      tags: [Reviews]
+      summary: 在已登记 current/base 文本或 diff hunk 行上创建审查线程
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      responses:
+        "201": {description: 已创建 SHA/line 绑定线程和 create event}
+        "400": {description: 正文、文件、side、行范围或 source thread 无效}
+        "409": {description: Artifact 已作最终决定或内容绑定已漂移}
+  /v1/admin/artifacts/{artifact_id}/comments/{thread_id}/edit:
+    post:
+      tags: [Reviews]
+      summary: 管理员编辑自己创建且未锁定的根评论
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {$ref: "#/components/parameters/ReviewThreadId"}
+      responses:
+        "200": {description: 已追加 edit event 并更新线程投影}
+        "403": {description: 不能编辑其他管理员或作者的内容}
+  /v1/admin/artifacts/{artifact_id}/comments/{thread_id}/resolve:
+    post:
+      tags: [Reviews]
+      summary: 管理员解决审查线程
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {$ref: "#/components/parameters/ReviewThreadId"}
+      responses:
+        "200": {description: 已追加 resolve event}
+        "409": {description: optimistic version 冲突或线程已锁定}
+  /v1/admin/artifacts/{artifact_id}/comments/{thread_id}/reopen:
+    post:
+      tags: [Reviews]
+      summary: 管理员重开审查线程
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {$ref: "#/components/parameters/ReviewThreadId"}
+      responses:
+        "200": {description: 已追加 reopen event}
+        "409": {description: optimistic version 冲突或线程已锁定}
   /v1/admin/artifacts/{artifact_id}/approve:
     post:
       tags: [Reviews]
@@ -981,6 +1058,13 @@ components:
       schema:
         type: string
       description: 必须属于路径中 Artifact 的已登记 Diff ID
+    ReviewThreadId:
+      in: path
+      name: thread_id
+      required: true
+      schema:
+        type: string
+      description: 必须属于路径中 Artifact 的审查线程 ID
   securitySchemes:
     cookieAuth:
       type: apiKey

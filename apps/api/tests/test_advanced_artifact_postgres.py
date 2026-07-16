@@ -195,6 +195,10 @@ def test_concurrent_auto_approve_is_atomic_against_postgres() -> None:
     asyncio.run(run_concurrent_auto_approve_scenario(database_url()))
 
 
+def test_concurrent_comment_events_and_decision_are_atomic_against_postgres() -> None:
+    asyncio.run(run_concurrent_comment_scenario(database_url()))
+
+
 def test_category_precedence_and_concurrency_against_postgres() -> None:
     asyncio.run(run_category_precedence_scenario(database_url()))
 
@@ -619,6 +623,136 @@ async def run_concurrent_auto_approve_scenario(url: str) -> None:
         await control.close()
 
 
+async def run_concurrent_comment_scenario(url: str) -> None:
+    schema = f"comment_concurrency_{uuid.uuid4().hex}"
+    control = await asyncpg.connect(url)
+    pool: asyncpg.Pool | None = None
+    try:
+        await control.execute(f"CREATE SCHEMA {schema}")
+        await control.execute(f"SET search_path TO {schema}")
+        await control.set_type_codec(
+            "jsonb",
+            schema="pg_catalog",
+            encoder=json.dumps,
+            decoder=json.loads,
+        )
+        await control.execute(SCHEMA_SQL)
+        await apply_schema_migrations(control)
+        await seed_market(control)
+        pool = await asyncpg.create_pool(
+            url,
+            min_size=2,
+            max_size=6,
+            server_settings={"search_path": schema},
+            init=_configure_json_codec,
+        )
+        repository = PgArtifactRepository(PooledRepositoryStore(pool))
+        artifact = await repository.create_artifact(artifact_payload("c"))
+        await control.execute(
+            """
+            INSERT INTO artifact_files (
+                id, artifact_id, path, language, mime_type, sha256,
+                size_bytes, line_count, is_text, content_key
+            )
+            VALUES (
+                'comment-file', $1, 'main.py', 'python', 'text/x-python',
+                $2, 10, 1, true, 'artifacts/comment/content.txt'
+            )
+            """,
+            artifact["id"],
+            "d" * 64,
+        )
+        await repository.transition_review_status(artifact["id"], "prechecking")
+        await repository.transition_review_status(artifact["id"], "scanning")
+        await repository.transition_review_status(artifact["id"], "pending_review")
+        thread = await repository.create_review_comment(
+            {
+                "artifact_id": artifact["id"],
+                "file_id": "comment-file",
+                "file_path": "main.py",
+                "file_sha256": "d" * 64,
+                "side": "current",
+                "line_start": 1,
+                "line_end": 1,
+                "body": "Concurrent review",
+                "reviewer_user_id": "reviewer-1",
+                "reviewer_nickname": "Reviewer",
+                "reviewer_role": "admin",
+                "idempotency_key": "concurrent-comment-create",
+            }
+        )
+
+        async def reply(marker: str) -> dict[str, Any] | None:
+            return await repository.append_review_comment_event(
+                thread["id"],
+                {
+                    "type": "reply",
+                    "body": marker,
+                    "actor_user_id": "owner-1",
+                    "actor_nickname": "Alice",
+                    "actor_role": "author",
+                    "expected_version": 1,
+                    "idempotency_key": f"concurrent-comment-{marker}",
+                },
+            )
+
+        replies = await asyncio.gather(reply("a"), reply("b"), return_exceptions=True)
+        assert sum(isinstance(result, dict) for result in replies) == 1
+        conflicts = [result for result in replies if isinstance(result, ValueError)]
+        assert len(conflicts) == 1
+        assert str(conflicts[0]) == ArtifactErrorCode.COMMENT_VERSION_CONFLICT.value
+
+        async def create_late_comment() -> dict[str, Any]:
+            return await repository.create_review_comment(
+                {
+                    "artifact_id": artifact["id"],
+                    "file_id": "comment-file",
+                    "file_path": "main.py",
+                    "file_sha256": "d" * 64,
+                    "side": "current",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "body": "Decision race",
+                    "reviewer_user_id": "reviewer-1",
+                    "reviewer_nickname": "Reviewer",
+                    "reviewer_role": "admin",
+                    "idempotency_key": "concurrent-comment-decision-race",
+                }
+            )
+
+        async def decide() -> dict[str, Any] | None:
+            return await repository.decide_artifact(
+                artifact["id"],
+                action="request_changes",
+                target_status="changes_requested",
+                reason="Concurrent decision",
+                reviewer={"id": "reviewer-1", "internal_username": "reviewer"},
+                idempotency_key="concurrent-comment-decision",
+            )
+
+        race = await asyncio.gather(create_late_comment(), decide(), return_exceptions=True)
+        assert any(isinstance(result, dict) for result in race)
+        stored = await repository.get_artifact(artifact["id"])
+        assert stored and stored["review_status"] == "changes_requested"
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    """
+                    SELECT count(*) FROM review_comments
+                     WHERE artifact_id = $1 AND locked_at IS NULL
+                    """,
+                    artifact["id"],
+                )
+                == 0
+            )
+    finally:
+        if pool is not None:
+            await pool.close()
+        await control.execute("RESET search_path")
+        await control.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        await control.close()
+
+
 async def _configure_json_codec(connection: asyncpg.Connection) -> None:
     await connection.set_type_codec(
         "jsonb",
@@ -999,6 +1133,40 @@ async def run_advanced_repository_scenario(url: str) -> None:
                 "idempotency_key": "comment-once",
             }
         )
+        repeated_thread = await repository.create_review_comment(
+            {
+                "artifact_id": first["id"],
+                "file_id": "file-main",
+                "file_path": "main.py",
+                "file_sha256": "4" * 64,
+                "side": "current",
+                "line_start": 1,
+                "line_end": 1,
+                "body": "Review this line",
+                "reviewer_user_id": "reviewer-1",
+                "reviewer_nickname": "Reviewer",
+                "reviewer_role": "admin",
+                "idempotency_key": "comment-once",
+            }
+        )
+        assert repeated_thread["id"] == thread["id"]
+        with pytest.raises(ValueError, match=ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value):
+            await repository.create_review_comment(
+                {
+                    "artifact_id": first["id"],
+                    "file_id": "file-main",
+                    "file_path": "main.py",
+                    "file_sha256": "4" * 64,
+                    "side": "current",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "body": "Different body",
+                    "reviewer_user_id": "reviewer-1",
+                    "reviewer_nickname": "Reviewer",
+                    "reviewer_role": "admin",
+                    "idempotency_key": "comment-once",
+                }
+            )
         replied = await repository.append_review_comment_event(
             thread["id"],
             {
@@ -1012,6 +1180,32 @@ async def run_advanced_repository_scenario(url: str) -> None:
             },
         )
         assert replied and replied["version"] == 2
+        replayed_reply = await repository.append_review_comment_event(
+            thread["id"],
+            {
+                "type": "reply",
+                "body": "Addressed",
+                "actor_user_id": "owner-1",
+                "actor_nickname": "Alice",
+                "actor_role": "author",
+                "expected_version": 1,
+                "idempotency_key": "comment-reply-once",
+            },
+        )
+        assert replayed_reply and replayed_reply["version"] == 2
+        with pytest.raises(ValueError, match=ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value):
+            await repository.append_review_comment_event(
+                thread["id"],
+                {
+                    "type": "reply",
+                    "body": "Different replay body",
+                    "actor_user_id": "owner-1",
+                    "actor_nickname": "Alice",
+                    "actor_role": "author",
+                    "expected_version": 1,
+                    "idempotency_key": "comment-reply-once",
+                },
+            )
         with pytest.raises(ValueError, match=ArtifactErrorCode.COMMENT_VERSION_CONFLICT.value):
             await repository.append_review_comment_event(
                 thread["id"],
@@ -1024,6 +1218,59 @@ async def run_advanced_repository_scenario(url: str) -> None:
                     "idempotency_key": "comment-stale-version",
                 },
             )
+        edited = await repository.append_review_comment_event(
+            thread["id"],
+            {
+                "type": "edit",
+                "body": "Updated review line",
+                "actor_user_id": "reviewer-1",
+                "actor_nickname": "Reviewer",
+                "actor_role": "admin",
+                "expected_version": 2,
+                "idempotency_key": "comment-edit-once",
+            },
+        )
+        assert edited and edited["body"] == "Updated review line"
+        resolved = await repository.append_review_comment_event(
+            thread["id"],
+            {
+                "type": "resolve",
+                "actor_user_id": "reviewer-1",
+                "actor_nickname": "Reviewer",
+                "actor_role": "admin",
+                "expected_version": 3,
+                "idempotency_key": "comment-resolve-once",
+            },
+        )
+        assert resolved and resolved["resolved"] is True
+        reopened = await repository.append_review_comment_event(
+            thread["id"],
+            {
+                "type": "reopen",
+                "actor_user_id": "reviewer-1",
+                "actor_nickname": "Reviewer",
+                "actor_role": "admin",
+                "expected_version": 4,
+                "idempotency_key": "comment-reopen-once",
+            },
+        )
+        assert reopened and reopened["resolved"] is False
+        addressed = await repository.append_review_comment_event(
+            thread["id"],
+            {
+                "type": "author_addressed",
+                "actor_user_id": "owner-1",
+                "actor_nickname": "Alice",
+                "actor_role": "author",
+                "expected_version": 5,
+                "idempotency_key": "comment-addressed-once",
+            },
+        )
+        assert addressed and addressed["version"] == 6 and addressed["resolved"] is False
+        assert await repository.count_review_comments(first["id"]) == 1
+        stored_thread = await repository.get_review_comment(first["id"], thread["id"])
+        assert stored_thread and len(stored_thread["events"]) == 6
+        assert await repository.list_review_comments(first["id"], limit=1, offset=0)
 
         findings = await repository.replace_findings(
             first["id"],
@@ -1126,6 +1373,16 @@ async def run_advanced_repository_scenario(url: str) -> None:
         policy_after_user_delete = await repository.get_review_policy(policy["id"])
         assert policy_after_user_delete
         assert policy_after_user_delete["created_by_user_id"] is None
+        comment_after_user_delete = await repository.get_review_comment(first["id"], thread["id"])
+        assert comment_after_user_delete
+        assert comment_after_user_delete["reviewer_user_id"] is None
+        assert comment_after_user_delete["reviewer_nickname"] == "Reviewer"
+        reviewer_events = [
+            event
+            for event in comment_after_user_delete["events"]
+            if event["actor_nickname"] == "Reviewer"
+        ]
+        assert reviewer_events and all(event["actor_user_id"] is None for event in reviewer_events)
 
         await connection.execute("DELETE FROM plugin_artifacts WHERE id = $1", first["id"])
         second_after_delete = await repository.get_artifact(second["id"])

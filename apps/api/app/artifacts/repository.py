@@ -202,7 +202,24 @@ class ArtifactRepository(Protocol):
         self, thread_id: str, payload: Mapping[str, Any]
     ) -> dict[str, Any] | None: ...
 
-    async def list_review_comments(self, artifact_id: str) -> list[dict[str, Any]]: ...
+    async def get_review_comment(
+        self,
+        artifact_id: str,
+        thread_id: str,
+        *,
+        event_limit: int = 20,
+    ) -> dict[str, Any] | None: ...
+
+    async def list_review_comments(
+        self,
+        artifact_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        event_limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
+
+    async def count_review_comments(self, artifact_id: str) -> int: ...
 
     async def lock_review_comments(self, artifact_id: str) -> int: ...
 
@@ -1270,12 +1287,19 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 existing = await connection.fetchrow(
-                    "SELECT artifact_id FROM review_decisions WHERE idempotency_key = $1",
+                    "SELECT * FROM review_decisions WHERE idempotency_key = $1",
                     idempotency_key,
                 )
                 if existing:
-                    if str(existing["artifact_id"]) != artifact_id:
-                        raise ValueError("idempotency_key_conflict")
+                    if not _same_decision_request(
+                        existing,
+                        artifact_id=artifact_id,
+                        action=action,
+                        target_status=target_status,
+                        reason=reason,
+                        reviewer=reviewer,
+                    ):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     row = await connection.fetchrow(
                         "SELECT * FROM plugin_artifacts WHERE id = $1", existing["artifact_id"]
                     )
@@ -2808,8 +2832,15 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         async with self._lock:
             for decision in self.decisions.values():
                 if decision["idempotency_key"] == idempotency_key:
-                    if decision["artifact_id"] != artifact_id:
-                        raise ValueError("idempotency_key_conflict")
+                    if not _same_decision_request(
+                        decision,
+                        artifact_id=artifact_id,
+                        action=action,
+                        target_status=target_status,
+                        reason=reason,
+                        reviewer=reviewer,
+                    ):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     artifact = self.artifacts.get(decision["artifact_id"])
                     return deepcopy(artifact) if artifact else None
             artifact = self.artifacts.get(artifact_id)
@@ -3503,6 +3534,25 @@ def _resolved_policy_snapshot(current: Any, requested: Any) -> str | None:
     if requested_id is not None and requested_id != current_id:
         raise ValueError(ArtifactErrorCode.ARTIFACT_POLICY_SNAPSHOT_CONFLICT.value)
     return current_id
+
+
+def _same_decision_request(
+    existing: Mapping[str, Any],
+    *,
+    artifact_id: str,
+    action: str,
+    target_status: str,
+    reason: str,
+    reviewer: Mapping[str, Any] | None,
+) -> bool:
+    return (
+        str(existing.get("artifact_id") or "") == artifact_id
+        and str(existing.get("action") or "") == action
+        and str(existing.get("to_status") or "") == target_status
+        and str(existing.get("reason") or "") == reason
+        and (str(existing.get("reviewer_user_id") or "") or None)
+        == (str((reviewer or {}).get("id") or "") or None)
+    )
 
 
 def _finding_source_for_run(run_type: str) -> str:

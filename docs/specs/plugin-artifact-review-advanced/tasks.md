@@ -292,24 +292,24 @@
         - *Details*: 运行 API/permissions/storage/OpenAPI/Ruff tests，敏感字段搜索后提交。
         - *Requirements*: FR-211、FR-223。
 
-- [ ] 14. **行级评论、要求修改与重新提交**
-    - [ ] 14.1. 实现 comment thread/event domain service
+- [x] 14. **行级评论、要求修改与重新提交**
+    - [x] 14.1. 实现 comment thread/event domain service
         - *Goal*: 评论绑定 artifact/file SHA/side/line 并以追加事件审计。
         - *Details*: create/edit/reply/resolve/reopen/author_addressed；正文纯文本限长；乐观 version + idempotency；最终 decision 后锁定。
         - *Requirements*: FR-212。
-    - [ ] 14.2. 实现角色权限和行范围校验
+    - [x] 14.2. 实现角色权限和行范围校验
         - *Goal*: 管理员控制审查线程，作者只能回复/标记已处理。
         - *Details*: current/base file 和 hunk 校验；作者不能改管理员原文或解决状态；用户删除后保留 nickname/role snapshot。
         - *Requirements*: FR-212、FR-223。
-    - [ ] 14.3. 实现 `request_changes` decision
+    - [x] 14.3. 实现 `request_changes` decision
         - *Goal*: 区分要求修改与拒绝，并保证候选不发布。
         - *Details*: 理由必填；锁定旧 artifact/thread；新提交创建新 artifact，记录 base/supersedes；禁止原 ZIP 原地替换；完整安全阶段重跑。
         - *Requirements*: FR-213。
-    - [ ] 14.4. 增加评论并发和重新提交测试
+    - [x] 14.4. 增加评论并发和重新提交测试
         - *Goal*: 并发回复/resolve 不丢事件，终态历史不可变。
         - *Details*: 覆盖 stale version、duplicate idempotency、跨角色、line drift、locked thread 和 supersedes chain。
         - *Requirements*: FR-212、FR-213。
-    - [ ] 14.5. 验证并提交评论/修改流程
+    - [x] 14.5. 验证并提交评论/修改流程
         - *Goal*: 完成作者-管理员修改闭环后提交。
         - *Details*: 运行 domain/repository/API/permission tests、Ruff 和 OpenAPI 后提交。
         - *Requirements*: FR-212、FR-213。

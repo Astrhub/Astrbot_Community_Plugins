@@ -5,10 +5,18 @@ from collections.abc import AsyncIterable, Mapping
 from decimal import Decimal
 from typing import Any
 
+from ..auth import is_admin
 from .archive import PrecheckError, normalize_github_repo, normalize_version
+from .comments import ReviewCommentLimits, ReviewCommentService
 from .content import ArtifactContentLimits, ArtifactContentService
 from .github_source import GithubSourceClient
-from .models import ArtifactStateError, PublicationStatus, ReviewStatus, new_domain_id
+from .models import (
+    ArtifactErrorCode,
+    ArtifactStateError,
+    PublicationStatus,
+    ReviewStatus,
+    new_domain_id,
+)
 from .repository import ArtifactRepository
 from .storage import ArtifactStorage, build_quarantine_key
 
@@ -29,12 +37,14 @@ class ArtifactService:
         github: GithubSourceClient,
         max_upload_bytes: int,
         content_limits: ArtifactContentLimits | None = None,
+        comment_limits: ReviewCommentLimits | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
         self.github = github
         self.max_upload_bytes = max_upload_bytes
         self.content = ArtifactContentService(repository, storage, content_limits)
+        self.comments = ReviewCommentService(repository, self.content, comment_limits)
 
     async def close(self) -> None:
         await self.github.close()
@@ -45,7 +55,13 @@ class ArtifactService:
         plugin: Mapping[str, Any],
         user: Mapping[str, Any],
         stream: AsyncIterable[bytes],
+        supersedes_artifact_id: str = "",
     ) -> dict[str, Any]:
+        supersedes_id = await self._validated_supersedes(
+            plugin,
+            user,
+            supersedes_artifact_id,
+        )
         artifact_id = new_domain_id("artifact")
         quarantine_key = build_quarantine_key(artifact_id)
         stored = await self.storage.put_quarantine(
@@ -63,6 +79,7 @@ class ArtifactService:
             source_type="upload",
             source_ref="",
             source_commit_sha="",
+            supersedes_artifact_id=supersedes_id,
         )
 
     async def submit_github(
@@ -71,7 +88,13 @@ class ArtifactService:
         plugin: Mapping[str, Any],
         user: Mapping[str, Any],
         source_ref: str,
+        supersedes_artifact_id: str = "",
     ) -> dict[str, Any]:
+        supersedes_id = await self._validated_supersedes(
+            plugin,
+            user,
+            supersedes_artifact_id,
+        )
         source = await self.github.resolve(str(plugin.get("repo") or ""), source_ref)
         artifact_id = new_domain_id("artifact")
         quarantine_key = build_quarantine_key(artifact_id)
@@ -90,6 +113,7 @@ class ArtifactService:
             source_type="github",
             source_ref=source.requested_ref,
             source_commit_sha=source.commit_sha,
+            supersedes_artifact_id=supersedes_id,
         )
 
     async def artifact_detail(self, artifact_id: str) -> dict[str, Any] | None:
@@ -153,6 +177,65 @@ class ArtifactService:
         hunk_id: str | None,
     ) -> dict[str, Any]:
         return await self.content.read_diff(artifact, diff_id, hunk_id=hunk_id)
+
+    async def artifact_comments(
+        self,
+        artifact: Mapping[str, Any],
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        return await self.comments.list(artifact, limit=limit, offset=offset)
+
+    async def create_review_comment(
+        self,
+        *,
+        artifact: Mapping[str, Any],
+        actor: Mapping[str, Any],
+        file_id: str,
+        side: str,
+        line_start: int,
+        line_end: int,
+        body: str,
+        diff_id: str | None,
+        hunk_id: str | None,
+        source_thread_id: str | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await self.comments.create(
+            artifact=artifact,
+            actor=actor,
+            file_id=file_id,
+            side=side,
+            line_start=line_start,
+            line_end=line_end,
+            body=body,
+            diff_id=diff_id,
+            hunk_id=hunk_id,
+            source_thread_id=source_thread_id,
+            idempotency_key=idempotency_key,
+        )
+
+    async def mutate_review_comment(
+        self,
+        *,
+        artifact: Mapping[str, Any],
+        thread_id: str,
+        actor: Mapping[str, Any],
+        event_type: str,
+        expected_version: int,
+        body: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await self.comments.mutate(
+            artifact=artifact,
+            thread_id=thread_id,
+            actor=actor,
+            event_type=event_type,
+            expected_version=expected_version,
+            body=body,
+            idempotency_key=idempotency_key,
+        )
 
     async def approve(
         self,
@@ -340,10 +423,19 @@ class ArtifactService:
         source_type: str,
         source_ref: str,
         source_commit_sha: str,
+        supersedes_artifact_id: str | None,
     ) -> dict[str, Any]:
         existing = await self.repository.get_artifact_by_sha(str(plugin["id"]), archive_sha256)
         if existing:
             await self.storage.delete_quarantine(quarantine_key)
+            if supersedes_artifact_id and str(existing.get("supersedes_artifact_id") or "") != str(
+                supersedes_artifact_id
+            ):
+                raise ArtifactServiceError(
+                    ArtifactErrorCode.RESUBMISSION_CONTENT_UNCHANGED.value,
+                    "重新提交的插件包内容未变化，请修改后创建新版本",
+                    status_code=409,
+                )
             return public_artifact(existing)
         try:
             artifact = await self.repository.create_artifact(
@@ -366,6 +458,7 @@ class ArtifactService:
                         or "",
                     },
                     "base_artifact_id": plugin.get("current_artifact_id"),
+                    "supersedes_artifact_id": supersedes_artifact_id,
                 }
             )
             if str(artifact["id"]) != artifact_id:
@@ -388,6 +481,45 @@ class ArtifactService:
             suffix="submitted",
         )
         return public_artifact(artifact)
+
+    async def _validated_supersedes(
+        self,
+        plugin: Mapping[str, Any],
+        user: Mapping[str, Any],
+        supersedes_artifact_id: str,
+    ) -> str | None:
+        target_id = str(supersedes_artifact_id or "").strip()
+        if not target_id:
+            return None
+        target = await self.repository.get_artifact(target_id)
+        if target is None:
+            raise ArtifactServiceError(
+                ArtifactErrorCode.SUPERSEDED_ARTIFACT_NOT_FOUND.value,
+                "被替代的 Artifact 不存在",
+                status_code=404,
+            )
+        if (
+            str(target.get("plugin_id") or "") != str(plugin.get("id") or "")
+            or str(target.get("review_status") or "") != ReviewStatus.CHANGES_REQUESTED.value
+        ):
+            raise ArtifactServiceError(
+                ArtifactErrorCode.SUPERSEDED_ARTIFACT_INVALID.value,
+                "只能重新提交同一插件中已要求修改的版本",
+                status_code=409,
+            )
+        user_id = str(user.get("id") or "")
+        allowed = is_admin(user) or user_id in {
+            str(plugin.get("owner_user_id") or ""),
+            str(target.get("submitted_by") or ""),
+            str(target.get("owner_user_id") or ""),
+        }
+        if not user_id or not allowed:
+            raise ArtifactServiceError(
+                ArtifactErrorCode.SUPERSEDED_ARTIFACT_FORBIDDEN.value,
+                "无权重新提交该 Artifact",
+                status_code=403,
+            )
+        return target_id
 
     async def enqueue_status_event(
         self,

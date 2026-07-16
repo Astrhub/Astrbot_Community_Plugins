@@ -6,10 +6,11 @@ from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile
 
 from ..auth import can_edit_plugin, is_admin
 from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
+from .comments import ReviewCommentError
 from .content import ArtifactContentError
 from .github_source import GithubSourceError
 from .models import ArtifactStateError
@@ -24,6 +25,12 @@ from .schemas import (
     GithubArtifactSubmission,
     PluginRegistrationPayload,
     ReviewFindingListResponse,
+    ReviewCommentAddressedPayload,
+    ReviewCommentBodyMutationPayload,
+    ReviewCommentCreatePayload,
+    ReviewCommentEnvelope,
+    ReviewCommentListResponse,
+    ReviewCommentStateMutationPayload,
     ReviewRunListResponse,
 )
 from .service import (
@@ -86,6 +93,7 @@ def build_artifact_router() -> APIRouter:
         request: Request,
         plugin_id: str,
         file: UploadFile = File(...),
+        supersedes_artifact_id: str = Form(default=""),
     ) -> dict[str, Any]:
         service = _require_service(request)
         user = await _require_user(request)
@@ -99,6 +107,7 @@ def build_artifact_router() -> APIRouter:
                 plugin=plugin,
                 user=user,
                 stream=_upload_stream(file),
+                supersedes_artifact_id=supersedes_artifact_id,
             )
         except Exception as exc:
             _raise_artifact_error(exc)
@@ -127,6 +136,7 @@ def build_artifact_router() -> APIRouter:
                 plugin=plugin,
                 user=user,
                 source_ref=payload.source_ref,
+                supersedes_artifact_id=payload.supersedes_artifact_id,
             )
         except Exception as exc:
             _raise_artifact_error(exc)
@@ -295,6 +305,225 @@ def build_artifact_router() -> APIRouter:
                 diff_id,
                 hunk_id=hunk_id,
             )
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.get(
+        "/v1/artifacts/{artifact_id}/comments",
+        tags=["artifacts"],
+        summary="查看 Artifact 行级审查评论",
+        response_model=ReviewCommentListResponse,
+    )
+    async def artifact_comments(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        limit: int = Query(default=20),
+        offset: int = Query(default=0),
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        user = await _require_user(request)
+        artifact = await _visible_artifact(service, artifact_id, user)
+        _private_read_headers(response)
+        try:
+            return await service.artifact_comments(artifact, limit=limit, offset=offset)
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.post(
+        "/v1/admin/artifacts/{artifact_id}/comments",
+        tags=["reviews"],
+        summary="创建 Artifact 行级审查评论",
+        response_model=ReviewCommentEnvelope,
+        status_code=201,
+    )
+    async def create_artifact_comment(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        payload: ReviewCommentCreatePayload,
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        actor = await _require_admin(request)
+        artifact = await _visible_artifact(service, artifact_id, actor)
+        _private_read_headers(response)
+        try:
+            comment = await service.create_review_comment(
+                artifact=artifact,
+                actor=actor,
+                file_id=payload.file_id,
+                side=payload.side,
+                line_start=payload.line_start,
+                line_end=payload.line_end,
+                body=payload.body,
+                diff_id=payload.diff_id,
+                hunk_id=payload.hunk_id,
+                source_thread_id=payload.source_thread_id,
+                idempotency_key=_request_idempotency_key(request, payload.idempotency_key),
+            )
+            return {"comment": comment}
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.post(
+        "/v1/artifacts/{artifact_id}/comments/{thread_id}/replies",
+        tags=["artifacts"],
+        summary="回复 Artifact 审查评论",
+        response_model=ReviewCommentEnvelope,
+    )
+    async def reply_artifact_comment(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        thread_id: str,
+        payload: ReviewCommentBodyMutationPayload,
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        actor = await _require_user(request)
+        artifact = await _visible_artifact(service, artifact_id, actor)
+        _private_read_headers(response)
+        try:
+            comment = await service.mutate_review_comment(
+                artifact=artifact,
+                thread_id=thread_id,
+                actor=actor,
+                event_type="reply",
+                expected_version=payload.expected_version,
+                body=payload.body,
+                idempotency_key=_request_idempotency_key(request, payload.idempotency_key),
+            )
+            return {"comment": comment}
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.post(
+        "/v1/artifacts/{artifact_id}/comments/{thread_id}/author-addressed",
+        tags=["artifacts"],
+        summary="标记 Artifact 审查评论已处理",
+        response_model=ReviewCommentEnvelope,
+    )
+    async def address_artifact_comment(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        thread_id: str,
+        payload: ReviewCommentAddressedPayload,
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        actor = await _require_user(request)
+        artifact = await _visible_artifact(service, artifact_id, actor)
+        _private_read_headers(response)
+        try:
+            comment = await service.mutate_review_comment(
+                artifact=artifact,
+                thread_id=thread_id,
+                actor=actor,
+                event_type="author_addressed",
+                expected_version=payload.expected_version,
+                body=payload.body,
+                idempotency_key=_request_idempotency_key(request, payload.idempotency_key),
+            )
+            return {"comment": comment}
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.post(
+        "/v1/admin/artifacts/{artifact_id}/comments/{thread_id}/edit",
+        tags=["reviews"],
+        summary="编辑自己的 Artifact 审查评论",
+        response_model=ReviewCommentEnvelope,
+    )
+    async def edit_artifact_comment(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        thread_id: str,
+        payload: ReviewCommentBodyMutationPayload,
+    ) -> dict[str, Any]:
+        return await _admin_comment_mutation(
+            request,
+            response,
+            artifact_id,
+            thread_id,
+            payload.expected_version,
+            payload.body,
+            _request_idempotency_key(request, payload.idempotency_key),
+            "edit",
+        )
+
+    @router.post(
+        "/v1/admin/artifacts/{artifact_id}/comments/{thread_id}/resolve",
+        tags=["reviews"],
+        summary="解决 Artifact 审查评论",
+        response_model=ReviewCommentEnvelope,
+    )
+    async def resolve_artifact_comment(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        thread_id: str,
+        payload: ReviewCommentStateMutationPayload,
+    ) -> dict[str, Any]:
+        return await _admin_comment_mutation(
+            request,
+            response,
+            artifact_id,
+            thread_id,
+            payload.expected_version,
+            "",
+            _request_idempotency_key(request, payload.idempotency_key),
+            "resolve",
+        )
+
+    @router.post(
+        "/v1/admin/artifacts/{artifact_id}/comments/{thread_id}/reopen",
+        tags=["reviews"],
+        summary="重开 Artifact 审查评论",
+        response_model=ReviewCommentEnvelope,
+    )
+    async def reopen_artifact_comment(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        thread_id: str,
+        payload: ReviewCommentStateMutationPayload,
+    ) -> dict[str, Any]:
+        return await _admin_comment_mutation(
+            request,
+            response,
+            artifact_id,
+            thread_id,
+            payload.expected_version,
+            "",
+            _request_idempotency_key(request, payload.idempotency_key),
+            "reopen",
+        )
+
+    async def _admin_comment_mutation(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        thread_id: str,
+        expected_version: int,
+        body: str,
+        idempotency_key: str,
+        event_type: str,
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        actor = await _require_admin(request)
+        artifact = await _visible_artifact(service, artifact_id, actor)
+        _private_read_headers(response)
+        try:
+            comment = await service.mutate_review_comment(
+                artifact=artifact,
+                thread_id=thread_id,
+                actor=actor,
+                event_type=event_type,
+                expected_version=expected_version,
+                body=body,
+                idempotency_key=idempotency_key,
+            )
+            return {"comment": comment}
         except Exception as exc:
             _raise_artifact_error(exc)
 
@@ -521,6 +750,13 @@ def _raise_artifact_error(exc: Exception) -> None:
         raise exc
     if isinstance(exc, ArtifactServiceError):
         raise _http_error(exc.status_code, exc.code, str(exc)) from exc
+    if isinstance(exc, ReviewCommentError):
+        raise _http_error(
+            exc.status_code,
+            exc.code,
+            str(exc),
+            headers=PRIVATE_READ_HEADERS,
+        ) from exc
     if isinstance(exc, ArtifactContentError):
         raise _http_error(
             exc.status_code,
@@ -620,3 +856,7 @@ def _http_error(
 
 def _private_read_headers(response: Response) -> None:
     response.headers.update(PRIVATE_READ_HEADERS)
+
+
+def _request_idempotency_key(request: Request, payload_value: str | None) -> str:
+    return str(payload_value or request.headers.get("idempotency-key", "")).strip()

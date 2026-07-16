@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ArtifactReviewStatus = Literal[
@@ -305,10 +305,135 @@ class ArtifactDiffContentResponse(PublicResponseModel):
     hunks: list[ArtifactDiffHunk]
 
 
+class PublicReviewCommentEvent(PublicResponseModel):
+    id: str
+    thread_id: str
+    type: Literal["create", "edit", "reply", "resolve", "reopen", "author_addressed"]
+    body: str = ""
+    actor_nickname: str = ""
+    actor_role: Literal["author", "admin", "core_admin", "system"]
+    expected_version: int = Field(ge=0)
+    resulting_version: int = Field(ge=1)
+    created_at: datetime
+
+
+class PublicReviewComment(PublicResponseModel):
+    id: str
+    artifact_id: str
+    source_thread_id: str | None = None
+    file_id: str | None = None
+    file_path: str
+    file_sha256: str
+    side: Literal["base", "current"]
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+    body: str
+    reviewer_nickname: str = ""
+    reviewer_role: Literal["admin", "core_admin"]
+    resolved: bool
+    resolved_by_nickname: str = ""
+    locked_at: datetime | None = None
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: datetime | None = None
+    event_count: int = Field(ge=0)
+    events_truncated: bool
+    events: list[PublicReviewCommentEvent]
+
+
+class ReviewCommentListResponse(PublicResponseModel):
+    artifact_id: str
+    items: list[PublicReviewComment]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ReviewCommentEnvelope(PublicResponseModel):
+    comment: PublicReviewComment
+
+
+class ReviewCommentCreatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    file_id: str = Field(min_length=1, max_length=200)
+    side: Literal["base", "current"]
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+    body: str = Field(min_length=1, max_length=10_000)
+    diff_id: str | None = Field(default=None, max_length=200)
+    hunk_id: str | None = Field(default=None, max_length=200)
+    source_thread_id: str | None = Field(default=None, max_length=200)
+    idempotency_key: str = Field(default="", max_length=200)
+
+    @field_validator("file_id")
+    @classmethod
+    def clean_file_id(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("diff_id", "hunk_id", "source_thread_id")
+    @classmethod
+    def clean_optional_ids(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def clean_create_key(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_anchor(self) -> ReviewCommentCreatePayload:
+        if self.line_end < self.line_start or bool(self.diff_id) != bool(self.hunk_id):
+            raise ValueError("invalid comment anchor")
+        return self
+
+
+class ReviewCommentBodyMutationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    body: str = Field(min_length=1, max_length=10_000)
+    idempotency_key: str = Field(default="", max_length=200)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def clean_body_key(cls, value: str) -> str:
+        return value.strip()
+
+
+class ReviewCommentAddressedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    body: str = Field(default="", max_length=10_000)
+    idempotency_key: str = Field(default="", max_length=200)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def clean_addressed_key(cls, value: str) -> str:
+        return value.strip()
+
+
+class ReviewCommentStateMutationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(default="", max_length=200)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def clean_state_key(cls, value: str) -> str:
+        return value.strip()
+
+
 class GithubArtifactSubmission(BaseModel):
     source_ref: str = Field(default="", max_length=200)
+    supersedes_artifact_id: str = Field(default="", max_length=200)
 
-    @field_validator("source_ref")
+    @field_validator("source_ref", "supersedes_artifact_id")
     @classmethod
     def clean_source_ref(cls, value: str) -> str:
         return value.strip()

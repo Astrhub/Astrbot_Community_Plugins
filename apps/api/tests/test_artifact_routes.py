@@ -322,6 +322,14 @@ def test_admin_can_idempotently_request_artifact_changes(tmp_path: Path) -> None
             assert response.status_code == 200
             assert response.json()["artifact"]["review_status"] == "changes_requested"
 
+        conflicting_replay = client.post(
+            f"/v1/admin/artifacts/{artifact_id}/request-changes",
+            headers=headers,
+            json={"reason": "不同的要求不能复用同一个幂等键"},
+        )
+        assert conflicting_replay.status_code == 409
+        assert conflicting_replay.json()["code"] == "idempotency_key_conflict"
+
         detail = client.get(f"/v1/artifacts/{artifact_id}", headers=owner_headers).json()
         assert [item["action"] for item in detail["decisions"]] == ["request_changes"]
         assert detail["artifact"]["download_url"] is None

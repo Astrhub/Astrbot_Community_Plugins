@@ -79,6 +79,12 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
     assert "/v1/artifacts/{artifact_id}/files/{file_id}/content" in user_schema["paths"]
     assert "/v1/artifacts/{artifact_id}/diff" in user_schema["paths"]
     assert "/v1/artifacts/{artifact_id}/diff/{diff_id}" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/comments" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/comments/{thread_id}/replies" in user_schema["paths"]
+    assert (
+        "/v1/artifacts/{artifact_id}/comments/{thread_id}/author-addressed" in user_schema["paths"]
+    )
+    assert "/v1/admin/artifacts/{artifact_id}/comments" not in user_schema["paths"]
     assert "/v1/admin/artifacts/{artifact_id}/request-changes" not in user_schema["paths"]
     detail_response = user_schema["paths"]["/v1/artifacts/{artifact_id}"]["get"]["responses"][
         "200"
@@ -92,6 +98,12 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
     ]
     response_schema = request_changes["responses"]["200"]["content"]["application/json"]["schema"]
     assert response_schema["$ref"].endswith("/ArtifactEnvelope")
+    assert "/v1/admin/artifacts/{artifact_id}/comments" in admin_schema["paths"]
+    for action in ("edit", "resolve", "reopen"):
+        assert (
+            f"/v1/admin/artifacts/{{artifact_id}}/comments/{{thread_id}}/{action}"
+            in admin_schema["paths"]
+        )
 
     schemas = admin_schema["components"]["schemas"]
     run_fields = set(schemas["PublicReviewRun"]["properties"])
@@ -112,6 +124,24 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
     assert {"content_key", "hunks_key", "quarantine_key"}.isdisjoint(file_fields)
     assert {"content_key", "hunks_key", "quarantine_key"}.isdisjoint(diff_fields)
     assert {"hunks_sha256", "hunks_size_bytes", "hunks_key"}.isdisjoint(diff_stats_fields)
+
+    comment_fields = set(schemas["PublicReviewComment"]["properties"])
+    comment_event_fields = set(schemas["PublicReviewCommentEvent"]["properties"])
+    assert {
+        "file_id",
+        "file_path",
+        "file_sha256",
+        "side",
+        "line_start",
+        "line_end",
+        "events",
+        "version",
+    } <= comment_fields
+    assert {"actor_nickname", "actor_role", "expected_version"} <= comment_event_fields
+    assert {"reviewer_user_id", "idempotency_key", "content_key"}.isdisjoint(comment_fields)
+    assert {"actor_user_id", "idempotency_key", "metadata"}.isdisjoint(comment_event_fields)
+    github_fields = set(schemas["GithubArtifactSubmission"]["properties"])
+    assert "supersedes_artifact_id" in github_fields
 
 
 def test_openapi_core_admin_sees_all():
