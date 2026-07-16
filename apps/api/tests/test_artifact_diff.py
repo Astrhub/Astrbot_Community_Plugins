@@ -421,7 +421,7 @@ def test_text_line_limit_degrades_before_diff_algorithm_runs(tmp_path: Path) -> 
     assert diff["stats"]["hunks_omitted_reason"] == "diff_text_file_too_many_lines"
 
 
-def test_diff_stage_recovers_validated_side_effects_and_rejects_import_graph(
+def test_diff_stage_recovers_validated_side_effects_and_rejects_unknown_graph_stage(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> tuple[
@@ -522,8 +522,8 @@ def test_diff_stage_recovers_validated_side_effects_and_rejects_import_graph(
                     "id": "job-import-stage",
                     "payload": {
                         **job["payload"],
-                        "stage": "import_graph",
-                        "stage_name": "import_graph",
+                        "stage": "unsupported_graph",
+                        "stage_name": "unsupported_graph",
                     },
                 },
                 artifact=scanning,

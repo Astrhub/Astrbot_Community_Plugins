@@ -14,6 +14,7 @@ import asyncpg
 import pytest
 
 from app.artifacts.diff import ArtifactDiffService, DiffBuildError, manifest_tree_sha256
+from app.artifacts.import_graph import ImportGraphBuildError, ImportGraphService
 from app.artifacts.models import ArtifactErrorCode, PublicationStatus, ReviewStatus
 from app.artifacts.policy_service import ReviewPolicyService
 from app.artifacts.repository import PgArtifactRepository
@@ -175,6 +176,10 @@ def test_advanced_repository_constraints_and_leases_against_postgres() -> None:
 
 def test_diff_service_tree_binding_against_postgres(tmp_path: Path) -> None:
     asyncio.run(run_diff_service_scenario(database_url(), tmp_path))
+
+
+def test_import_graph_service_against_postgres(tmp_path: Path) -> None:
+    asyncio.run(run_import_graph_service_scenario(database_url(), tmp_path))
 
 
 def test_review_policy_lifecycle_against_postgres() -> None:
@@ -1221,6 +1226,129 @@ async def run_diff_service_scenario(url: str, root: Path) -> None:
                 artifact=current,
                 repository=repository,
                 storage=storage,
+            )
+        assert caught.value.code == ArtifactErrorCode.DIFF_TREE_CHANGED.value
+        assert caught.value.retryable is True
+    finally:
+        await transaction.rollback()
+        await connection.close()
+
+
+async def run_import_graph_service_scenario(url: str, root: Path) -> None:
+    connection, transaction = await begin_isolated_schema(url)
+    try:
+        await apply_schema_migrations(connection)
+        await seed_market(connection)
+        repository = PgArtifactRepository(RepositoryStore(connection))
+        storage = LocalArtifactStorage(root, "https://cdn.example.test")
+        artifact = await repository.create_artifact(artifact_payload("6"))
+        payloads = {
+            "helper.py": b"VALUE = 1\n",
+            "main.py": b"from . import helper\n",
+        }
+        manifests = []
+        for path, content in sorted(payloads.items()):
+            file_id = f"file-pg-graph-{path.removesuffix('.py')}"
+            content_key = build_content_key(artifact["id"], file_id)
+            await storage.put_text_content(content_key, content)
+            manifests.append(
+                {
+                    "id": file_id,
+                    "path": path,
+                    "language": "python",
+                    "mime_type": "text/x-python",
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                    "line_count": 1,
+                    "is_text": True,
+                    "content_key": content_key,
+                }
+            )
+        tree_sha256 = manifest_tree_sha256(manifests)
+        await repository.replace_artifact_files(artifact["id"], manifests, tree_sha256)
+        artifact = await repository.get_artifact(artifact["id"])
+        assert artifact is not None
+
+        service = ImportGraphService()
+        first = await service.build(
+            artifact=artifact,
+            repository=repository,
+            storage=storage,
+            entrypoint_paths={"main.py"},
+        )
+        second = await service.build(
+            artifact=artifact,
+            repository=repository,
+            storage=storage,
+            entrypoint_paths={"main.py"},
+        )
+        files = await repository.list_artifact_files(artifact["id"])
+        edges = await repository.list_dependency_edges(artifact["id"])
+        refreshed = await repository.get_artifact(artifact["id"])
+        assert refreshed is not None
+        assert first.input_sha256 == second.input_sha256
+        assert first.output_sha256 == second.output_sha256
+        assert len(edges) == 1
+        assert edges[0]["source_path"] == "main.py"
+        assert edges[0]["target_path"] == "helper.py"
+        assert all(item["graph_status"] == "complete" for item in files)
+        assert refreshed["review_coverage"]["import_graph"]["output_sha256"] == (
+            first.output_sha256
+        )
+
+        unrelated_base = await repository.create_artifact(artifact_payload("7"))
+        with pytest.raises(ValueError, match=ArtifactErrorCode.DIFF_BASE_INVALID.value):
+            await repository.replace_artifact_graph(
+                artifact["id"],
+                tree_sha256=tree_sha256,
+                files=[
+                    {
+                        "file_id": item["id"],
+                        "is_entrypoint": item["is_entrypoint"],
+                        "is_reachable": item["is_reachable"],
+                        "graph_status": item["graph_status"],
+                        "scan_summary": item["scan_summary"],
+                    }
+                    for item in files
+                ],
+                edges=[],
+                coverage={"complete": False},
+                base_artifact_id=unrelated_base["id"],
+                base_tree_sha256=str(unrelated_base["tree_sha256"]),
+            )
+
+        with pytest.raises(ValueError, match=ArtifactErrorCode.DIFF_BASE_INVALID.value):
+            await repository.replace_artifact_graph(
+                artifact["id"],
+                tree_sha256=tree_sha256,
+                files=[
+                    {
+                        "file_id": item["id"],
+                        "is_entrypoint": item["is_entrypoint"],
+                        "is_reachable": item["is_reachable"],
+                        "graph_status": item["graph_status"],
+                        "scan_summary": item["scan_summary"],
+                    }
+                    for item in files
+                ],
+                edges=[],
+                coverage={"complete": False},
+                base_artifact_id="artifact-missing",
+                base_tree_sha256="1" * 64,
+            )
+        assert len(await repository.list_dependency_edges(artifact["id"])) == 1
+
+        await connection.execute(
+            "UPDATE plugin_artifacts SET tree_sha256 = $2 WHERE id = $1",
+            artifact["id"],
+            "0" * 64,
+        )
+        with pytest.raises(ImportGraphBuildError) as caught:
+            await service.build(
+                artifact=artifact,
+                repository=repository,
+                storage=storage,
+                entrypoint_paths={"main.py"},
             )
         assert caught.value.code == ArtifactErrorCode.DIFF_TREE_CHANGED.value
         assert caught.value.retryable is True

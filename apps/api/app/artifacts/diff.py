@@ -93,7 +93,7 @@ class DiffBuildError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class _ManifestFile:
+class ArtifactManifestFile:
     id: str
     artifact_id: str
     path: str
@@ -122,8 +122,8 @@ class _ManifestFile:
 class _Candidate:
     change_type: str
     path: str
-    base: _ManifestFile | None
-    current: _ManifestFile | None
+    base: ArtifactManifestFile | None
+    current: ArtifactManifestFile | None
 
     @property
     def base_path(self) -> str:
@@ -163,7 +163,7 @@ class ArtifactDiffService:
         current_tree_sha256 = str(artifact.get("tree_sha256") or "")
         current_rows = await repository.list_artifact_files(artifact_id)
         try:
-            current_files = _validated_manifest(artifact, current_rows)
+            current_files = validate_artifact_manifest(artifact, current_rows)
         except ValueError as exc:
             return await self._current_manifest_degraded(
                 artifact,
@@ -175,7 +175,7 @@ class ArtifactDiffService:
 
         requested_base_id = str(artifact.get("base_artifact_id") or "") or None
         compared_base: Mapping[str, Any] | None = None
-        base_files: tuple[_ManifestFile, ...] = ()
+        base_files: tuple[ArtifactManifestFile, ...] = ()
         base_reason: str | None = None
         base_detail = ""
         if requested_base_id is None:
@@ -196,7 +196,7 @@ class ArtifactDiffService:
             else:
                 base_rows = await repository.list_artifact_files(requested_base_id)
                 try:
-                    base_files = _validated_manifest(compared_base, base_rows)
+                    base_files = validate_artifact_manifest(compared_base, base_rows)
                 except ValueError as exc:
                     compared_base = None
                     base_files = ()
@@ -553,10 +553,10 @@ def validate_hunk_payload(
     return document
 
 
-def _validated_manifest(
+def validate_artifact_manifest(
     artifact: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
-) -> tuple[_ManifestFile, ...]:
+) -> tuple[ArtifactManifestFile, ...]:
     artifact_id = str(artifact.get("id") or "")
     tree_sha256 = str(artifact.get("tree_sha256") or "")
     if not artifact_id or not _SHA256_PATTERN.fullmatch(tree_sha256):
@@ -565,7 +565,7 @@ def _validated_manifest(
         raise ValueError("Artifact manifest is empty")
     seen: set[str] = set()
     seen_casefold: set[str] = set()
-    normalized: list[_ManifestFile] = []
+    normalized: list[ArtifactManifestFile] = []
     for row in rows:
         file_id = str(row.get("id") or "")
         path = str(row.get("path") or "")
@@ -604,7 +604,7 @@ def _validated_manifest(
         if not is_text and content_key is not None:
             raise ValueError("Binary manifest unexpectedly contains a text content key")
         normalized.append(
-            _ManifestFile(
+            ArtifactManifestFile(
                 id=file_id,
                 artifact_id=artifact_id,
                 path=path,
@@ -639,8 +639,8 @@ def _validate_manifest_path(path: str) -> None:
 
 
 def _forced_review_paths(
-    current: Sequence[_ManifestFile],
-    base: Sequence[_ManifestFile],
+    current: Sequence[ArtifactManifestFile],
+    base: Sequence[ArtifactManifestFile],
     policy_paths: Set[str] | Sequence[str],
 ) -> frozenset[str]:
     forced = set(_DEFAULT_FORCED_PATHS)
@@ -657,8 +657,8 @@ def _forced_review_paths(
 
 
 def _classify(
-    base: Sequence[_ManifestFile],
-    current: Sequence[_ManifestFile],
+    base: Sequence[ArtifactManifestFile],
+    current: Sequence[ArtifactManifestFile],
 ) -> tuple[_Candidate, ...]:
     base_by_path = {item.path: item for item in base}
     current_by_path = {item.path: item for item in current}
@@ -678,8 +678,8 @@ def _classify(
 
     deleted = {path: base_by_path[path] for path in base_by_path.keys() - current_by_path.keys()}
     added = {path: current_by_path[path] for path in current_by_path.keys() - base_by_path.keys()}
-    deleted_by_sha: dict[str, list[_ManifestFile]] = defaultdict(list)
-    added_by_sha: dict[str, list[_ManifestFile]] = defaultdict(list)
+    deleted_by_sha: dict[str, list[ArtifactManifestFile]] = defaultdict(list)
+    added_by_sha: dict[str, list[ArtifactManifestFile]] = defaultdict(list)
     for item in deleted.values():
         deleted_by_sha[item.sha256].append(item)
     for item in added.values():
@@ -745,7 +745,7 @@ def _content_limit_reason(
 
 
 async def _read_text(
-    item: _ManifestFile | None,
+    item: ArtifactManifestFile | None,
     storage: ArtifactStorage,
     limits: DiffLimits,
 ) -> tuple[str, str | None]:
@@ -958,7 +958,7 @@ def _format_unified_range(start: int, count: int) -> str:
     return str(start) if count == 1 else f"{start},{count}"
 
 
-def _hunk_file_identity(item: _ManifestFile | None) -> dict[str, Any] | None:
+def _hunk_file_identity(item: ArtifactManifestFile | None) -> dict[str, Any] | None:
     if item is None:
         return None
     return {
@@ -999,12 +999,12 @@ def _diff_id(
 
 def _input_sha256(
     artifact: Mapping[str, Any],
-    current_files: Sequence[_ManifestFile],
+    current_files: Sequence[ArtifactManifestFile],
     *,
     requested_base_id: str | None,
     compared_base_id: str | None,
     base_tree_sha256: str | None,
-    base_files: Sequence[_ManifestFile],
+    base_files: Sequence[ArtifactManifestFile],
     forced_paths: Set[str],
     limits: DiffLimits,
     base_reason: str | None,

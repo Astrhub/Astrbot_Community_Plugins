@@ -266,6 +266,52 @@ def test_incomplete_or_drifted_inputs_never_auto_approve(
     assert expected_reason in result.reason_codes
 
 
+def test_completed_import_graph_with_incomplete_coverage_requires_manual_review() -> None:
+    policy_data = _policy(auto_approve=True).model_dump(mode="json")
+    policy_data["required_stages"] = ["static", "diff", "import_graph", "runtime"]
+    runs = [
+        *_runs(),
+        {
+            "id": "run-diff",
+            "artifact_id": "artifact-routing-v1",
+            "type": "diff",
+            "status": "succeeded",
+            "tool_name": "artifact-diff",
+            "tool_version": "artifact-diff-v1",
+            "policy_version_id": POLICY_ID,
+            "coverage": {
+                "outcome": "completed",
+                "stage_name": "diff",
+                "complete": True,
+            },
+        },
+        {
+            "id": "run-import-graph",
+            "artifact_id": "artifact-routing-v1",
+            "type": "import_graph",
+            "status": "succeeded",
+            "tool_name": "python-ast-import-graph",
+            "tool_version": "python-ast-import-graph-v1",
+            "policy_version_id": POLICY_ID,
+            "coverage": {
+                "outcome": "completed",
+                "stage_name": "import_graph",
+                "complete": False,
+                "full_review_required": True,
+                "reasons": ["dynamic_import:main.py:1"],
+            },
+        },
+    ]
+
+    result = _evaluate(
+        policy=ReviewPolicyV1.model_validate(policy_data),
+        runs=runs,
+    )
+
+    assert result.kind is RouteKind.MANUAL_REVIEW
+    assert "required_stage_incomplete" in result.reason_codes
+
+
 def test_fail_closed_policy_rejects_production_runtime_failure() -> None:
     runs = deepcopy(_runs())
     runs[1]["status"] = "failed"

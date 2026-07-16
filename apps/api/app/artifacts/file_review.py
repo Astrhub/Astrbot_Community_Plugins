@@ -73,6 +73,7 @@ class SelectionReason(StrEnum):
     DETERMINISTIC_FINDING = "deterministic_finding"
     CHANGED = "changed"
     ENTRY_DEPENDENCY = "entry_dependency"
+    INCREMENTAL_IMPACT = "incremental_impact"
     PACKAGE_SUGGESTED = "package_suggested"
 
 
@@ -327,6 +328,18 @@ class FileCandidateSelector:
         for file_id in closure - entry_ids:
             if item := by_id.get(file_id):
                 reasons[str(item["path"])].add(SelectionReason.ENTRY_DEPENDENCY)
+
+        artifact_coverage = artifact.get("review_coverage")
+        graph_coverage = (
+            artifact_coverage.get("import_graph")
+            if isinstance(artifact_coverage, Mapping)
+            else None
+        )
+        if isinstance(graph_coverage, Mapping):
+            for path in graph_coverage.get("review_paths") or ():
+                normalized = str(path or "")
+                if normalized in by_path:
+                    reasons[normalized].add(SelectionReason.INCREMENTAL_IMPACT)
 
         package_result, package_complete = _latest_package_result(
             runs,
@@ -712,7 +725,8 @@ _REASON_ORDER = {
     SelectionReason.DETERMINISTIC_FINDING: 2,
     SelectionReason.CHANGED: 3,
     SelectionReason.ENTRY_DEPENDENCY: 4,
-    SelectionReason.PACKAGE_SUGGESTED: 5,
+    SelectionReason.INCREMENTAL_IMPACT: 5,
+    SelectionReason.PACKAGE_SUGGESTED: 6,
 }
 
 
@@ -721,7 +735,11 @@ def _candidate_priority(reasons: set[SelectionReason]) -> int:
         return 0
     if SelectionReason.DETERMINISTIC_FINDING in reasons:
         return 1
-    if reasons & {SelectionReason.CHANGED, SelectionReason.ENTRY_DEPENDENCY}:
+    if reasons & {
+        SelectionReason.CHANGED,
+        SelectionReason.ENTRY_DEPENDENCY,
+        SelectionReason.INCREMENTAL_IMPACT,
+    }:
         return 2
     if SelectionReason.PACKAGE_SUGGESTED in reasons:
         return 3

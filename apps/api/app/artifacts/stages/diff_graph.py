@@ -11,6 +11,13 @@ from ..diff import (
     diff_output_sha256,
     validate_hunk_payload,
 )
+from ..import_graph import (
+    IMPORT_GRAPH_TOOL_NAME,
+    IMPORT_GRAPH_TOOL_VERSION,
+    ImportGraphBuildError,
+    ImportGraphService,
+    import_graph_output_sha256,
+)
 from ..models import JobType, ReviewStatus
 from ..policy import parse_review_policy
 from ..storage import ArtifactStorageError
@@ -20,39 +27,54 @@ from .base import StageContext, StageOutcome
 class DiffGraphStage:
     job_type = JobType.DIFF_GRAPH.value
 
-    def __init__(self, service: ArtifactDiffService | None = None) -> None:
-        self.service = service or ArtifactDiffService()
+    def __init__(
+        self,
+        diff_service: ArtifactDiffService | None = None,
+        graph_service: ImportGraphService | None = None,
+    ) -> None:
+        self.diff_service = diff_service or ArtifactDiffService()
+        self.graph_service = graph_service or ImportGraphService()
 
     async def execute(self, context: StageContext) -> StageOutcome:
         if context.artifact.get("review_status") != ReviewStatus.SCANNING.value:
             return StageOutcome.terminal_failure(
                 "artifact_not_scanning",
-                "Artifact is not ready for diff generation",
+                "Artifact is not ready for diff or import graph generation",
             )
         if context.policy is None:
             return StageOutcome.terminal_failure(
                 "review_policy_unavailable",
-                "Artifact diff policy is unavailable",
+                "Artifact diff/import graph policy is unavailable",
             )
         if context.job.get("policy_version_id") != context.artifact.get("policy_version_id"):
             return StageOutcome.terminal_failure(
                 "artifact_policy_snapshot_conflict",
-                "Diff job policy does not match the artifact snapshot",
+                "Diff/import graph job policy does not match the artifact snapshot",
             )
         payload = context.job.get("payload")
         payload = payload if isinstance(payload, Mapping) else {}
-        if str(payload.get("stage") or "") != "diff":
-            return StageOutcome.terminal_failure(
-                "diff_graph_stage_unsupported",
-                "The diff worker cannot execute this diff_graph stage",
-            )
+        stage_name = str(payload.get("stage") or "")
+        if stage_name == "diff":
+            return await self._execute_diff(context, payload)
+        if stage_name == "import_graph":
+            return await self._execute_import_graph(context, payload)
+        return StageOutcome.terminal_failure(
+            "diff_graph_stage_unsupported",
+            "The worker cannot execute this diff_graph stage",
+        )
+
+    async def _execute_diff(
+        self,
+        context: StageContext,
+        payload: Mapping[str, Any],
+    ) -> StageOutcome:
         if str(payload.get("tool_version") or "") != DIFF_TOOL_VERSION:
             return StageOutcome.terminal_failure(
                 "diff_tool_version_conflict",
                 "Diff job tool version does not match the worker",
             )
 
-        recovered = await self._recover_completed(context)
+        recovered = await self._recover_diff(context)
         if recovered is not None:
             return recovered
         run = await context.repository.create_review_run(
@@ -76,7 +98,7 @@ class DiffGraphStage:
         policy = parse_review_policy(context.policy.get("policy") or {})
         forced_paths = set(policy.llm.required_files)
         try:
-            result = await self.service.build(
+            result = await self.diff_service.build(
                 artifact=context.artifact,
                 repository=context.repository,
                 storage=context.storage,
@@ -114,7 +136,79 @@ class DiffGraphStage:
             )
         return StageOutcome.completed(summary, coverage=result.coverage)
 
-    async def _recover_completed(self, context: StageContext) -> StageOutcome | None:
+    async def _execute_import_graph(
+        self,
+        context: StageContext,
+        payload: Mapping[str, Any],
+    ) -> StageOutcome:
+        if str(payload.get("tool_version") or "") != IMPORT_GRAPH_TOOL_VERSION:
+            return StageOutcome.terminal_failure(
+                "import_graph_tool_version_conflict",
+                "Import graph job tool version does not match the worker",
+            )
+        recovered = await self._recover_import_graph(context)
+        if recovered is not None:
+            return recovered
+        run = await context.repository.create_review_run(
+            {
+                "artifact_id": context.artifact["id"],
+                "type": "import_graph",
+                "status": "running",
+                "attempt": context.attempt,
+                "tool_name": IMPORT_GRAPH_TOOL_NAME,
+                "tool_version": IMPORT_GRAPH_TOOL_VERSION,
+                "policy_version_id": context.artifact.get("policy_version_id"),
+                "input_sha256": str(payload.get("input_sha256") or ""),
+                "idempotency_key": (
+                    f"import-graph-run:{context.job['id']}:attempt-{context.attempt}"
+                ),
+                "coverage": {"stage_name": "import_graph", "outcome": "running"},
+            }
+        )
+        if run.get("status") == "succeeded":
+            return StageOutcome.retryable_failure(
+                "import_graph_recovery_invalid",
+                "Completed import graph run could not be validated from persisted side effects",
+            )
+        policy = parse_review_policy(context.policy.get("policy") or {})
+        policy_paths = set(policy.llm.required_files)
+        try:
+            result = await self.graph_service.build(
+                artifact=context.artifact,
+                repository=context.repository,
+                storage=context.storage,
+                entrypoint_paths={path for path in policy_paths if path.endswith(".py")},
+                forced_paths=policy_paths,
+            )
+        except ImportGraphBuildError as exc:
+            if exc.retryable:
+                return StageOutcome.retryable_failure(exc.code, str(exc))
+            return StageOutcome.terminal_failure(exc.code, str(exc))
+        summary = (
+            "Python import 图已生成，增量范围不完整"
+            if not result.coverage.get("complete")
+            else "Python import 图已生成"
+        )
+        await context.repository.complete_review_run(
+            str(run["id"]),
+            {
+                "status": "succeeded",
+                "summary": summary,
+                "input_sha256": result.input_sha256,
+                "output_sha256": result.output_sha256,
+                "coverage": dict(result.coverage),
+                "raw_result": {
+                    "complete": bool(result.coverage.get("complete")),
+                    "edge_count": int(result.coverage.get("edge_count") or 0),
+                    "python_files": int(result.coverage.get("python_files") or 0),
+                    "reasons": list(result.coverage.get("reasons") or ()),
+                    "review_path_count": len(result.coverage.get("review_paths") or ()),
+                },
+            },
+        )
+        return StageOutcome.completed(summary, coverage=result.coverage)
+
+    async def _recover_diff(self, context: StageContext) -> StageOutcome | None:
         runs = await context.repository.list_review_runs(str(context.artifact["id"]))
         for run in reversed(runs):
             if (
@@ -203,7 +297,7 @@ class DiffGraphStage:
                 raise DiffBuildError("diff_hunk_invalid", "Diff hunk hash is missing")
             payload = await context.storage.read_text_content(
                 key,
-                self.service.limits.max_hunk_bytes,
+                self.diff_service.limits.max_hunk_bytes,
                 expected_sha256,
             )
             validate_hunk_payload(
@@ -213,6 +307,60 @@ class DiffGraphStage:
                 current_tree_sha256=current_tree_sha256,
                 base_tree_sha256=base_tree_sha256,
             )
+
+    async def _recover_import_graph(self, context: StageContext) -> StageOutcome | None:
+        runs = await context.repository.list_review_runs(str(context.artifact["id"]))
+        for run in reversed(runs):
+            if (
+                run.get("type") != "import_graph"
+                or run.get("status") != "succeeded"
+                or run.get("policy_version_id") != context.artifact.get("policy_version_id")
+                or run.get("tool_version") != IMPORT_GRAPH_TOOL_VERSION
+            ):
+                continue
+            coverage = run.get("coverage")
+            coverage = coverage if isinstance(coverage, Mapping) else {}
+            artifact_coverage = context.artifact.get("review_coverage")
+            persisted_coverage = (
+                artifact_coverage.get("import_graph")
+                if isinstance(artifact_coverage, Mapping)
+                else None
+            )
+            if (
+                coverage.get("stage_name") != "import_graph"
+                or coverage.get("tree_sha256") != context.artifact.get("tree_sha256")
+                or (str(coverage.get("requested_base_artifact_id") or "") or None)
+                != (str(context.artifact.get("base_artifact_id") or "") or None)
+                or not isinstance(persisted_coverage, Mapping)
+                or persisted_coverage.get("output_sha256") != coverage.get("output_sha256")
+                or run.get("input_sha256") != coverage.get("input_sha256")
+                or run.get("output_sha256") != coverage.get("output_sha256")
+            ):
+                continue
+            base_artifact_id = str(coverage.get("base_artifact_id") or "") or None
+            if base_artifact_id:
+                base = await context.repository.get_artifact(base_artifact_id)
+                if (
+                    base is None
+                    or base.get("plugin_id") != context.artifact.get("plugin_id")
+                    or base.get("tree_sha256") != coverage.get("base_tree_sha256")
+                ):
+                    continue
+            files = await context.repository.list_artifact_files(str(context.artifact["id"]))
+            edges = await context.repository.list_dependency_edges(str(context.artifact["id"]))
+            if import_graph_output_sha256(
+                files,
+                edges,
+                persisted_coverage,
+            ) != run.get("output_sha256"):
+                continue
+            if import_graph_output_sha256(files, edges, coverage) != run.get("output_sha256"):
+                continue
+            return StageOutcome.completed(
+                "Existing import graph was validated and recovered",
+                coverage={**dict(coverage), "recovered": True},
+            )
+        return None
 
 
 def _outcome_from_run(run: Mapping[str, Any]) -> StageOutcome | None:

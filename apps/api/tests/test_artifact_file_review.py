@@ -25,7 +25,12 @@ from app.artifacts.file_review import (
 from app.artifacts.jobs import ArtifactJobRunner
 from app.artifacts.models import ReviewStatus
 from app.artifacts.package_review import LlmBudgetExceeded, LlmOutputInvalid
-from app.artifacts.policy import LlmPolicy, ReviewPolicyV1, review_policy_sha256
+from app.artifacts.policy import (
+    LlmPolicy,
+    ReviewPolicyStage,
+    ReviewPolicyV1,
+    review_policy_sha256,
+)
 from app.artifacts.repository import InMemoryArtifactRepository
 from app.artifacts.stages import (
     LlmFileStage,
@@ -523,6 +528,39 @@ def test_candidate_selection_rejects_unknown_binary_and_oversize_suggestions(
     assert "assets/logo.png" not in {item.path for item in plan.candidates}
     assert "main.py" not in {item.path for item in plan.candidates}
     assert plan.complete is False
+
+
+def test_candidate_selection_includes_import_graph_incremental_scope(tmp_path: Path) -> None:
+    async def scenario() -> Any:
+        policy = _llm_policy()
+        repository, _, artifact, _, _, _ = await _fixture(tmp_path, llm_policy=policy)
+        await repository.update_artifact_review_coverage(
+            artifact["id"],
+            {
+                "import_graph": {
+                    "outcome": "completed",
+                    "complete": True,
+                    "review_paths": ["README.md"],
+                }
+            },
+        )
+        refreshed = await repository.get_artifact(artifact["id"])
+        assert refreshed is not None
+        return await FileCandidateSelector(repository).build(
+            refreshed,
+            policy,
+            required_stages=(
+                ReviewPolicyStage.STATIC,
+                ReviewPolicyStage.IMPORT_GRAPH,
+                ReviewPolicyStage.LLM_PACKAGE,
+                ReviewPolicyStage.LLM_FILE,
+            ),
+        )
+
+    plan = asyncio.run(scenario())
+    by_path = {item.path: item for item in plan.candidates}
+
+    assert SelectionReason.INCREMENTAL_IMPACT in by_path["README.md"].reasons
 
 
 def test_file_input_preserves_lines_redacts_credentials_and_binds_sha(tmp_path: Path) -> None:

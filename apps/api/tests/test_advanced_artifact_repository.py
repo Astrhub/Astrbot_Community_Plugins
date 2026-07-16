@@ -238,6 +238,162 @@ def test_runtime_dispatch_lease_result_and_collection_are_single_consumer() -> N
     assert repeated_collection is None
 
 
+def test_artifact_graph_projection_is_tree_bound_and_atomic() -> None:
+    repo, user, plugin = make_repository()
+
+    async def scenario() -> tuple[list[dict], list[dict], dict]:
+        artifact = await repo.create_artifact(artifact_payload(plugin, user, "g"))
+        unrelated_base = await repo.create_artifact(artifact_payload(plugin, user, "gb"))
+        tree_sha256 = "7" * 64
+        await repo.replace_artifact_files(
+            artifact["id"],
+            [
+                {
+                    "id": "graph-main",
+                    "path": "main.py",
+                    "sha256": "8" * 64,
+                    "size_bytes": 10,
+                    "line_count": 1,
+                    "is_text": True,
+                },
+                {
+                    "id": "graph-helper",
+                    "path": "helper.py",
+                    "sha256": "9" * 64,
+                    "size_bytes": 10,
+                    "line_count": 1,
+                    "is_text": True,
+                },
+            ],
+            tree_sha256,
+        )
+        files, edges = await repo.replace_artifact_graph(
+            artifact["id"],
+            tree_sha256=tree_sha256,
+            files=[
+                {
+                    "file_id": "graph-main",
+                    "is_entrypoint": True,
+                    "is_reachable": True,
+                    "graph_status": "complete",
+                    "scan_summary": {"edge_count": 1},
+                },
+                {
+                    "file_id": "graph-helper",
+                    "is_entrypoint": False,
+                    "is_reachable": True,
+                    "graph_status": "complete",
+                    "scan_summary": {"edge_count": 0},
+                },
+            ],
+            edges=[
+                {
+                    "id": "edge-main-helper",
+                    "source_file_id": "graph-main",
+                    "target_file_id": "graph-helper",
+                    "target_name": "helper",
+                    "edge_type": "import",
+                    "confidence": 1,
+                    "line_start": 1,
+                }
+            ],
+            coverage={"complete": True, "output_sha256": "a" * 64},
+        )
+        with pytest.raises(ValueError, match="import_graph_incomplete"):
+            await repo.replace_artifact_graph(
+                artifact["id"],
+                tree_sha256=tree_sha256,
+                files=[
+                    {
+                        "file_id": "graph-main",
+                        "graph_status": "incomplete",
+                    }
+                ],
+                edges=[],
+                coverage={"complete": False},
+            )
+        with pytest.raises(ValueError, match="import_graph_incomplete"):
+            await repo.replace_artifact_graph(
+                artifact["id"],
+                tree_sha256=tree_sha256,
+                files=[
+                    {"file_id": "graph-main", "graph_status": "complete"},
+                    {"file_id": "graph-helper", "graph_status": "complete"},
+                ],
+                edges=[
+                    {
+                        "source_file_id": "graph-main",
+                        "target_file_id": "foreign-file",
+                        "target_name": "foreign",
+                        "edge_type": "import",
+                    }
+                ],
+                coverage={"complete": False},
+            )
+        with pytest.raises(ValueError, match="diff_tree_changed"):
+            await repo.replace_artifact_graph(
+                artifact["id"],
+                tree_sha256="0" * 64,
+                files=[],
+                edges=[],
+                coverage={"complete": False},
+            )
+        with pytest.raises(ValueError, match="diff_base_invalid"):
+            await repo.replace_artifact_graph(
+                artifact["id"],
+                tree_sha256=tree_sha256,
+                files=[
+                    {"file_id": "graph-main", "graph_status": "complete"},
+                    {"file_id": "graph-helper", "graph_status": "complete"},
+                ],
+                edges=[],
+                coverage={"complete": False},
+                base_artifact_id="artifact-missing",
+                base_tree_sha256="1" * 64,
+            )
+        with pytest.raises(ValueError, match="diff_base_invalid"):
+            await repo.replace_artifact_graph(
+                artifact["id"],
+                tree_sha256=tree_sha256,
+                files=[
+                    {"file_id": "graph-main", "graph_status": "complete"},
+                    {"file_id": "graph-helper", "graph_status": "complete"},
+                ],
+                edges=[],
+                coverage={"complete": False},
+                base_artifact_id=unrelated_base["id"],
+                base_tree_sha256=str(unrelated_base["tree_sha256"]),
+            )
+        with pytest.raises(ValueError, match="diff_base_invalid"):
+            await repo.replace_artifact_graph(
+                artifact["id"],
+                tree_sha256=tree_sha256,
+                files=[
+                    {"file_id": "graph-main", "graph_status": "complete"},
+                    {"file_id": "graph-helper", "graph_status": "complete"},
+                ],
+                edges=[],
+                coverage={"complete": False},
+                base_artifact_id=artifact["id"],
+                base_tree_sha256=tree_sha256,
+            )
+        refreshed = await repo.get_artifact(artifact["id"])
+        assert refreshed is not None
+        return (
+            await repo.list_artifact_files(artifact["id"]),
+            await repo.list_dependency_edges(artifact["id"]),
+            refreshed,
+        )
+
+    files, edges, artifact = asyncio.run(scenario())
+
+    by_path = {item["path"]: item for item in files}
+    assert by_path["main.py"]["is_entrypoint"] is True
+    assert by_path["helper.py"]["is_reachable"] is True
+    assert edges[0]["target_path"] == "helper.py"
+    assert artifact["review_coverage"]["import_graph"]["complete"] is True
+
+
 def test_comment_versions_final_decision_and_history_are_atomic() -> None:
     repo, user, plugin = make_repository()
 

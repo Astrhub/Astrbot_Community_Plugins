@@ -785,6 +785,137 @@ class PgAdvancedReviewRepositoryMixin:
         )
         return [_record(row) for row in rows]
 
+    async def replace_artifact_graph(
+        self,
+        artifact_id: str,
+        *,
+        tree_sha256: str,
+        files: Sequence[Mapping[str, Any]],
+        edges: Sequence[Mapping[str, Any]],
+        coverage: Mapping[str, Any],
+        base_artifact_id: str | None = None,
+        base_tree_sha256: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        pool = self._advanced_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                artifact = await connection.fetchrow(
+                    """
+                    SELECT plugin_id, tree_sha256, base_artifact_id
+                      FROM plugin_artifacts
+                     WHERE id = $1
+                     FOR UPDATE
+                    """,
+                    artifact_id,
+                )
+                if not artifact:
+                    return [], []
+                if str(artifact["tree_sha256"]) != tree_sha256:
+                    raise ValueError(ArtifactErrorCode.DIFF_TREE_CHANGED.value)
+                if base_artifact_id is None:
+                    if base_tree_sha256 is not None:
+                        raise ValueError(ArtifactErrorCode.DIFF_BASE_INVALID.value)
+                else:
+                    declared_base_id = str(artifact["base_artifact_id"] or "") or None
+                    if base_artifact_id == artifact_id or base_artifact_id != declared_base_id:
+                        raise ValueError(ArtifactErrorCode.DIFF_BASE_INVALID.value)
+                    base = await connection.fetchrow(
+                        """
+                        SELECT plugin_id, tree_sha256
+                          FROM plugin_artifacts
+                         WHERE id = $1
+                         FOR SHARE
+                        """,
+                        base_artifact_id,
+                    )
+                    if (
+                        base is None
+                        or str(base["plugin_id"]) != str(artifact["plugin_id"])
+                        or str(base["tree_sha256"]) != str(base_tree_sha256 or "")
+                    ):
+                        raise ValueError(ArtifactErrorCode.DIFF_BASE_INVALID.value)
+                registered_file_ids = {
+                    str(row["id"])
+                    for row in await connection.fetch(
+                        "SELECT id FROM artifact_files WHERE artifact_id = $1 FOR UPDATE",
+                        artifact_id,
+                    )
+                }
+                _validate_graph_projection(files, edges, registered_file_ids)
+                updated_files: list[dict[str, Any]] = []
+                for item in files:
+                    row = await connection.fetchrow(
+                        """
+                        UPDATE artifact_files
+                           SET is_entrypoint = $3,
+                               is_reachable = $4,
+                               graph_status = $5,
+                               scan_summary = $6::jsonb
+                         WHERE id = $1
+                           AND artifact_id = $2
+                     RETURNING *
+                        """,
+                        item["file_id"],
+                        artifact_id,
+                        bool(item.get("is_entrypoint")),
+                        bool(item.get("is_reachable")),
+                        str(item.get("graph_status") or "not_analyzed"),
+                        dict(item.get("scan_summary") or {}),
+                    )
+                    if row is None:
+                        raise ValueError(ArtifactErrorCode.IMPORT_GRAPH_INCOMPLETE.value)
+                    updated_files.append(_record(row))
+                await connection.execute(
+                    "DELETE FROM artifact_dependency_edges WHERE artifact_id = $1",
+                    artifact_id,
+                )
+                edge_records = [
+                    (
+                        str(item.get("id") or new_domain_id("edge")),
+                        artifact_id,
+                        item["source_file_id"],
+                        item.get("target_file_id"),
+                        item.get("target_name", ""),
+                        item["edge_type"],
+                        item.get("confidence", 1),
+                        item.get("line_start"),
+                        dict(item.get("metadata") or {}),
+                    )
+                    for item in edges
+                ]
+                if edge_records:
+                    await connection.executemany(
+                        """
+                        INSERT INTO artifact_dependency_edges (
+                            id, artifact_id, source_file_id, target_file_id,
+                            target_name, edge_type, confidence, line_start, metadata
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+                        """,
+                        edge_records,
+                    )
+                saved_edges = await connection.fetch(
+                    """
+                    SELECT * FROM artifact_dependency_edges
+                     WHERE artifact_id = $1
+                  ORDER BY source_file_id, line_start NULLS FIRST, id
+                    """,
+                    artifact_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE plugin_artifacts
+                       SET review_coverage = review_coverage
+                           || jsonb_build_object('import_graph', $2::jsonb),
+                           updated_at = now()
+                     WHERE id = $1
+                    """,
+                    artifact_id,
+                    dict(coverage),
+                )
+        updated_files.sort(key=lambda item: str(item.get("path") or ""))
+        return updated_files, [_record(row) for row in saved_edges]
+
     async def create_runtime_dispatch(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         row = await self._advanced_pool().fetchrow(
             """
@@ -2090,6 +2221,71 @@ class InMemoryAdvancedReviewRepositoryMixin:
         )
         return deepcopy(values)
 
+    async def replace_artifact_graph(
+        self,
+        artifact_id: str,
+        *,
+        tree_sha256: str,
+        files: Sequence[Mapping[str, Any]],
+        edges: Sequence[Mapping[str, Any]],
+        coverage: Mapping[str, Any],
+        base_artifact_id: str | None = None,
+        base_tree_sha256: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        async with self._lock:
+            artifact = self.artifacts.get(artifact_id)
+            if not artifact:
+                return [], []
+            if artifact["tree_sha256"] != tree_sha256:
+                raise ValueError(ArtifactErrorCode.DIFF_TREE_CHANGED.value)
+            if base_artifact_id is None:
+                if base_tree_sha256 is not None:
+                    raise ValueError(ArtifactErrorCode.DIFF_BASE_INVALID.value)
+            else:
+                declared_base_id = str(artifact.get("base_artifact_id") or "") or None
+                if base_artifact_id == artifact_id or base_artifact_id != declared_base_id:
+                    raise ValueError(ArtifactErrorCode.DIFF_BASE_INVALID.value)
+                base = self.artifacts.get(base_artifact_id)
+                if (
+                    base is None
+                    or base["plugin_id"] != artifact["plugin_id"]
+                    or base["tree_sha256"] != base_tree_sha256
+                ):
+                    raise ValueError(ArtifactErrorCode.DIFF_BASE_INVALID.value)
+            file_by_id = {str(item["id"]): item for item in self.files.get(artifact_id, [])}
+            _validate_graph_projection(files, edges, set(file_by_id))
+            for item in files:
+                target = file_by_id[str(item["file_id"])]
+                target.update(
+                    {
+                        "is_entrypoint": bool(item.get("is_entrypoint")),
+                        "is_reachable": bool(item.get("is_reachable")),
+                        "graph_status": str(item.get("graph_status") or "not_analyzed"),
+                        "scan_summary": dict(item.get("scan_summary") or {}),
+                    }
+                )
+            now = _utc_now()
+            saved_edges = [
+                {
+                    **dict(item),
+                    "id": str(item.get("id") or new_domain_id("edge")),
+                    "artifact_id": artifact_id,
+                    "metadata": dict(item.get("metadata") or {}),
+                    "created_at": now,
+                }
+                for item in edges
+            ]
+            self.dependency_edges[artifact_id] = saved_edges
+            artifact["review_coverage"] = {
+                **dict(artifact.get("review_coverage") or {}),
+                "import_graph": dict(coverage),
+            }
+            artifact["updated_at"] = now
+            updated_files = sorted(
+                file_by_id.values(), key=lambda item: str(item.get("path") or "")
+            )
+            return deepcopy(updated_files), deepcopy(saved_edges)
+
     async def create_runtime_dispatch(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         async with self._lock:
             run = self.runs.get(str(payload["run_id"]))
@@ -2608,6 +2804,54 @@ def _finding_event_type(
     if not bool(current.get("affects_current_release")) and affects_current_release:
         return "current_release_linked"
     return "correlation_changed"
+
+
+def _validate_graph_projection(
+    files: Sequence[Mapping[str, Any]],
+    edges: Sequence[Mapping[str, Any]],
+    registered_file_ids: set[str],
+) -> None:
+    file_ids = [str(item.get("file_id") or "") for item in files]
+    if len(file_ids) != len(set(file_ids)) or set(file_ids) != registered_file_ids:
+        raise ValueError(ArtifactErrorCode.IMPORT_GRAPH_INCOMPLETE.value)
+    valid_statuses = {"complete", "incomplete", "not_analyzed", "not_applicable"}
+    if any(str(item.get("graph_status") or "not_analyzed") not in valid_statuses for item in files):
+        raise ValueError(ArtifactErrorCode.IMPORT_GRAPH_INCOMPLETE.value)
+    edge_ids: set[str] = set()
+    identities: set[tuple[str, str, str, str, int]] = set()
+    for item in edges:
+        source_id = str(item.get("source_file_id") or "")
+        target_id = str(item.get("target_file_id") or "")
+        edge_type = str(item.get("edge_type") or "")
+        target_name = str(item.get("target_name") or "")
+        line_start = item.get("line_start")
+        confidence = item.get("confidence", 1)
+        if (
+            source_id not in registered_file_ids
+            or (target_id and target_id not in registered_file_ids)
+            or edge_type not in {"import", "from", "dynamic", "unknown"}
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not 0 <= float(confidence) <= 1
+            or (
+                line_start is not None
+                and (
+                    not isinstance(line_start, int)
+                    or isinstance(line_start, bool)
+                    or line_start < 1
+                )
+            )
+        ):
+            raise ValueError(ArtifactErrorCode.IMPORT_GRAPH_INCOMPLETE.value)
+        edge_id = str(item.get("id") or "")
+        if edge_id:
+            if edge_id in edge_ids:
+                raise ValueError(ArtifactErrorCode.IMPORT_GRAPH_INCOMPLETE.value)
+            edge_ids.add(edge_id)
+        identity = (source_id, target_id, target_name, edge_type, int(line_start or 0))
+        if identity in identities:
+            raise ValueError(ArtifactErrorCode.IMPORT_GRAPH_INCOMPLETE.value)
+        identities.add(identity)
 
 
 def _policy_validation_is_current(policy: Mapping[str, Any]) -> bool:

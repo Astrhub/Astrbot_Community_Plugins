@@ -248,24 +248,24 @@
         - *Details*: 运行 diff/storage/repository tests、Ruff、迁移 checks 后提交。
         - *Requirements*: FR-209。
 
-- [ ] 12. **Python Import Graph 与增量审查集合**
-    - [ ] 12.1. 实现 AST local import resolver
+- [x] 12. **Python Import Graph 与增量审查集合**
+    - [x] 12.1. 实现 AST local import resolver
         - *Goal*: 不执行源码地解析 import/from/relative/package imports。
         - *Details*: 区分 local/external/unknown；保存 line、edge type、confidence；从 `main.py` 和 policy entrypoints 计算 reachability。
         - *Requirements*: FR-210。
-    - [ ] 12.2. 实现 incomplete detection
+    - [x] 12.2. 实现 incomplete detection
         - *Goal*: 动态 import、`sys.path`、语法错误和未知入口不被静默忽略。
         - *Details*: 保存 reason/coverage；policy 决定全量或人工；LLM 只能继续建议。
         - *Requirements*: FR-210。
-    - [ ] 12.3. 计算 forward/reverse/removed impact
+    - [x] 12.3. 计算 forward/reverse/removed impact
         - *Goal*: 增量集合包含变更反向依赖、入口路径和删除文件旧依赖。
         - *Details*: 使用 current/base graph；metadata/requirements/entry changes 强制完整 runtime/dependency。
         - *Requirements*: FR-206、FR-210。
-    - [ ] 12.4. 增加 import graph fixtures
+    - [x] 12.4. 增加 import graph fixtures
         - *Goal*: 覆盖 package、relative、cycle、dynamic、syntax error、delete 和 reverse dependency。
         - *Details*: 断言 coverage 和降级 reason，不导入 fixture。
         - *Requirements*: FR-210。
-    - [ ] 12.5. 验证并提交 graph/scope
+    - [x] 12.5. 验证并提交 graph/scope
         - *Goal*: 完成可证明的增量选择基础。
         - *Details*: 运行 graph/scope/DAG tests、Ruff 后提交。
         - *Requirements*: FR-206、FR-210。

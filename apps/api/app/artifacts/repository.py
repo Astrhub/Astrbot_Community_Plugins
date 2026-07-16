@@ -66,9 +66,7 @@ class ArtifactRepository(Protocol):
 
     async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]: ...
 
-    async def get_artifact_category_state(
-        self, artifact_id: str
-    ) -> dict[str, Any] | None: ...
+    async def get_artifact_category_state(self, artifact_id: str) -> dict[str, Any] | None: ...
 
     async def apply_category_suggestion(
         self,
@@ -156,6 +154,18 @@ class ArtifactRepository(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     async def list_dependency_edges(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def replace_artifact_graph(
+        self,
+        artifact_id: str,
+        *,
+        tree_sha256: str,
+        files: Sequence[Mapping[str, Any]],
+        edges: Sequence[Mapping[str, Any]],
+        coverage: Mapping[str, Any],
+        base_artifact_id: str | None = None,
+        base_tree_sha256: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
 
     async def create_runtime_dispatch(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
 
@@ -1590,9 +1600,8 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     artifact_id,
                     effective_policy_id,
                 )
-                if (
-                    {str(item["id"]) for item in run_rows} != set(unique_run_ids)
-                    or any(str(item["status"]) != "succeeded" for item in run_rows)
+                if {str(item["id"]) for item in run_rows} != set(unique_run_ids) or any(
+                    str(item["status"]) != "succeeded" for item in run_rows
                 ):
                     raise ValueError("required_review_runs_invalid")
 
@@ -2467,9 +2476,7 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                     or ""
                 ),
                 "worker_id": str(payload.get("worker_id") or run.get("worker_id") or ""),
-                "input_sha256": str(
-                    payload.get("input_sha256") or run.get("input_sha256") or ""
-                ),
+                "input_sha256": str(payload.get("input_sha256") or run.get("input_sha256") or ""),
                 "completed_at": _utc_now(),
             }
         )
@@ -3012,11 +3019,7 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
 
             publish_key = f"publish:{artifact_id}"
             existing_publish = next(
-                (
-                    job
-                    for job in self.jobs.values()
-                    if job["idempotency_key"] == publish_key
-                ),
+                (job for job in self.jobs.values() if job["idempotency_key"] == publish_key),
                 None,
             )
             if existing_publish and (

@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from app.artifacts.archive import ArchivePrechecker
 from app.artifacts.diff import DIFF_TOOL_VERSION
+from app.artifacts.import_graph import IMPORT_GRAPH_TOOL_VERSION
 from app.artifacts.jobs import ArtifactJobRunner
 from app.artifacts.models import JobType
 from app.artifacts.orchestration import (
@@ -142,7 +143,7 @@ def test_static_only_policy_enqueues_exactly_one_route_job() -> None:
     assert [job["type"] for job in jobs] == [JobType.ROUTE_REVIEW.value]
 
 
-def test_default_runner_configures_diff_without_claiming_import_graph_support() -> None:
+def test_default_runner_configures_diff_and_import_graph_tools() -> None:
     repository = InMemoryArtifactRepository()
     runner = ArtifactJobRunner(
         repository=repository,
@@ -158,7 +159,10 @@ def test_default_runner_configures_diff_without_claiming_import_graph_support() 
     assert runner.review_orchestrator.tool_snapshots[ReviewPolicyStage.DIFF].version == (
         DIFF_TOOL_VERSION
     )
-    assert ReviewPolicyStage.IMPORT_GRAPH not in runner.review_orchestrator.tool_snapshots
+    assert (
+        runner.review_orchestrator.tool_snapshots[ReviewPolicyStage.IMPORT_GRAPH].version
+        == IMPORT_GRAPH_TOOL_VERSION
+    )
     assert isinstance(runner._review_stages[JobType.DIFF_GRAPH.value], DiffGraphStage)
 
 
