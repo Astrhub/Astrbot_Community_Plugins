@@ -8,6 +8,7 @@ from contextlib import suppress
 from typing import Any
 
 from .category import CategoryProvider, CategorySuggestionService, UnavailableCategoryProvider
+from .file_review import FileReviewService
 from .archive import (
     ArchivePrechecker,
     PrecheckError,
@@ -21,7 +22,9 @@ from .policy import ReviewPolicyStage
 from .repository import ArtifactRepository
 from .stages import (
     CategoryStage,
+    LlmFileStage,
     LlmPackageStage,
+    LlmSummaryStage,
     PrecheckStage,
     ReviewStage,
     StageContext,
@@ -30,6 +33,7 @@ from .stages import (
     RoutingStage,
 )
 from .static_scan import StaticScanner
+from .summary_review import SummaryReviewService
 from .structured_llm import StructuredLlmProvider, UnavailableStructuredLlmProvider
 from .package_review import PackageReviewService
 from .storage import (
@@ -86,9 +90,12 @@ class ArtifactJobRunner:
                 category_provider.version
             )
         if llm_provider is not None:
-            tool_snapshots[ReviewPolicyStage.LLM_PACKAGE] = StageToolSnapshot(
-                llm_provider.version
-            )
+            for stage in (
+                ReviewPolicyStage.LLM_PACKAGE,
+                ReviewPolicyStage.LLM_FILE,
+                ReviewPolicyStage.LLM_SUMMARY,
+            ):
+                tool_snapshots[stage] = StageToolSnapshot(llm_provider.version)
         self.review_orchestrator = review_orchestrator or ReviewOrchestrator(
             repository,
             tool_snapshots=tool_snapshots,
@@ -108,6 +115,24 @@ class ArtifactJobRunner:
         default_stages.append(
             LlmPackageStage(
                 PackageReviewService(
+                    self.llm_provider,
+                    retry_delay_seconds=llm_retry_delay_seconds,
+                ),
+                provider_config_ref=llm_provider_config_ref,
+            )
+        )
+        default_stages.append(
+            LlmFileStage(
+                FileReviewService(
+                    self.llm_provider,
+                    retry_delay_seconds=llm_retry_delay_seconds,
+                ),
+                provider_config_ref=llm_provider_config_ref,
+            )
+        )
+        default_stages.append(
+            LlmSummaryStage(
+                SummaryReviewService(
                     self.llm_provider,
                     retry_delay_seconds=llm_retry_delay_seconds,
                 ),

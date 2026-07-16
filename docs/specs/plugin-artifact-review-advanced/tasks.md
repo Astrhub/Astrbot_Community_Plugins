@@ -182,24 +182,24 @@
         - *Details*: 运行 LLM schema/budget/redaction/failure tests、Ruff 后提交。
         - *Requirements*: FR-205、FR-207。
 
-- [ ] 9. **LLM 文件选择、文件级审查与汇总**
-    - [ ] 9.1. 实现确定性候选集合和排序
+- [x] 9. **LLM 文件选择、文件级审查与汇总**
+    - [x] 9.1. 实现确定性候选集合和排序
         - *Goal*: 入口、依赖闭包、变更、命中、强制和模型建议文件按 policy 预算审查。
         - *Details*: 只接受 manifest 中受限文本；保存 reviewed/skipped 文件、原因和 coverage；未完成不得声称全量。
         - *Requirements*: FR-206、FR-210。
-    - [ ] 9.2. 实现 file input 和 result schema
+    - [x] 9.2. 实现 file input 和 result schema
         - *Goal*: 每个 run 绑定 file ID/SHA、prompt、model 和 input hash。
         - *Details*: 限制单文件/总 token；服务端复读行范围和 evidence；无法复核输出不写普通 finding。
         - *Requirements*: FR-206。
-    - [ ] 9.3. 实现 summary non-mutation boundary
+    - [x] 9.3. 实现 summary non-mutation boundary
         - *Goal*: 汇总只能消费规范化结果，不能改写历史 finding。
         - *Details*: 输出人工优先级/摘要；LLM finding deterministic=false；severity merge 只升不降；禁止 decision/revoke command。
         - *Requirements*: FR-207。
-    - [ ] 9.4. 增加路径、行号、预算和 severity 测试
+    - [x] 9.4. 增加路径、行号、预算和 severity 测试
         - *Goal*: 阻止模型越权读取和风险降级。
         - *Details*: 覆盖未知 path、binary、oversize、SHA drift、line overflow、evidence mismatch、budget exhaustion 和模型建议 critical。
         - *Requirements*: FR-206、FR-207。
-    - [ ] 9.5. 验证并提交 file/summary LLM
+    - [x] 9.5. 验证并提交 file/summary LLM
         - *Goal*: 完成结构化 LLM 审查链。
         - *Details*: 运行 targeted tests、Ruff、敏感输出扫描后提交。
         - *Requirements*: FR-206、FR-207。

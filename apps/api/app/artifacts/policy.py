@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any, Literal, Mapping, Self
 
 from packaging.version import InvalidVersion, Version
@@ -14,6 +15,7 @@ POLICY_SCHEMA_VERSION = "1"
 _CONFIG_REFERENCE = re.compile(r"^(?:config|env|secret):[A-Za-z][A-Za-z0-9._/-]{0,127}$")
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _PROFILE_IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_UNSAFE_PATH_CHARACTER = re.compile(r"[\x00-\x1f\x7f\u200b-\u200f\u2060\ufeff]")
 
 
 class ReviewPolicyStage(StrEnum):
@@ -140,6 +142,7 @@ class LlmPolicy(FrozenPolicyModel):
     )
     max_files: int = Field(default=20, ge=1, le=500)
     max_file_bytes: int = Field(default=262_144, ge=1024, le=2_097_152)
+    required_files: tuple[str, ...] = Field(default=(), max_length=100)
     timeout_seconds: int = Field(default=90, ge=5, le=600)
     max_retries: int = Field(default=2, ge=0, le=5)
 
@@ -155,6 +158,27 @@ class LlmPolicy(FrozenPolicyModel):
         if normalized and not _SAFE_IDENTIFIER.fullmatch(normalized):
             raise ValueError("value must be a public identifier, not a credential or URL")
         return normalized
+
+    @field_validator("required_files")
+    @classmethod
+    def validate_required_files(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        for item in value:
+            path = item.strip()
+            parsed = PurePosixPath(path)
+            if (
+                not path
+                or len(path) > 512
+                or "\\" in path
+                or _UNSAFE_PATH_CHARACTER.search(path)
+                or parsed.is_absolute()
+                or any(part in {"", ".", ".."} for part in parsed.parts)
+                or path != parsed.as_posix()
+            ):
+                raise ValueError("required LLM file path is unsafe")
+            if path not in normalized:
+                normalized.append(path)
+        return tuple(sorted(normalized))
 
     @model_validator(mode="after")
     def validate_enabled_budget(self) -> Self:

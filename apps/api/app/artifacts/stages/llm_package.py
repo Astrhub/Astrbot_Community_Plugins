@@ -153,6 +153,7 @@ class LlmPackageStage:
             "outcome": "completed",
             "complete": input_complete,
             "stage_name": "llm_package",
+            "provider_call": True,
             "manual_review_required": manual_review_required,
             "risk_level": effective_risk,
             "model_risk_level": evaluation.result.risk_level.value,
