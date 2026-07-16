@@ -21,6 +21,7 @@ from .policy import ReviewPolicyStage
 from .repository import ArtifactRepository
 from .stages import (
     CategoryStage,
+    LlmPackageStage,
     PrecheckStage,
     ReviewStage,
     StageContext,
@@ -29,6 +30,8 @@ from .stages import (
     RoutingStage,
 )
 from .static_scan import StaticScanner
+from .structured_llm import StructuredLlmProvider, UnavailableStructuredLlmProvider
+from .package_review import PackageReviewService
 from .storage import (
     ArtifactStorage,
     ArtifactStorageError,
@@ -62,6 +65,9 @@ class ArtifactJobRunner:
         review_orchestrator: ReviewOrchestrator | None = None,
         category_provider: CategoryProvider | None = None,
         category_provider_config_ref: str = "config:llm-default",
+        llm_provider: StructuredLlmProvider | None = None,
+        llm_provider_config_ref: str = "config:llm-default",
+        llm_retry_delay_seconds: float = 0.25,
     ) -> None:
         self.repository = repository
         self.storage = storage
@@ -73,11 +79,16 @@ class ArtifactJobRunner:
         self.notification_dispatcher = notification_dispatcher
         self.advanced_review_enabled = advanced_review_enabled
         self.category_provider = category_provider or UnavailableCategoryProvider()
-        tool_snapshots = (
-            {ReviewPolicyStage.CATEGORY: StageToolSnapshot(category_provider.version)}
-            if category_provider is not None
-            else {}
-        )
+        self.llm_provider = llm_provider or UnavailableStructuredLlmProvider()
+        tool_snapshots: dict[ReviewPolicyStage, StageToolSnapshot] = {}
+        if category_provider is not None:
+            tool_snapshots[ReviewPolicyStage.CATEGORY] = StageToolSnapshot(
+                category_provider.version
+            )
+        if llm_provider is not None:
+            tool_snapshots[ReviewPolicyStage.LLM_PACKAGE] = StageToolSnapshot(
+                llm_provider.version
+            )
         self.review_orchestrator = review_orchestrator or ReviewOrchestrator(
             repository,
             tool_snapshots=tool_snapshots,
@@ -92,6 +103,15 @@ class ArtifactJobRunner:
             CategoryStage(
                 CategorySuggestionService(self.category_provider),
                 provider_config_ref=category_provider_config_ref,
+            )
+        )
+        default_stages.append(
+            LlmPackageStage(
+                PackageReviewService(
+                    self.llm_provider,
+                    retry_delay_seconds=llm_retry_delay_seconds,
+                ),
+                provider_config_ref=llm_provider_config_ref,
             )
         )
         self._review_stages = (
@@ -114,11 +134,16 @@ class ArtifactJobRunner:
         self._stopping.set()
 
     async def close(self) -> None:
-        close = getattr(self.category_provider, "close", None)
-        if close is not None:
-            result = close()
-            if hasattr(result, "__await__"):
-                await result
+        closed: set[int] = set()
+        for provider in (self.category_provider, self.llm_provider):
+            if id(provider) in closed:
+                continue
+            closed.add(id(provider))
+            close = getattr(provider, "close", None)
+            if close is not None:
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
 
     async def run_forever(self) -> None:
         while not self._stopping.is_set():

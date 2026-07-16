@@ -127,6 +127,17 @@ class LlmPolicy(FrozenPolicyModel):
     model: str = Field(default="", max_length=128)
     prompt_version: str = Field(default="v1", min_length=1, max_length=64)
     max_tokens: int = Field(default=0, ge=0, le=1_000_000)
+    max_cost_microusd: int = Field(default=0, ge=0, le=100_000_000)
+    input_cost_microusd_per_million_tokens: int = Field(
+        default=0,
+        ge=0,
+        le=100_000_000,
+    )
+    output_cost_microusd_per_million_tokens: int = Field(
+        default=0,
+        ge=0,
+        le=100_000_000,
+    )
     max_files: int = Field(default=20, ge=1, le=500)
     max_file_bytes: int = Field(default=262_144, ge=1024, le=2_097_152)
     timeout_seconds: int = Field(default=90, ge=5, le=600)
@@ -152,8 +163,21 @@ class LlmPolicy(FrozenPolicyModel):
                 raise ValueError("enabled LLM review requires a model identifier")
             if self.max_tokens <= 0:
                 raise ValueError("enabled LLM review requires a positive token budget")
-        elif self.model or self.max_tokens:
-            raise ValueError("disabled LLM review cannot carry an active model or token budget")
+            if self.max_cost_microusd <= 0:
+                raise ValueError("enabled LLM review requires a positive cost budget")
+            if (
+                self.input_cost_microusd_per_million_tokens <= 0
+                or self.output_cost_microusd_per_million_tokens <= 0
+            ):
+                raise ValueError("enabled LLM review requires versioned token pricing")
+        elif (
+            self.model
+            or self.max_tokens
+            or self.max_cost_microusd
+            or self.input_cost_microusd_per_million_tokens
+            or self.output_cost_microusd_per_million_tokens
+        ):
+            raise ValueError("disabled LLM review cannot carry an active model or budget")
         return self
 
 

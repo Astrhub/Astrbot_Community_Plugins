@@ -6,12 +6,14 @@ from app.artifacts.models import (
     ArtifactErrorCode,
     ArtifactStateError,
     DecisionAction,
+    FindingSeverity,
     JobType,
     PublicationStatus,
     ReviewRunType,
     ReviewStatus,
     RiskLevel,
     TERMINAL_REVIEW_STATUSES,
+    risk_rank,
     review_target_for_decision,
     validate_publication_transition,
     validate_review_transition,
@@ -51,6 +53,8 @@ def test_advanced_review_enum_contract_keeps_critical_as_risk_only() -> None:
     assert {"auto_approve", "request_changes", "policy_migrate"} <= {
         item.value for item in DecisionAction
     }
+    assert [risk_rank(item) for item in RiskLevel] == [0, 2, 3, 4, 5]
+    assert risk_rank(FindingSeverity.CRITICAL) == risk_rank(RiskLevel.CRITICAL)
 
 
 @pytest.mark.parametrize(

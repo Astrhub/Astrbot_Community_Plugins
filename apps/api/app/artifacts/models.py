@@ -354,6 +354,13 @@ def highest_risk(values: list[str]) -> RiskLevel:
     return RiskLevel.NONE if severity is FindingSeverity.INFO else RiskLevel(severity.value)
 
 
+def risk_rank(value: str | RiskLevel | FindingSeverity) -> int:
+    normalized = str(value)
+    if normalized == RiskLevel.NONE.value:
+        return 0
+    return SEVERITY_ORDER[FindingSeverity(normalized)] + 1
+
+
 def review_target_for_decision(action: str | DecisionAction) -> ReviewStatus | None:
     return DECISION_REVIEW_TARGETS.get(DecisionAction(action))
 

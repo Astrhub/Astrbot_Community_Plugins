@@ -424,7 +424,14 @@ Policy JSON 使用版本化 Pydantic/JSON Schema，主要字段：
   "runtime_targets": [{"astrbot": "4.26.5", "python": "3.12"}],
   "limits": {"cpu": 1, "memory_mb": 768, "pids": 128, "timeout_seconds": 120},
   "network_profiles": {"install": "pypi-only-v1", "smoke": "none"},
-  "llm": {"enabled": true, "model": "configured-model", "max_tokens": 24000},
+  "llm": {
+    "enabled": true,
+    "model": "configured-model",
+    "max_tokens": 24000,
+    "max_cost_microusd": 100000,
+    "input_cost_microusd_per_million_tokens": 1000000,
+    "output_cost_microusd_per_million_tokens": 4000000
+  },
   "malware": {"clamav": true, "yara_ruleset": "market-v1"},
   "dependency": {"max_severity": "high", "max_data_age_hours": 24},
   "routing": {"auto_approve": false, "manual_review_at": "low"}

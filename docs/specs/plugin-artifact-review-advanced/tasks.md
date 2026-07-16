@@ -160,24 +160,24 @@
         - *Details*: 运行 schema、prompt injection、优先级、并发和 API projection tests、Ruff 后提交。
         - *Requirements*: FR-201。
 
-- [ ] 8. **结构化 LLM 包级审查**
-    - [ ] 8.1. 构造限长 package input
+- [x] 8. **结构化 LLM 包级审查**
+    - [x] 8.1. 构造限长 package input
         - *Goal*: 不发送整个代码包或全量源码。
         - *Details*: 组合 tree、metadata、requirements、README 脱敏摘要、deterministic findings、diff/graph coverage 和 policy；保存 input hash/token estimate。
         - *Requirements*: FR-205。
-    - [ ] 8.2. 定义 `PackageReviewResultV1`
+    - [x] 8.2. 定义 `PackageReviewResultV1`
         - *Goal*: 严格校验风险摘要、建议文件、分类和 coverage notes。
         - *Details*: 拒绝隐藏命令、未知字段超限、路径穿越、二进制/不存在文件；保存 model/prompt/schema versions。
         - *Requirements*: FR-205、FR-207。
-    - [ ] 8.3. 实现 provider adapter、预算和重试
+    - [x] 8.3. 实现 provider adapter、预算和重试
         - *Goal*: timeout/429/invalid JSON 具有明确失败和人工复核语义。
         - *Details*: 有限重试、费用/token budget、原始响应私有存储、日志脱敏；不把模型失败映射为 clean。
         - *Requirements*: FR-205、FR-207、FR-221。
-    - [ ] 8.4. 增加包级数据边界测试
+    - [x] 8.4. 增加包级数据边界测试
         - *Goal*: 证明请求不含全量源码、凭据或隔离 key。
         - *Details*: 使用恶意 README/requirements/prompt injection、超长 tree 和 invalid outputs 测试。
         - *Requirements*: FR-205、FR-207。
-    - [ ] 8.5. 验证并提交 package LLM
+    - [x] 8.5. 验证并提交 package LLM
         - *Goal*: 交付可审计包级建议。
         - *Details*: 运行 LLM schema/budget/redaction/failure tests、Ruff 后提交。
         - *Requirements*: FR-205、FR-207。

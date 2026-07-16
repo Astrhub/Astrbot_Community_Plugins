@@ -16,6 +16,7 @@ from .repository import InMemoryArtifactRepository, PgArtifactRepository
 from .service import ArtifactService
 from .static_scan import StaticScanner
 from .storage import create_artifact_storage
+from .structured_llm import OpenAICompatibleStructuredLlmProvider
 
 
 @dataclass(slots=True)
@@ -88,6 +89,7 @@ class ArtifactRuntime:
                     lease_seconds=self.config.job_lease_seconds,
                 )
                 category_provider = _category_provider(self.config.review)
+                llm_provider = _structured_llm_provider(self.config.review)
                 job_runner = ArtifactJobRunner(
                     repository=repository,
                     storage=storage,
@@ -100,6 +102,8 @@ class ArtifactRuntime:
                     advanced_review_enabled=self.config.review.enabled,
                     category_provider=category_provider,
                     category_provider_config_ref=self.config.review.llm_config_ref,
+                    llm_provider=llm_provider,
+                    llm_provider_config_ref=self.config.review.llm_config_ref,
                 )
                 self.attach_components(
                     repository=repository,
@@ -296,6 +300,23 @@ def _category_provider(
         return None
     try:
         return OpenAICompatibleCategoryProvider(
+            endpoint_url=review.llm_endpoint_url,
+            api_key=review.llm_api_key,
+            configured_model=review.llm_model,
+        )
+    except ValueError:
+        return None
+
+
+def _structured_llm_provider(
+    review: ArtifactReviewSettings,
+) -> OpenAICompatibleStructuredLlmProvider | None:
+    if not review.llm_enabled or review.llm_provider not in {"openai", "openai-compatible"}:
+        return None
+    if not all((review.llm_endpoint_url, review.llm_api_key, review.llm_model)):
+        return None
+    try:
+        return OpenAICompatibleStructuredLlmProvider(
             endpoint_url=review.llm_endpoint_url,
             api_key=review.llm_api_key,
             configured_model=review.llm_model,

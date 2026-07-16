@@ -31,7 +31,14 @@ def policy_payload() -> dict:
             "timeout_seconds": 120,
         },
         "network_profiles": {"install": "pypi-only-v1", "smoke": "none"},
-        "llm": {"enabled": True, "model": "configured-model", "max_tokens": 24000},
+        "llm": {
+            "enabled": True,
+            "model": "configured-model",
+            "max_tokens": 24000,
+            "max_cost_microusd": 100000,
+            "input_cost_microusd_per_million_tokens": 1000000,
+            "output_cost_microusd_per_million_tokens": 4000000,
+        },
         "malware": {"clamav": True, "yara_ruleset": "market-v1"},
         "dependency": {"max_severity": "high", "max_data_age_hours": 24},
         "category": {
@@ -224,6 +231,12 @@ def test_review_policy_rejects_unknown_secret_fields() -> None:
     [
         ("limits", {"tmpfs_mb": 1024, "memory_mb": 768}, "cannot exceed"),
         ("llm", {"enabled": True, "model": "", "max_tokens": 10}, "requires a model"),
+        ("llm", {"max_cost_microusd": 0}, "positive cost budget"),
+        (
+            "llm",
+            {"input_cost_microusd_per_million_tokens": 0},
+            "versioned token pricing",
+        ),
         ("llm", {"enabled": False, "model": "configured", "max_tokens": 0}, "disabled LLM"),
         ("routing", {"manual_review_at": "high"}, "cannot be higher than medium"),
         ("routing", {"deterministic_reject_at": "medium"}, "cannot be lower than high"),
