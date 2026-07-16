@@ -823,6 +823,55 @@ paths:
       parameters: [{$ref: "#/components/parameters/ArtifactId"}]
       responses:
         "200": {description: Findings（仅有限 evidence excerpt）}
+  /v1/artifacts/{artifact_id}/files:
+    get:
+      tags: [Artifacts]
+      summary: 分页列出已登记 Artifact 文件树
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {in: query, name: limit, schema: {type: integer, default: 200}}
+        - {in: query, name: offset, schema: {type: integer, default: 0}}
+      responses:
+        "200": {description: 文件 metadata；不含 content key 或私有对象 URL}
+        "403": {description: 非作者且非管理员}
+  /v1/artifacts/{artifact_id}/files/{file_id}/content:
+    get:
+      tags: [Artifacts]
+      summary: 按 1-based 行号分页读取已登记 UTF-8 文本
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {$ref: "#/components/parameters/ArtifactFileId"}
+        - {in: query, name: start_line, schema: {type: integer, default: 1}}
+        - {in: query, name: line_limit, schema: {type: integer, default: 200}}
+      responses:
+        "200": {description: SHA/tree 绑定的受限纯文本行；Cache-Control no-store}
+        "415": {description: 文件不是已登记 UTF-8 文本}
+        "416": {description: 行范围无效}
+  /v1/artifacts/{artifact_id}/diff:
+    get:
+      tags: [Artifacts]
+      summary: 分页列出 SHA/tree 绑定的 Artifact diff 摘要
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {in: query, name: limit, schema: {type: integer, default: 200}}
+        - {in: query, name: offset, schema: {type: integer, default: 0}}
+      responses:
+        "200": {description: Diff metadata；不含 hunks key}
+  /v1/artifacts/{artifact_id}/diff/{diff_id}:
+    get:
+      tags: [Artifacts]
+      summary: 读取已登记、校验后的受限 diff hunks
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {$ref: "#/components/parameters/ArtifactDiffId"}
+        - {in: query, name: hunk_id, schema: {type: string}}
+      responses:
+        "200": {description: 结构化纯文本 hunks；Cache-Control no-store}
+        "409": {description: Diff object、file SHA 或两端 tree 已漂移}
   /v1/admin/artifacts:
     get:
       tags: [Reviews]
@@ -918,6 +967,20 @@ components:
       schema:
         type: string
       description: 不可变插件包 Artifact ID
+    ArtifactFileId:
+      in: path
+      name: file_id
+      required: true
+      schema:
+        type: string
+      description: 必须属于路径中 Artifact 的已登记文件 ID
+    ArtifactDiffId:
+      in: path
+      name: diff_id
+      required: true
+      schema:
+        type: string
+      description: 必须属于路径中 Artifact 的已登记 Diff ID
   securitySchemes:
     cookieAuth:
       type: apiKey

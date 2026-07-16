@@ -12,6 +12,7 @@ from app.artifacts.storage import (
     ArtifactStorageError,
     LocalArtifactStorage,
     S3ArtifactStorage,
+    build_content_key,
     build_diff_key,
     build_published_key,
     build_quarantine_key,
@@ -177,6 +178,61 @@ def test_local_storage_rejects_conflicting_object(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_private_content_range_validates_size_sha_and_bounds(tmp_path: Path) -> None:
+    storage = LocalArtifactStorage(tmp_path, "https://cdn.example.com")
+    key = build_content_key("artifact_range", "file_range")
+    content = b"alpha\nbeta\ngamma\n"
+    digest = hashlib.sha256(content).hexdigest()
+
+    async def scenario() -> None:
+        await storage.put_text_content(key, content)
+        stat = await storage.stat_text_content(key)
+        assert stat is not None
+        assert stat.size_bytes == len(content)
+        assert stat.sha256 == digest
+
+        result = await storage.read_text_content_range(
+            key,
+            start_byte=6,
+            max_bytes=4,
+            max_object_bytes=1024,
+            expected_size_bytes=len(content),
+            expected_sha256=digest,
+        )
+        assert result.content == b"beta"
+        assert result.start_byte == 6
+        assert result.end_byte == 10
+        assert result.size_bytes == len(content)
+        assert result.sha256 == digest
+        assert result.truncated is True
+
+        with pytest.raises(ArtifactStorageError, match="range"):
+            await storage.read_text_content_range(
+                key,
+                start_byte=-1,
+                max_bytes=4,
+                max_object_bytes=1024,
+            )
+        with pytest.raises(ArtifactStorageError, match="size"):
+            await storage.read_text_content_range(
+                key,
+                start_byte=0,
+                max_bytes=4,
+                max_object_bytes=1024,
+                expected_size_bytes=len(content) + 1,
+            )
+        with pytest.raises(ArtifactStorageError, match="does not match"):
+            await storage.read_text_content_range(
+                key,
+                start_byte=0,
+                max_bytes=4,
+                max_object_bytes=1024,
+                expected_sha256="0" * 64,
+            )
+
+    asyncio.run(scenario())
+
+
 def test_s3_storage_uses_conditional_create_and_digest_metadata(tmp_path: Path) -> None:
     settings = load_settings(
         {
@@ -210,6 +266,36 @@ def test_s3_storage_uses_conditional_create_and_digest_metadata(tmp_path: Path) 
         result_content = b'{"status":"passed"}'
         result_sha256 = hashlib.sha256(result_content).hexdigest()
         await storage.put_text_content(result_key, result_content)
+        stat = await storage.stat_text_content(result_key)
+        assert stat is not None
+        assert stat.size_bytes == len(result_content)
+        ranged = await storage.read_text_content_range(
+            result_key,
+            start_byte=2,
+            max_bytes=6,
+            max_object_bytes=1024,
+            expected_size_bytes=len(result_content),
+            expected_sha256=result_sha256,
+        )
+        assert ranged.content == result_content[2:8]
+        assert ranged.truncated is True
+        client.objects[(settings.artifacts.quarantine_bucket, result_key)] = (
+            b'{"status":"failed"}',
+            {},
+        )
+        with pytest.raises(ArtifactStorageError, match="does not match"):
+            await storage.read_text_content_range(
+                result_key,
+                start_byte=0,
+                max_bytes=8,
+                max_object_bytes=1024,
+                expected_size_bytes=len(result_content),
+                expected_sha256=result_sha256,
+            )
+        client.objects[(settings.artifacts.quarantine_bucket, result_key)] = (
+            result_content,
+            {"sha256": result_sha256},
+        )
         assert await storage.read_text_content(result_key, 1024, result_sha256) == result_content
         with pytest.raises(ArtifactStorageError, match="exceeds limit"):
             await storage.read_text_content(result_key, 4, result_sha256)

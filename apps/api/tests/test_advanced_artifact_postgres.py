@@ -13,6 +13,7 @@ from typing import Any
 import asyncpg
 import pytest
 
+from app.artifacts.content import ArtifactContentService
 from app.artifacts.diff import ArtifactDiffService, DiffBuildError, manifest_tree_sha256
 from app.artifacts.import_graph import ImportGraphBuildError, ImportGraphService
 from app.artifacts.models import ArtifactErrorCode, PublicationStatus, ReviewStatus
@@ -1215,6 +1216,25 @@ async def run_diff_service_scenario(url: str, root: Path) -> None:
         assert diffs[0]["base_tree_sha256"] == base_tree
         assert diffs[0]["current_tree_sha256"] == current_tree
         assert diffs[0]["hunks_key"]
+        assert await repository.get_artifact_file(current["id"], current_file_id) is not None
+        assert await repository.get_artifact_file(current["id"], base_file_id) is None
+        assert await repository.get_artifact_diff(current["id"], diffs[0]["id"]) is not None
+        assert await repository.get_artifact_diff(base["id"], diffs[0]["id"]) is None
+        content_service = ArtifactContentService(repository, storage)
+        file_page = await content_service.list_files(current, limit=20, offset=0)
+        file_content = await content_service.read_file(
+            current,
+            current_file_id,
+            start_line=1,
+            line_limit=20,
+        )
+        diff_page = await content_service.list_diffs(current, limit=20, offset=0)
+        diff_content = await content_service.read_diff(current, diffs[0]["id"])
+        assert file_page["items"][0]["id"] == current_file_id
+        assert file_content["lines"] == [{"number": 1, "text": "value = 2"}]
+        assert diff_page["items"][0]["id"] == diffs[0]["id"]
+        assert diff_content["hunks_available"] is True
+        assert diff_content["hunks"]
 
         await connection.execute(
             "UPDATE plugin_artifacts SET tree_sha256 = $2 WHERE id = $1",

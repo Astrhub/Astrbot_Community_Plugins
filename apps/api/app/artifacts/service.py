@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from .archive import PrecheckError, normalize_github_repo, normalize_version
+from .content import ArtifactContentLimits, ArtifactContentService
 from .github_source import GithubSourceClient
 from .models import ArtifactStateError, PublicationStatus, ReviewStatus, new_domain_id
 from .repository import ArtifactRepository
@@ -27,11 +28,13 @@ class ArtifactService:
         storage: ArtifactStorage,
         github: GithubSourceClient,
         max_upload_bytes: int,
+        content_limits: ArtifactContentLimits | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
         self.github = github
         self.max_upload_bytes = max_upload_bytes
+        self.content = ArtifactContentService(repository, storage, content_limits)
 
     async def close(self) -> None:
         await self.github.close()
@@ -108,6 +111,48 @@ class ArtifactService:
                 for decision in await self.repository.list_review_decisions(artifact_id)
             ],
         }
+
+    async def artifact_files(
+        self,
+        artifact: Mapping[str, Any],
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        return await self.content.list_files(artifact, limit=limit, offset=offset)
+
+    async def artifact_file_content(
+        self,
+        artifact: Mapping[str, Any],
+        file_id: str,
+        *,
+        start_line: int,
+        line_limit: int,
+    ) -> dict[str, Any]:
+        return await self.content.read_file(
+            artifact,
+            file_id,
+            start_line=start_line,
+            line_limit=line_limit,
+        )
+
+    async def artifact_diffs(
+        self,
+        artifact: Mapping[str, Any],
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        return await self.content.list_diffs(artifact, limit=limit, offset=offset)
+
+    async def artifact_diff_content(
+        self,
+        artifact: Mapping[str, Any],
+        diff_id: str,
+        *,
+        hunk_id: str | None,
+    ) -> dict[str, Any]:
+        return await self.content.read_diff(artifact, diff_id, hunk_id=hunk_id)
 
     async def approve(
         self,
@@ -202,16 +247,13 @@ class ArtifactService:
                 reason=reason,
                 reviewer=reviewer,
                 idempotency_key=(
-                    idempotency_key
-                    or f"request-changes:{artifact_id}:{secrets.token_hex(8)}"
+                    idempotency_key or f"request-changes:{artifact_id}:{secrets.token_hex(8)}"
                 ),
             )
         except ArtifactStateError:
             raise
         except ValueError as exc:
-            raise ArtifactServiceError(
-                str(exc), "Artifact 状态已变化", status_code=409
-            ) from exc
+            raise ArtifactServiceError(str(exc), "Artifact 状态已变化", status_code=409) from exc
         if not changed:
             raise ArtifactServiceError("artifact_not_found", "Artifact 不存在", status_code=404)
         await self.enqueue_status_event(
@@ -540,9 +582,9 @@ def public_review_run(run: Mapping[str, Any]) -> dict[str, Any]:
 
 def public_review_finding(finding: Mapping[str, Any]) -> dict[str, Any]:
     result = _pick_fields(finding, _PUBLIC_FINDING_FIELDS)
-    advisory = not bool(finding.get("deterministic", True)) or str(
-        finding.get("source") or ""
-    ) == "llm"
+    advisory = (
+        not bool(finding.get("deterministic", True)) or str(finding.get("source") or "") == "llm"
+    )
     result["advisory"] = advisory
     result["label"] = "自动审查建议" if advisory else "确定性检查"
     return result

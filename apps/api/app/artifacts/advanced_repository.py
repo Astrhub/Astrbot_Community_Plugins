@@ -712,6 +712,23 @@ class PgAdvancedReviewRepositoryMixin:
         )
         return [_record(row) for row in rows]
 
+    async def get_artifact_diff(self, artifact_id: str, diff_id: str) -> dict[str, Any] | None:
+        row = await self._advanced_pool().fetchrow(
+            """
+            SELECT d.*,
+                   base_file.path AS resolved_base_path,
+                   current_file.path AS resolved_current_path
+              FROM artifact_file_diffs d
+         LEFT JOIN artifact_files base_file ON base_file.id = d.base_file_id
+         LEFT JOIN artifact_files current_file ON current_file.id = d.current_file_id
+             WHERE d.artifact_id = $1
+               AND d.id = $2
+            """,
+            artifact_id,
+            diff_id,
+        )
+        return _record(row) if row else None
+
     async def replace_dependency_edges(
         self,
         artifact_id: str,
@@ -2173,6 +2190,24 @@ class InMemoryAdvancedReviewRepositoryMixin:
                 }
             )
         return deepcopy(sorted(values, key=lambda item: item["path"]))
+
+    async def get_artifact_diff(self, artifact_id: str, diff_id: str) -> dict[str, Any] | None:
+        item = next(
+            (row for row in self.diffs.get(artifact_id, []) if str(row.get("id") or "") == diff_id),
+            None,
+        )
+        if item is None:
+            return None
+        files_by_id = {str(file["id"]): file for files in self.files.values() for file in files}
+        base = files_by_id.get(str(item.get("base_file_id") or "")) or {}
+        current = files_by_id.get(str(item.get("current_file_id") or "")) or {}
+        return deepcopy(
+            {
+                **item,
+                "resolved_base_path": base.get("path"),
+                "resolved_current_path": current.get("path"),
+            }
+        )
 
     async def replace_dependency_edges(
         self,

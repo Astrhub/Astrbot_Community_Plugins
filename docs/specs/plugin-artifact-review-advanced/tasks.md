@@ -270,24 +270,24 @@
         - *Details*: 运行 graph/scope/DAG tests、Ruff 后提交。
         - *Requirements*: FR-206、FR-210。
 
-- [ ] 13. **受限文件与 Diff API**
-    - [ ] 13.1. 扩展 ArtifactStorage 安全读取接口
+- [x] 13. **受限文件与 Diff API**
+    - [x] 13.1. 扩展 ArtifactStorage 安全读取接口
         - *Goal*: 通过登记 key 读取受限文本/JSON，不暴露预签名 URL。
         - *Details*: Local/S3 实现 range/size/hash；API service 只接受 artifact/file/diff IDs；路径和对象 key 不来自客户端。
         - *Requirements*: FR-211。
-    - [ ] 13.2. 实现文件树、文本行分页和 diff API
+    - [x] 13.2. 实现文件树、文本行分页和 diff API
         - *Goal*: 作者/管理员安全浏览 artifact。
         - *Details*: 所有权/admin 校验、UTF-8 text only、binary metadata、line limits、Cache-Control no-store、稳定错误码和可选读取审计。
         - *Requirements*: FR-211、FR-223。
-    - [ ] 13.3. 更新 typed schemas 和 OpenAPI
+    - [x] 13.3. 更新 typed schemas 和 OpenAPI
         - *Goal*: public/user/admin/core_admin surface 准确。
         - *Details*: 不返回 content_key/quarantine_key/log/prompt；同步静态 OpenAPI 和过滤测试。
         - *Requirements*: FR-211、FR-223。
-    - [ ] 13.4. 增加权限与恶意输入测试
+    - [x] 13.4. 增加权限与恶意输入测试
         - *Goal*: 阻止跨作者、任意路径、二进制、超限和 SHA drift。
         - *Details*: 覆盖 `../`、object key、跨 artifact file ID、huge line、invalid range、non-UTF8、stale diff。
         - *Requirements*: P3 验收、安全。
-    - [ ] 13.5. 验证并提交内容 API
+    - [x] 13.5. 验证并提交内容 API
         - *Goal*: 后端阅读边界验证无误后提交。
         - *Details*: 运行 API/permissions/storage/OpenAPI/Ruff tests，敏感字段搜索后提交。
         - *Requirements*: FR-211、FR-223。

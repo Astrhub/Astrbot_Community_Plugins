@@ -37,6 +37,8 @@ def test_openapi_public_excludes_admin_and_core():
     assert "/v1/admin/users" not in paths
     assert "/v1/core/users" not in paths
     assert "/v1/admin/settings" not in paths
+    assert "/v1/artifacts/{artifact_id}/files" not in paths
+    assert "/v1/artifacts/{artifact_id}/files/{file_id}/content" not in paths
     # public routes MUST appear
     assert "/v1/plugins" in paths
     assert "/v1/site" in paths
@@ -73,6 +75,10 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
     _login(client, "regularuser", "userpass123")
     user_schema = client.get("/openapi.json").json()
     assert "/v1/artifacts/{artifact_id}" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/files" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/files/{file_id}/content" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/diff" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/diff/{diff_id}" in user_schema["paths"]
     assert "/v1/admin/artifacts/{artifact_id}/request-changes" not in user_schema["paths"]
     detail_response = user_schema["paths"]["/v1/artifacts/{artifact_id}"]["get"]["responses"][
         "200"
@@ -81,12 +87,10 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
 
     _login(client, "adminuser", "adminpass123")
     admin_schema = client.get("/openapi.json").json()
-    request_changes = admin_schema["paths"][
-        "/v1/admin/artifacts/{artifact_id}/request-changes"
-    ]["post"]
-    response_schema = request_changes["responses"]["200"]["content"]["application/json"][
-        "schema"
+    request_changes = admin_schema["paths"]["/v1/admin/artifacts/{artifact_id}/request-changes"][
+        "post"
     ]
+    response_schema = request_changes["responses"]["200"]["content"]["application/json"]["schema"]
     assert response_schema["$ref"].endswith("/ArtifactEnvelope")
 
     schemas = admin_schema["components"]["schemas"]
@@ -99,6 +103,15 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
     assert {"raw_result", "raw_result_key", "worker_id"}.isdisjoint(run_fields)
     assert "metadata" not in finding_fields
     assert "idempotency_key" not in decision_fields
+
+    file_fields = set(schemas["PublicArtifactFile"]["properties"])
+    diff_fields = set(schemas["PublicArtifactDiff"]["properties"])
+    diff_stats_fields = set(schemas["PublicArtifactDiffStats"]["properties"])
+    assert {"id", "path", "sha256", "is_text", "graph_status"} <= file_fields
+    assert {"id", "path", "change_type", "has_hunks", "stats"} <= diff_fields
+    assert {"content_key", "hunks_key", "quarantine_key"}.isdisjoint(file_fields)
+    assert {"content_key", "hunks_key", "quarantine_key"}.isdisjoint(diff_fields)
+    assert {"hunks_sha256", "hunks_size_bytes", "hunks_key"}.isdisjoint(diff_stats_fields)
 
 
 def test_openapi_core_admin_sees_all():

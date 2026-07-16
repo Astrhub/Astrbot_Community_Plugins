@@ -66,6 +66,8 @@ class ArtifactRepository(Protocol):
 
     async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]: ...
 
+    async def get_artifact_file(self, artifact_id: str, file_id: str) -> dict[str, Any] | None: ...
+
     async def get_artifact_category_state(self, artifact_id: str) -> dict[str, Any] | None: ...
 
     async def apply_category_suggestion(
@@ -144,6 +146,8 @@ class ArtifactRepository(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     async def list_artifact_diffs(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def get_artifact_diff(self, artifact_id: str, diff_id: str) -> dict[str, Any] | None: ...
 
     async def replace_dependency_edges(
         self,
@@ -628,6 +632,14 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
             artifact_id,
         )
         return [_record(row) for row in rows]
+
+    async def get_artifact_file(self, artifact_id: str, file_id: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            "SELECT * FROM artifact_files WHERE artifact_id = $1 AND id = $2",
+            artifact_id,
+            file_id,
+        )
+        return _record(row) if row else None
 
     async def get_artifact_category_state(self, artifact_id: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow(
@@ -2292,6 +2304,13 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
 
     async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]:
         return deepcopy(sorted(self.files.get(artifact_id, []), key=lambda item: item["path"]))
+
+    async def get_artifact_file(self, artifact_id: str, file_id: str) -> dict[str, Any] | None:
+        item = next(
+            (row for row in self.files.get(artifact_id, []) if str(row.get("id") or "") == file_id),
+            None,
+        )
+        return deepcopy(item) if item else None
 
     async def get_artifact_category_state(self, artifact_id: str) -> dict[str, Any] | None:
         artifact = self.artifacts.get(artifact_id)

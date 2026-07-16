@@ -187,6 +187,124 @@ class ReviewFindingListResponse(PublicResponseModel):
     items: list[PublicReviewFinding]
 
 
+class PublicArtifactFile(PublicResponseModel):
+    id: str
+    artifact_id: str
+    path: str
+    language: str = ""
+    mime_type: str = "application/octet-stream"
+    sha256: str
+    size_bytes: int = Field(ge=0)
+    line_count: int | None = Field(default=None, ge=0)
+    is_text: bool
+    is_entrypoint: bool = False
+    is_reachable: bool = False
+    graph_status: Literal["not_analyzed", "complete", "incomplete", "not_applicable"]
+    content_available: bool
+
+
+class ArtifactFileListResponse(PublicResponseModel):
+    artifact_id: str
+    tree_sha256: str
+    items: list[PublicArtifactFile]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ArtifactTextLine(PublicResponseModel):
+    number: int = Field(ge=1)
+    text: str
+
+
+class ArtifactFileContentResponse(PublicResponseModel):
+    artifact_id: str
+    tree_sha256: str
+    file: PublicArtifactFile
+    encoding: Literal["utf-8"]
+    start_line: int = Field(ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+    total_lines: int = Field(ge=0)
+    truncated: bool
+    lines: list[ArtifactTextLine]
+
+
+class PublicArtifactDiffStats(PublicResponseModel):
+    base_size_bytes: int | None = Field(default=None, ge=0)
+    current_size_bytes: int | None = Field(default=None, ge=0)
+    base_line_count: int | None = Field(default=None, ge=0)
+    current_line_count: int | None = Field(default=None, ge=0)
+    forced_review: bool = False
+    binary: bool = False
+    added_lines: int = Field(default=0, ge=0)
+    deleted_lines: int = Field(default=0, ge=0)
+    hunk_count: int = Field(default=0, ge=0)
+    hunks_complete: bool = True
+    hunks_omitted: int = Field(default=0, ge=0)
+    hunks_omitted_reason: str = ""
+    hunks_truncated: bool = False
+
+
+class PublicArtifactDiff(PublicResponseModel):
+    id: str
+    artifact_id: str
+    base_artifact_id: str | None = None
+    base_file_id: str | None = None
+    current_file_id: str | None = None
+    path: str
+    base_path: str = ""
+    change_type: Literal["added", "deleted", "modified", "unchanged", "renamed"]
+    base_sha256: str | None = None
+    current_sha256: str | None = None
+    base_tree_sha256: str | None = None
+    current_tree_sha256: str
+    stats: PublicArtifactDiffStats = Field(default_factory=PublicArtifactDiffStats)
+    has_hunks: bool
+    created_at: datetime | None = None
+
+
+class ArtifactDiffListResponse(PublicResponseModel):
+    artifact_id: str
+    tree_sha256: str
+    items: list[PublicArtifactDiff]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ArtifactDiffLine(PublicResponseModel):
+    kind: Literal["context", "delete", "add"]
+    prefix: Literal[" ", "-", "+"]
+    text: str
+    newline: Literal["none", "lf", "crlf", "cr"]
+    old_line: int | None = Field(default=None, ge=1)
+    new_line: int | None = Field(default=None, ge=1)
+
+
+class ArtifactDiffHunk(PublicResponseModel):
+    id: str
+    header: str
+    old_start: int = Field(ge=0)
+    old_lines: int = Field(ge=0)
+    new_start: int = Field(ge=0)
+    new_lines: int = Field(ge=0)
+    lines: list[ArtifactDiffLine]
+
+
+class ArtifactDiffContentResponse(PublicResponseModel):
+    artifact_id: str
+    tree_sha256: str
+    diff: PublicArtifactDiff
+    hunks_available: bool
+    unavailable_reason: str = ""
+    schema_version: str = ""
+    tool_version: str = ""
+    context_lines: int = Field(default=0, ge=0, le=20)
+    truncated: bool
+    omitted_hunks: int = Field(default=0, ge=0)
+    hunks: list[ArtifactDiffHunk]
+
+
 class GithubArtifactSubmission(BaseModel):
     source_ref: str = Field(default="", max_length=200)
 

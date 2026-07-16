@@ -6,16 +6,21 @@ from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
 
 from ..auth import can_edit_plugin, is_admin
 from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
+from .content import ArtifactContentError
 from .github_source import GithubSourceError
 from .models import ArtifactStateError
 from .schemas import (
     ArtifactDecisionPayload,
+    ArtifactDiffContentResponse,
+    ArtifactDiffListResponse,
     ArtifactDetailResponse,
     ArtifactEnvelope,
+    ArtifactFileContentResponse,
+    ArtifactFileListResponse,
     GithubArtifactSubmission,
     PluginRegistrationPayload,
     ReviewFindingListResponse,
@@ -31,6 +36,11 @@ from .service import (
 from .storage import ArtifactStorageError
 
 ZIP_FILENAME_PATTERN = re.compile(r"\.zip$", re.IGNORECASE)
+PRIVATE_READ_HEADERS = {
+    "Cache-Control": "no-store, private",
+    "Pragma": "no-cache",
+    "X-Content-Type-Options": "nosniff",
+}
 
 
 def build_artifact_router() -> APIRouter:
@@ -189,6 +199,104 @@ def build_artifact_router() -> APIRouter:
                 for finding in await service.repository.list_findings(artifact_id)
             ]
         }
+
+    @router.get(
+        "/v1/artifacts/{artifact_id}/files",
+        tags=["artifacts"],
+        summary="查看 Artifact 文件树",
+        response_model=ArtifactFileListResponse,
+    )
+    async def artifact_files(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        limit: int = Query(default=200),
+        offset: int = Query(default=0),
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        user = await _require_user(request)
+        artifact = await _visible_artifact(service, artifact_id, user)
+        _private_read_headers(response)
+        try:
+            return await service.artifact_files(artifact, limit=limit, offset=offset)
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.get(
+        "/v1/artifacts/{artifact_id}/files/{file_id}/content",
+        tags=["artifacts"],
+        summary="分页读取 Artifact 文本文件",
+        response_model=ArtifactFileContentResponse,
+    )
+    async def artifact_file_content(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        file_id: str,
+        start_line: int = Query(default=1),
+        line_limit: int = Query(default=200),
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        user = await _require_user(request)
+        artifact = await _visible_artifact(service, artifact_id, user)
+        _private_read_headers(response)
+        try:
+            return await service.artifact_file_content(
+                artifact,
+                file_id,
+                start_line=start_line,
+                line_limit=line_limit,
+            )
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.get(
+        "/v1/artifacts/{artifact_id}/diff",
+        tags=["artifacts"],
+        summary="查看 Artifact 文件差异",
+        response_model=ArtifactDiffListResponse,
+    )
+    async def artifact_diffs(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        limit: int = Query(default=200),
+        offset: int = Query(default=0),
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        user = await _require_user(request)
+        artifact = await _visible_artifact(service, artifact_id, user)
+        _private_read_headers(response)
+        try:
+            return await service.artifact_diffs(artifact, limit=limit, offset=offset)
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.get(
+        "/v1/artifacts/{artifact_id}/diff/{diff_id}",
+        tags=["artifacts"],
+        summary="读取 Artifact 受限 Diff Hunks",
+        response_model=ArtifactDiffContentResponse,
+    )
+    async def artifact_diff_content(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        diff_id: str,
+        hunk_id: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        user = await _require_user(request)
+        artifact = await _visible_artifact(service, artifact_id, user)
+        _private_read_headers(response)
+        try:
+            return await service.artifact_diff_content(
+                artifact,
+                diff_id,
+                hunk_id=hunk_id,
+            )
+        except Exception as exc:
+            _raise_artifact_error(exc)
 
     @router.get(
         "/v1/admin/artifacts",
@@ -413,6 +521,13 @@ def _raise_artifact_error(exc: Exception) -> None:
         raise exc
     if isinstance(exc, ArtifactServiceError):
         raise _http_error(exc.status_code, exc.code, str(exc)) from exc
+    if isinstance(exc, ArtifactContentError):
+        raise _http_error(
+            exc.status_code,
+            exc.code,
+            str(exc),
+            headers=PRIVATE_READ_HEADERS,
+        ) from exc
     if isinstance(exc, GithubSourceError):
         status = 503 if exc.retryable else 400
         raise _http_error(status, exc.code, str(exc)) from exc
@@ -489,5 +604,19 @@ async def _increment_rate_limit(request: Request, key: str, expires_at: int, now
     return int(entry["count"])
 
 
-def _http_error(status: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code=status, detail={"code": code, "message": message})
+def _http_error(
+    status: int,
+    code: str,
+    message: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status,
+        detail={"code": code, "message": message},
+        headers=dict(headers or {}),
+    )
+
+
+def _private_read_headers(response: Response) -> None:
+    response.headers.update(PRIVATE_READ_HEADERS)
