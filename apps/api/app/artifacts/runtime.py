@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -10,6 +11,15 @@ from .archive import ArchivePrechecker
 from .category import OpenAICompatibleCategoryProvider
 from .github_source import GithubSourceClient
 from .jobs import ArtifactJobRunner, worker_id
+from .malware import (
+    ClamAvScanner,
+    ClamdInstreamScanner,
+    UnavailableClamAvScanner,
+    UnavailableYaraScanner,
+    YaraRulesetSnapshot,
+    YaraScanner,
+    YaraSubprocessScanner,
+)
 from .notifications import ArtifactNotificationDispatcher
 from .policy import ReviewPolicyV1, parse_review_policy, review_policy_sha256
 from .repository import InMemoryArtifactRepository, PgArtifactRepository
@@ -29,6 +39,7 @@ class ArtifactRuntime:
     store: Any
     github_api_token: str = ""
     allow_in_memory_artifacts: bool = False
+    worker_execution_enabled: bool = False
     started: bool = False
     generation: int = 0
     repository: Any | None = None
@@ -90,6 +101,10 @@ class ArtifactRuntime:
                 )
                 category_provider = _category_provider(self.config.review)
                 llm_provider = _structured_llm_provider(self.config.review)
+                clamav_scanner, yara_scanner = _malware_scanners(
+                    self.config.review,
+                    enabled=self.worker_execution_enabled,
+                )
                 job_runner = ArtifactJobRunner(
                     repository=repository,
                     storage=storage,
@@ -104,6 +119,8 @@ class ArtifactRuntime:
                     category_provider_config_ref=self.config.review.llm_config_ref,
                     llm_provider=llm_provider,
                     llm_provider_config_ref=self.config.review.llm_config_ref,
+                    clamav_scanner=clamav_scanner,
+                    yara_scanner=yara_scanner,
                 )
                 self.attach_components(
                     repository=repository,
@@ -279,6 +296,7 @@ def build_artifact_runtime(
     store: Any,
     *,
     allow_in_memory_artifacts: bool = True,
+    worker_execution_enabled: bool = False,
 ) -> ArtifactRuntime:
     """Build the shared runtime shell without starting an in-process worker."""
     return ArtifactRuntime(
@@ -288,6 +306,7 @@ def build_artifact_runtime(
         store=store,
         github_api_token=settings.github_api_token,
         allow_in_memory_artifacts=allow_in_memory_artifacts,
+        worker_execution_enabled=worker_execution_enabled,
     )
 
 
@@ -323,6 +342,40 @@ def _structured_llm_provider(
         )
     except ValueError:
         return None
+
+
+def _malware_scanners(
+    review: ArtifactReviewSettings,
+    *,
+    enabled: bool,
+) -> tuple[ClamAvScanner | None, YaraScanner | None]:
+    if not enabled:
+        return None, None
+
+    clamav: ClamAvScanner | None = None
+    if review.clamav_enabled:
+        try:
+            clamav = ClamdInstreamScanner(
+                host=review.clamav_host,
+                port=review.clamav_port,
+                config_ref=review.clamav_config_ref,
+            )
+        except ValueError:
+            clamav = UnavailableClamAvScanner("clamav_configuration_invalid")
+
+    yara: YaraScanner | None = None
+    if review.yara_enabled:
+        try:
+            snapshot = YaraRulesetSnapshot.load(
+                version=review.yara_ruleset_version,
+                path=Path(review.yara_ruleset_path),
+                source=review.yara_ruleset_source,
+                activated_at=review.yara_ruleset_activated_at,
+            )
+            yara = YaraSubprocessScanner(snapshot)
+        except (OSError, ValueError):
+            yara = UnavailableYaraScanner("yara_ruleset_unavailable")
+    return clamav, yara
 
 
 def _finalize_review_status(

@@ -18,12 +18,19 @@ from .archive import (
     normalize_version,
 )
 from .models import JobType, PublicationStatus, ReviewStatus
+from .malware import (
+    ClamAvScanner,
+    UnavailableClamAvScanner,
+    UnavailableYaraScanner,
+    YaraScanner,
+)
 from .notifications import ArtifactNotificationDispatcher
 from .orchestration import ReviewOrchestrator, StageToolSnapshot, review_run_type_for_job
 from .policy import ReviewPolicyStage
 from .repository import ArtifactRepository
 from .stages import (
     CategoryStage,
+    ClamAvStage,
     DiffGraphStage,
     LlmFileStage,
     LlmPackageStage,
@@ -33,6 +40,7 @@ from .stages import (
     StageContext,
     StageOutcome,
     StaticScanStage,
+    YaraStage,
     RoutingStage,
 )
 from .static_scan import StaticScanner
@@ -75,6 +83,8 @@ class ArtifactJobRunner:
         llm_provider: StructuredLlmProvider | None = None,
         llm_provider_config_ref: str = "config:llm-default",
         llm_retry_delay_seconds: float = 0.25,
+        clamav_scanner: ClamAvScanner | None = None,
+        yara_scanner: YaraScanner | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
@@ -87,6 +97,8 @@ class ArtifactJobRunner:
         self.advanced_review_enabled = advanced_review_enabled
         self.category_provider = category_provider or UnavailableCategoryProvider()
         self.llm_provider = llm_provider or UnavailableStructuredLlmProvider()
+        self.clamav_scanner = clamav_scanner or UnavailableClamAvScanner()
+        self.yara_scanner = yara_scanner or UnavailableYaraScanner()
         tool_snapshots: dict[ReviewPolicyStage, StageToolSnapshot] = {}
         tool_snapshots[ReviewPolicyStage.DIFF] = StageToolSnapshot(DIFF_TOOL_VERSION)
         tool_snapshots[ReviewPolicyStage.IMPORT_GRAPH] = StageToolSnapshot(
@@ -103,6 +115,18 @@ class ArtifactJobRunner:
                 ReviewPolicyStage.LLM_SUMMARY,
             ):
                 tool_snapshots[stage] = StageToolSnapshot(llm_provider.version)
+        if clamav_scanner is not None:
+            tool_snapshots[ReviewPolicyStage.CLAMAV] = StageToolSnapshot(
+                self.clamav_scanner.version,
+                ready=self.clamav_scanner.ready,
+                reason=self.clamav_scanner.unavailable_reason,
+            )
+        if yara_scanner is not None:
+            tool_snapshots[ReviewPolicyStage.YARA] = StageToolSnapshot(
+                self.yara_scanner.version,
+                ready=self.yara_scanner.ready,
+                reason=self.yara_scanner.unavailable_reason,
+            )
         self.review_orchestrator = review_orchestrator or ReviewOrchestrator(
             repository,
             tool_snapshots=tool_snapshots,
@@ -112,6 +136,8 @@ class ArtifactJobRunner:
             PrecheckStage(advanced_review_enabled=advanced_review_enabled),
             StaticScanStage(advanced_review_enabled=advanced_review_enabled),
             DiffGraphStage(ArtifactDiffService(), ImportGraphService()),
+            ClamAvStage(self.clamav_scanner),
+            YaraStage(self.yara_scanner),
             RoutingStage(),
         ]
         default_stages.append(
@@ -168,7 +194,12 @@ class ArtifactJobRunner:
 
     async def close(self) -> None:
         closed: set[int] = set()
-        for provider in (self.category_provider, self.llm_provider):
+        for provider in (
+            self.category_provider,
+            self.llm_provider,
+            self.clamav_scanner,
+            self.yara_scanner,
+        ):
             if id(provider) in closed:
                 continue
             closed.add(id(provider))

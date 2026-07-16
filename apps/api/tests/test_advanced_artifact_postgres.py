@@ -1194,6 +1194,35 @@ async def run_advanced_repository_scenario(url: str) -> None:
                 }
             )
 
+        malware_run = await repository.create_review_run(
+            {
+                "artifact_id": first["id"],
+                "type": "clamav",
+                "status": "running",
+                "policy_version_id": policy["id"],
+                "tool_name": "clamav",
+                "tool_version": "clamd-instream-v1",
+                "input_sha256": "d" * 64,
+                "idempotency_key": "postgres-clamav-run",
+            }
+        )
+        malware_run = await repository.complete_review_run(
+            malware_run["id"],
+            {
+                "status": "succeeded",
+                "summary": "ClamAV scan completed",
+                "ruleset_version": "28000",
+                "coverage": {
+                    "outcome": "completed",
+                    "stage_name": "clamav",
+                    "scan_result": "clean",
+                    "database_version": "28000",
+                },
+            },
+        )
+        assert malware_run and malware_run["ruleset_version"] == "28000"
+        assert malware_run["coverage"]["database_version"] == "28000"
+
         dispatch_payload = {
             "artifact_id": first["id"],
             "run_id": run["id"],

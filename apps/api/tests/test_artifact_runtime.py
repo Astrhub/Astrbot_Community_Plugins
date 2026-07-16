@@ -217,9 +217,7 @@ def test_runtime_wires_category_adapter_into_external_worker(tmp_path) -> None:
             runner = runtime.job_runner
             assert runner is not None
             stage_wired = "category" in runner._review_stages
-            snapshot = runner.review_orchestrator.tool_snapshots.get(
-                ReviewPolicyStage.CATEGORY
-            )
+            snapshot = runner.review_orchestrator.tool_snapshots.get(ReviewPolicyStage.CATEGORY)
             return stage_wired, bool(snapshot and snapshot.ready)
         finally:
             await runtime.close()
@@ -252,6 +250,100 @@ def test_runtime_keeps_category_handler_when_provider_is_unavailable(tmp_path) -
             await runtime.close()
 
     assert asyncio.run(scenario()) == (True, False)
+
+
+def test_api_runtime_does_not_load_or_probe_configured_malware_tools(tmp_path) -> None:
+    settings = load_settings(
+        {
+            "ARTIFACTS_ENABLED": "true",
+            "ARTIFACT_LOCAL_ROOT": str(tmp_path / "artifacts"),
+            "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+            "ARTIFACT_ADVANCED_REVIEW_ENABLED": "true",
+            "ARTIFACT_CLAMAV_ENABLED": "true",
+            "ARTIFACT_CLAMAV_HOST": "clamav.internal",
+            "ARTIFACT_YARA_ENABLED": "true",
+            "ARTIFACT_YARA_RULESET_VERSION": "market-v1",
+            "ARTIFACT_YARA_RULESET_PATH": str(tmp_path / "must-not-be-read.yar"),
+            "ARTIFACT_YARA_RULESET_SOURCE": "core-admin",
+            "ARTIFACT_YARA_RULESET_ACTIVATED_AT": "2026-07-16T00:00:00Z",
+            "DATABASE_URL": "postgresql://example.invalid/market",
+        }
+    )
+
+    async def scenario() -> tuple[set[str], set[ReviewPolicyStage]]:
+        runtime = build_artifact_runtime(settings, InMemoryMarketStore())
+        await runtime.start(runtime.store)
+        try:
+            runner = runtime.job_runner
+            assert runner is not None
+            return set(runner._handlers), set(runner.review_orchestrator.tool_snapshots)
+        finally:
+            await runtime.close()
+
+    handlers, snapshots = asyncio.run(scenario())
+
+    assert {"clamav_scan", "yara_scan"} <= handlers
+    assert ReviewPolicyStage.CLAMAV not in snapshots
+    assert ReviewPolicyStage.YARA not in snapshots
+
+
+def test_worker_runtime_loads_audited_yara_snapshot_without_probing_clamd(tmp_path) -> None:
+    rules = tmp_path / "market-v1.yar"
+    rules.write_text("rule fixture { condition: false }", encoding="utf-8")
+    settings = load_settings(
+        {
+            "ARTIFACTS_ENABLED": "true",
+            "ARTIFACT_LOCAL_ROOT": str(tmp_path / "artifacts"),
+            "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+            "ARTIFACT_ADVANCED_REVIEW_ENABLED": "true",
+            "ARTIFACT_CLAMAV_ENABLED": "true",
+            "ARTIFACT_CLAMAV_CONFIG_REF": "config:clamav-test",
+            "ARTIFACT_CLAMAV_HOST": "clamav.internal",
+            "ARTIFACT_YARA_ENABLED": "true",
+            "ARTIFACT_YARA_RULESET_VERSION": "market-v1",
+            "ARTIFACT_YARA_RULESET_PATH": str(rules),
+            "ARTIFACT_YARA_RULESET_SOURCE": "core-admin",
+            "ARTIFACT_YARA_RULESET_ACTIVATED_AT": "2026-07-16T00:00:00Z",
+            "DATABASE_URL": "postgresql://example.invalid/market",
+        }
+    )
+
+    async def scenario() -> dict[ReviewPolicyStage, object]:
+        runtime = build_artifact_runtime(
+            settings,
+            InMemoryMarketStore(),
+            worker_execution_enabled=True,
+        )
+        await runtime.start(runtime.store)
+        try:
+            runner = runtime.job_runner
+            assert runner is not None
+            return dict(runner.review_orchestrator.tool_snapshots)
+        finally:
+            await runtime.close()
+
+    snapshots = asyncio.run(scenario())
+
+    assert snapshots[ReviewPolicyStage.CLAMAV].ready is True
+    assert snapshots[ReviewPolicyStage.CLAMAV].version == "clamd-instream-v1"
+    assert snapshots[ReviewPolicyStage.YARA].ready is True
+    assert snapshots[ReviewPolicyStage.YARA].version.startswith("yara-subprocess-v1:market-v1:")
+
+
+def test_yara_component_rejects_unversioned_activation_metadata(tmp_path) -> None:
+    component = load_settings(
+        {
+            "ARTIFACT_YARA_ENABLED": "true",
+            "ARTIFACT_YARA_RULESET_VERSION": "market-v1",
+            "ARTIFACT_YARA_RULESET_PATH": str(tmp_path / "rules.yar"),
+            "ARTIFACT_YARA_RULESET_SOURCE": "https://author.invalid/rules",
+            "ARTIFACT_YARA_RULESET_ACTIVATED_AT": "yesterday",
+        }
+    ).artifacts.review.component_configuration()["yara"]
+
+    assert component["configured"] is False
+    assert "yara_ruleset_source_invalid" in component["reasons"]
+    assert "yara_ruleset_activation_invalid" in component["reasons"]
 
 
 def test_artifact_api_fails_closed_without_postgresql_store() -> None:

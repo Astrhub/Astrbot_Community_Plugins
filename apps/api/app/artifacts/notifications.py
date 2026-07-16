@@ -52,6 +52,14 @@ STATUS_COPY: dict[str, tuple[str, str]] = {
         "[自动审查] 插件版本处理失败",
         "自动审查基础设施处理失败，版本未进入人工复核；当前稳定 CDN 包不会被覆盖。",
     ),
+    "artifact_malware_critical": (
+        "[安全审查] 插件版本检测到严重风险",
+        "恶意软件扫描检测到严重风险，该候选版本不会发布 CDN 插件包。请进入站内工作台查看结果。",
+    ),
+    "artifact_malware_degraded": (
+        "[自动审查] 恶意软件扫描未完成",
+        "恶意软件扫描基础设施或规则状态异常，本次结果不会显示为安全通过。请进入站内工作台查看结果。",
+    ),
     "artifact_revoked": (
         "[安全处置] 插件 CDN 包已下架",
         "管理员已撤回当前 CDN 插件包。请进入站内工作台查看原因。",
@@ -72,6 +80,7 @@ _UNLIST_EVENTS = frozenset(
 _EMERGENCY_ADMIN_EVENTS = frozenset(
     {"artifact_stable_risk_revoking", "artifact_revoked", "artifact_revoke_failed"}
 )
+_MALWARE_ADMIN_EVENTS = frozenset({"artifact_malware_critical", "artifact_malware_degraded"})
 
 
 class ArtifactNotificationDispatcher:
@@ -150,8 +159,10 @@ class ArtifactNotificationDispatcher:
                 )
 
         event_type = str(event.get("event_type") or "")
-        notify_admins = event_type == "artifact_pending_review" or (
-            event_type in _EMERGENCY_ADMIN_EVENTS and payload.get("emergency") is True
+        notify_admins = (
+            event_type == "artifact_pending_review"
+            or event_type in _MALWARE_ADMIN_EVENTS
+            or (event_type in _EMERGENCY_ADMIN_EVENTS and payload.get("emergency") is True)
         )
         if notify_admins:
             users = await self._call_store("list_users")
@@ -174,6 +185,7 @@ class ArtifactNotificationDispatcher:
                     email_preference=(
                         "email_notify_pending_review"
                         if event_type == "artifact_pending_review"
+                        or event_type in _MALWARE_ADMIN_EVENTS
                         else "email_notify_unlist"
                     ),
                 )

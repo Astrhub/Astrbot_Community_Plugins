@@ -28,7 +28,7 @@ async def run_worker() -> None:
         session_ttl_seconds=settings.session_max_age_seconds,
     )
     await store.connect()
-    runtime = build_artifact_runtime(settings, store)
+    runtime = build_artifact_runtime(settings, store, worker_execution_enabled=True)
     await runtime.start(store)
     if not runtime.available or runtime.job_runner is None:
         await runtime.close()

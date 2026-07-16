@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
@@ -56,6 +58,8 @@ class ArtifactReviewSettings:
     yara_enabled: bool
     yara_ruleset_version: str
     yara_ruleset_path: str
+    yara_ruleset_source: str
+    yara_ruleset_activated_at: str
     dependency_enabled: bool
     dependency_config_ref: str
     dependency_advisory_url: str
@@ -74,10 +78,39 @@ class ArtifactReviewSettings:
         )
         if self.llm_enabled and self.llm_provider not in {"openai", "openai-compatible"}:
             llm = _degraded_review_component(llm, "llm_provider_unsupported")
-        if self.llm_enabled and self.llm_endpoint_url and not _valid_llm_endpoint(
-            self.llm_endpoint_url
+        if (
+            self.llm_enabled
+            and self.llm_endpoint_url
+            and not _valid_llm_endpoint(self.llm_endpoint_url)
         ):
             llm = _degraded_review_component(llm, "llm_endpoint_url_invalid")
+        yara = _review_component_configuration(
+            self.yara_enabled,
+            {
+                "yara_ruleset_version_missing": self.yara_ruleset_version,
+                "yara_ruleset_path_missing": self.yara_ruleset_path,
+                "yara_ruleset_source_missing": self.yara_ruleset_source,
+                "yara_ruleset_activation_missing": self.yara_ruleset_activated_at,
+            },
+        )
+        if (
+            self.yara_enabled
+            and self.yara_ruleset_path
+            and not Path(self.yara_ruleset_path).is_absolute()
+        ):
+            yara = _degraded_review_component(yara, "yara_ruleset_path_invalid")
+        if (
+            self.yara_enabled
+            and self.yara_ruleset_source
+            and not _valid_public_identifier(self.yara_ruleset_source)
+        ):
+            yara = _degraded_review_component(yara, "yara_ruleset_source_invalid")
+        if (
+            self.yara_enabled
+            and self.yara_ruleset_activated_at
+            and not _valid_timestamp(self.yara_ruleset_activated_at)
+        ):
+            yara = _degraded_review_component(yara, "yara_ruleset_activation_invalid")
         return {
             "runtime": _review_component_configuration(
                 self.runtime_enabled,
@@ -91,13 +124,7 @@ class ArtifactReviewSettings:
                     "clamav_host_missing": self.clamav_host,
                 },
             ),
-            "yara": _review_component_configuration(
-                self.yara_enabled,
-                {
-                    "yara_ruleset_version_missing": self.yara_ruleset_version,
-                    "yara_ruleset_path_missing": self.yara_ruleset_path,
-                },
-            ),
+            "yara": yara,
             "dependency": _review_component_configuration(
                 self.dependency_enabled,
                 {
@@ -417,6 +444,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                 yara_enabled=_bool(merged.get("ARTIFACT_YARA_ENABLED")),
                 yara_ruleset_version=merged.get("ARTIFACT_YARA_RULESET_VERSION", ""),
                 yara_ruleset_path=merged.get("ARTIFACT_YARA_RULESET_PATH", ""),
+                yara_ruleset_source=merged.get("ARTIFACT_YARA_RULESET_SOURCE", "deployment"),
+                yara_ruleset_activated_at=merged.get(
+                    "ARTIFACT_YARA_RULESET_ACTIVATED_AT",
+                    "",
+                ),
                 dependency_enabled=_bool(merged.get("ARTIFACT_DEPENDENCY_REVIEW_ENABLED")),
                 dependency_config_ref=merged.get(
                     "ARTIFACT_DEPENDENCY_CONFIG_REF",
@@ -496,6 +528,21 @@ def _valid_llm_endpoint(value: str) -> bool:
         and not parsed.query
         and not parsed.fragment
     )
+
+
+def _valid_public_identifier(value: str) -> bool:
+    normalized = str(value or "").strip()
+    return bool(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", normalized) and "://" not in normalized
+    )
+
+
+def _valid_timestamp(value: str) -> bool:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
 
 
 def _normalize_env(env: Mapping[str, str]) -> dict[str, str]:

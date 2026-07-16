@@ -366,24 +366,24 @@
         - *Details*: 运行 `vp check`、Vitest/build、API permission tests；使用桌面/移动截图检查重叠和文本，再提交。
         - *Requirements*: FR-224、P3 验收。
 
-- [ ] 17. **ClamAV 与 YARA**
-    - [ ] 17.1. 实现 ClamAV adapter
+- [x] 17. **ClamAV 与 YARA**
+    - [x] 17.1. 实现 ClamAV adapter
         - *Goal*: 扫描 quarantine ZIP 并保存 engine/database/target/signature 快照。
         - *Details*: 使用 INSTREAM/等价安全协议；clean/infected/unknown/error/stale 分离；daemon 不在 API；confirmed infection deterministic critical。
         - *Requirements*: FR-216。
-    - [ ] 17.2. 实现版本化 YARA ruleset 和 scanner
+    - [x] 17.2. 实现版本化 YARA ruleset 和 scanner
         - *Goal*: 规则来源/hash/激活可审计，扫描受资源限制。
         - *Details*: 核心管理员管理 ruleset；bounded subprocess/service；保存 namespace/rule/tags/offset；author 不能注入规则；timeout/error degraded。
         - *Requirements*: FR-217、FR-220。
-    - [ ] 17.3. 接入 DAG/routing/tool health
+    - [x] 17.3. 接入 DAG/routing/tool health
         - *Goal*: malware 工具结果正确阻断或降级。
         - *Details*: policy fail-closed/manual 配置；工具未运行不显示 clean；run 保存 tool/rules/database versions；通知 critical/degraded。
         - *Requirements*: FR-208、FR-216、FR-217、FR-221、FR-222。
-    - [ ] 17.4. 增加 EICAR/YARA/error tests
+    - [x] 17.4. 增加 EICAR/YARA/error tests
         - *Goal*: 覆盖 infected、clean、unknown、stale、timeout、bad rules 和输出限额。
         - *Details*: 使用官方安全测试字符串/本地测试规则，不提交真实恶意样本。
         - *Requirements*: P4 验收。
-    - [ ] 17.5. 验证并提交 malware scanning
+    - [x] 17.5. 验证并提交 malware scanning
         - *Goal*: 生产 adapter 契约和失败语义验证后提交。
         - *Details*: 运行 unit/contract/DAG/routing/Ruff/Compose tests，记录病毒库/ruleset 测试快照后提交。
         - *Requirements*: FR-216、FR-217。

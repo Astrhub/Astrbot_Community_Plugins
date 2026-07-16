@@ -211,6 +211,19 @@ class MalwarePolicy(FrozenPolicyModel):
     yara_ruleset: str | None = Field(default=None, max_length=128)
     max_database_age_hours: int = Field(default=24, ge=1, le=720)
     on_unknown: ToolFailureAction = ToolFailureAction.FAIL_CLOSED
+    max_files: int = Field(default=2000, ge=1, le=5000)
+    max_file_bytes: int = Field(default=8 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    max_total_bytes: int = Field(
+        default=128 * 1024 * 1024,
+        ge=1024,
+        le=512 * 1024 * 1024,
+    )
+    timeout_seconds: int = Field(default=60, ge=5, le=600)
+    per_file_timeout_seconds: int = Field(default=10, ge=1, le=120)
+    max_matches: int = Field(default=200, ge=1, le=5000)
+    max_offsets_per_match: int = Field(default=16, ge=1, le=256)
+    max_output_bytes: int = Field(default=256 * 1024, ge=1024, le=4 * 1024 * 1024)
+    subprocess_memory_mb: int = Field(default=512, ge=64, le=4096)
 
     @field_validator("clamav_config_ref")
     @classmethod
@@ -223,9 +236,17 @@ class MalwarePolicy(FrozenPolicyModel):
         if value is None:
             return None
         normalized = value.strip()
-        if not _SAFE_IDENTIFIER.fullmatch(normalized):
+        if not _SAFE_IDENTIFIER.fullmatch(normalized) or "://" in normalized:
             raise ValueError("YARA ruleset must be a versioned public identifier")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_scan_limits(self) -> Self:
+        if self.max_file_bytes > self.max_total_bytes:
+            raise ValueError("malware per-file byte limit cannot exceed total byte limit")
+        if self.per_file_timeout_seconds > self.timeout_seconds:
+            raise ValueError("malware per-file timeout cannot exceed total timeout")
+        return self
 
 
 class DependencyPolicy(FrozenPolicyModel):

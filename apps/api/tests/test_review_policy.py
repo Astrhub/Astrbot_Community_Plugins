@@ -66,6 +66,12 @@ def test_review_policy_matches_versioned_design_and_is_immutable() -> None:
     assert policy.category.provider_config_ref == "config:llm-default"
     assert policy.category.prompt_version == "category-prompt-v1"
     assert policy.category.max_output_tokens == 512
+    assert policy.malware.max_file_bytes == 8 * 1024 * 1024
+    assert policy.malware.max_total_bytes == 128 * 1024 * 1024
+    assert policy.malware.max_files == 2000
+    assert policy.malware.timeout_seconds == 60
+    assert policy.malware.per_file_timeout_seconds == 10
+    assert policy.malware.max_matches == 200
 
     with pytest.raises(ValidationError):
         policy.routing.auto_approve = True
@@ -226,6 +232,14 @@ def test_review_policy_rejects_unknown_secret_fields() -> None:
         ReviewPolicyV1.model_validate(payload)
 
 
+def test_review_policy_rejects_a_yara_ruleset_url() -> None:
+    payload = policy_payload()
+    payload["malware"]["yara_ruleset"] = "https://author.invalid/rules"
+
+    with pytest.raises(ValidationError, match="versioned public identifier"):
+        ReviewPolicyV1.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("section", "updates", "message"),
     [
@@ -240,6 +254,16 @@ def test_review_policy_rejects_unknown_secret_fields() -> None:
         ("llm", {"enabled": False, "model": "configured", "max_tokens": 0}, "disabled LLM"),
         ("routing", {"manual_review_at": "high"}, "cannot be higher than medium"),
         ("routing", {"deterministic_reject_at": "medium"}, "cannot be lower than high"),
+        (
+            "malware",
+            {"max_file_bytes": 2 * 1024 * 1024, "max_total_bytes": 1024 * 1024},
+            "per-file byte limit",
+        ),
+        (
+            "malware",
+            {"timeout_seconds": 10, "per_file_timeout_seconds": 11},
+            "per-file timeout",
+        ),
     ],
 )
 def test_review_policy_validates_cross_field_thresholds(

@@ -40,7 +40,10 @@ def _policy_payload(
         },
         "network_profiles": {"install": "pypi-only-v1", "smoke": "none"},
         "llm": {"enabled": False},
-        "malware": {"clamav": ReviewPolicyStage.CLAMAV.value in required},
+        "malware": {
+            "clamav": ReviewPolicyStage.CLAMAV.value in required,
+            "yara_ruleset": ("market-v1" if ReviewPolicyStage.YARA.value in required else None),
+        },
         "dependency": {"enabled": ReviewPolicyStage.DEPENDENCY.value in required},
         "routing": {"auto_approve": False, "manual_review_at": "low"},
     }
@@ -303,6 +306,82 @@ def test_unavailable_tool_is_degraded_without_fake_success() -> None:
     assert runtime["coverage"]["outcome"] == "degraded"
     assert runtime["coverage"]["tool_reason"] == "runner health is unknown"
     assert result.route_job_id is not None
+
+
+def test_malware_tools_share_a_wave_and_unavailable_tools_never_enqueue_scans() -> None:
+    async def scenario() -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
+        policy = _policy_payload(
+            [
+                ReviewPolicyStage.STATIC,
+                ReviewPolicyStage.CLAMAV,
+                ReviewPolicyStage.YARA,
+            ]
+        )
+        repository, artifact, _ = await _review_fixture(policy)
+        orchestrator = ReviewOrchestrator(
+            repository,
+            tool_snapshots={
+                ReviewPolicyStage.CLAMAV: StageToolSnapshot(
+                    "clamd-instream-v1",
+                    ready=False,
+                    reason="clamav_health_unknown",
+                ),
+                ReviewPolicyStage.YARA: StageToolSnapshot(
+                    "yara-subprocess-v1:market-v1:aaaaaaaaaaaa",
+                    ready=False,
+                    reason="yara_ruleset_unavailable",
+                ),
+            },
+        )
+        result = await orchestrator.reconcile(artifact["id"])
+        return (
+            result,
+            await repository.list_review_runs(artifact["id"]),
+            await repository.list_artifact_jobs(artifact["id"]),
+        )
+
+    result, runs, jobs = asyncio.run(scenario())
+
+    assert result.stage_states["clamav"] == StageState.DEGRADED
+    assert result.stage_states["yara"] == StageState.DEGRADED
+    malware_runs = [run for run in runs if run["type"] in {"clamav", "yara"}]
+    assert {run["type"] for run in malware_runs} == {"clamav", "yara"}
+    assert all(run["status"] == "cancelled" for run in malware_runs)
+    assert all(run["coverage"]["outcome"] == "degraded" for run in malware_runs)
+    assert not any(job["type"] in {"clamav_scan", "yara_scan"} for job in jobs)
+    assert result.route_job_id is not None
+
+
+def test_ready_clamav_and_yara_jobs_are_enqueued_in_the_same_wave() -> None:
+    async def scenario() -> tuple[Any, list[dict[str, Any]]]:
+        policy = _policy_payload(
+            [
+                ReviewPolicyStage.STATIC,
+                ReviewPolicyStage.CLAMAV,
+                ReviewPolicyStage.YARA,
+            ]
+        )
+        repository, artifact, _ = await _review_fixture(policy)
+        orchestrator = ReviewOrchestrator(
+            repository,
+            tool_snapshots={
+                ReviewPolicyStage.CLAMAV: StageToolSnapshot("clamd-instream-v1"),
+                ReviewPolicyStage.YARA: StageToolSnapshot(
+                    "yara-subprocess-v1:market-v1:aaaaaaaaaaaa"
+                ),
+            },
+        )
+        result = await orchestrator.reconcile(artifact["id"])
+        return result, await repository.list_artifact_jobs(artifact["id"])
+
+    result, jobs = asyncio.run(scenario())
+
+    malware_jobs = [job for job in jobs if job["type"] in {"clamav_scan", "yara_scan"}]
+    assert {job["type"] for job in malware_jobs} == {"clamav_scan", "yara_scan"}
+    assert {job["id"] for job in malware_jobs} == set(result.enqueued_job_ids)
+    assert result.stage_states["clamav"] == StageState.RUNNING
+    assert result.stage_states["yara"] == StageState.RUNNING
+    assert result.route_job_id is None
 
 
 def test_succeeded_job_without_terminal_run_is_failed_not_completed() -> None:

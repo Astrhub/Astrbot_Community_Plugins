@@ -887,6 +887,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                    ),
                    worker_id = COALESCE(NULLIF($11, ''), worker_id),
                    input_sha256 = COALESCE(NULLIF($12, ''), input_sha256),
+                   ruleset_version = COALESCE(NULLIF($13, ''), ruleset_version),
                    completed_at = now()
              WHERE id = $1
          RETURNING *
@@ -903,6 +904,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
             payload.get("dependency_snapshot_sha256", ""),
             payload.get("worker_id", ""),
             payload.get("input_sha256", ""),
+            payload.get("ruleset_version", ""),
         )
         return _record(row) if row else None
 
@@ -2706,6 +2708,9 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 ),
                 "worker_id": str(payload.get("worker_id") or run.get("worker_id") or ""),
                 "input_sha256": str(payload.get("input_sha256") or run.get("input_sha256") or ""),
+                "ruleset_version": str(
+                    payload.get("ruleset_version") or run.get("ruleset_version") or ""
+                ),
                 "completed_at": _utc_now(),
             }
         )
