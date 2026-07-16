@@ -60,7 +60,7 @@ def test_runtime_probe_and_runner_images_are_separate_targets() -> None:
     assert probe["build"]["dockerfile"] == "Dockerfile.runtime-probe"
     assert probe["network_mode"] == "none"
     assert runner["build"]["target"] == "runtime-runner"
-    assert "FROM api AS runtime-runner" in dockerfile
+    assert "FROM api-base AS runtime-runner" in dockerfile
     assert "COPY --from=docker-cli /usr/local/bin/docker" in dockerfile
     assert "USER 65532:65532" in probe_dockerfile
     assert "PYTHONPATH=/opt/runtime-probe" in probe_dockerfile

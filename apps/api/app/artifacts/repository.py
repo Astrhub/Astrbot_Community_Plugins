@@ -5,6 +5,7 @@ import secrets
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Protocol
 
 import asyncpg
@@ -63,6 +64,20 @@ class ArtifactRepository(Protocol):
     ) -> dict[str, Any] | None: ...
 
     async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]: ...
+
+    async def get_artifact_category_state(
+        self, artifact_id: str
+    ) -> dict[str, Any] | None: ...
+
+    async def apply_category_suggestion(
+        self,
+        artifact_id: str,
+        *,
+        suggested_category: str,
+        confidence: float,
+        reason: str,
+        minimum_confidence: float,
+    ) -> dict[str, Any] | None: ...
 
     async def create_review_policy(
         self,
@@ -586,6 +601,110 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         )
         return [_record(row) for row in rows]
 
+    async def get_artifact_category_state(self, artifact_id: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            SELECT p.category,
+                   p.category_source,
+                   CASE
+                       WHEN p.metadata->>'category_explicit' = 'false' THEN false
+                       ELSE true
+                   END AS category_explicit,
+                   p.suggested_category,
+                   p.category_confidence,
+                   p.category_reason
+              FROM plugin_artifacts a
+              JOIN market_plugins p ON p.id = a.plugin_id
+             WHERE a.id = $1
+            """,
+            artifact_id,
+        )
+        return _record(row) if row else None
+
+    async def apply_category_suggestion(
+        self,
+        artifact_id: str,
+        *,
+        suggested_category: str,
+        confidence: float,
+        reason: str,
+        minimum_confidence: float,
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                artifact = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET suggested_category = $2,
+                           category_confidence = $3,
+                           category_reason = $4,
+                           updated_at = now()
+                     WHERE id = $1
+                       AND review_status = 'scanning'
+                 RETURNING *
+                    """,
+                    artifact_id,
+                    suggested_category,
+                    confidence,
+                    reason,
+                )
+                if artifact is None:
+                    return None
+                plugin = await connection.fetchrow(
+                    """
+                    WITH target AS (
+                        SELECT p.id,
+                               (
+                                   $2 <> 'other'
+                                   AND $3::numeric >= $5::numeric
+                                   AND (
+                                       p.category_source = 'ai'
+                                       OR (
+                                           p.category = 'other'
+                                           AND p.category_source = 'user'
+                                           AND COALESCE(
+                                               p.metadata->>'category_explicit', 'true'
+                                           ) = 'false'
+                                       )
+                                   )
+                               ) AS should_apply
+                          FROM market_plugins p
+                          JOIN plugin_artifacts a ON a.plugin_id = p.id
+                         WHERE a.id = $1
+                           FOR UPDATE OF p
+                    )
+                    UPDATE market_plugins p
+                       SET suggested_category = $2,
+                           category_confidence = $3::numeric,
+                           category_reason = $4,
+                           category = CASE
+                               WHEN target.should_apply THEN $2
+                               ELSE p.category
+                           END,
+                           category_source = CASE
+                               WHEN target.should_apply THEN 'ai'
+                               ELSE p.category_source
+                           END,
+                           updated_at = now()
+                      FROM target
+                     WHERE p.id = target.id
+                 RETURNING p.category,
+                           p.category_source,
+                           p.suggested_category,
+                           p.category_confidence,
+                           p.category_reason,
+                           target.should_apply AS category_applied
+                    """,
+                    artifact_id,
+                    suggested_category,
+                    confidence,
+                    reason,
+                    minimum_confidence,
+                )
+                if plugin is None:
+                    raise RuntimeError("artifact_plugin_missing")
+        return {"artifact": _record(artifact), **_record(plugin)}
+
     async def create_review_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         pool = self._pool()
         async with pool.acquire() as connection:
@@ -693,6 +812,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                        NULLIF($10, ''), dependency_snapshot_sha256
                    ),
                    worker_id = COALESCE(NULLIF($11, ''), worker_id),
+                   input_sha256 = COALESCE(NULLIF($12, ''), input_sha256),
                    completed_at = now()
              WHERE id = $1
          RETURNING *
@@ -708,6 +828,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
             payload.get("container_image_digest", ""),
             payload.get("dependency_snapshot_sha256", ""),
             payload.get("worker_id", ""),
+            payload.get("input_sha256", ""),
         )
         return _record(row) if row else None
 
@@ -1964,6 +2085,88 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
     async def list_artifact_files(self, artifact_id: str) -> list[dict[str, Any]]:
         return deepcopy(sorted(self.files.get(artifact_id, []), key=lambda item: item["path"]))
 
+    async def get_artifact_category_state(self, artifact_id: str) -> dict[str, Any] | None:
+        artifact = self.artifacts.get(artifact_id)
+        plugin = self._plugin(str(artifact.get("plugin_id") or "")) if artifact else None
+        if artifact is None or plugin is None:
+            return None
+        return deepcopy(
+            {
+                "category": plugin.get("category", "other"),
+                "category_source": plugin.get("category_source", "user"),
+                "category_explicit": bool(plugin.get("category_explicit", True)),
+                "suggested_category": plugin.get("suggested_category", ""),
+                "category_confidence": plugin.get("category_confidence"),
+                "category_reason": plugin.get("category_reason", ""),
+            }
+        )
+
+    async def apply_category_suggestion(
+        self,
+        artifact_id: str,
+        *,
+        suggested_category: str,
+        confidence: float,
+        reason: str,
+        minimum_confidence: float,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            artifact = self.artifacts.get(artifact_id)
+            if artifact is None or artifact["review_status"] != ReviewStatus.SCANNING.value:
+                return None
+            plugin = self._plugin(str(artifact["plugin_id"]))
+            if plugin is None:
+                raise RuntimeError("artifact_plugin_missing")
+            should_apply = (
+                suggested_category != "other"
+                and confidence >= minimum_confidence
+                and (
+                    plugin.get("category_source") == "ai"
+                    or (
+                        plugin.get("category", "other") == "other"
+                        and plugin.get("category_source", "user") == "user"
+                        and plugin.get("category_explicit") is False
+                    )
+                )
+            )
+            plugin_patch: dict[str, Any] = {
+                "suggested_category": suggested_category,
+                "category_confidence": confidence,
+                "category_reason": reason,
+            }
+            if should_apply:
+                plugin_patch.update(
+                    {
+                        "category": suggested_category,
+                        "category_source": "ai",
+                    }
+                )
+            updater = getattr(self.store, "update_plugin_metadata", None)
+            if updater is None:
+                raise RuntimeError("artifact_plugin_store_unavailable")
+            updated_plugin = updater(str(artifact["plugin_id"]), plugin_patch)
+            if updated_plugin is None:
+                raise RuntimeError("artifact_plugin_missing")
+            artifact.update(
+                {
+                    "suggested_category": suggested_category,
+                    "category_confidence": confidence,
+                    "category_reason": reason,
+                    "updated_at": _utc_now(),
+                }
+            )
+            return deepcopy(
+                {
+                    "artifact": artifact,
+                    "category": updated_plugin.get("category", "other"),
+                    "category_source": updated_plugin.get("category_source", "user"),
+                    "suggested_category": suggested_category,
+                    "category_confidence": confidence,
+                    "category_reason": reason,
+                    "category_applied": should_apply,
+                }
+            )
+
     async def create_review_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         idempotency_key = payload.get("idempotency_key")
         if idempotency_key:
@@ -2065,6 +2268,9 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                     or ""
                 ),
                 "worker_id": str(payload.get("worker_id") or run.get("worker_id") or ""),
+                "input_sha256": str(
+                    payload.get("input_sha256") or run.get("input_sha256") or ""
+                ),
                 "completed_at": _utc_now(),
             }
         )
@@ -2913,6 +3119,8 @@ def _serialize(value: Any) -> Any:
         return [_serialize(item) for item in value]
     if isinstance(value, dict):
         return {str(key): _serialize(item) for key, item in value.items()}
+    if isinstance(value, Decimal):
+        return float(value)
     return value
 
 

@@ -94,7 +94,10 @@ class ArtifactService:
             return None
         return {
             "artifact": public_artifact(artifact),
-            "runs": await self.repository.list_review_runs(artifact_id),
+            "runs": [
+                public_review_run(run)
+                for run in await self.repository.list_review_runs(artifact_id)
+            ],
             "findings": await self.repository.list_findings(artifact_id),
             "decisions": await self.repository.list_review_decisions(artifact_id),
         }
@@ -326,3 +329,8 @@ class ArtifactService:
 def public_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
     hidden = {"quarantine_key", "submitted_by_snapshot"}
     return {key: value for key, value in dict(artifact).items() if key not in hidden}
+
+
+def public_review_run(run: Mapping[str, Any]) -> dict[str, Any]:
+    hidden = {"raw_result", "raw_result_key"}
+    return {key: value for key, value in dict(run).items() if key not in hidden}

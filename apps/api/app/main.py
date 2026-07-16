@@ -1025,6 +1025,7 @@ def register_routes(app: FastAPI) -> None:
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
         data = payload.model_dump()
+        data["category_explicit"] = "category" in payload.model_fields_set
         validate_plugin_submission(data, settings)
         validate_repo_owner(data["repo"], user)
         data.update(
@@ -1118,6 +1119,8 @@ def register_routes(app: FastAPI) -> None:
             )
         if "category" in patch:
             patch["category"] = validate_plugin_category(patch.get("category", ""))
+            patch["category_source"] = "reviewer" if is_admin(user) else "user"
+            patch["category_explicit"] = True
         updated = await call_store(
             request,
             "update_plugin_metadata",

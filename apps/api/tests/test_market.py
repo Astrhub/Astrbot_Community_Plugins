@@ -1271,6 +1271,10 @@ def test_owner_can_manage_own_plugins_without_bypassing_review() -> None:
 
     mine = client.get("/v1/me/plugins")
     patched = client.patch(f"/v1/plugins/{plugin['id']}", json={"tags": ["demo", "tool"]})
+    categorized = client.patch(
+        f"/v1/plugins/{plugin['id']}",
+        json={"category": "utilities"},
+    )
     unlisted = client.post(f"/v1/plugins/{plugin['id']}/unlist", json={"reason": "维护中"})
     requested = client.post(f"/v1/plugins/{plugin['id']}/request-list")
 
@@ -1278,6 +1282,10 @@ def test_owner_can_manage_own_plugins_without_bypassing_review() -> None:
     assert mine.json()["items"][0]["id"] == plugin["id"]
     assert patched.status_code == 200
     assert patched.json()["tags"] == ["demo", "tool"]
+    assert categorized.status_code == 200
+    assert categorized.json()["category"] == "utilities"
+    assert categorized.json()["category_source"] == "user"
+    assert categorized.json()["category_explicit"] is True
     assert unlisted.status_code == 200
     assert unlisted.json()["status"] == "unlisted"
     assert unlisted.json()["unlist_reason"] == "维护中"
@@ -1299,10 +1307,17 @@ def test_core_admin_can_review_plugin_submissions() -> None:
     )
 
     admin_plugins = client.get("/v1/admin/plugins")
+    categorized = client.patch(
+        f"/v1/plugins/{plugin['id']}",
+        json={"category": "integrations"},
+    )
     listed = client.post(f"/v1/admin/plugins/{plugin['id']}/list")
 
     assert admin_plugins.status_code == 200
     assert admin_plugins.json()["items"][0]["id"] == plugin["id"]
+    assert categorized.status_code == 200
+    assert categorized.json()["category_source"] == "reviewer"
+    assert categorized.json()["category_explicit"] is True
     assert listed.status_code == 200
     assert listed.json()["status"] == "listed"
     client.get("/v1/auth/debug-login?login=alice")

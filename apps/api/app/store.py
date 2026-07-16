@@ -4,6 +4,7 @@ import secrets
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import asyncpg
@@ -28,6 +29,8 @@ def serialize_value(value: Any) -> Any:
         return [serialize_value(item) for item in value]
     if isinstance(value, dict):
         return {key: serialize_value(item) for key, item in value.items()}
+    if isinstance(value, Decimal):
+        return float(value)
     return value
 
 
@@ -279,7 +282,11 @@ class InMemoryMarketStore:
                 "tags": payload.get("tags", []),
                 "social_link": payload.get("social_link", ""),
                 "category": payload.get("category", (existing or {}).get("category", "other")),
-                "category_source": (existing or {}).get("category_source", "user"),
+                "category_source": (
+                    "user"
+                    if "category" in payload
+                    else (existing or {}).get("category_source", "user")
+                ),
                 "repo_version": (existing or {}).get("repo_version", ""),
                 "current_artifact_id": (existing or {}).get("current_artifact_id"),
                 "owner_user_id": user["id"],
@@ -950,6 +957,13 @@ class InMemoryMarketStore:
             "likes": int(plugin.get("likes") or 0),
             "comments_count": int(plugin.get("comments_count") or 0),
             "status": plugin.get("status") or "pending",
+            "suggested_category": str(plugin.get("suggested_category") or ""),
+            "category_confidence": (
+                float(plugin["category_confidence"])
+                if plugin.get("category_confidence") is not None
+                else None
+            ),
+            "category_reason": str(plugin.get("category_reason") or ""),
         }
 
     def _comment_with_user(self, comment: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
@@ -982,6 +996,9 @@ PLUGIN_COLUMN_KEYS = {
     "current_artifact_id",
     "category",
     "category_source",
+    "suggested_category",
+    "category_confidence",
+    "category_reason",
 }
 
 
@@ -1787,7 +1804,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    repo_version = $16,
                    category = $17,
                    category_source = $18,
-                   metadata = $19::jsonb,
+                   suggested_category = $19,
+                   category_confidence = $20,
+                   category_reason = $21,
+                   metadata = $22::jsonb,
                    updated_at = now()
              WHERE id = $1
          RETURNING *
@@ -1810,6 +1830,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
             updated.get("repo_version", ""),
             updated.get("category", "other"),
             updated.get("category_source", "user"),
+            updated.get("suggested_category", ""),
+            updated.get("category_confidence"),
+            updated.get("category_reason", ""),
             metadata,
         )
         return self._plugin_from_record(row) if row else None

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from .env_file import read_env_file
 
@@ -61,20 +62,28 @@ class ArtifactReviewSettings:
     dependency_api_token: str
 
     def component_configuration(self) -> dict[str, dict[str, object]]:
+        llm = _review_component_configuration(
+            self.llm_enabled,
+            {
+                "llm_config_ref_missing": self.llm_config_ref,
+                "llm_provider_missing": self.llm_provider,
+                "llm_model_missing": self.llm_model,
+                "llm_endpoint_url_missing": self.llm_endpoint_url,
+                "llm_api_key_missing": self.llm_api_key,
+            },
+        )
+        if self.llm_enabled and self.llm_provider not in {"openai", "openai-compatible"}:
+            llm = _degraded_review_component(llm, "llm_provider_unsupported")
+        if self.llm_enabled and self.llm_endpoint_url and not _valid_llm_endpoint(
+            self.llm_endpoint_url
+        ):
+            llm = _degraded_review_component(llm, "llm_endpoint_url_invalid")
         return {
             "runtime": _review_component_configuration(
                 self.runtime_enabled,
                 {"runtime_container_image_missing": self.runtime_container_image},
             ),
-            "llm": _review_component_configuration(
-                self.llm_enabled,
-                {
-                    "llm_config_ref_missing": self.llm_config_ref,
-                    "llm_provider_missing": self.llm_provider,
-                    "llm_model_missing": self.llm_model,
-                    "llm_api_key_missing": self.llm_api_key,
-                },
-            ),
+            "llm": llm,
             "clamav": _review_component_configuration(
                 self.clamav_enabled,
                 {
@@ -452,6 +461,41 @@ def _review_component_status(
         "status": status,
         "reasons": reasons,
     }
+
+
+def _degraded_review_component(
+    component: dict[str, object],
+    reason: str,
+) -> dict[str, object]:
+    reasons = [str(item) for item in component.get("reasons") or []]
+    if reason not in reasons:
+        reasons.append(reason)
+    return {
+        **component,
+        "configured": False,
+        "ready": False,
+        "degraded": True,
+        "status": "degraded",
+        "reasons": reasons,
+    }
+
+
+def _valid_llm_endpoint(value: str) -> bool:
+    try:
+        parsed = urlsplit(value.strip())
+        parsed.port
+    except ValueError:
+        return False
+    loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    return bool(
+        parsed.scheme in ({"https", "http"} if loopback else {"https"})
+        and parsed.hostname
+        and parsed.path
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def _normalize_env(env: Mapping[str, str]) -> dict[str, str]:

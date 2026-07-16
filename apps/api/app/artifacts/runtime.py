@@ -5,8 +5,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..config import ArtifactSettings, Settings
+from ..config import ArtifactReviewSettings, ArtifactSettings, Settings
 from .archive import ArchivePrechecker
+from .category import OpenAICompatibleCategoryProvider
 from .github_source import GithubSourceClient
 from .jobs import ArtifactJobRunner, worker_id
 from .notifications import ArtifactNotificationDispatcher
@@ -86,6 +87,7 @@ class ArtifactRuntime:
                     worker_id=identity,
                     lease_seconds=self.config.job_lease_seconds,
                 )
+                category_provider = _category_provider(self.config.review)
                 job_runner = ArtifactJobRunner(
                     repository=repository,
                     storage=storage,
@@ -96,6 +98,8 @@ class ArtifactRuntime:
                     poll_seconds=self.config.worker_poll_seconds,
                     notification_dispatcher=notifications,
                     advanced_review_enabled=self.config.review.enabled,
+                    category_provider=category_provider,
+                    category_provider_config_ref=self.config.review.llm_config_ref,
                 )
                 self.attach_components(
                     repository=repository,
@@ -283,6 +287,23 @@ def build_artifact_runtime(
     )
 
 
+def _category_provider(
+    review: ArtifactReviewSettings,
+) -> OpenAICompatibleCategoryProvider | None:
+    if not review.llm_enabled or review.llm_provider not in {"openai", "openai-compatible"}:
+        return None
+    if not all((review.llm_endpoint_url, review.llm_api_key, review.llm_model)):
+        return None
+    try:
+        return OpenAICompatibleCategoryProvider(
+            endpoint_url=review.llm_endpoint_url,
+            api_key=review.llm_api_key,
+            configured_model=review.llm_model,
+        )
+    except ValueError:
+        return None
+
+
 def _finalize_review_status(
     review: dict[str, object],
     *,
@@ -296,18 +317,29 @@ def _finalize_review_status(
     if policy_model:
         policy_tools = {
             "runtime": bool(policy_model.runtime_targets),
-            "llm": policy_model.llm.enabled,
+            "llm": policy_model.llm.enabled or policy_model.category.enabled,
             "clamav": policy_model.malware.clamav,
             "yara": bool(policy_model.malware.yara_ruleset),
             "dependency": policy_model.dependency.enabled,
         }
         configured = config.review.component_configuration()
         reference_errors = {
-            "llm": (
-                []
-                if policy_model.llm.provider_config_ref == config.review.llm_config_ref
-                else ["llm_config_ref_mismatch"]
-            ),
+            "llm": [
+                code
+                for enabled, reference, code in (
+                    (
+                        policy_model.llm.enabled,
+                        policy_model.llm.provider_config_ref,
+                        "llm_config_ref_mismatch",
+                    ),
+                    (
+                        policy_model.category.enabled,
+                        policy_model.category.provider_config_ref,
+                        "category_config_ref_mismatch",
+                    ),
+                )
+                if enabled and reference != config.review.llm_config_ref
+            ],
             "clamav": (
                 []
                 if policy_model.malware.clamav_config_ref == config.review.clamav_config_ref

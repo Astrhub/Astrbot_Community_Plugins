@@ -203,24 +203,26 @@ class DependencyPolicy(FrozenPolicyModel):
 
 class CategoryPolicy(FrozenPolicyModel):
     enabled: bool = False
-    provider_config_ref: str = "config:category-default"
+    provider_config_ref: str = "config:llm-default"
     model: str = Field(default="", max_length=128)
     minimum_confidence: float = Field(default=0.8, ge=0, le=1, allow_inf_nan=False)
     allowed_categories: tuple[PluginCategory, ...] = tuple(PluginCategory)
     default_category: PluginCategory = PluginCategory.OTHER
     max_input_chars: int = Field(default=32_000, ge=1024, le=200_000)
+    max_output_tokens: int = Field(default=512, ge=64, le=2048)
+    prompt_version: str = Field(default="category-prompt-v1", max_length=128)
 
     @field_validator("provider_config_ref")
     @classmethod
     def validate_provider_reference(cls, value: str) -> str:
         return _config_reference(value)
 
-    @field_validator("model")
+    @field_validator("model", "prompt_version")
     @classmethod
     def validate_model_identifier(cls, value: str) -> str:
         normalized = value.strip()
         if normalized and not _SAFE_IDENTIFIER.fullmatch(normalized):
-            raise ValueError("category model must be a public identifier")
+            raise ValueError("category model and prompt_version must be public identifiers")
         return normalized
 
     @field_validator("allowed_categories")

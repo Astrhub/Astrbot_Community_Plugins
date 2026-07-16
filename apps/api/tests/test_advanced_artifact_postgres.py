@@ -177,6 +177,158 @@ def test_concurrent_review_policy_activation_against_postgres() -> None:
     asyncio.run(run_concurrent_review_policy_activation_scenario(database_url()))
 
 
+def test_category_precedence_and_concurrency_against_postgres() -> None:
+    asyncio.run(run_category_precedence_scenario(database_url()))
+
+
+async def run_category_precedence_scenario(url: str) -> None:
+    schema = f"category_concurrency_{uuid.uuid4().hex}"
+    control = await asyncpg.connect(url)
+    pool: asyncpg.Pool | None = None
+    try:
+        await control.execute(f"CREATE SCHEMA {schema}")
+        await control.execute(f"SET search_path TO {schema}")
+        await control.set_type_codec(
+            "jsonb",
+            schema="pg_catalog",
+            encoder=json.dumps,
+            decoder=json.loads,
+        )
+        await control.execute(SCHEMA_SQL)
+        await apply_schema_migrations(control)
+        await seed_market(control)
+        await control.execute(
+            """
+            UPDATE market_plugins
+               SET category = 'other',
+                   category_source = 'user',
+                   metadata = jsonb_set(metadata, '{category_explicit}', 'false'::jsonb)
+             WHERE id = 'plugin-1'
+            """
+        )
+        pool = await asyncpg.create_pool(
+            url,
+            min_size=2,
+            max_size=4,
+            server_settings={"search_path": schema},
+            init=_configure_json_codec,
+        )
+        repository = PgArtifactRepository(PooledRepositoryStore(pool))
+        artifact = await repository.create_artifact(artifact_payload("7"))
+        await repository.transition_review_status(artifact["id"], "prechecking")
+        artifact = await repository.transition_review_status(artifact["id"], "scanning")
+        assert artifact is not None
+
+        low = await repository.apply_category_suggestion(
+            artifact["id"],
+            suggested_category="entertainment",
+            confidence=0.5,
+            reason="Low confidence",
+            minimum_confidence=0.8,
+        )
+        high = await repository.apply_category_suggestion(
+            artifact["id"],
+            suggested_category="utilities",
+            confidence=0.95,
+            reason="High confidence",
+            minimum_confidence=0.8,
+        )
+        assert low and low["category_applied"] is False
+        assert high and high["category_applied"] is True
+        assert high["category"] == "utilities"
+        assert high["category_source"] == "ai"
+
+        async def ai_update(index: int) -> dict[str, Any] | None:
+            return await repository.apply_category_suggestion(
+                artifact["id"],
+                suggested_category="integrations",
+                confidence=0.99,
+                reason=f"Concurrent AI suggestion {index}",
+                minimum_confidence=0.8,
+            )
+
+        async def human_update(index: int) -> None:
+            assert pool is not None
+            async with pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    UPDATE market_plugins
+                       SET category = 'productivity',
+                           category_source = 'user',
+                           metadata = jsonb_set(
+                               metadata,
+                               '{category_explicit}',
+                               'true'::jsonb
+                           ),
+                           updated_at = now()
+                     WHERE id = 'plugin-1'
+                    """
+                )
+
+        for index in range(12):
+            await control.execute(
+                """
+                UPDATE market_plugins
+                   SET category = 'other',
+                       category_source = 'user',
+                       metadata = jsonb_set(
+                           metadata,
+                           '{category_explicit}',
+                           'false'::jsonb
+                       )
+                 WHERE id = 'plugin-1'
+                """
+            )
+            await asyncio.gather(ai_update(index), human_update(index))
+            current = await control.fetchrow(
+                """
+                SELECT category, category_source, suggested_category,
+                       category_confidence, category_reason
+                  FROM market_plugins
+                 WHERE id = 'plugin-1'
+                """
+            )
+            assert current
+            assert current["category"] == "productivity"
+            assert current["category_source"] == "user"
+            assert current["suggested_category"] == "integrations"
+            assert float(current["category_confidence"]) == 0.99
+
+        await control.execute(
+            """
+            UPDATE market_plugins
+               SET category = 'integrations',
+                   category_source = 'reviewer',
+                   metadata = jsonb_set(
+                       metadata,
+                       '{category_explicit}',
+                       '"broken"'::jsonb
+                   )
+             WHERE id = 'plugin-1'
+            """
+        )
+        state = await repository.get_artifact_category_state(artifact["id"])
+        protected = await repository.apply_category_suggestion(
+            artifact["id"],
+            suggested_category="ai_tools",
+            confidence=1.0,
+            reason="Reviewer category must win",
+            minimum_confidence=0.8,
+        )
+        assert state and state["category_explicit"] is True
+        assert protected and protected["category_applied"] is False
+        assert protected["category"] == "integrations"
+        assert protected["category_source"] == "reviewer"
+        stored_artifact = await repository.get_artifact(artifact["id"])
+        assert stored_artifact and stored_artifact["suggested_category"] == "ai_tools"
+    finally:
+        if pool is not None:
+            await pool.close()
+        await control.execute("RESET search_path")
+        await control.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        await control.close()
+
+
 async def run_concurrent_review_policy_activation_scenario(url: str) -> None:
     schema = f"policy_concurrency_{uuid.uuid4().hex}"
     control = await asyncpg.connect(url)
@@ -777,7 +929,9 @@ async def run_advanced_repository_scenario(url: str) -> None:
         )
         assert sbom["package_count"] == 2
 
-        with pytest.raises(asyncpg.RestrictViolationError):
+        with pytest.raises(
+            (asyncpg.RestrictViolationError, asyncpg.ForeignKeyViolationError)
+        ):
             async with connection.transaction():
                 await connection.execute(
                     "DELETE FROM review_policies WHERE id = $1",

@@ -56,6 +56,9 @@ def test_review_policy_matches_versioned_design_and_is_immutable() -> None:
     assert policy.network_profiles.smoke == "none"
     assert policy.llm.provider_config_ref == "config:llm-default"
     assert policy.category.default_category.value == "other"
+    assert policy.category.provider_config_ref == "config:llm-default"
+    assert policy.category.prompt_version == "category-prompt-v1"
+    assert policy.category.max_output_tokens == 512
 
     with pytest.raises(ValidationError):
         policy.routing.auto_approve = True

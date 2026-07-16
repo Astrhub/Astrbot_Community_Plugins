@@ -184,6 +184,8 @@ class PrecheckStage:
                                 "author",
                                 "repo",
                                 "astrbot_version",
+                                "tags",
+                                "category",
                             )
                             if key in result.metadata
                         },

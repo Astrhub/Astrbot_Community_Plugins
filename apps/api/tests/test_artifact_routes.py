@@ -76,6 +76,33 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         )
         assert submitted.status_code == 202
         artifact_id = submitted.json()["artifact"]["id"]
+        repository = app.state.artifact_runtime.repository
+        asyncio.run(
+            repository.create_review_run(
+                {
+                    "artifact_id": artifact_id,
+                    "type": "category",
+                    "status": "failed",
+                    "summary": "AI 分类建议不可用",
+                    "raw_result": {"provider_response": {"hidden": "private"}},
+                    "raw_result_key": "private/category-result.json",
+                    "error_code": "category_result_invalid",
+                }
+            )
+        )
+        public_runs = client.get(
+            f"/v1/artifacts/{artifact_id}/runs",
+            headers=owner_headers,
+        )
+        public_detail = client.get(
+            f"/v1/artifacts/{artifact_id}",
+            headers=owner_headers,
+        )
+        assert public_runs.status_code == 200
+        assert public_detail.status_code == 200
+        assert all("raw_result" not in run for run in public_runs.json()["items"])
+        assert all("raw_result_key" not in run for run in public_runs.json()["items"])
+        assert all("raw_result" not in run for run in public_detail.json()["runs"])
 
         first_page = client.get(
             "/v1/me/artifacts?limit=1&offset=0",

@@ -4,6 +4,7 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
+from app.artifacts.policy import ReviewPolicyStage
 from app.artifacts.policy_service import ReviewPolicyService
 from app.artifacts.runtime import build_artifact_runtime
 from app.config import load_settings
@@ -162,6 +163,95 @@ def test_health_reports_redacted_artifact_readiness() -> None:
         "private-advisory",
     ):
         assert secret not in rendered
+
+
+def test_llm_component_rejects_unsupported_provider_and_unsafe_endpoint() -> None:
+    base = {
+        "ARTIFACT_LLM_REVIEW_ENABLED": "true",
+        "ARTIFACT_LLM_CONFIG_REF": "config:llm-default",
+        "ARTIFACT_LLM_MODEL": "category-model-v1",
+        "ARTIFACT_LLM_API_KEY": "private-key",
+    }
+    unsupported = load_settings(
+        {
+            **base,
+            "ARTIFACT_LLM_PROVIDER": "unknown-provider",
+            "ARTIFACT_LLM_ENDPOINT_URL": "https://llm.example.test/v1/chat/completions",
+        }
+    ).artifacts.review.component_configuration()["llm"]
+    unsafe_url = load_settings(
+        {
+            **base,
+            "ARTIFACT_LLM_PROVIDER": "openai-compatible",
+            "ARTIFACT_LLM_ENDPOINT_URL": "http://metadata.internal/v1/chat/completions",
+        }
+    ).artifacts.review.component_configuration()["llm"]
+
+    assert unsupported["configured"] is False
+    assert "llm_provider_unsupported" in unsupported["reasons"]
+    assert unsafe_url["configured"] is False
+    assert "llm_endpoint_url_invalid" in unsafe_url["reasons"]
+
+
+def test_runtime_wires_category_adapter_into_external_worker(tmp_path) -> None:
+    settings = load_settings(
+        {
+            "ARTIFACTS_ENABLED": "true",
+            "ARTIFACT_LOCAL_ROOT": str(tmp_path / "artifacts"),
+            "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+            "ARTIFACT_ADVANCED_REVIEW_ENABLED": "true",
+            "ARTIFACT_LLM_REVIEW_ENABLED": "true",
+            "ARTIFACT_LLM_CONFIG_REF": "config:llm-default",
+            "ARTIFACT_LLM_PROVIDER": "openai-compatible",
+            "ARTIFACT_LLM_MODEL": "category-model-v1",
+            "ARTIFACT_LLM_ENDPOINT_URL": "https://llm.example.test/v1/chat/completions",
+            "ARTIFACT_LLM_API_KEY": "private-key",
+            "DATABASE_URL": "postgresql://example.invalid/market",
+        }
+    )
+
+    async def scenario() -> tuple[bool, bool]:
+        runtime = build_artifact_runtime(settings, InMemoryMarketStore())
+        await runtime.start(runtime.store)
+        try:
+            runner = runtime.job_runner
+            assert runner is not None
+            stage_wired = "category" in runner._review_stages
+            snapshot = runner.review_orchestrator.tool_snapshots.get(
+                ReviewPolicyStage.CATEGORY
+            )
+            return stage_wired, bool(snapshot and snapshot.ready)
+        finally:
+            await runtime.close()
+
+    assert asyncio.run(scenario()) == (True, True)
+
+
+def test_runtime_keeps_category_handler_when_provider_is_unavailable(tmp_path) -> None:
+    settings = load_settings(
+        {
+            "ARTIFACTS_ENABLED": "true",
+            "ARTIFACT_LOCAL_ROOT": str(tmp_path / "artifacts"),
+            "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+            "ARTIFACT_ADVANCED_REVIEW_ENABLED": "true",
+            "DATABASE_URL": "postgresql://example.invalid/market",
+        }
+    )
+
+    async def scenario() -> tuple[bool, bool]:
+        runtime = build_artifact_runtime(settings, InMemoryMarketStore())
+        await runtime.start(runtime.store)
+        try:
+            runner = runtime.job_runner
+            assert runner is not None
+            return (
+                "category" in runner._handlers,
+                ReviewPolicyStage.CATEGORY in runner.review_orchestrator.tool_snapshots,
+            )
+        finally:
+            await runtime.close()
+
+    assert asyncio.run(scenario()) == (True, False)
 
 
 def test_artifact_api_fails_closed_without_postgresql_store() -> None:

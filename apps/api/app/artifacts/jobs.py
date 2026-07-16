@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from typing import Any
 
+from .category import CategoryProvider, CategorySuggestionService, UnavailableCategoryProvider
 from .archive import (
     ArchivePrechecker,
     PrecheckError,
@@ -15,14 +16,15 @@ from .archive import (
 )
 from .models import JobType, PublicationStatus, ReviewStatus
 from .notifications import ArtifactNotificationDispatcher
-from .orchestration import ReviewOrchestrator, review_run_type_for_job
+from .orchestration import ReviewOrchestrator, StageToolSnapshot, review_run_type_for_job
+from .policy import ReviewPolicyStage
 from .repository import ArtifactRepository
 from .stages import (
+    CategoryStage,
     PrecheckStage,
     ReviewStage,
     StageContext,
     StageOutcome,
-    StageOutcomeKind,
     StaticScanStage,
     RoutingStage,
 )
@@ -58,6 +60,8 @@ class ArtifactJobRunner:
         advanced_review_enabled: bool = False,
         review_stages: Mapping[str, ReviewStage] | None = None,
         review_orchestrator: ReviewOrchestrator | None = None,
+        category_provider: CategoryProvider | None = None,
+        category_provider_config_ref: str = "config:llm-default",
     ) -> None:
         self.repository = repository
         self.storage = storage
@@ -68,15 +72,27 @@ class ArtifactJobRunner:
         self.poll_seconds = poll_seconds
         self.notification_dispatcher = notification_dispatcher
         self.advanced_review_enabled = advanced_review_enabled
+        self.category_provider = category_provider or UnavailableCategoryProvider()
+        tool_snapshots = (
+            {ReviewPolicyStage.CATEGORY: StageToolSnapshot(category_provider.version)}
+            if category_provider is not None
+            else {}
+        )
         self.review_orchestrator = review_orchestrator or ReviewOrchestrator(
             repository,
-            tool_snapshots={},
+            tool_snapshots=tool_snapshots,
         )
         self._stopping = asyncio.Event()
-        default_stages: tuple[ReviewStage, ...] = (
+        default_stages: list[ReviewStage] = [
             PrecheckStage(advanced_review_enabled=advanced_review_enabled),
             StaticScanStage(advanced_review_enabled=advanced_review_enabled),
             RoutingStage(),
+        ]
+        default_stages.append(
+            CategoryStage(
+                CategorySuggestionService(self.category_provider),
+                provider_config_ref=category_provider_config_ref,
+            )
         )
         self._review_stages = (
             dict(review_stages)
@@ -96,6 +112,13 @@ class ArtifactJobRunner:
 
     def stop(self) -> None:
         self._stopping.set()
+
+    async def close(self) -> None:
+        close = getattr(self.category_provider, "close", None)
+        if close is not None:
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
 
     async def run_forever(self) -> None:
         while not self._stopping.is_set():
@@ -281,11 +304,7 @@ class ArtifactJobRunner:
         )
         try:
             outcome = await stage.execute(context)
-            if (
-                self.advanced_review_enabled
-                and job_type == JobType.STATIC_SCAN.value
-                and outcome.kind == StageOutcomeKind.COMPLETED
-            ):
+            if self.advanced_review_enabled and outcome.completes_job:
                 await self.review_orchestrator.reconcile(str(artifact["id"]))
         except ArtifactStorageError as exc:
             if exc.code in {"quarantine_object_missing"}:

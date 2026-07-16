@@ -13,7 +13,7 @@ from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
 from .github_source import GithubSourceError
 from .models import ArtifactStateError
 from .schemas import ArtifactDecisionPayload, GithubArtifactSubmission, PluginRegistrationPayload
-from .service import ArtifactService, ArtifactServiceError, public_artifact
+from .service import ArtifactService, ArtifactServiceError, public_artifact, public_review_run
 from .storage import ArtifactStorageError
 
 ZIP_FILENAME_PATTERN = re.compile(r"\.zip$", re.IGNORECASE)
@@ -34,6 +34,7 @@ def build_artifact_router() -> APIRouter:
         user = await _require_user(request)
         _ensure_submission_allowed(user)
         data = payload.model_dump()
+        data["category_explicit"] = "category" in payload.model_fields_set
         try:
             canonical_repo = normalize_github_repo(data["repo"])
         except PrecheckError as exc:
@@ -149,7 +150,12 @@ def build_artifact_router() -> APIRouter:
         service = _require_service(request)
         user = await _require_user(request)
         await _visible_artifact(service, artifact_id, user)
-        return {"items": await service.repository.list_review_runs(artifact_id)}
+        return {
+            "items": [
+                public_review_run(run)
+                for run in await service.repository.list_review_runs(artifact_id)
+            ]
+        }
 
     @router.get(
         "/v1/artifacts/{artifact_id}/findings",

@@ -142,20 +142,20 @@
         - *Details*: 运行 unit/integration/Compose config/Ruff；记录 image digest 和测试结果，差异自审后提交。
         - *Requirements*: FR-202 至 FR-204、FR-219。
 
-- [ ] 7. **AI 分类建议**
-    - [ ] 7.1. 定义分类输入/输出 schema
+- [x] 7. **AI 分类建议**
+    - [x] 7.1. 定义分类输入/输出 schema
         - *Goal*: 只发送 metadata、README 摘要、文件树和允许分类枚举。
         - *Details*: JSON schema 包含 category/confidence/reason/model/prompt version；脱敏、长度和枚举限制；原始响应私有保存。
         - *Requirements*: FR-201。
-    - [ ] 7.2. 实现 reviewer/user/ai/default 优先级
+    - [x] 7.2. 实现 reviewer/user/ai/default 优先级
         - *Goal*: AI 永远不覆盖明确人工分类。
         - *Details*: 只在空/other 且 policy 允许并达阈值时应用；artifact 保存建议，plugin 保存当前投影；并发更新使用条件 SQL。
         - *Requirements*: FR-201。
-    - [ ] 7.3. 增加分类 adapter 和失败语义
+    - [x] 7.3. 增加分类 adapter 和失败语义
         - *Goal*: provider timeout/invalid JSON 不被当作分类完成。
         - *Details*: 使用 Protocol 和 deterministic fake；配置模型/prompt version/token limit；失败进入 coverage/degraded，不影响人工选择。
         - *Requirements*: FR-201、FR-221。
-    - [ ] 7.4. 验证并提交分类功能
+    - [x] 7.4. 验证并提交分类功能
         - *Goal*: 独立验证分类数据边界与优先级。
         - *Details*: 运行 schema、prompt injection、优先级、并发和 API projection tests、Ruff 后提交。
         - *Requirements*: FR-201。
