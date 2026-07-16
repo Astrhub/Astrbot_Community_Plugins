@@ -32,6 +32,10 @@ STATUS_COPY: dict[str, tuple[str, str]] = {
         "[审查结果] 插件版本未通过",
         "该版本未通过审查，不会提供插件源 CDN 下载链接；用户仍可选择 GitHub 直连。",
     ),
+    "artifact_changes_requested": (
+        "[审查结果] 插件版本需要修改",
+        "该版本需要修改，不会提供插件源 CDN 下载链接；用户仍可选择 GitHub 直连。请进入站内工作台查看审查意见。",
+    ),
     "artifact_approved": (
         "[审查结果] 插件版本已批准",
         "该版本已通过人工复核，正在排队发布不可变 CDN 插件包。",

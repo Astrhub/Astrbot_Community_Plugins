@@ -204,24 +204,24 @@
         - *Details*: 运行 targeted tests、Ruff、敏感输出扫描后提交。
         - *Requirements*: FR-206、FR-207。
 
-- [ ] 10. **确定性自动路由与 P2 报告 API**
-    - [ ] 10.1. 实现 routing truth table
+- [x] 10. **确定性自动路由与 P2 报告 API**
+    - [x] 10.1. 实现 routing truth table
         - *Goal*: 明确 auto reject/manual/auto approve 的唯一计算路径。
         - *Details*: 只消费 fixed policy、required runs、tool health、coverage 和 open findings；LLM safe 不能单独通过；auto approve 默认关闭。
         - *Requirements*: FR-208。
-    - [ ] 10.2. 实现 route decision 审计与幂等
+    - [x] 10.2. 实现 route decision 审计与幂等
         - *Goal*: 保存 policy、run IDs、fingerprints、coverage hash、理由和 idempotency key。
         - *Details*: 行锁 artifact；并发 route/admin decision 只有合法转换成功；auto approve 复用现有 publish job，不绕过版本门控。
         - *Requirements*: FR-208、FR-223。
-    - [ ] 10.3. 扩展 artifact/runs/findings 报告 schema
+    - [x] 10.3. 扩展 artifact/runs/findings 报告 schema
         - *Goal*: 作者和管理员看到 structured runtime/LLM/category/coverage，不看到 raw prompt/log/key。
         - *Details*: typed summaries、tool/model/version、degraded 状态和“自动审查建议”标签；OpenAPI 角色过滤。
         - *Requirements*: FR-207、FR-221、FR-223、FR-224。
-    - [ ] 10.4. 扩展 Summary/Header/Decision UI
+    - [x] 10.4. 扩展 Summary/Header/Decision UI
         - *Goal*: P2 结果可读且不会误称绝对安全。
         - *Details*: 展示 stage、target、coverage、finding、建议分类和 route reason；现有 route view 保持薄；管理员命令仍由后端鉴权。
         - *Requirements*: FR-207、FR-224。
-    - [ ] 10.5. 验证并提交 P2 闭环
+    - [x] 10.5. 验证并提交 P2 闭环
         - *Goal*: 证明 runtime + AI + routing 端到端工作且旧发布安全。
         - *Details*: 运行 API/worker/runtime/LLM/frontend tests、`vp check`、Vitest/build、OpenAPI、Compose；检查拒绝候选不影响旧 CDN 后提交。
         - *Requirements*: P2 验收、全局回归。

@@ -177,6 +177,10 @@ def test_concurrent_review_policy_activation_against_postgres() -> None:
     asyncio.run(run_concurrent_review_policy_activation_scenario(database_url()))
 
 
+def test_concurrent_auto_approve_is_atomic_against_postgres() -> None:
+    asyncio.run(run_concurrent_auto_approve_scenario(database_url()))
+
+
 def test_category_precedence_and_concurrency_against_postgres() -> None:
     asyncio.run(run_category_precedence_scenario(database_url()))
 
@@ -425,6 +429,174 @@ async def run_concurrent_review_policy_activation_scenario(url: str) -> None:
                 )
                 == 1
             )
+    finally:
+        if pool is not None:
+            await pool.close()
+        await control.execute("RESET search_path")
+        await control.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        await control.close()
+
+
+async def run_concurrent_auto_approve_scenario(url: str) -> None:
+    schema = f"auto_approve_concurrency_{uuid.uuid4().hex}"
+    control = await asyncpg.connect(url)
+    pool: asyncpg.Pool | None = None
+    try:
+        await control.execute(f"CREATE SCHEMA {schema}")
+        await control.execute(f"SET search_path TO {schema}")
+        await control.set_type_codec(
+            "jsonb",
+            schema="pg_catalog",
+            encoder=json.dumps,
+            decoder=json.loads,
+        )
+        await control.execute(SCHEMA_SQL)
+        await apply_schema_migrations(control)
+        await seed_market(control)
+        await control.execute(
+            "UPDATE market_plugins SET repo_version = 'v1.0.0' WHERE id = 'plugin-1'"
+        )
+        pool = await asyncpg.create_pool(
+            url,
+            min_size=2,
+            max_size=8,
+            server_settings={"search_path": schema},
+            init=_configure_json_codec,
+        )
+        repository = PgArtifactRepository(PooledRepositoryStore(pool))
+        service = ReviewPolicyService(repository)
+        actor = {
+            "id": "reviewer-1",
+            "role": "core_admin",
+            "github_login": "reviewer",
+        }
+        policy_payload = review_policy_payload("4.26.5")
+        policy_payload["routing"]["auto_approve"] = True
+        policy = await service.create_draft(
+            version="auto-approve-concurrency-v1",
+            policy=policy_payload,
+            actor=actor,
+            request_id="auto-approve-policy-create",
+            idempotency_key="auto-approve-policy-create",
+        )
+        policy = await service.activate(
+            policy["id"],
+            actor=actor,
+            request_id="auto-approve-policy-activate",
+            idempotency_key="auto-approve-policy-activate",
+            reason="Enable concurrent auto approve test",
+        )
+        artifact = await repository.create_artifact(artifact_payload("8"))
+        artifact = await repository.snapshot_active_review_policy(artifact["id"])
+        assert artifact and artifact["policy_version_id"] == policy["id"]
+        await repository.transition_review_status(artifact["id"], "prechecking")
+        artifact = await repository.transition_review_status(artifact["id"], "scanning")
+        assert artifact is not None
+
+        runs = []
+        for run_type in ("static", "runtime", "dependency"):
+            runs.append(
+                await repository.create_review_run(
+                    {
+                        "artifact_id": artifact["id"],
+                        "type": run_type,
+                        "status": "succeeded",
+                        "tool_name": run_type,
+                        "tool_version": "test-v1",
+                        "policy_version_id": policy["id"],
+                        "idempotency_key": f"auto-approve-{run_type}-run",
+                        "coverage": {
+                            "outcome": "completed",
+                            "stage_name": run_type,
+                            "complete": True,
+                        },
+                    }
+                )
+            )
+        run_ids = [str(run["id"]) for run in runs]
+
+        async def approve() -> dict[str, Any] | None:
+            return await repository.auto_approve_artifact(
+                artifact["id"],
+                reason="All deterministic review gates passed",
+                expected_repo_version="v1.0.0",
+                expected_normalized_version="1.0.0",
+                expected_version="v1.0.0",
+                idempotency_key="postgres-auto-approve-once",
+                policy_version_id=policy["id"],
+                input_run_ids=run_ids,
+                input_fingerprints=[],
+                coverage_sha256="9" * 64,
+                metadata={"routing": {"route": "auto_approve"}},
+                risk_level="none",
+            )
+
+        results = await asyncio.gather(*(approve() for _ in range(12)))
+        assert all(result and result["review_status"] == "approved" for result in results)
+        async with pool.acquire() as connection:
+            assert (
+                await connection.fetchval(
+                    "SELECT count(*) FROM review_decisions WHERE artifact_id = $1",
+                    artifact["id"],
+                )
+                == 1
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT count(*) FROM artifact_jobs WHERE artifact_id = $1 AND type = 'publish'",
+                    artifact["id"],
+                )
+                == 1
+            )
+
+        conflict_artifact = await repository.create_artifact(artifact_payload("9"))
+        conflict_artifact = await repository.snapshot_active_review_policy(conflict_artifact["id"])
+        assert conflict_artifact is not None
+        await repository.transition_review_status(conflict_artifact["id"], "prechecking")
+        conflict_artifact = await repository.transition_review_status(
+            conflict_artifact["id"], "scanning"
+        )
+        assert conflict_artifact is not None
+        conflict_run = await repository.create_review_run(
+            {
+                "artifact_id": conflict_artifact["id"],
+                "type": "static",
+                "status": "succeeded",
+                "policy_version_id": policy["id"],
+                "idempotency_key": "auto-approve-conflict-static-run",
+            }
+        )
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO artifact_jobs (
+                    id, artifact_id, type, idempotency_key, policy_version_id
+                )
+                VALUES ($1, $2, 'static_scan', $3, $4)
+                """,
+                "conflicting-publish-job",
+                conflict_artifact["id"],
+                f"publish:{conflict_artifact['id']}",
+                policy["id"],
+            )
+        with pytest.raises(ValueError, match=ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value):
+            await repository.auto_approve_artifact(
+                conflict_artifact["id"],
+                reason="Conflicting publish job must roll back",
+                expected_repo_version="v1.0.0",
+                expected_normalized_version="1.0.0",
+                expected_version="v1.0.0",
+                idempotency_key="postgres-auto-approve-conflict",
+                policy_version_id=policy["id"],
+                input_run_ids=[str(conflict_run["id"])],
+                input_fingerprints=[],
+                coverage_sha256="8" * 64,
+                metadata={"routing": {"route": "auto_approve"}},
+                risk_level="none",
+            )
+        unchanged = await repository.get_artifact(conflict_artifact["id"])
+        assert unchanged and unchanged["review_status"] == "scanning"
+        assert await repository.list_review_decisions(conflict_artifact["id"]) == []
     finally:
         if pool is not None:
             await pool.close()

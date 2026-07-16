@@ -239,3 +239,95 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         assert revoked["artifact"]["publication_status"] == "revoked"
         assert any(item["action"] == "revoke" for item in revoked["decisions"])
         assert "astrbot_plugin_demo" not in client.get("/plugins.json").json()
+
+
+def test_admin_can_idempotently_request_artifact_changes(tmp_path: Path) -> None:
+    settings = load_settings(
+        {
+            "ENABLE_DEV_AUTH": "true",
+            "ARTIFACTS_ENABLED": "true",
+            "ARTIFACT_LOCAL_ROOT": str(tmp_path / "storage"),
+            "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+            "ARTIFACT_SUBMISSION_RPM": "0",
+            "DATABASE_URL": "postgresql://example.invalid/market",
+            "REDIS_URL": "redis://example.invalid/0",
+            "GITHUB_METADATA_SYNC_ENABLED": "false",
+        }
+    )
+    store = InMemoryMarketStore()
+    app = create_app(settings=settings, store=store)
+    owner_headers = {"x-dev-github-login": "alice"}
+
+    with TestClient(app) as client:
+        plugin = client.post(
+            "/v1/plugins/registrations",
+            headers=owner_headers,
+            json={
+                "name": "astrbot_plugin_changes",
+                "display_name": "Changes",
+                "desc": "Request changes fixture",
+                "author": "Alice",
+                "repo": "https://github.com/alice/astrbot_plugin_changes",
+            },
+        ).json()["plugin"]
+        submitted = client.post(
+            f"/v1/plugins/{plugin['id']}/artifacts/upload",
+            headers=owner_headers,
+            files={"file": ("plugin.zip", plugin_zip(), "application/zip")},
+        )
+        artifact_id = submitted.json()["artifact"]["id"]
+        repository = app.state.artifact_runtime.repository
+        asyncio.run(repository.transition_review_status(artifact_id, "prechecking"))
+        asyncio.run(repository.transition_review_status(artifact_id, "scanning"))
+
+        owner_forbidden = client.post(
+            f"/v1/admin/artifacts/{artifact_id}/request-changes",
+            headers=owner_headers,
+            json={"reason": "owner cannot moderate"},
+        )
+        assert owner_forbidden.status_code == 403
+
+        reviewer = store.upsert_github_user(
+            {"id": "reviewer-1", "login": "reviewer", "name": "Reviewer"}
+        )
+        store.update_user_role(reviewer["id"], "admin")
+        headers = {
+            "x-dev-github-login": "reviewer",
+            "idempotency-key": "request-changes-once",
+        }
+        invalid_state = client.post(
+            f"/v1/admin/artifacts/{artifact_id}/request-changes",
+            headers={
+                "x-dev-github-login": "reviewer",
+                "idempotency-key": "request-changes-too-early",
+            },
+            json={"reason": "wait for automated review"},
+        )
+        assert invalid_state.status_code == 409
+        asyncio.run(repository.transition_review_status(artifact_id, "pending_review"))
+        missing_reason = client.post(
+            f"/v1/admin/artifacts/{artifact_id}/request-changes",
+            headers=headers,
+            json={"reason": ""},
+        )
+        assert missing_reason.status_code == 400
+        assert missing_reason.json()["code"] == "reason_required"
+
+        for _ in range(2):
+            response = client.post(
+                f"/v1/admin/artifacts/{artifact_id}/request-changes",
+                headers=headers,
+                json={"reason": "请移除未说明的命令执行"},
+            )
+            assert response.status_code == 200
+            assert response.json()["artifact"]["review_status"] == "changes_requested"
+
+        detail = client.get(f"/v1/artifacts/{artifact_id}", headers=owner_headers).json()
+        assert [item["action"] for item in detail["decisions"]] == ["request_changes"]
+        assert detail["artifact"]["download_url"] is None
+        events = [
+            event
+            for event in repository.outbox.values()
+            if event["event_type"] == "artifact_changes_requested"
+        ]
+        assert len(events) == 1

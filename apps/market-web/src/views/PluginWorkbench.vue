@@ -117,6 +117,17 @@ async function reject(reason: string): Promise<void> {
   }
 }
 
+async function requestChanges(reason: string): Promise<void> {
+  if (!selectedId.value) return;
+  try {
+    await artifactStore.requestChanges(selectedId.value, reason);
+    message.success("已要求作者修改，该版本不会发布 CDN 包");
+    await refreshList();
+  } catch (error) {
+    message.error(errorMessage(error, "要求修改失败"));
+  }
+}
+
 async function retryPublish(): Promise<void> {
   if (!selectedId.value) return;
   try {
@@ -164,6 +175,7 @@ onMounted(async () => {
         :is-admin="isAdmin"
         :item-count="visibleItems.length"
         :refreshing="loadingList"
+        :artifact="detail?.artifact || null"
         @back="router.back()"
         @refresh="refreshList"
       />
@@ -197,6 +209,7 @@ onMounted(async () => {
       :busy="deciding"
       @approve="approve"
       @reject="reject"
+      @request-changes="requestChanges"
       @retry-publish="retryPublish"
       @revoke="revoke"
     />

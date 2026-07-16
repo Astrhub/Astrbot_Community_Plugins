@@ -12,8 +12,22 @@ from ..auth import can_edit_plugin, is_admin
 from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
 from .github_source import GithubSourceError
 from .models import ArtifactStateError
-from .schemas import ArtifactDecisionPayload, GithubArtifactSubmission, PluginRegistrationPayload
-from .service import ArtifactService, ArtifactServiceError, public_artifact, public_review_run
+from .schemas import (
+    ArtifactDecisionPayload,
+    ArtifactDetailResponse,
+    ArtifactEnvelope,
+    GithubArtifactSubmission,
+    PluginRegistrationPayload,
+    ReviewFindingListResponse,
+    ReviewRunListResponse,
+)
+from .service import (
+    ArtifactService,
+    ArtifactServiceError,
+    public_artifact,
+    public_review_finding,
+    public_review_run,
+)
 from .storage import ArtifactStorageError
 
 ZIP_FILENAME_PATTERN = re.compile(r"\.zip$", re.IGNORECASE)
@@ -131,6 +145,7 @@ def build_artifact_router() -> APIRouter:
         "/v1/artifacts/{artifact_id}",
         tags=["artifacts"],
         summary="查看插件版本审查详情",
+        response_model=ArtifactDetailResponse,
     )
     async def artifact_detail(request: Request, artifact_id: str) -> dict[str, Any]:
         service = _require_service(request)
@@ -145,6 +160,7 @@ def build_artifact_router() -> APIRouter:
         "/v1/artifacts/{artifact_id}/runs",
         tags=["artifacts"],
         summary="查看自动审查运行记录",
+        response_model=ReviewRunListResponse,
     )
     async def artifact_runs(request: Request, artifact_id: str) -> dict[str, Any]:
         service = _require_service(request)
@@ -161,12 +177,18 @@ def build_artifact_router() -> APIRouter:
         "/v1/artifacts/{artifact_id}/findings",
         tags=["artifacts"],
         summary="查看结构化风险发现",
+        response_model=ReviewFindingListResponse,
     )
     async def artifact_findings(request: Request, artifact_id: str) -> dict[str, Any]:
         service = _require_service(request)
         user = await _require_user(request)
         await _visible_artifact(service, artifact_id, user)
-        return {"items": await service.repository.list_findings(artifact_id)}
+        return {
+            "items": [
+                public_review_finding(finding)
+                for finding in await service.repository.list_findings(artifact_id)
+            ]
+        }
 
     @router.get(
         "/v1/admin/artifacts",
@@ -198,6 +220,7 @@ def build_artifact_router() -> APIRouter:
         "/v1/admin/artifacts/{artifact_id}/approve",
         tags=["reviews"],
         summary="批准并排队发布 Artifact",
+        response_model=ArtifactEnvelope,
     )
     async def approve_artifact(
         request: Request,
@@ -227,6 +250,7 @@ def build_artifact_router() -> APIRouter:
         "/v1/admin/artifacts/{artifact_id}/reject",
         tags=["reviews"],
         summary="拒绝 Artifact",
+        response_model=ArtifactEnvelope,
     )
     async def reject_artifact(
         request: Request,
@@ -237,6 +261,31 @@ def build_artifact_router() -> APIRouter:
         reviewer = await _require_admin(request)
         try:
             artifact = await service.reject(
+                artifact_id=artifact_id,
+                reviewer=reviewer,
+                reason=payload.reason,
+                idempotency_key=payload.idempotency_key
+                or request.headers.get("idempotency-key", "").strip(),
+            )
+            return {"artifact": artifact}
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.post(
+        "/v1/admin/artifacts/{artifact_id}/request-changes",
+        tags=["reviews"],
+        summary="要求修改 Artifact",
+        response_model=ArtifactEnvelope,
+    )
+    async def request_artifact_changes(
+        request: Request,
+        artifact_id: str,
+        payload: ArtifactDecisionPayload,
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        reviewer = await _require_admin(request)
+        try:
+            artifact = await service.request_changes(
                 artifact_id=artifact_id,
                 reviewer=reviewer,
                 reason=payload.reason,

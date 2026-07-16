@@ -122,9 +122,13 @@ export const useArtifactStore = defineStore("artifacts", () => {
     return decide(artifactId, "reject", reason);
   }
 
+  async function requestChanges(artifactId: string, reason: string): Promise<PluginArtifact> {
+    return decide(artifactId, "request-changes", reason);
+  }
+
   async function decide(
     artifactId: string,
-    action: "approve" | "reject",
+    action: "approve" | "reject" | "request-changes",
     reason: string,
   ): Promise<PluginArtifact> {
     deciding.value = true;
@@ -186,6 +190,7 @@ export const useArtifactStore = defineStore("artifacts", () => {
     submitGithub,
     approve,
     reject,
+    requestChanges,
     retryPublish,
     revokeRelease,
     clearDetail,

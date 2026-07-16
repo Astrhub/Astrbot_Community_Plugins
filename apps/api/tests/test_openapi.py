@@ -68,6 +68,39 @@ def test_openapi_admin_includes_admin_routes():
     assert "/v1/core/users" not in paths
 
 
+def test_artifact_report_openapi_is_typed_and_role_filtered():
+    client, _ = _client_with_store()
+    _login(client, "regularuser", "userpass123")
+    user_schema = client.get("/openapi.json").json()
+    assert "/v1/artifacts/{artifact_id}" in user_schema["paths"]
+    assert "/v1/admin/artifacts/{artifact_id}/request-changes" not in user_schema["paths"]
+    detail_response = user_schema["paths"]["/v1/artifacts/{artifact_id}"]["get"]["responses"][
+        "200"
+    ]["content"]["application/json"]["schema"]
+    assert detail_response["$ref"].endswith("/ArtifactDetailResponse")
+
+    _login(client, "adminuser", "adminpass123")
+    admin_schema = client.get("/openapi.json").json()
+    request_changes = admin_schema["paths"][
+        "/v1/admin/artifacts/{artifact_id}/request-changes"
+    ]["post"]
+    response_schema = request_changes["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+    assert response_schema["$ref"].endswith("/ArtifactEnvelope")
+
+    schemas = admin_schema["components"]["schemas"]
+    run_fields = set(schemas["PublicReviewRun"]["properties"])
+    finding_fields = set(schemas["PublicReviewFinding"]["properties"])
+    decision_fields = set(schemas["PublicReviewDecision"]["properties"])
+    assert {"coverage", "tool_name", "tool_version", "model", "advisory", "label"} <= run_fields
+    assert {"source", "deterministic", "advisory", "label"} <= finding_fields
+    assert {"policy_version_id", "input_run_ids", "coverage_sha256"} <= decision_fields
+    assert {"raw_result", "raw_result_key", "worker_id"}.isdisjoint(run_fields)
+    assert "metadata" not in finding_fields
+    assert "idempotency_key" not in decision_fields
+
+
 def test_openapi_core_admin_sees_all():
     client, _ = _client_with_store()
     _login(client, "coreadmin", "testpass123")

@@ -51,6 +51,19 @@ describe("ReviewDecisionPanel", () => {
     expect(wrapper.find("textarea").exists()).toBe(false);
   });
 
+  it("emits request changes with the review reason", async () => {
+    const wrapper = mount(ReviewDecisionPanel, {
+      props: { artifact: pendingArtifact(), isAdmin: true, busy: false },
+    });
+
+    await wrapper.find("textarea").setValue("请固定依赖版本");
+    await flushPromises();
+    const button = wrapper.findAll("button").find((item) => item.text().includes("要求修改"));
+    await button?.trigger("click");
+
+    expect(wrapper.emitted("requestChanges")).toEqual([["请固定依赖版本"]]);
+  });
+
   it("offers an explicit revoke retry after a terminal revoke failure", async () => {
     const artifact: PluginArtifact = {
       ...pendingArtifact(),

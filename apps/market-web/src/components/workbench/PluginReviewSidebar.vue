@@ -25,6 +25,7 @@ defineEmits<{
 const statusOptions = [
   { label: "全部状态", value: "" },
   { label: "待人工审查", value: "pending_review" },
+  { label: "需要修改", value: "changes_requested" },
   { label: "处理中", value: "scanning" },
   { label: "已批准", value: "approved" },
   { label: "已拒绝", value: "rejected" },

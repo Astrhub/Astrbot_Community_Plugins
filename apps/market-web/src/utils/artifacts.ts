@@ -9,6 +9,7 @@ export const REVIEW_STATUS_LABELS: Record<ArtifactReviewStatus, string> = {
   prechecking: "基础校验",
   scanning: "静态扫描",
   pending_review: "待人工审查",
+  changes_requested: "需要修改",
   approved: "已批准",
   rejected: "已拒绝",
   withdrawn: "已撤回",
@@ -38,7 +39,7 @@ export function reviewTagType(
 ): "default" | "info" | "success" | "warning" | "error" {
   if (status === "approved") return "success";
   if (status === "rejected" || status === "processing_failed") return "error";
-  if (status === "pending_review") return "warning";
+  if (status === "pending_review" || status === "changes_requested") return "warning";
   return "info";
 }
 

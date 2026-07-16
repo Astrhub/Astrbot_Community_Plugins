@@ -23,6 +23,35 @@ const sortedFindings = computed(() => {
     (left, right) => order[right.severity] - order[left.severity],
   );
 });
+
+const routingCoverage = computed(() => {
+  const coverage = asRecord(props.detail?.artifact.review_coverage);
+  return asRecord(coverage.routing);
+});
+
+const routeReasons = computed(() =>
+  Array.isArray(routingCoverage.value.reason_codes)
+    ? routingCoverage.value.reason_codes.map(String)
+    : [],
+);
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function runTarget(run: ArtifactDetail["runs"][number]): string {
+  const coverage = asRecord(run.coverage);
+  const target = coverage.target_status || coverage.stage_name || coverage.outcome;
+  return target ? String(target) : "coverage 待生成";
+}
+
+function runTool(run: ArtifactDetail["runs"][number]): string {
+  const name = run.tool_name || run.model || "未记录工具";
+  const version = run.tool_version || "";
+  return version ? `${name} ${version}` : name;
+}
 </script>
 
 <template>
@@ -77,6 +106,31 @@ const sortedFindings = computed(() => {
         >
           仓库版本与候选包版本不同。该版本即使完成审查，也不会覆盖稳定 CDN 链接。
         </NAlert>
+        <NAlert
+          v-if="detail.artifact.suggested_category"
+          class="version-warning"
+          type="info"
+          :bordered="false"
+        >
+          <strong>自动审查建议：</strong>
+          分类 {{ detail.artifact.suggested_category }}
+          <template v-if="detail.artifact.category_confidence != null">
+            （置信度 {{ Math.round(detail.artifact.category_confidence * 100) }}%）
+          </template>
+          <span v-if="detail.artifact.category_reason">
+            · {{ detail.artifact.category_reason }}</span
+          >
+        </NAlert>
+        <NAlert
+          v-if="routingCoverage.route"
+          class="version-warning"
+          :type="routingCoverage.route === 'auto_reject' ? 'error' : 'info'"
+          :bordered="false"
+        >
+          路由结果：{{ routingCoverage.route }} →
+          {{ routingCoverage.target_status || detail.artifact.review_status }}
+          <template v-if="routeReasons.length"> · {{ routeReasons.join("、") }}</template>
+        </NAlert>
       </NCard>
 
       <NCard title="自动审查运行" size="small">
@@ -84,6 +138,9 @@ const sortedFindings = computed(() => {
           <article v-for="run in detail.runs" :key="run.id" class="run-item">
             <div class="run-item__title">
               <strong>{{ run.type }}</strong>
+              <NTag size="small" :type="run.advisory ? 'warning' : 'default'">
+                {{ run.label }}
+              </NTag>
               <NTag
                 size="small"
                 :type="
@@ -98,6 +155,12 @@ const sortedFindings = computed(() => {
               </NTag>
             </div>
             <p>{{ run.summary || "暂无摘要" }}</p>
+            <div class="run-item__metadata">
+              <span>{{ runTool(run) }}</span>
+              <span>{{ runTarget(run) }}</span>
+              <span v-if="run.astrbot_version">AstrBot {{ run.astrbot_version }}</span>
+              <span v-if="run.python_version">Python {{ run.python_version }}</span>
+            </div>
             <small>{{ formatArtifactTime(run.completed_at || run.created_at) }}</small>
           </article>
         </div>
@@ -114,6 +177,9 @@ const sortedFindings = computed(() => {
               >
                 {{ finding.severity }}
               </NTag>
+              <NTag size="small" :type="finding.advisory ? 'warning' : 'default'">
+                {{ finding.label }}
+              </NTag>
               <code>{{ finding.rule_id || finding.category || "RULE" }}</code>
               <span
                 >{{ finding.file_path || "包级发现"
@@ -129,7 +195,7 @@ const sortedFindings = computed(() => {
             </code>
           </article>
         </div>
-        <NEmpty v-else description="未发现静态风险命中" />
+        <NEmpty v-else description="当前没有结构化风险命中；此结果不构成安全背书" />
       </NCard>
     </div>
   </NSpin>
@@ -179,6 +245,15 @@ const sortedFindings = computed(() => {
 .run-item small,
 .finding-item__suggestion {
   color: var(--text-secondary);
+}
+
+.run-item__metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin: 7px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .finding-item__evidence {

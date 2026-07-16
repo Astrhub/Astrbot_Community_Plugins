@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import AsyncIterable, Mapping
+from decimal import Decimal
 from typing import Any
 
 from .archive import PrecheckError, normalize_github_repo, normalize_version
@@ -98,8 +99,14 @@ class ArtifactService:
                 public_review_run(run)
                 for run in await self.repository.list_review_runs(artifact_id)
             ],
-            "findings": await self.repository.list_findings(artifact_id),
-            "decisions": await self.repository.list_review_decisions(artifact_id),
+            "findings": [
+                public_review_finding(finding)
+                for finding in await self.repository.list_findings(artifact_id)
+            ],
+            "decisions": [
+                public_review_decision(decision)
+                for decision in await self.repository.list_review_decisions(artifact_id)
+            ],
         }
 
     async def approve(
@@ -176,6 +183,44 @@ class ArtifactService:
             extra={"reason": reason},
         )
         return public_artifact(rejected)
+
+    async def request_changes(
+        self,
+        *,
+        artifact_id: str,
+        reviewer: Mapping[str, Any],
+        reason: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        if not reason.strip():
+            raise ArtifactServiceError("reason_required", "要求修改时必须填写原因")
+        try:
+            changed = await self.repository.decide_artifact(
+                artifact_id,
+                action="request_changes",
+                target_status=ReviewStatus.CHANGES_REQUESTED.value,
+                reason=reason,
+                reviewer=reviewer,
+                idempotency_key=(
+                    idempotency_key
+                    or f"request-changes:{artifact_id}:{secrets.token_hex(8)}"
+                ),
+            )
+        except ArtifactStateError:
+            raise
+        except ValueError as exc:
+            raise ArtifactServiceError(
+                str(exc), "Artifact 状态已变化", status_code=409
+            ) from exc
+        if not changed:
+            raise ArtifactServiceError("artifact_not_found", "Artifact 不存在", status_code=404)
+        await self.enqueue_status_event(
+            artifact=changed,
+            event_type="artifact_changes_requested",
+            suffix="changes-requested",
+            extra={"reason": reason},
+        )
+        return public_artifact(changed)
 
     async def retry_publish(
         self, artifact_id: str, *, reviewer: Mapping[str, Any]
@@ -326,11 +371,208 @@ class ArtifactService:
         )
 
 
+_PUBLIC_ARTIFACT_FIELDS = {
+    "id",
+    "plugin_id",
+    "plugin_name",
+    "plugin_repo",
+    "version",
+    "normalized_version",
+    "repo_version",
+    "published_version",
+    "source_type",
+    "source_repo",
+    "source_ref",
+    "source_commit_sha",
+    "archive_sha256",
+    "tree_sha256",
+    "size_bytes",
+    "review_status",
+    "publication_status",
+    "risk_level",
+    "rejection_code",
+    "download_url",
+    "submitted_by",
+    "owner_user_id",
+    "suggested_category",
+    "category_confidence",
+    "category_reason",
+    "policy_version_id",
+    "base_artifact_id",
+    "supersedes_artifact_id",
+    "review_coverage",
+    "automated_review_completed_at",
+    "created_at",
+    "updated_at",
+    "reviewed_at",
+    "published_at",
+    "revoked_at",
+}
+_PUBLIC_RUN_FIELDS = {
+    "id",
+    "artifact_id",
+    "type",
+    "status",
+    "attempt",
+    "summary",
+    "error_code",
+    "model",
+    "ruleset_version",
+    "tool_name",
+    "tool_version",
+    "policy_version_id",
+    "input_sha256",
+    "output_sha256",
+    "coverage",
+    "prompt_version",
+    "result_schema_version",
+    "astrbot_version",
+    "python_version",
+    "platform",
+    "dependency_snapshot_sha256",
+    "queued_at",
+    "started_at",
+    "completed_at",
+    "created_at",
+}
+_PUBLIC_FINDING_FIELDS = {
+    "id",
+    "artifact_id",
+    "run_id",
+    "fingerprint",
+    "rule_id",
+    "file_path",
+    "line_start",
+    "line_end",
+    "severity",
+    "category",
+    "message",
+    "suggestion",
+    "evidence_excerpt",
+    "confidence",
+    "status",
+    "source",
+    "deterministic",
+    "affects_current_release",
+    "version",
+    "created_at",
+    "status_updated_at",
+}
+_PUBLIC_DECISION_FIELDS = {
+    "id",
+    "artifact_id",
+    "action",
+    "from_status",
+    "to_status",
+    "reason",
+    "reviewer_nickname",
+    "policy_version",
+    "policy_version_id",
+    "source",
+    "input_run_ids",
+    "input_fingerprints",
+    "coverage_sha256",
+    "metadata",
+    "created_at",
+}
+_PRIVATE_REPORT_KEYS = {
+    "api_key",
+    "authorization",
+    "content_key",
+    "credential",
+    "credentials",
+    "env",
+    "endpoint",
+    "environment",
+    "idempotency_key",
+    "log",
+    "logs",
+    "password",
+    "prompt",
+    "provider_response",
+    "published_key",
+    "quarantine_key",
+    "raw_result",
+    "raw_result_key",
+    "request",
+    "response",
+    "result_key",
+    "secret",
+    "stderr",
+    "stdout",
+    "token",
+    "url",
+    "worker_id",
+}
+_PRIVATE_REPORT_SUFFIXES = (
+    "_api_key",
+    "_credential",
+    "_endpoint",
+    "_key",
+    "_password",
+    "_secret",
+    "_token",
+    "_url",
+)
+_ADVISORY_RUN_TYPES = {"category", "llm_package", "llm_file", "llm_summary"}
+
+
 def public_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
-    hidden = {"quarantine_key", "submitted_by_snapshot"}
-    return {key: value for key, value in dict(artifact).items() if key not in hidden}
+    result = _pick_fields(artifact, _PUBLIC_ARTIFACT_FIELDS)
+    if (
+        result.get("review_status") != ReviewStatus.APPROVED.value
+        or result.get("publication_status") != PublicationStatus.PUBLISHED.value
+    ):
+        result["download_url"] = None
+    if "review_coverage" in result:
+        result["review_coverage"] = _public_report_value(result["review_coverage"])
+    return result
 
 
 def public_review_run(run: Mapping[str, Any]) -> dict[str, Any]:
-    hidden = {"raw_result", "raw_result_key"}
-    return {key: value for key, value in dict(run).items() if key not in hidden}
+    result = _pick_fields(run, _PUBLIC_RUN_FIELDS)
+    result["coverage"] = _public_report_value(result.get("coverage") or {})
+    advisory = str(run.get("type") or "") in _ADVISORY_RUN_TYPES
+    result["advisory"] = advisory
+    result["label"] = "自动审查建议" if advisory else "确定性检查"
+    return result
+
+
+def public_review_finding(finding: Mapping[str, Any]) -> dict[str, Any]:
+    result = _pick_fields(finding, _PUBLIC_FINDING_FIELDS)
+    advisory = not bool(finding.get("deterministic", True)) or str(
+        finding.get("source") or ""
+    ) == "llm"
+    result["advisory"] = advisory
+    result["label"] = "自动审查建议" if advisory else "确定性检查"
+    return result
+
+
+def public_review_decision(decision: Mapping[str, Any]) -> dict[str, Any]:
+    result = _pick_fields(decision, _PUBLIC_DECISION_FIELDS)
+    result["metadata"] = _public_report_value(result.get("metadata") or {})
+    return result
+
+
+def _pick_fields(value: Mapping[str, Any], fields: set[str]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key in fields}
+
+
+def _public_report_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 8:
+        return None
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in _PRIVATE_REPORT_KEYS or normalized.endswith(_PRIVATE_REPORT_SUFFIXES):
+                continue
+            result[str(key)] = _public_report_value(item, depth=depth + 1)
+        return result
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_public_report_value(item, depth=depth + 1) for item in value]
+    if isinstance(value, Decimal):
+        return float(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)

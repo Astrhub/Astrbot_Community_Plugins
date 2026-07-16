@@ -5,6 +5,7 @@ export type ArtifactReviewStatus =
   | "prechecking"
   | "scanning"
   | "pending_review"
+  | "changes_requested"
   | "approved"
   | "rejected"
   | "withdrawn"
@@ -42,6 +43,15 @@ export interface PluginArtifact {
   download_url?: string | null;
   submitted_by?: string | null;
   owner_user_id?: string | null;
+  suggested_category?: string;
+  category_confidence?: number | null;
+  category_reason?: string;
+  policy_version_id?: string | null;
+  review_coverage?: Record<string, unknown>;
+  automated_review_completed_at?: string | null;
+  reviewed_at?: string | null;
+  published_at?: string | null;
+  revoked_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -49,17 +59,44 @@ export interface PluginArtifact {
 export interface ArtifactReviewRun {
   id: string;
   artifact_id: string;
-  type: "precheck" | "static" | "runtime" | "llm_package" | "llm_file" | "llm_summary";
+  type:
+    | "precheck"
+    | "static"
+    | "diff"
+    | "import_graph"
+    | "runtime"
+    | "category"
+    | "clamav"
+    | "yara"
+    | "dependency"
+    | "llm_package"
+    | "llm_file"
+    | "llm_summary"
+    | "routing";
   status: "queued" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled";
+  attempt: number;
+  advisory: boolean;
+  label: "自动审查建议" | "确定性检查";
   summary?: string;
   error_code?: string;
-  raw_result?: Record<string, unknown>;
+  model?: string;
+  ruleset_version?: string;
+  tool_name?: string;
+  tool_version?: string;
+  policy_version_id?: string | null;
+  coverage: Record<string, unknown>;
+  astrbot_version?: string;
+  python_version?: string;
+  platform?: string;
   created_at: string;
   completed_at?: string | null;
 }
 
 export interface ArtifactFinding {
   id: string;
+  artifact_id: string;
+  run_id: string;
+  fingerprint: string;
   rule_id?: string;
   file_path?: string;
   line_start?: number | null;
@@ -69,13 +106,31 @@ export interface ArtifactFinding {
   message: string;
   suggestion?: string;
   evidence_excerpt?: string;
+  confidence?: number | null;
+  status: "open" | "accepted" | "resolved" | "false_positive";
+  source?: string;
+  deterministic: boolean;
+  advisory: boolean;
+  label: "自动审查建议" | "确定性检查";
+  affects_current_release?: boolean;
+  created_at: string;
 }
 
 export interface ArtifactDecision {
   id: string;
+  artifact_id: string;
   action: string;
+  from_status: string;
+  to_status: string;
   reason?: string;
   reviewer_nickname?: string;
+  policy_version?: string;
+  policy_version_id?: string | null;
+  source: "admin" | "system" | "policy";
+  input_run_ids: string[];
+  input_fingerprints: string[];
+  coverage_sha256?: string;
+  metadata: Record<string, unknown>;
   created_at: string;
 }
 

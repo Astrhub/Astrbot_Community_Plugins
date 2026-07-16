@@ -848,6 +848,16 @@ paths:
       parameters: [{$ref: "#/components/parameters/ArtifactId"}]
       responses:
         "200": {description: 已拒绝，不发布 CDN URL}
+  /v1/admin/artifacts/{artifact_id}/request-changes:
+    post:
+      tags: [Reviews]
+      summary: 要求作者修改 artifact
+      security: [{cookieAuth: []}]
+      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      responses:
+        "200": {description: 已锁定审查结果并标记为需要修改，不发布 CDN URL}
+        "400": {description: 必须提供修改原因}
+        "409": {description: Artifact 不处于待人工审查状态}
   /v1/admin/artifacts/{artifact_id}/retry-publish:
     post:
       tags: [Reviews]
