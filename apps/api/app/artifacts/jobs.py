@@ -312,9 +312,19 @@ class ArtifactJobRunner:
         if job_type == JobType.REVOKE.value and not will_retry:
             artifact = await self.repository.get_artifact(artifact_id)
             if artifact and artifact["publication_status"] == PublicationStatus.REVOKING.value:
+                failed = None
                 with suppress(Exception):
-                    await self.repository.transition_publication_status(
+                    failed = await self.repository.transition_publication_status(
                         artifact_id, PublicationStatus.REVOKE_FAILED.value
+                    )
+                if failed:
+                    extra = _revoke_event_extra(job.get("payload"))
+                    extra["code"] = error_code
+                    await self._status_event(
+                        failed,
+                        "artifact_revoke_failed",
+                        f"revoke-failed:{error_code}",
+                        extra,
                     )
 
     async def _renew_lease(self, job_id: str, stop: asyncio.Event) -> None:
@@ -501,13 +511,13 @@ class ArtifactJobRunner:
     async def _run_revoke(self, job: Mapping[str, Any]) -> None:
         artifact = await self._artifact_for_job(job)
         current_publication = str(artifact["publication_status"])
-        reason = str((job.get("payload") or {}).get("reason") or "")
+        event_extra = _revoke_event_extra(job.get("payload"))
         if current_publication == PublicationStatus.REVOKED.value:
             await self._status_event(
                 artifact,
                 "artifact_revoked",
                 "revoked",
-                {"reason": reason},
+                event_extra,
             )
             return
         if current_publication not in {
@@ -536,7 +546,7 @@ class ArtifactJobRunner:
             revoked,
             "artifact_revoked",
             "revoked",
-            {"reason": reason},
+            event_extra,
         )
 
     async def _run_cleanup_orphan(self, job: Mapping[str, Any]) -> None:
@@ -610,6 +620,20 @@ def _retry_delay(attempt: int) -> int:
 
 def _safe_error(error: Exception) -> str:
     return " ".join(str(error or error.__class__.__name__).split())[:500]
+
+
+def _revoke_event_extra(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, Mapping) else {}
+    return {
+        key: item
+        for key, item in {
+            "reason": str(payload.get("reason") or "")[:2000],
+            "emergency": payload.get("emergency") is True,
+            "candidate_artifact_id": str(payload.get("candidate_artifact_id") or ""),
+            "finding_id": str(payload.get("finding_id") or ""),
+        }.items()
+        if item not in {"", False, None}
+    }
 
 
 def worker_id() -> str:

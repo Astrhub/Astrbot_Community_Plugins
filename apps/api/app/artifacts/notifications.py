@@ -56,7 +56,22 @@ STATUS_COPY: dict[str, tuple[str, str]] = {
         "[安全处置] 插件 CDN 包已下架",
         "管理员已撤回当前 CDN 插件包。请进入站内工作台查看原因。",
     ),
+    "artifact_stable_risk_revoking": (
+        "[安全处置] 插件 CDN 包正在紧急撤回",
+        "管理员已确认风险影响当前稳定版本，插件已从插件源隐藏，CDN 对象正在撤回。",
+    ),
+    "artifact_revoke_failed": (
+        "[安全处置] 插件 CDN 包撤回失败",
+        "插件仍保持从插件源隐藏，但 CDN 对象撤回失败。请进入站内工作台处理。",
+    ),
 }
+
+_UNLIST_EVENTS = frozenset(
+    {"artifact_stable_risk_revoking", "artifact_revoked", "artifact_revoke_failed"}
+)
+_EMERGENCY_ADMIN_EVENTS = frozenset(
+    {"artifact_stable_risk_revoking", "artifact_revoked", "artifact_revoke_failed"}
+)
 
 
 class ArtifactNotificationDispatcher:
@@ -127,25 +142,40 @@ class ArtifactNotificationDispatcher:
                     body=full_body,
                     email_body=email_body,
                     artifact_id=artifact_id,
-                    email_preference="email_notify_unlist"
-                    if event.get("event_type") == "artifact_revoked"
-                    else "email_notify_plugin_review",
+                    email_preference=(
+                        "email_notify_unlist"
+                        if event.get("event_type") in _UNLIST_EVENTS
+                        else "email_notify_plugin_review"
+                    ),
                 )
 
-        if event.get("event_type") == "artifact_pending_review":
+        event_type = str(event.get("event_type") or "")
+        notify_admins = event_type == "artifact_pending_review" or (
+            event_type in _EMERGENCY_ADMIN_EVENTS and payload.get("emergency") is True
+        )
+        if notify_admins:
             users = await self._call_store("list_users")
             for admin in users or []:
                 if not is_admin(admin) or str(admin.get("id") or "") == recipient_id:
                     continue
+                admin_title = (
+                    "[待审队列] 有新的插件版本待复核"
+                    if event_type == "artifact_pending_review"
+                    else title
+                )
                 await self._notify_user(
                     admin,
                     event_id=f"{event['id']}:admin:{admin.get('id')}",
-                    event_type="artifact_pending_review",
-                    title="[待审队列] 有新的插件版本待复核",
+                    event_type=event_type,
+                    title=admin_title,
                     body=full_body,
                     email_body=email_body,
                     artifact_id=artifact_id,
-                    email_preference="email_notify_pending_review",
+                    email_preference=(
+                        "email_notify_pending_review"
+                        if event_type == "artifact_pending_review"
+                        else "email_notify_unlist"
+                    ),
                 )
 
     async def _notify_user(

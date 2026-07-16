@@ -248,6 +248,8 @@ class ArtifactErrorCode(StrEnum):
     SUPERSEDED_ARTIFACT_INVALID = "superseded_artifact_invalid"
     SUPERSEDED_ARTIFACT_FORBIDDEN = "superseded_artifact_forbidden"
     RESUBMISSION_CONTENT_UNCHANGED = "resubmission_content_unchanged"
+    HISTORY_CURSOR_INVALID = "history_cursor_invalid"
+    HISTORY_PROJECTION_INVALID = "history_projection_invalid"
     FINDING_VERSION_CONFLICT = "finding_version_conflict"
     REVIEW_POLICY_INVALID = "review_policy_invalid"
     REVIEW_POLICY_VERSION_CONFLICT = "review_policy_version_conflict"

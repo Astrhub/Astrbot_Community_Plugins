@@ -1526,11 +1526,11 @@ class PgAdvancedReviewRepositoryMixin:
         async with pool.acquire() as connection:
             async with connection.transaction():
                 existing_event = await connection.fetchrow(
-                    "SELECT finding_id FROM review_finding_events WHERE idempotency_key = $1",
+                    "SELECT * FROM review_finding_events WHERE idempotency_key = $1",
                     payload["idempotency_key"],
                 )
                 if existing_event:
-                    if str(existing_event["finding_id"]) != finding_id:
+                    if not _same_finding_event_request(existing_event, finding_id, payload):
                         raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     existing = await connection.fetchrow(
                         "SELECT * FROM review_findings WHERE id = $1",
@@ -1618,6 +1618,14 @@ class PgAdvancedReviewRepositoryMixin:
         )
         return [_record(row) for row in rows]
 
+    async def get_review_finding(self, artifact_id: str, finding_id: str) -> dict[str, Any] | None:
+        row = await self._advanced_pool().fetchrow(
+            "SELECT * FROM review_findings WHERE artifact_id = $1 AND id = $2",
+            artifact_id,
+            finding_id,
+        )
+        return _record(row) if row else None
+
     async def create_artifact_sbom(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         pool = self._advanced_pool()
         async with pool.acquire() as connection:
@@ -1659,6 +1667,251 @@ class PgAdvancedReviewRepositoryMixin:
           ORDER BY created_at, id
             """,
             artifact_id,
+        )
+        return [_record(row) for row in rows]
+
+    async def list_review_history_records(
+        self,
+        artifact_id: str,
+        *,
+        limit: int,
+        after: tuple[datetime, str, str] | None,
+    ) -> list[dict[str, Any]]:
+        after_time, after_type, after_id = after or (None, "", "")
+        rows = await self._advanced_pool().fetch(
+            """
+            WITH history AS (
+                SELECT run.id,
+                       'run'::text AS type,
+                       run.created_at AS occurred_at,
+                       'system'::text AS source,
+                       ''::text AS actor_nickname,
+                       'system'::text AS actor_role,
+                       COALESCE(run.idempotency_key, '') AS idempotency_key,
+                       run.policy_version_id,
+                       jsonb_build_object(
+                           'run_type', run.type,
+                           'status', run.status,
+                           'attempt', run.attempt,
+                           'summary', left(run.summary, 2000),
+                           'error_code', run.error_code,
+                           'tool_name', run.tool_name,
+                           'tool_version', run.tool_version,
+                           'ruleset_version', run.ruleset_version,
+                           'model', run.model,
+                           'coverage', run.coverage
+                       ) AS payload
+                  FROM review_runs run
+                 WHERE run.artifact_id = $1
+
+                UNION ALL
+
+                SELECT finding.id,
+                       'finding'::text,
+                       finding.created_at,
+                       finding.source,
+                       ''::text,
+                       'system'::text,
+                       ''::text,
+                       run.policy_version_id,
+                       jsonb_build_object(
+                           'finding_id', finding.id,
+                           'run_id', finding.run_id,
+                           'fingerprint', finding.fingerprint,
+                           'rule_id', finding.rule_id,
+                           'severity', finding.severity,
+                           'category', finding.category,
+                           'message', left(finding.message, 2000),
+                           'file_path', finding.file_path,
+                           'line_start', finding.line_start,
+                           'line_end', finding.line_end,
+                           'status', finding.status,
+                           'deterministic', finding.deterministic,
+                           'affects_current_release', finding.affects_current_release,
+                           'correlation', finding.correlation
+                       )
+                  FROM review_findings finding
+             LEFT JOIN review_runs run ON run.id = finding.run_id
+                 WHERE finding.artifact_id = $1
+
+                UNION ALL
+
+                SELECT event.id,
+                       'finding_event'::text,
+                       event.created_at,
+                       event.actor_source,
+                       event.actor_nickname,
+                       CASE WHEN event.actor_source = 'user' THEN 'admin' ELSE 'system' END,
+                       event.idempotency_key,
+                       run.policy_version_id,
+                       jsonb_build_object(
+                           'finding_id', event.finding_id,
+                           'event_type', event.type,
+                           'from_status', event.from_status,
+                           'to_status', event.to_status,
+                           'reason', left(event.reason, 2000),
+                           'metadata', event.metadata
+                       )
+                  FROM review_finding_events event
+                  JOIN review_findings finding ON finding.id = event.finding_id
+             LEFT JOIN review_runs run ON run.id = finding.run_id
+                 WHERE event.artifact_id = $1
+
+                UNION ALL
+
+                SELECT event.id,
+                       'comment_event'::text,
+                       event.created_at,
+                       CASE WHEN event.actor_role = 'system' THEN 'system' ELSE 'user' END,
+                       event.actor_nickname,
+                       event.actor_role,
+                       event.idempotency_key,
+                       artifact.policy_version_id,
+                       jsonb_build_object(
+                           'thread_id', event.thread_id,
+                           'event_type', event.type,
+                           'body_preview', left(event.body, 500),
+                           'expected_version', event.expected_version,
+                           'resulting_version', event.resulting_version
+                       )
+                  FROM review_comment_events event
+                  JOIN plugin_artifacts artifact ON artifact.id = event.artifact_id
+                 WHERE event.artifact_id = $1
+
+                UNION ALL
+
+                SELECT decision.id,
+                       'decision'::text,
+                       decision.created_at,
+                       decision.source,
+                       decision.reviewer_nickname,
+                       CASE WHEN decision.reviewer_user_id IS NULL THEN 'system' ELSE 'admin' END,
+                       decision.idempotency_key,
+                       decision.policy_version_id,
+                       jsonb_build_object(
+                           'action', decision.action,
+                           'from_status', decision.from_status,
+                           'to_status', decision.to_status,
+                           'reason', left(decision.reason, 2000),
+                           'policy_version', decision.policy_version,
+                           'input_run_ids', decision.input_run_ids,
+                           'input_fingerprints', decision.input_fingerprints,
+                           'coverage_sha256', decision.coverage_sha256,
+                           'metadata', decision.metadata
+                       )
+                  FROM review_decisions decision
+                 WHERE decision.artifact_id = $1
+
+                UNION ALL
+
+                SELECT event.id,
+                       'policy_event'::text,
+                       event.created_at,
+                       'user'::text,
+                       event.actor_nickname,
+                       'core_admin'::text,
+                       event.idempotency_key,
+                       event.policy_id,
+                       jsonb_build_object(
+                           'action', event.action,
+                           'reason', left(event.reason, 2000),
+                           'request_id', event.request_id,
+                           'base_version', event.base_version
+                       )
+                  FROM review_policy_events event
+                  JOIN plugin_artifacts artifact ON artifact.policy_version_id = event.policy_id
+                 WHERE artifact.id = $1
+
+                UNION ALL
+
+                SELECT artifact.id || ':submitted',
+                       'artifact_submitted'::text,
+                       artifact.created_at,
+                       'user'::text,
+                       COALESCE(artifact.submitted_by_snapshot->>'nickname', ''),
+                       'author'::text,
+                       ''::text,
+                       artifact.policy_version_id,
+                       jsonb_build_object(
+                           'source_type', artifact.source_type,
+                           'source_ref', artifact.source_ref,
+                           'source_commit_sha', artifact.source_commit_sha
+                       )
+                  FROM plugin_artifacts artifact
+                 WHERE artifact.id = $1
+
+                UNION ALL
+
+                SELECT artifact.id || ':published',
+                       'publication_published'::text,
+                       artifact.published_at,
+                       'system'::text,
+                       ''::text,
+                       'system'::text,
+                       ''::text,
+                       artifact.policy_version_id,
+                       jsonb_build_object('publication_status', 'published')
+                  FROM plugin_artifacts artifact
+                 WHERE artifact.id = $1 AND artifact.published_at IS NOT NULL
+
+                UNION ALL
+
+                SELECT artifact.id || ':revoked',
+                       'publication_revoked'::text,
+                       artifact.revoked_at,
+                       'system'::text,
+                       ''::text,
+                       'system'::text,
+                       ''::text,
+                       artifact.policy_version_id,
+                       jsonb_build_object('publication_status', 'revoked')
+                  FROM plugin_artifacts artifact
+                 WHERE artifact.id = $1 AND artifact.revoked_at IS NOT NULL
+
+                UNION ALL
+
+                SELECT event.id,
+                       CASE event.event_type
+                           WHEN 'artifact_publish_failed' THEN 'publication_publish_failed'
+                           ELSE 'publication_revoke_failed'
+                       END,
+                       event.created_at,
+                       'system'::text,
+                       ''::text,
+                       'system'::text,
+                       event.dedupe_key,
+                       artifact.policy_version_id,
+                       jsonb_strip_nulls(
+                           jsonb_build_object(
+                               'publication_status',
+                               CASE event.event_type
+                                   WHEN 'artifact_publish_failed' THEN 'publish_failed'
+                                   ELSE 'revoke_failed'
+                               END,
+                               'code', event.payload->>'code'
+                           )
+                       )
+                  FROM outbox_events event
+                  JOIN plugin_artifacts artifact ON artifact.id = event.aggregate_id
+                 WHERE event.aggregate_type = 'artifact'
+                   AND event.aggregate_id = $1
+                   AND event.event_type IN (
+                       'artifact_publish_failed', 'artifact_revoke_failed'
+                   )
+            )
+            SELECT id, type, occurred_at, source, actor_nickname, actor_role,
+                   idempotency_key, policy_version_id, payload
+              FROM history
+             WHERE $2::timestamptz IS NULL
+                OR (occurred_at, type, id) > ($2::timestamptz, $3::text, $4::text)
+          ORDER BY occurred_at, type, id
+             LIMIT $5
+            """,
+            artifact_id,
+            after_time,
+            after_type,
+            after_id,
+            limit,
         )
         return [_record(row) for row in rows]
 
@@ -2873,7 +3126,7 @@ class InMemoryAdvancedReviewRepositoryMixin:
         async with self._lock:
             for event in self.finding_events.values():
                 if event["idempotency_key"] == payload["idempotency_key"]:
-                    if event["finding_id"] != finding_id:
+                    if not _same_finding_event_request(event, finding_id, payload):
                         raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     finding = self._memory_finding(finding_id)
                     return deepcopy(finding) if finding else None
@@ -2919,6 +3172,12 @@ class InMemoryAdvancedReviewRepositoryMixin:
         values.sort(key=lambda item: (item["created_at"], item["id"]))
         return deepcopy(values)
 
+    async def get_review_finding(self, artifact_id: str, finding_id: str) -> dict[str, Any] | None:
+        finding = self._memory_finding(finding_id)
+        if not finding or finding["artifact_id"] != artifact_id:
+            return None
+        return deepcopy(finding)
+
     async def create_artifact_sbom(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         run = self.runs.get(str(payload["run_id"]))
         if not run or run["artifact_id"] != payload["artifact_id"]:
@@ -2945,6 +3204,260 @@ class InMemoryAdvancedReviewRepositoryMixin:
         values = [sbom for sbom in self.sboms.values() if sbom["artifact_id"] == artifact_id]
         values.sort(key=lambda item: (item["created_at"], item["id"]))
         return deepcopy(values)
+
+    async def list_review_history_records(
+        self,
+        artifact_id: str,
+        *,
+        limit: int,
+        after: tuple[datetime, str, str] | None,
+    ) -> list[dict[str, Any]]:
+        artifact = self.artifacts.get(artifact_id)
+        if not artifact:
+            return []
+        records: list[dict[str, Any]] = [
+            _history_record(
+                record_id=f"{artifact_id}:submitted",
+                event_type="artifact_submitted",
+                occurred_at=artifact["created_at"],
+                source="user",
+                actor_nickname=str(
+                    (artifact.get("submitted_by_snapshot") or {}).get("nickname") or ""
+                ),
+                actor_role="author",
+                idempotency_key="",
+                policy_version_id=artifact.get("policy_version_id"),
+                payload={
+                    "source_type": artifact.get("source_type", ""),
+                    "source_ref": artifact.get("source_ref", ""),
+                    "source_commit_sha": artifact.get("source_commit_sha", ""),
+                },
+            )
+        ]
+        for run in self.runs.values():
+            if run["artifact_id"] != artifact_id:
+                continue
+            records.append(
+                _history_record(
+                    record_id=run["id"],
+                    event_type="run",
+                    occurred_at=run["created_at"],
+                    source="system",
+                    actor_nickname="",
+                    actor_role="system",
+                    idempotency_key=str(run.get("idempotency_key") or ""),
+                    policy_version_id=run.get("policy_version_id"),
+                    payload={
+                        "run_type": run.get("type", ""),
+                        "status": run.get("status", ""),
+                        "attempt": run.get("attempt", 1),
+                        "summary": str(run.get("summary") or "")[:2000],
+                        "error_code": run.get("error_code", ""),
+                        "tool_name": run.get("tool_name", ""),
+                        "tool_version": run.get("tool_version", ""),
+                        "ruleset_version": run.get("ruleset_version", ""),
+                        "model": run.get("model", ""),
+                        "coverage": deepcopy(run.get("coverage") or {}),
+                    },
+                )
+            )
+        for finding in (
+            item
+            for findings in self.findings.values()
+            for item in findings
+            if item["artifact_id"] == artifact_id
+        ):
+            run = self.runs.get(str(finding.get("run_id") or "")) or {}
+            records.append(
+                _history_record(
+                    record_id=finding["id"],
+                    event_type="finding",
+                    occurred_at=finding["created_at"],
+                    source=str(finding.get("source") or ""),
+                    actor_nickname="",
+                    actor_role="system",
+                    idempotency_key="",
+                    policy_version_id=run.get("policy_version_id"),
+                    payload={
+                        "finding_id": finding["id"],
+                        "run_id": finding.get("run_id"),
+                        "fingerprint": finding.get("fingerprint", ""),
+                        "rule_id": finding.get("rule_id", ""),
+                        "severity": finding.get("severity", ""),
+                        "category": finding.get("category", ""),
+                        "message": str(finding.get("message") or "")[:2000],
+                        "file_path": finding.get("file_path", ""),
+                        "line_start": finding.get("line_start"),
+                        "line_end": finding.get("line_end"),
+                        "status": finding.get("status", "open"),
+                        "deterministic": bool(finding.get("deterministic")),
+                        "affects_current_release": bool(finding.get("affects_current_release")),
+                        "correlation": deepcopy(finding.get("correlation") or {}),
+                    },
+                )
+            )
+        for event in self.finding_events.values():
+            if event["artifact_id"] != artifact_id:
+                continue
+            finding = self._memory_finding(str(event["finding_id"])) or {}
+            run = self.runs.get(str(finding.get("run_id") or "")) or {}
+            records.append(
+                _history_record(
+                    record_id=event["id"],
+                    event_type="finding_event",
+                    occurred_at=event["created_at"],
+                    source=str(event.get("actor_source") or ""),
+                    actor_nickname=str(event.get("actor_nickname") or ""),
+                    actor_role="admin" if event.get("actor_source") == "user" else "system",
+                    idempotency_key=str(event.get("idempotency_key") or ""),
+                    policy_version_id=run.get("policy_version_id"),
+                    payload={
+                        "finding_id": event.get("finding_id"),
+                        "event_type": event.get("type", ""),
+                        "from_status": event.get("from_status"),
+                        "to_status": event.get("to_status"),
+                        "reason": str(event.get("reason") or "")[:2000],
+                        "metadata": deepcopy(event.get("metadata") or {}),
+                    },
+                )
+            )
+        for event in self.comment_events.values():
+            if event["artifact_id"] != artifact_id:
+                continue
+            records.append(
+                _history_record(
+                    record_id=event["id"],
+                    event_type="comment_event",
+                    occurred_at=event["created_at"],
+                    source="system" if event.get("actor_role") == "system" else "user",
+                    actor_nickname=str(event.get("actor_nickname") or ""),
+                    actor_role=str(event.get("actor_role") or ""),
+                    idempotency_key=str(event.get("idempotency_key") or ""),
+                    policy_version_id=artifact.get("policy_version_id"),
+                    payload={
+                        "thread_id": event.get("thread_id"),
+                        "event_type": event.get("type", ""),
+                        "body_preview": str(event.get("body") or "")[:500],
+                        "expected_version": event.get("expected_version", 0),
+                        "resulting_version": event.get("resulting_version", 1),
+                    },
+                )
+            )
+        for decision in self.decisions.values():
+            if decision["artifact_id"] != artifact_id:
+                continue
+            records.append(
+                _history_record(
+                    record_id=decision["id"],
+                    event_type="decision",
+                    occurred_at=decision["created_at"],
+                    source=str(decision.get("source") or "admin"),
+                    actor_nickname=str(decision.get("reviewer_nickname") or ""),
+                    actor_role="admin" if decision.get("reviewer_user_id") else "system",
+                    idempotency_key=str(decision.get("idempotency_key") or ""),
+                    policy_version_id=decision.get("policy_version_id"),
+                    payload={
+                        "action": decision.get("action", ""),
+                        "from_status": decision.get("from_status", ""),
+                        "to_status": decision.get("to_status", ""),
+                        "reason": str(decision.get("reason") or "")[:2000],
+                        "policy_version": decision.get("policy_version", ""),
+                        "input_run_ids": list(decision.get("input_run_ids") or []),
+                        "input_fingerprints": list(decision.get("input_fingerprints") or []),
+                        "coverage_sha256": decision.get("coverage_sha256", ""),
+                        "metadata": deepcopy(decision.get("metadata") or {}),
+                    },
+                )
+            )
+        policy_id = str(artifact.get("policy_version_id") or "")
+        for event in self.policy_events.values():
+            if event["policy_id"] != policy_id:
+                continue
+            records.append(
+                _history_record(
+                    record_id=event["id"],
+                    event_type="policy_event",
+                    occurred_at=event["created_at"],
+                    source="user",
+                    actor_nickname=str(event.get("actor_nickname") or ""),
+                    actor_role="core_admin",
+                    idempotency_key=str(event.get("idempotency_key") or ""),
+                    policy_version_id=policy_id,
+                    payload={
+                        "action": event.get("action", ""),
+                        "reason": str(event.get("reason") or "")[:2000],
+                        "request_id": event.get("request_id", ""),
+                        "base_version": event.get("base_version", ""),
+                    },
+                )
+            )
+        if artifact.get("published_at"):
+            records.append(
+                _history_record(
+                    record_id=f"{artifact_id}:published",
+                    event_type="publication_published",
+                    occurred_at=artifact["published_at"],
+                    source="system",
+                    actor_nickname="",
+                    actor_role="system",
+                    idempotency_key="",
+                    policy_version_id=artifact.get("policy_version_id"),
+                    payload={"publication_status": "published"},
+                )
+            )
+        if artifact.get("revoked_at"):
+            records.append(
+                _history_record(
+                    record_id=f"{artifact_id}:revoked",
+                    event_type="publication_revoked",
+                    occurred_at=artifact["revoked_at"],
+                    source="system",
+                    actor_nickname="",
+                    actor_role="system",
+                    idempotency_key="",
+                    policy_version_id=artifact.get("policy_version_id"),
+                    payload={"publication_status": "revoked"},
+                )
+            )
+        for event in self.outbox.values():
+            if (
+                event.get("aggregate_type") != "artifact"
+                or event.get("aggregate_id") != artifact_id
+                or event.get("event_type")
+                not in {"artifact_publish_failed", "artifact_revoke_failed"}
+            ):
+                continue
+            status = (
+                "publish_failed"
+                if event["event_type"] == "artifact_publish_failed"
+                else "revoke_failed"
+            )
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            records.append(
+                _history_record(
+                    record_id=event["id"],
+                    event_type=f"publication_{status}",
+                    occurred_at=event["created_at"],
+                    source="system",
+                    actor_nickname="",
+                    actor_role="system",
+                    idempotency_key=str(event.get("dedupe_key") or ""),
+                    policy_version_id=artifact.get("policy_version_id"),
+                    payload={
+                        key: value
+                        for key, value in {
+                            "publication_status": status,
+                            "code": payload.get("code"),
+                        }.items()
+                        if value not in {None, ""}
+                    },
+                )
+            )
+        records.sort(key=_history_sort_key)
+        if after is not None:
+            after_key = (after[0], after[1], after[2])
+            records = [item for item in records if _history_sort_key(item) > after_key]
+        return deepcopy(records[:limit])
 
     async def get_review_history_sources(self, artifact_id: str) -> dict[str, Any]:
         artifact = self.artifacts.get(artifact_id)
@@ -3018,6 +3531,39 @@ class InMemoryAdvancedReviewRepositoryMixin:
                 if finding["id"] == finding_id:
                     return finding
         return None
+
+
+def _history_record(
+    *,
+    record_id: str,
+    event_type: str,
+    occurred_at: str | datetime,
+    source: str,
+    actor_nickname: str,
+    actor_role: str,
+    idempotency_key: str,
+    policy_version_id: Any,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": str(record_id),
+        "type": event_type,
+        "occurred_at": occurred_at,
+        "source": source,
+        "actor_nickname": actor_nickname,
+        "actor_role": actor_role,
+        "idempotency_key": idempotency_key,
+        "policy_version_id": str(policy_version_id or "") or None,
+        "payload": dict(payload),
+    }
+
+
+def _history_sort_key(item: Mapping[str, Any]) -> tuple[datetime, str, str]:
+    return (
+        _parse_time(item["occurred_at"]),
+        str(item["type"]),
+        str(item["id"]),
+    )
 
 
 def _finding_event_type(
@@ -3130,6 +3676,21 @@ def _same_comment_event(
         and int(existing.get("expected_version") or 0) == int(payload.get("expected_version") or 0)
         and dict(existing.get("metadata") or {}) == dict(payload.get("metadata") or {})
     )
+
+
+def _same_finding_event_request(
+    existing: Mapping[str, Any],
+    finding_id: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    if str(existing.get("finding_id") or "") != finding_id:
+        return False
+    requested_metadata = dict(payload.get("metadata") or {})
+    request_fingerprint = str(requested_metadata.get("request_fingerprint") or "")
+    if not request_fingerprint:
+        return True
+    existing_metadata = dict(existing.get("metadata") or {})
+    return str(existing_metadata.get("request_fingerprint") or "") == request_fingerprint
 
 
 def _actor_name(actor: Mapping[str, Any]) -> str:

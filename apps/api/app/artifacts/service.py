@@ -9,7 +9,9 @@ from ..auth import is_admin
 from .archive import PrecheckError, normalize_github_repo, normalize_version
 from .comments import ReviewCommentLimits, ReviewCommentService
 from .content import ArtifactContentLimits, ArtifactContentService
+from .findings import StableRiskService
 from .github_source import GithubSourceClient
+from .history import ReviewHistoryLimits, ReviewHistoryService
 from .models import (
     ArtifactErrorCode,
     ArtifactStateError,
@@ -38,6 +40,7 @@ class ArtifactService:
         max_upload_bytes: int,
         content_limits: ArtifactContentLimits | None = None,
         comment_limits: ReviewCommentLimits | None = None,
+        history_limits: ReviewHistoryLimits | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
@@ -45,6 +48,8 @@ class ArtifactService:
         self.max_upload_bytes = max_upload_bytes
         self.content = ArtifactContentService(repository, storage, content_limits)
         self.comments = ReviewCommentService(repository, self.content, comment_limits)
+        self.history = ReviewHistoryService(repository, history_limits)
+        self.stable_risk = StableRiskService(repository, self.content)
 
     async def close(self) -> None:
         await self.github.close()
@@ -186,6 +191,15 @@ class ArtifactService:
         offset: int,
     ) -> dict[str, Any]:
         return await self.comments.list(artifact, limit=limit, offset=offset)
+
+    async def artifact_history(
+        self,
+        artifact: Mapping[str, Any],
+        *,
+        limit: int,
+        cursor: str,
+    ) -> dict[str, Any]:
+        return await self.history.list(artifact, limit=limit, cursor=cursor)
 
     async def create_review_comment(
         self,
@@ -410,6 +424,31 @@ class ArtifactService:
         if not revoking:
             raise ArtifactServiceError("artifact_not_found", "Artifact 不存在", status_code=404)
         return {"artifact": public_artifact(revoking)}
+
+    async def request_stable_risk_revoke(
+        self,
+        *,
+        candidate_artifact_id: str,
+        finding_id: str,
+        actor: Mapping[str, Any],
+        expected_version: int,
+        reason: str,
+        confirm_affects_current_release: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        result = await self.stable_risk.request_revoke(
+            candidate_artifact_id=candidate_artifact_id,
+            finding_id=finding_id,
+            actor=actor,
+            expected_version=expected_version,
+            reason=reason,
+            confirm_affects_current_release=confirm_affects_current_release,
+            idempotency_key=idempotency_key,
+        )
+        return {
+            **result,
+            "stable_artifact": public_artifact(result["stable_artifact"]),
+        }
 
     async def _create_artifact(
         self,

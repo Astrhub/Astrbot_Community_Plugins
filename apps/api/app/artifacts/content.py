@@ -194,6 +194,31 @@ class ArtifactContentService:
             )
         return current, selected_row, item
 
+    async def resolve_path(
+        self,
+        artifact: Mapping[str, Any],
+        path: str,
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], ArtifactManifestFile]:
+        current = await self._current_artifact(artifact)
+        artifact_id = str(current["id"])
+        rows = await self.repository.list_artifact_files(artifact_id)
+        files = self._validated_manifest(current, rows)
+        item = next((value for value in files if value.path == path), None)
+        if item is None:
+            raise ArtifactContentError(
+                ArtifactErrorCode.ARTIFACT_FILE_NOT_FOUND.value,
+                "Artifact file does not exist",
+                status_code=404,
+            )
+        selected_row = await self.repository.get_artifact_file(artifact_id, item.id)
+        if selected_row is None or not _same_file_identity(selected_row, item):
+            raise ArtifactContentError(
+                ArtifactErrorCode.ARTIFACT_FILE_SHA_CHANGED.value,
+                "Artifact file metadata changed",
+                status_code=409,
+            )
+        return current, selected_row, item
+
     async def list_diffs(
         self,
         artifact: Mapping[str, Any],

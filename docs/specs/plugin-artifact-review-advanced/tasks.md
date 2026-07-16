@@ -314,24 +314,24 @@
         - *Details*: 运行 domain/repository/API/permission tests、Ruff 和 OpenAPI 后提交。
         - *Requirements*: FR-212、FR-213。
 
-- [ ] 15. **审查历史与 Stable Risk 关联**
-    - [ ] 15.1. 实现 cursor history projection
+- [x] 15. **审查历史与 Stable Risk 关联**
+    - [x] 15.1. 实现 cursor history projection
         - *Goal*: 不复制事实地聚合 runs/findings/comments/decisions/publication/policy events。
         - *Details*: 按 `(occurred_at,type,id)` 稳定分页；带 actor/source/idempotency/policy snapshot；隐藏敏感 raw data。
         - *Requirements*: FR-214。
-    - [ ] 15.2. 实现 deterministic stable correlator
+    - [x] 15.2. 实现 deterministic stable correlator
         - *Goal*: 候选 critical 默认不撤回 stable，只有证据关联后才能下架。
         - *Details*: 同 path+SHA、dependency/advisory、deterministic fingerprint、管理员确认；LLM 只产生 suggestion。
         - *Requirements*: FR-215。
-    - [ ] 15.3. 接入紧急撤回和通知
+    - [x] 15.3. 接入紧急撤回和通知
         - *Goal*: 确认影响 stable 后先隐藏 feed，再异步撤回对象。
         - *Details*: 保存 correlation/finding/actor/policy/reason；复用 P1 revoke idempotency/retry；通知作者和管理员。
         - *Requirements*: FR-215、FR-222。
-    - [ ] 15.4. 增加误关联和下架失败测试
+    - [x] 15.4. 增加误关联和下架失败测试
         - *Goal*: 证明候选风险不会无证据污染稳定版本。
         - *Details*: 覆盖 LLM-only、同路径不同 SHA、同 SHA、dependency match、admin confirmation、revoke failure 和旧 CDN 指针行为。
         - *Requirements*: P3 验收。
-    - [ ] 15.5. 验证并提交 history/stable risk
+    - [x] 15.5. 验证并提交 history/stable risk
         - *Goal*: 审计和重大风险处置验证后提交。
         - *Details*: 运行 history/correlation/revoke/feed/notification tests、Ruff 后提交。
         - *Requirements*: FR-214、FR-215。

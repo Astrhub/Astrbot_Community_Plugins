@@ -16,6 +16,7 @@ import pytest
 from app.artifacts.content import ArtifactContentService
 from app.artifacts.diff import ArtifactDiffService, DiffBuildError, manifest_tree_sha256
 from app.artifacts.import_graph import ImportGraphBuildError, ImportGraphService
+from app.artifacts.history import ReviewHistoryService
 from app.artifacts.models import ArtifactErrorCode, PublicationStatus, ReviewStatus
 from app.artifacts.policy_service import ReviewPolicyService
 from app.artifacts.repository import PgArtifactRepository
@@ -201,6 +202,196 @@ def test_concurrent_comment_events_and_decision_are_atomic_against_postgres() ->
 
 def test_category_precedence_and_concurrency_against_postgres() -> None:
     asyncio.run(run_category_precedence_scenario(database_url()))
+
+
+def test_history_projection_and_emergency_revoke_against_postgres() -> None:
+    asyncio.run(run_history_revoke_scenario(database_url()))
+
+
+async def run_history_revoke_scenario(url: str) -> None:
+    connection, transaction = await begin_isolated_schema(url)
+    try:
+        await apply_schema_migrations(connection)
+        await seed_market(connection)
+        await connection.execute(
+            "UPDATE market_plugins SET repo_version = 'v1.0.0' WHERE id = 'plugin-1'"
+        )
+        repository = PgArtifactRepository(RepositoryStore(connection))
+        stable = await repository.create_artifact(artifact_payload("8"))
+        await repository.transition_publication_status(
+            stable["id"], PublicationStatus.PUBLISHING.value
+        )
+        stable = await repository.publish_artifact(
+            stable["id"],
+            expected_repo_version="v1.0.0",
+            published_key="owner-1/advanced/v1.0.0/plugin.zip",
+            download_url="https://cdn.example.test/owner-1/advanced/v1.0.0/plugin.zip",
+        )
+        assert stable is not None
+
+        candidate_payload = artifact_payload("9")
+        candidate_payload["base_artifact_id"] = stable["id"]
+        candidate = await repository.create_artifact(candidate_payload)
+        run = await repository.create_review_run(
+            {
+                "artifact_id": candidate["id"],
+                "type": "static",
+                "status": "succeeded",
+                "tool_name": "scanner",
+                "tool_version": "1.0.0",
+                "ruleset_version": "rules-v1",
+                "idempotency_key": "postgres-history-run",
+            }
+        )
+        finding = (
+            await repository.replace_findings(
+                candidate["id"],
+                run["id"],
+                [
+                    {
+                        "fingerprint": "postgres-critical",
+                        "rule_id": "critical-rule",
+                        "severity": "critical",
+                        "message": "critical issue",
+                        "source": "static",
+                        "deterministic": True,
+                    }
+                ],
+            )
+        )[0]
+        reviewer = {"id": "reviewer-1", "internal_username": "Reviewer"}
+        correlation = {"stable_artifact_id": stable["id"], "kind": "fingerprint"}
+        finding_link = {
+            "expected_version": 1,
+            "candidate_artifact_id": candidate["id"],
+            "finding_id": finding["id"],
+            "status": "open",
+            "correlation": correlation,
+            "affects_current_release": True,
+            "actor_user_id": "reviewer-1",
+            "actor_nickname": "Reviewer",
+            "actor_source": "user",
+            "reason": "Confirmed stable impact",
+            "metadata": {"request_fingerprint": "a" * 64},
+            "expected_finding": {
+                "fingerprint": finding["fingerprint"],
+                "run_id": finding["run_id"],
+                "rule_id": finding["rule_id"],
+                "source": finding["source"],
+                "deterministic": finding["deterministic"],
+                "severity": finding["severity"],
+                "status": finding["status"],
+                "file_path": finding.get("file_path"),
+                "file_sha256": finding.get("file_sha256"),
+                "correlation": dict(finding.get("correlation") or {}),
+            },
+            "idempotency_key": "postgres-finding-link",
+        }
+        metadata = {
+            "emergency": True,
+            "candidate_artifact_id": candidate["id"],
+            "finding_id": finding["id"],
+            "stable_risk": correlation,
+        }
+        notification = {
+            "event_type": "artifact_stable_risk_revoking",
+            "aggregate_type": "artifact",
+            "aggregate_id": stable["id"],
+            "recipient_user_id": "owner-1",
+            "payload": {
+                "artifact_id": stable["id"],
+                "plugin_id": "plugin-1",
+                "candidate_artifact_id": candidate["id"],
+                "finding_id": finding["id"],
+                "correlation_kind": "fingerprint",
+                "emergency": True,
+                "reason": "Confirmed stable impact",
+            },
+            "dedupe_key": "postgres-stable-risk-notification",
+        }
+        revoking = await repository.request_revoke_artifact(
+            stable["id"],
+            reason="Confirmed stable impact",
+            reviewer=reviewer,
+            idempotency_key="postgres-emergency-revoke",
+            source="admin",
+            input_fingerprints=[finding["fingerprint"]],
+            metadata=metadata,
+            finding_link=finding_link,
+            notification=notification,
+        )
+        repeated = await repository.request_revoke_artifact(
+            stable["id"],
+            reason="Confirmed stable impact",
+            reviewer=reviewer,
+            idempotency_key="postgres-emergency-revoke",
+            source="admin",
+            input_fingerprints=[finding["fingerprint"]],
+            metadata=metadata,
+            finding_link=finding_link,
+            notification=notification,
+        )
+        assert revoking and repeated
+        assert revoking["publication_status"] == PublicationStatus.REVOKING.value
+        with pytest.raises(ValueError, match=ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value):
+            await repository.request_revoke_artifact(
+                stable["id"],
+                reason="Changed reason",
+                reviewer=reviewer,
+                idempotency_key="postgres-emergency-revoke",
+                source="admin",
+                input_fingerprints=[finding["fingerprint"]],
+                metadata=metadata,
+                finding_link=finding_link,
+                notification=notification,
+            )
+
+        history_service = ReviewHistoryService(repository)
+        first_page = await history_service.list(candidate, limit=2, cursor="")
+        second_page = await history_service.list(
+            candidate,
+            limit=20,
+            cursor=first_page["next_cursor"] or "",
+        )
+        history = first_page["items"] + second_page["items"]
+        assert first_page["has_more"] is True
+        assert {item["type"] for item in history} >= {
+            "artifact_submitted",
+            "run",
+            "finding",
+            "finding_event",
+        }
+        assert len({(item["type"], item["id"]) for item in history}) == len(history)
+
+        plugin = await connection.fetchrow(
+            "SELECT status, current_artifact_id FROM market_plugins WHERE id = 'plugin-1'"
+        )
+        job = await connection.fetchrow(
+            "SELECT payload FROM artifact_jobs WHERE idempotency_key = 'postgres-emergency-revoke'"
+        )
+        decision = await connection.fetchrow(
+            "SELECT metadata, input_fingerprints FROM review_decisions "
+            "WHERE idempotency_key = 'postgres-emergency-revoke'"
+        )
+        linked = await connection.fetchrow(
+            "SELECT version, affects_current_release, correlation FROM review_findings "
+            "WHERE id = $1",
+            finding["id"],
+        )
+        outbox = await connection.fetchrow(
+            "SELECT * FROM outbox_events WHERE dedupe_key = 'postgres-stable-risk-notification'"
+        )
+        assert plugin and plugin["status"] == "unlisted"
+        assert plugin["current_artifact_id"] == stable["id"]
+        assert job and dict(job["payload"])["finding_id"] == finding["id"]
+        assert decision and dict(decision["metadata"]) == metadata
+        assert list(decision["input_fingerprints"]) == [finding["fingerprint"]]
+        assert linked and linked["version"] == 2 and linked["affects_current_release"] is True
+        assert dict(linked["correlation"]) == correlation
+        assert outbox and outbox["event_type"] == "artifact_stable_risk_revoking"
+    finally:
+        await transaction.rollback()
+        await connection.close()
 
 
 async def run_category_precedence_scenario(url: str) -> None:

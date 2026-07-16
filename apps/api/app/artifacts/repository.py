@@ -229,6 +229,18 @@ class ArtifactRepository(Protocol):
 
     async def list_finding_events(self, artifact_id: str) -> list[dict[str, Any]]: ...
 
+    async def get_review_finding(
+        self, artifact_id: str, finding_id: str
+    ) -> dict[str, Any] | None: ...
+
+    async def list_review_history_records(
+        self,
+        artifact_id: str,
+        *,
+        limit: int,
+        after: tuple[datetime, str, str] | None,
+    ) -> list[dict[str, Any]]: ...
+
     async def create_artifact_sbom(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
 
     async def list_artifact_sboms(self, artifact_id: str) -> list[dict[str, Any]]: ...
@@ -349,6 +361,11 @@ class ArtifactRepository(Protocol):
         reason: str,
         reviewer: Mapping[str, Any],
         idempotency_key: str,
+        source: str = "admin",
+        input_fingerprints: Sequence[str] = (),
+        metadata: Mapping[str, Any] | None = None,
+        finding_link: Mapping[str, Any] | None = None,
+        notification: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None: ...
 
     async def publish_artifact(
@@ -1722,7 +1739,16 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         reason: str,
         reviewer: Mapping[str, Any],
         idempotency_key: str,
+        source: str = "admin",
+        input_fingerprints: Sequence[str] = (),
+        metadata: Mapping[str, Any] | None = None,
+        finding_link: Mapping[str, Any] | None = None,
+        notification: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        decision_metadata = dict(metadata or {})
+        fingerprints = [str(item) for item in input_fingerprints if str(item)]
+        link_payload = dict(finding_link or {})
+        notification_payload = dict(notification or {})
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 current = await connection.fetchrow(
@@ -1738,12 +1764,38 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                 if not current:
                     return None
                 existing = await connection.fetchrow(
-                    "SELECT artifact_id FROM review_decisions WHERE idempotency_key = $1",
+                    "SELECT * FROM review_decisions WHERE idempotency_key = $1",
                     idempotency_key,
                 )
                 if existing:
-                    if str(existing["artifact_id"]) != artifact_id:
-                        raise ValueError("idempotency_key_conflict")
+                    if not _same_revoke_request(
+                        existing,
+                        artifact_id=artifact_id,
+                        reason=reason,
+                        reviewer=reviewer,
+                        source=source,
+                        input_fingerprints=fingerprints,
+                        metadata=decision_metadata,
+                    ):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    if link_payload:
+                        link_event = await connection.fetchrow(
+                            "SELECT * FROM review_finding_events WHERE idempotency_key = $1",
+                            link_payload["idempotency_key"],
+                        )
+                        if not link_event or not _same_finding_link_request(
+                            link_event, link_payload
+                        ):
+                            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    if notification_payload:
+                        outbox_event = await connection.fetchrow(
+                            "SELECT * FROM outbox_events WHERE dedupe_key = $1",
+                            notification_payload["dedupe_key"],
+                        )
+                        if not outbox_event or not _same_outbox_request(
+                            outbox_event, notification_payload
+                        ):
+                            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     return _record(current)
                 if str(current["current_artifact_id"] or "") != artifact_id:
                     raise ArtifactStateError(
@@ -1764,16 +1816,116 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     if not policy_row:
                         raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
                     effective_policy_version = str(policy_row["version"])
+                if link_payload:
+                    finding = await connection.fetchrow(
+                        """
+                        SELECT finding.*, candidate.plugin_id AS candidate_plugin_id
+                          FROM review_findings finding
+                          JOIN plugin_artifacts candidate ON candidate.id = finding.artifact_id
+                         WHERE finding.id = $1
+                           AND finding.artifact_id = $2
+                         FOR UPDATE OF finding
+                        """,
+                        link_payload["finding_id"],
+                        link_payload["candidate_artifact_id"],
+                    )
+                    if not finding:
+                        raise ValueError("artifact_finding_not_found")
+                    if str(finding["candidate_plugin_id"] or "") != str(current["plugin_id"]):
+                        raise ValueError(
+                            ArtifactErrorCode.STABLE_RELEASE_CORRELATION_REQUIRED.value
+                        )
+                    target_status = str(link_payload.get("status") or finding["status"])
+                    target_correlation = dict(link_payload.get("correlation") or {})
+                    if (
+                        str(finding["severity"] or "") != "critical"
+                        or target_status not in {"open", "accepted"}
+                        or link_payload.get("affects_current_release") is not True
+                        or str(target_correlation.get("stable_artifact_id") or "") != artifact_id
+                    ):
+                        raise ValueError(
+                            ArtifactErrorCode.STABLE_RELEASE_CORRELATION_REQUIRED.value
+                        )
+                    link_event = await connection.fetchrow(
+                        "SELECT * FROM review_finding_events WHERE idempotency_key = $1",
+                        link_payload["idempotency_key"],
+                    )
+                    if link_event:
+                        if not _same_finding_link_request(link_event, link_payload) or (
+                            str(finding["status"] or "") != target_status
+                            or dict(finding["correlation"] or {}) != target_correlation
+                            or not bool(finding["affects_current_release"])
+                        ):
+                            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    else:
+                        if int(finding["version"]) != int(link_payload["expected_version"]):
+                            raise ValueError(ArtifactErrorCode.FINDING_VERSION_CONFLICT.value)
+                        if not _same_finding_snapshot(
+                            finding, link_payload.get("expected_finding")
+                        ):
+                            raise ValueError(ArtifactErrorCode.FINDING_VERSION_CONFLICT.value)
+                        event_type = (
+                            "status_changed"
+                            if str(finding["status"] or "") != target_status
+                            else (
+                                "current_release_linked"
+                                if not bool(finding["affects_current_release"])
+                                else "correlation_changed"
+                            )
+                        )
+                        await connection.execute(
+                            """
+                            UPDATE review_findings
+                               SET status = $2,
+                                   correlation = $3::jsonb,
+                                   affects_current_release = true,
+                                   status_actor_user_id = $4,
+                                   status_actor_nickname = $5,
+                                   status_updated_at = now(),
+                                   version = version + 1
+                             WHERE id = $1
+                            """,
+                            finding["id"],
+                            target_status,
+                            target_correlation,
+                            link_payload.get("actor_user_id"),
+                            link_payload.get("actor_nickname", ""),
+                        )
+                        await connection.execute(
+                            """
+                            INSERT INTO review_finding_events (
+                                id, finding_id, artifact_id, type, from_status, to_status,
+                                actor_user_id, actor_nickname, actor_source, reason,
+                                metadata, idempotency_key
+                            )
+                            VALUES (
+                                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                                $11::jsonb, $12
+                            )
+                            """,
+                            link_payload.get("id") or new_domain_id("finding_event"),
+                            finding["id"],
+                            finding["artifact_id"],
+                            event_type,
+                            finding["status"],
+                            target_status,
+                            link_payload.get("actor_user_id"),
+                            link_payload.get("actor_nickname", ""),
+                            link_payload.get("actor_source", "user"),
+                            link_payload.get("reason", ""),
+                            dict(link_payload.get("metadata") or {}),
+                            link_payload["idempotency_key"],
+                        )
                 await connection.execute(
                     """
                     INSERT INTO review_decisions (
                         id, artifact_id, action, from_status, to_status, reason,
                         reviewer_user_id, reviewer_nickname, policy_version, idempotency_key,
-                        source, policy_version_id
+                        source, policy_version_id, input_fingerprints, metadata
                     )
                     VALUES (
                         $1, $2, 'revoke', $3, 'revoking', $4, $5, $6,
-                        $7, $8, 'admin', $9
+                        $7, $8, $9, $10, $11::text[], $12::jsonb
                     )
                     """,
                     new_domain_id("decision"),
@@ -1784,7 +1936,10 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     _reviewer_name(reviewer),
                     effective_policy_version,
                     idempotency_key,
+                    source,
                     effective_policy_id,
+                    fingerprints,
+                    decision_metadata,
                 )
                 revoking = await connection.fetchrow(
                     """
@@ -1807,21 +1962,52 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     current["plugin_id"],
                     artifact_id,
                 )
-                await connection.execute(
+                revoke_job = await connection.fetchrow(
                     """
                     INSERT INTO artifact_jobs (
                         id, artifact_id, type, payload, max_attempts, idempotency_key,
                         policy_version_id
                     )
                     VALUES ($1, $2, 'revoke', $3::jsonb, 5, $4, $5)
-                    ON CONFLICT (idempotency_key) DO NOTHING
+                    ON CONFLICT (idempotency_key) DO UPDATE
+                       SET idempotency_key = EXCLUDED.idempotency_key
+                    RETURNING artifact_id, type, payload, policy_version_id
                     """,
                     new_domain_id("job"),
                     artifact_id,
-                    {"reason": reason},
+                    {"reason": reason, **decision_metadata},
                     idempotency_key,
                     effective_policy_id,
                 )
+                if (
+                    str(revoke_job["artifact_id"] or "") != artifact_id
+                    or str(revoke_job["type"] or "") != JobType.REVOKE.value
+                    or dict(revoke_job["payload"] or {}) != {"reason": reason, **decision_metadata}
+                    or (str(revoke_job["policy_version_id"] or "") or None) != effective_policy_id
+                ):
+                    raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                if notification_payload:
+                    outbox_event = await connection.fetchrow(
+                        """
+                        INSERT INTO outbox_events (
+                            id, event_type, aggregate_type, aggregate_id,
+                            recipient_user_id, payload, dedupe_key
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                        ON CONFLICT (dedupe_key) DO UPDATE
+                           SET dedupe_key = EXCLUDED.dedupe_key
+                        RETURNING *
+                        """,
+                        notification_payload.get("id") or new_domain_id("outbox"),
+                        notification_payload["event_type"],
+                        notification_payload["aggregate_type"],
+                        notification_payload["aggregate_id"],
+                        notification_payload.get("recipient_user_id"),
+                        dict(notification_payload.get("payload") or {}),
+                        notification_payload["dedupe_key"],
+                    )
+                    if not _same_outbox_request(outbox_event, notification_payload):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
         return _record(revoking)
 
     async def publish_artifact(
@@ -3140,12 +3326,55 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         reason: str,
         reviewer: Mapping[str, Any],
         idempotency_key: str,
+        source: str = "admin",
+        input_fingerprints: Sequence[str] = (),
+        metadata: Mapping[str, Any] | None = None,
+        finding_link: Mapping[str, Any] | None = None,
+        notification: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        decision_metadata = dict(metadata or {})
+        fingerprints = [str(item) for item in input_fingerprints if str(item)]
+        link_payload = dict(finding_link or {})
+        notification_payload = dict(notification or {})
         async with self._lock:
             for decision in self.decisions.values():
                 if decision["idempotency_key"] == idempotency_key:
-                    if decision["artifact_id"] != artifact_id:
-                        raise ValueError("idempotency_key_conflict")
+                    if not _same_revoke_request(
+                        decision,
+                        artifact_id=artifact_id,
+                        reason=reason,
+                        reviewer=reviewer,
+                        source=source,
+                        input_fingerprints=fingerprints,
+                        metadata=decision_metadata,
+                    ):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    if link_payload:
+                        link_event = next(
+                            (
+                                event
+                                for event in self.finding_events.values()
+                                if event["idempotency_key"] == link_payload["idempotency_key"]
+                            ),
+                            None,
+                        )
+                        if not link_event or not _same_finding_link_request(
+                            link_event, link_payload
+                        ):
+                            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    if notification_payload:
+                        outbox_event = next(
+                            (
+                                event
+                                for event in self.outbox.values()
+                                if event["dedupe_key"] == notification_payload["dedupe_key"]
+                            ),
+                            None,
+                        )
+                        if not outbox_event or not _same_outbox_request(
+                            outbox_event, notification_payload
+                        ):
+                            raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
                     artifact = self.artifacts.get(artifact_id)
                     return deepcopy(artifact) if artifact else None
             artifact = self.artifacts.get(artifact_id)
@@ -3169,6 +3398,71 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 if not policy:
                     raise ValueError(ArtifactErrorCode.REVIEW_POLICY_INVALID.value)
                 effective_policy_version = str(policy["version"])
+            finding = None
+            link_event = None
+            target_status = ""
+            target_correlation: dict[str, Any] = {}
+            if link_payload:
+                finding = self._memory_finding(str(link_payload["finding_id"]))
+                if not finding or finding["artifact_id"] != link_payload["candidate_artifact_id"]:
+                    raise ValueError("artifact_finding_not_found")
+                candidate = self.artifacts.get(str(link_payload["candidate_artifact_id"]))
+                if not candidate or candidate["plugin_id"] != artifact["plugin_id"]:
+                    raise ValueError(ArtifactErrorCode.STABLE_RELEASE_CORRELATION_REQUIRED.value)
+                target_status = str(link_payload.get("status") or finding["status"])
+                target_correlation = dict(link_payload.get("correlation") or {})
+                if (
+                    finding.get("severity") != "critical"
+                    or target_status not in {"open", "accepted"}
+                    or link_payload.get("affects_current_release") is not True
+                    or str(target_correlation.get("stable_artifact_id") or "") != artifact_id
+                ):
+                    raise ValueError(ArtifactErrorCode.STABLE_RELEASE_CORRELATION_REQUIRED.value)
+                link_event = next(
+                    (
+                        event
+                        for event in self.finding_events.values()
+                        if event["idempotency_key"] == link_payload["idempotency_key"]
+                    ),
+                    None,
+                )
+                if link_event:
+                    if not _same_finding_link_request(link_event, link_payload) or (
+                        finding.get("status") != target_status
+                        or dict(finding.get("correlation") or {}) != target_correlation
+                        or not bool(finding.get("affects_current_release"))
+                    ):
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                elif int(finding.get("version") or 1) != int(link_payload["expected_version"]):
+                    raise ValueError(ArtifactErrorCode.FINDING_VERSION_CONFLICT.value)
+                elif not _same_finding_snapshot(finding, link_payload.get("expected_finding")):
+                    raise ValueError(ArtifactErrorCode.FINDING_VERSION_CONFLICT.value)
+            existing_outbox = None
+            if notification_payload:
+                existing_outbox = next(
+                    (
+                        event
+                        for event in self.outbox.values()
+                        if event["dedupe_key"] == notification_payload["dedupe_key"]
+                    ),
+                    None,
+                )
+                if existing_outbox and not _same_outbox_request(
+                    existing_outbox, notification_payload
+                ):
+                    raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+            expected_job_payload = {"reason": reason, **decision_metadata}
+            existing_job = next(
+                (job for job in self.jobs.values() if job["idempotency_key"] == idempotency_key),
+                None,
+            )
+            if existing_job and (
+                existing_job["artifact_id"] != artifact_id
+                or existing_job["type"] != JobType.REVOKE.value
+                or dict(existing_job.get("payload") or {}) != expected_job_payload
+                or (str(existing_job.get("policy_version_id") or "") or None) != effective_policy_id
+            ):
+                raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
             decision = {
                 "id": new_domain_id("decision"),
                 "artifact_id": artifact_id,
@@ -3180,14 +3474,46 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 "reviewer_nickname": _reviewer_name(reviewer),
                 "policy_version": effective_policy_version,
                 "policy_version_id": effective_policy_id,
-                "source": "admin",
+                "source": source,
                 "input_run_ids": [],
-                "input_fingerprints": [],
+                "input_fingerprints": fingerprints,
                 "coverage_sha256": "",
-                "metadata": {},
+                "metadata": decision_metadata,
                 "idempotency_key": idempotency_key,
                 "created_at": now,
             }
+            if finding is not None and link_event is None:
+                old_status = str(finding.get("status") or "open")
+                old_affects = bool(finding.get("affects_current_release"))
+                finding["status"] = target_status
+                finding["correlation"] = target_correlation
+                finding["affects_current_release"] = True
+                finding["status_actor_user_id"] = link_payload.get("actor_user_id")
+                finding["status_actor_nickname"] = str(link_payload.get("actor_nickname") or "")
+                finding["status_updated_at"] = now
+                finding["version"] = int(finding.get("version") or 1) + 1
+                event = {
+                    "id": str(link_payload.get("id") or new_domain_id("finding_event")),
+                    "finding_id": finding["id"],
+                    "artifact_id": finding["artifact_id"],
+                    "type": (
+                        "status_changed"
+                        if old_status != target_status
+                        else (
+                            "current_release_linked" if not old_affects else "correlation_changed"
+                        )
+                    ),
+                    "from_status": old_status,
+                    "to_status": target_status,
+                    "actor_user_id": link_payload.get("actor_user_id"),
+                    "actor_nickname": str(link_payload.get("actor_nickname") or ""),
+                    "actor_source": str(link_payload.get("actor_source") or "user"),
+                    "reason": str(link_payload.get("reason") or ""),
+                    "metadata": dict(link_payload.get("metadata") or {}),
+                    "idempotency_key": str(link_payload["idempotency_key"]),
+                    "created_at": now,
+                }
+                self.finding_events[event["id"]] = event
             self.decisions[decision["id"]] = decision
             artifact["publication_status"] = PublicationStatus.REVOKING.value
             artifact["updated_at"] = now
@@ -3197,7 +3523,7 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 "artifact_id": artifact_id,
                 "type": "revoke",
                 "status": JobStatus.QUEUED.value,
-                "payload": {"reason": reason},
+                "payload": expected_job_payload,
                 "attempts": 0,
                 "max_attempts": 5,
                 "available_at": now,
@@ -3213,7 +3539,28 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 "updated_at": now,
                 "completed_at": None,
             }
-            self.jobs[job["id"]] = job
+            if existing_job is None:
+                self.jobs[job["id"]] = job
+            if notification_payload and existing_outbox is None:
+                outbox_event = {
+                    "id": str(notification_payload.get("id") or new_domain_id("outbox")),
+                    "event_type": str(notification_payload["event_type"]),
+                    "aggregate_type": str(notification_payload["aggregate_type"]),
+                    "aggregate_id": str(notification_payload["aggregate_id"]),
+                    "recipient_user_id": notification_payload.get("recipient_user_id"),
+                    "payload": dict(notification_payload.get("payload") or {}),
+                    "dedupe_key": str(notification_payload["dedupe_key"]),
+                    "status": "queued",
+                    "attempts": 0,
+                    "available_at": now,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "delivered_at": None,
+                    "last_error": "",
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                self.outbox[outbox_event["id"]] = outbox_event
             return deepcopy(artifact)
 
     async def publish_artifact(
@@ -3477,6 +3824,7 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             "plugin_name": plugin.get("name", artifact["plugin_id"]),
             "plugin_repo": plugin.get("repo", artifact.get("source_repo", "")),
             "repo_version": plugin.get("repo_version", ""),
+            "current_artifact_id": plugin.get("current_artifact_id"),
             "published_version": current.get("version", ""),
             "owner_user_id": plugin.get("owner_user_id"),
             "owner_github_login": plugin.get("owner_github_login", ""),
@@ -3552,6 +3900,73 @@ def _same_decision_request(
         and str(existing.get("reason") or "") == reason
         and (str(existing.get("reviewer_user_id") or "") or None)
         == (str((reviewer or {}).get("id") or "") or None)
+    )
+
+
+def _same_revoke_request(
+    existing: Mapping[str, Any],
+    *,
+    artifact_id: str,
+    reason: str,
+    reviewer: Mapping[str, Any],
+    source: str,
+    input_fingerprints: Sequence[str],
+    metadata: Mapping[str, Any],
+) -> bool:
+    return (
+        str(existing.get("artifact_id") or "") == artifact_id
+        and str(existing.get("action") or "") == "revoke"
+        and str(existing.get("to_status") or "") == PublicationStatus.REVOKING.value
+        and str(existing.get("reason") or "") == reason
+        and (str(existing.get("reviewer_user_id") or "") or None)
+        == (str(reviewer.get("id") or "") or None)
+        and str(existing.get("source") or "") == source
+        and list(existing.get("input_fingerprints") or []) == list(input_fingerprints)
+        and dict(existing.get("metadata") or {}) == dict(metadata)
+    )
+
+
+def _same_finding_link_request(existing: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    return (
+        str(existing.get("finding_id") or "") == str(payload.get("finding_id") or "")
+        and str(existing.get("artifact_id") or "")
+        == str(payload.get("candidate_artifact_id") or "")
+        and str(existing.get("to_status") or "") == str(payload.get("status") or "")
+        and (str(existing.get("actor_user_id") or "") or None)
+        == (str(payload.get("actor_user_id") or "") or None)
+        and str(existing.get("actor_source") or "") == str(payload.get("actor_source") or "user")
+        and str(existing.get("reason") or "") == str(payload.get("reason") or "")
+        and dict(existing.get("metadata") or {}) == dict(payload.get("metadata") or {})
+    )
+
+
+def _same_finding_snapshot(existing: Mapping[str, Any], value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return (
+        str(existing.get("fingerprint") or "") == str(value.get("fingerprint") or "")
+        and str(existing.get("run_id") or "") == str(value.get("run_id") or "")
+        and str(existing.get("rule_id") or "") == str(value.get("rule_id") or "")
+        and str(existing.get("source") or "") == str(value.get("source") or "")
+        and bool(existing.get("deterministic")) is bool(value.get("deterministic"))
+        and str(existing.get("severity") or "") == str(value.get("severity") or "")
+        and str(existing.get("status") or "") == str(value.get("status") or "")
+        and str(existing.get("file_path") or "") == str(value.get("file_path") or "")
+        and (str(existing.get("file_sha256") or "") or None)
+        == (str(value.get("file_sha256") or "") or None)
+        and dict(existing.get("correlation") or {}) == dict(value.get("correlation") or {})
+    )
+
+
+def _same_outbox_request(existing: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    return (
+        str(existing.get("event_type") or "") == str(payload.get("event_type") or "")
+        and str(existing.get("aggregate_type") or "") == str(payload.get("aggregate_type") or "")
+        and str(existing.get("aggregate_id") or "") == str(payload.get("aggregate_id") or "")
+        and (str(existing.get("recipient_user_id") or "") or None)
+        == (str(payload.get("recipient_user_id") or "") or None)
+        and dict(existing.get("payload") or {}) == dict(payload.get("payload") or {})
+        and str(existing.get("dedupe_key") or "") == str(payload.get("dedupe_key") or "")
     )
 
 

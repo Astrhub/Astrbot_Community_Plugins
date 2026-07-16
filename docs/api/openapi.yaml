@@ -884,6 +884,19 @@ paths:
       responses:
         "200": {description: 纯文本评论投影；不含用户 ID、幂等键或私有对象 key；Cache-Control no-store}
         "403": {description: 非作者且非管理员}
+  /v1/artifacts/{artifact_id}/history:
+    get:
+      tags: [Artifacts]
+      summary: 以稳定 cursor 分页查看审查和发布事实时间线
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {in: query, name: limit, schema: {type: integer, default: 30, minimum: 1, maximum: 50}}
+        - {in: query, name: cursor, schema: {type: string, maxLength: 1000}}
+      responses:
+        "200": {description: runs、findings/events、comments、decisions、policy 与 publication 的脱敏投影；Cache-Control no-store}
+        "400": {description: cursor 或 page size 无效}
+        "403": {description: 非作者且非管理员}
   /v1/artifacts/{artifact_id}/comments/{thread_id}/replies:
     post:
       tags: [Artifacts]
@@ -924,6 +937,19 @@ paths:
         "201": {description: 已创建 SHA/line 绑定线程和 create event}
         "400": {description: 正文、文件、side、行范围或 source thread 无效}
         "409": {description: Artifact 已作最终决定或内容绑定已漂移}
+  /v1/admin/artifacts/{artifact_id}/findings/{finding_id}/stable-risk:
+    post:
+      tags: [Reviews]
+      summary: 以确定性证据或管理员明确确认关联当前稳定版本并紧急撤回
+      security: [{cookieAuth: []}]
+      parameters:
+        - {$ref: "#/components/parameters/ArtifactId"}
+        - {$ref: "#/components/parameters/ReviewFindingId"}
+      responses:
+        "200": {description: 已保存 finding/correlation/actor/policy/reason，先移出插件源并创建异步撤回任务}
+        "400": {description: 原因、finding version 或幂等键无效}
+        "403": {description: 需要管理员权限}
+        "409": {description: 没有当前稳定版本确定性关联、LLM-only 未经人工确认、版本冲突或幂等冲突}
   /v1/admin/artifacts/{artifact_id}/comments/{thread_id}/edit:
     post:
       tags: [Reviews]
@@ -1065,6 +1091,13 @@ components:
       schema:
         type: string
       description: 必须属于路径中 Artifact 的审查线程 ID
+    ReviewFindingId:
+      in: path
+      name: finding_id
+      required: true
+      schema:
+        type: string
+      description: 必须属于路径中候选 Artifact 的 critical finding ID
   securitySchemes:
     cookieAuth:
       type: apiKey

@@ -80,16 +80,25 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
     assert "/v1/artifacts/{artifact_id}/diff" in user_schema["paths"]
     assert "/v1/artifacts/{artifact_id}/diff/{diff_id}" in user_schema["paths"]
     assert "/v1/artifacts/{artifact_id}/comments" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/history" in user_schema["paths"]
     assert "/v1/artifacts/{artifact_id}/comments/{thread_id}/replies" in user_schema["paths"]
     assert (
         "/v1/artifacts/{artifact_id}/comments/{thread_id}/author-addressed" in user_schema["paths"]
     )
     assert "/v1/admin/artifacts/{artifact_id}/comments" not in user_schema["paths"]
     assert "/v1/admin/artifacts/{artifact_id}/request-changes" not in user_schema["paths"]
+    assert (
+        "/v1/admin/artifacts/{artifact_id}/findings/{finding_id}/stable-risk"
+        not in user_schema["paths"]
+    )
     detail_response = user_schema["paths"]["/v1/artifacts/{artifact_id}"]["get"]["responses"][
         "200"
     ]["content"]["application/json"]["schema"]
     assert detail_response["$ref"].endswith("/ArtifactDetailResponse")
+    history_response = user_schema["paths"]["/v1/artifacts/{artifact_id}/history"]["get"][
+        "responses"
+    ]["200"]["content"]["application/json"]["schema"]
+    assert history_response["$ref"].endswith("/ReviewHistoryResponse")
 
     _login(client, "adminuser", "adminpass123")
     admin_schema = client.get("/openapi.json").json()
@@ -99,6 +108,11 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
     response_schema = request_changes["responses"]["200"]["content"]["application/json"]["schema"]
     assert response_schema["$ref"].endswith("/ArtifactEnvelope")
     assert "/v1/admin/artifacts/{artifact_id}/comments" in admin_schema["paths"]
+    stable_risk = admin_schema["paths"][
+        "/v1/admin/artifacts/{artifact_id}/findings/{finding_id}/stable-risk"
+    ]["post"]
+    stable_response = stable_risk["responses"]["200"]["content"]["application/json"]["schema"]
+    assert stable_response["$ref"].endswith("/StableRiskResponse")
     for action in ("edit", "resolve", "reopen"):
         assert (
             f"/v1/admin/artifacts/{{artifact_id}}/comments/{{thread_id}}/{action}"
@@ -142,6 +156,13 @@ def test_artifact_report_openapi_is_typed_and_role_filtered():
     assert {"actor_user_id", "idempotency_key", "metadata"}.isdisjoint(comment_event_fields)
     github_fields = set(schemas["GithubArtifactSubmission"]["properties"])
     assert "supersedes_artifact_id" in github_fields
+    history_fields = set(schemas["PublicReviewHistoryEvent"]["properties"])
+    stable_fields = set(schemas["StableRiskEvidenceResponse"]["properties"])
+    assert {"occurred_at", "source", "actor_role", "idempotency_key", "payload"} <= history_fields
+    assert {"kind", "deterministic", "stable_artifact_id", "finding_id"} <= stable_fields
+    assert {"raw_result", "raw_result_key", "content_key", "published_key"}.isdisjoint(
+        history_fields
+    )
 
 
 def test_openapi_core_admin_sees_all():

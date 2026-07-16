@@ -12,7 +12,9 @@ from ..auth import can_edit_plugin, is_admin
 from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
 from .comments import ReviewCommentError
 from .content import ArtifactContentError
+from .findings import StableRiskError
 from .github_source import GithubSourceError
+from .history import ReviewHistoryError
 from .models import ArtifactStateError
 from .schemas import (
     ArtifactDecisionPayload,
@@ -31,7 +33,10 @@ from .schemas import (
     ReviewCommentEnvelope,
     ReviewCommentListResponse,
     ReviewCommentStateMutationPayload,
+    ReviewHistoryResponse,
     ReviewRunListResponse,
+    StableRiskPayload,
+    StableRiskResponse,
 )
 from .service import (
     ArtifactService,
@@ -229,6 +234,28 @@ def build_artifact_router() -> APIRouter:
         _private_read_headers(response)
         try:
             return await service.artifact_files(artifact, limit=limit, offset=offset)
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.get(
+        "/v1/artifacts/{artifact_id}/history",
+        tags=["artifacts"],
+        summary="查看 Artifact 审查时间线",
+        response_model=ReviewHistoryResponse,
+    )
+    async def artifact_history(
+        request: Request,
+        response: Response,
+        artifact_id: str,
+        limit: int = Query(default=30),
+        cursor: str = Query(default="", max_length=1000),
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        user = await _require_user(request)
+        artifact = await _visible_artifact(service, artifact_id, user)
+        _private_read_headers(response)
+        try:
+            return await service.artifact_history(artifact, limit=limit, cursor=cursor)
         except Exception as exc:
             _raise_artifact_error(exc)
 
@@ -554,6 +581,33 @@ def build_artifact_router() -> APIRouter:
         }
 
     @router.post(
+        "/v1/admin/artifacts/{artifact_id}/findings/{finding_id}/stable-risk",
+        tags=["reviews"],
+        summary="确认 critical finding 影响当前稳定版本并紧急撤回",
+        response_model=StableRiskResponse,
+    )
+    async def request_stable_risk_revoke(
+        request: Request,
+        artifact_id: str,
+        finding_id: str,
+        payload: StableRiskPayload,
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        actor = await _require_admin(request)
+        try:
+            return await service.request_stable_risk_revoke(
+                candidate_artifact_id=artifact_id,
+                finding_id=finding_id,
+                actor=actor,
+                expected_version=payload.expected_version,
+                reason=payload.reason,
+                confirm_affects_current_release=payload.confirm_affects_current_release,
+                idempotency_key=_request_idempotency_key(request, payload.idempotency_key),
+            )
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.post(
         "/v1/admin/artifacts/{artifact_id}/approve",
         tags=["reviews"],
         summary="批准并排队发布 Artifact",
@@ -749,6 +803,15 @@ def _raise_artifact_error(exc: Exception) -> None:
     if isinstance(exc, HTTPException):
         raise exc
     if isinstance(exc, ArtifactServiceError):
+        raise _http_error(exc.status_code, exc.code, str(exc)) from exc
+    if isinstance(exc, ReviewHistoryError):
+        raise _http_error(
+            exc.status_code,
+            exc.code,
+            str(exc),
+            headers=PRIVATE_READ_HEADERS,
+        ) from exc
+    if isinstance(exc, StableRiskError):
         raise _http_error(exc.status_code, exc.code, str(exc)) from exc
     if isinstance(exc, ReviewCommentError):
         raise _http_error(

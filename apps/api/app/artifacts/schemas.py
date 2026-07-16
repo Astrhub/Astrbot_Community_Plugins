@@ -187,6 +187,64 @@ class ReviewFindingListResponse(PublicResponseModel):
     items: list[PublicReviewFinding]
 
 
+class PublicReviewHistoryEvent(PublicResponseModel):
+    id: str
+    type: Literal[
+        "artifact_submitted",
+        "comment_event",
+        "decision",
+        "finding",
+        "finding_event",
+        "policy_event",
+        "publication_publish_failed",
+        "publication_published",
+        "publication_revoke_failed",
+        "publication_revoked",
+        "run",
+    ]
+    occurred_at: datetime
+    source: str
+    actor_nickname: str = ""
+    actor_role: str
+    idempotency_key: str = ""
+    policy_version_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewHistoryResponse(PublicResponseModel):
+    artifact_id: str
+    items: list[PublicReviewHistoryEvent]
+    has_more: bool
+    next_cursor: str | None = None
+
+
+class StableRiskEvidenceResponse(PublicResponseModel):
+    kind: Literal["path_sha", "dependency", "fingerprint", "admin_confirmation"]
+    deterministic: bool
+    candidate_artifact_id: str
+    stable_artifact_id: str
+    finding_id: str
+    fingerprint: str = ""
+    path: str = ""
+    file_sha256: str = ""
+    package_name: str = ""
+    package_version: str = ""
+    advisory_id: str = ""
+    tool_name: str = ""
+    tool_version: str = ""
+    ruleset_version: str = ""
+    confirmed_by_nickname: str = ""
+    reason: str = ""
+
+
+class StableRiskResponse(PublicResponseModel):
+    candidate_artifact_id: str
+    finding_id: str
+    affects_current_release: Literal[True]
+    correlation: StableRiskEvidenceResponse
+    stable_artifact: PublicArtifact
+
+
 class PublicArtifactFile(PublicResponseModel):
     id: str
     artifact_id: str
@@ -447,6 +505,20 @@ class ArtifactDecisionPayload(BaseModel):
     @classmethod
     def clean_text(cls, value: str) -> str:
         return value.strip()
+
+
+class StableRiskPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=2000)
+    confirm_affects_current_release: bool = False
+    idempotency_key: str = Field(default="", max_length=200)
+
+    @field_validator("reason", "idempotency_key")
+    @classmethod
+    def clean_stable_risk_text(cls, value: str) -> str:
+        return " ".join(value.split()) if value else ""
 
 
 class PluginRegistrationPayload(BaseModel):
