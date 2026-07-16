@@ -572,6 +572,7 @@ def _stage_input_sha256(
     payload = {
         "artifact_id": artifact["id"],
         "archive_sha256": artifact.get("archive_sha256") or "",
+        "base_artifact_id": artifact.get("base_artifact_id") or "",
         "tree_sha256": artifact.get("tree_sha256") or "",
         "policy_version_id": policy_version_id,
         "stage_name": unit.name,

@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import uuid
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import asyncpg
 import pytest
 
+from app.artifacts.diff import ArtifactDiffService, DiffBuildError, manifest_tree_sha256
 from app.artifacts.models import ArtifactErrorCode, PublicationStatus, ReviewStatus
 from app.artifacts.policy_service import ReviewPolicyService
 from app.artifacts.repository import PgArtifactRepository
+from app.artifacts.storage import LocalArtifactStorage, build_content_key
 from app.runtime_runner.repository import PgRuntimeRunnerRepository
 from app.schema_migrations import (
     SchemaMigrationError,
@@ -167,6 +171,10 @@ async def run_p1_upgrade_scenario(url: str) -> None:
 
 def test_advanced_repository_constraints_and_leases_against_postgres() -> None:
     asyncio.run(run_advanced_repository_scenario(database_url()))
+
+
+def test_diff_service_tree_binding_against_postgres(tmp_path: Path) -> None:
+    asyncio.run(run_diff_service_scenario(database_url(), tmp_path))
 
 
 def test_review_policy_lifecycle_against_postgres() -> None:
@@ -1101,9 +1109,7 @@ async def run_advanced_repository_scenario(url: str) -> None:
         )
         assert sbom["package_count"] == 2
 
-        with pytest.raises(
-            (asyncpg.RestrictViolationError, asyncpg.ForeignKeyViolationError)
-        ):
+        with pytest.raises((asyncpg.RestrictViolationError, asyncpg.ForeignKeyViolationError)):
             async with connection.transaction():
                 await connection.execute(
                     "DELETE FROM review_policies WHERE id = $1",
@@ -1126,6 +1132,98 @@ async def run_advanced_repository_scenario(url: str) -> None:
         assert diffs_after_delete[0]["base_sha256"] == "4" * 64
         assert await repository.get_runtime_dispatch(dispatch["id"]) is None
         assert await repository.list_artifact_sboms(first["id"]) == []
+    finally:
+        await transaction.rollback()
+        await connection.close()
+
+
+async def run_diff_service_scenario(url: str, root: Path) -> None:
+    connection, transaction = await begin_isolated_schema(url)
+    try:
+        await apply_schema_migrations(connection)
+        await seed_market(connection)
+        repository = PgArtifactRepository(RepositoryStore(connection))
+        storage = LocalArtifactStorage(root, "https://cdn.example.test")
+        base = await repository.create_artifact(artifact_payload("4"))
+        current_payload = artifact_payload("5")
+        current_payload["base_artifact_id"] = base["id"]
+        current = await repository.create_artifact(current_payload)
+
+        base_content = b"value = 1\n"
+        current_content = b"value = 2\n"
+        base_file_id = "file-pg-base-main"
+        current_file_id = "file-pg-current-main"
+        base_key = build_content_key(base["id"], base_file_id)
+        current_key = build_content_key(current["id"], current_file_id)
+        await storage.put_text_content(base_key, base_content)
+        await storage.put_text_content(current_key, current_content)
+        base_manifest = [
+            {
+                "id": base_file_id,
+                "path": "main.py",
+                "language": "python",
+                "mime_type": "text/x-python",
+                "sha256": hashlib.sha256(base_content).hexdigest(),
+                "size_bytes": len(base_content),
+                "line_count": 1,
+                "is_text": True,
+                "content_key": base_key,
+                "is_entrypoint": True,
+            }
+        ]
+        current_manifest = [
+            {
+                "id": current_file_id,
+                "path": "main.py",
+                "language": "python",
+                "mime_type": "text/x-python",
+                "sha256": hashlib.sha256(current_content).hexdigest(),
+                "size_bytes": len(current_content),
+                "line_count": 1,
+                "is_text": True,
+                "content_key": current_key,
+                "is_entrypoint": True,
+            }
+        ]
+        base_tree = manifest_tree_sha256(base_manifest)
+        current_tree = manifest_tree_sha256(current_manifest)
+        await repository.replace_artifact_files(base["id"], base_manifest, base_tree)
+        await repository.replace_artifact_files(current["id"], current_manifest, current_tree)
+        current = await repository.get_artifact(current["id"])
+        assert current is not None
+
+        service = ArtifactDiffService()
+        first = await service.build(
+            artifact=current,
+            repository=repository,
+            storage=storage,
+        )
+        second = await service.build(
+            artifact=current,
+            repository=repository,
+            storage=storage,
+        )
+        diffs = await repository.list_artifact_diffs(current["id"])
+        assert first.input_sha256 == second.input_sha256
+        assert first.output_sha256 == second.output_sha256
+        assert len(diffs) == 1
+        assert diffs[0]["base_tree_sha256"] == base_tree
+        assert diffs[0]["current_tree_sha256"] == current_tree
+        assert diffs[0]["hunks_key"]
+
+        await connection.execute(
+            "UPDATE plugin_artifacts SET tree_sha256 = $2 WHERE id = $1",
+            current["id"],
+            "0" * 64,
+        )
+        with pytest.raises(DiffBuildError) as caught:
+            await service.build(
+                artifact=current,
+                repository=repository,
+                storage=storage,
+            )
+        assert caught.value.code == ArtifactErrorCode.DIFF_TREE_CHANGED.value
+        assert caught.value.retryable is True
     finally:
         await transaction.rollback()
         await connection.close()

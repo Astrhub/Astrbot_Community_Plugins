@@ -8,6 +8,7 @@ from contextlib import suppress
 from typing import Any
 
 from .category import CategoryProvider, CategorySuggestionService, UnavailableCategoryProvider
+from .diff import DIFF_TOOL_VERSION, ArtifactDiffService
 from .file_review import FileReviewService
 from .archive import (
     ArchivePrechecker,
@@ -22,6 +23,7 @@ from .policy import ReviewPolicyStage
 from .repository import ArtifactRepository
 from .stages import (
     CategoryStage,
+    DiffGraphStage,
     LlmFileStage,
     LlmPackageStage,
     LlmSummaryStage,
@@ -85,6 +87,7 @@ class ArtifactJobRunner:
         self.category_provider = category_provider or UnavailableCategoryProvider()
         self.llm_provider = llm_provider or UnavailableStructuredLlmProvider()
         tool_snapshots: dict[ReviewPolicyStage, StageToolSnapshot] = {}
+        tool_snapshots[ReviewPolicyStage.DIFF] = StageToolSnapshot(DIFF_TOOL_VERSION)
         if category_provider is not None:
             tool_snapshots[ReviewPolicyStage.CATEGORY] = StageToolSnapshot(
                 category_provider.version
@@ -104,6 +107,7 @@ class ArtifactJobRunner:
         default_stages: list[ReviewStage] = [
             PrecheckStage(advanced_review_enabled=advanced_review_enabled),
             StaticScanStage(advanced_review_enabled=advanced_review_enabled),
+            DiffGraphStage(ArtifactDiffService()),
             RoutingStage(),
         ]
         default_stages.append(

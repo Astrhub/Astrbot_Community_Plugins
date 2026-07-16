@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from app.artifacts.archive import ArchivePrechecker
+from app.artifacts.diff import DIFF_TOOL_VERSION
 from app.artifacts.jobs import ArtifactJobRunner
 from app.artifacts.models import JobType
 from app.artifacts.orchestration import (
@@ -15,7 +16,7 @@ from app.artifacts.orchestration import (
 )
 from app.artifacts.policy import ReviewPolicyStage, review_policy_sha256
 from app.artifacts.repository import ArtifactRepository, InMemoryArtifactRepository
-from app.artifacts.stages import StageContext, StageOutcome
+from app.artifacts.stages import DiffGraphStage, StageContext, StageOutcome
 from app.artifacts.static_scan import StaticScanner
 from app.artifacts.storage import ArtifactStorage
 
@@ -139,6 +140,26 @@ def test_static_only_policy_enqueues_exactly_one_route_job() -> None:
     assert second.route_job_id == first.route_job_id
     assert second.enqueued_job_ids == ()
     assert [job["type"] for job in jobs] == [JobType.ROUTE_REVIEW.value]
+
+
+def test_default_runner_configures_diff_without_claiming_import_graph_support() -> None:
+    repository = InMemoryArtifactRepository()
+    runner = ArtifactJobRunner(
+        repository=repository,
+        storage=cast(ArtifactStorage, object()),
+        prechecker=cast(ArchivePrechecker, object()),
+        scanner=cast(StaticScanner, object()),
+        worker_id="diff-tool-worker",
+        lease_seconds=60,
+        poll_seconds=1,
+        advanced_review_enabled=True,
+    )
+
+    assert runner.review_orchestrator.tool_snapshots[ReviewPolicyStage.DIFF].version == (
+        DIFF_TOOL_VERSION
+    )
+    assert ReviewPolicyStage.IMPORT_GRAPH not in runner.review_orchestrator.tool_snapshots
+    assert isinstance(runner._review_stages[JobType.DIFF_GRAPH.value], DiffGraphStage)
 
 
 def test_concurrent_reconcile_still_creates_one_route_job() -> None:

@@ -226,24 +226,24 @@
         - *Details*: 运行 API/worker/runtime/LLM/frontend tests、`vp check`、Vitest/build、OpenAPI、Compose；检查拒绝候选不影响旧 CDN 后提交。
         - *Requirements*: P2 验收、全局回归。
 
-- [ ] 11. **Artifact Diff 与 Tree Hash 绑定**
-    - [ ] 11.1. 实现 base artifact 校验
+- [x] 11. **Artifact Diff 与 Tree Hash 绑定**
+    - [x] 11.1. 实现 base artifact 校验
         - *Goal*: 只比较同插件、提交时固定且 tree 完整的 base。
         - *Details*: base 缺失/跨插件/未完成 manifest 时标记 degraded 并退化全量；不使用后续 current pointer 替换已记录 base。
         - *Requirements*: FR-209。
-    - [ ] 11.2. 实现文件 change classification
+    - [x] 11.2. 实现文件 change classification
         - *Goal*: 确定性识别 added/deleted/modified/unchanged/exact rename。
         - *Details*: path+SHA 比较；rename 仅相同 SHA 一一对应；二进制只存 metadata；绑定两侧 tree/file SHA。
         - *Requirements*: FR-209。
-    - [ ] 11.3. 生成受限 unified hunks
+    - [x] 11.3. 生成受限 unified hunks
         - *Goal*: 为文本 diff 和行级评论提供稳定行范围。
         - *Details*: 限制文件/总字节、hunk context 和输出大小；私有对象存储；读取时校验 tree hash，过期重算。
         - *Requirements*: FR-209、FR-211。
-    - [ ] 11.4. 增加 diff corpus tests
+    - [x] 11.4. 增加 diff corpus tests
         - *Goal*: 覆盖换行、Unicode、rename ambiguity、binary、delete 和 tree drift。
         - *Details*: 使用小型动态 fixture；断言 deterministic output 和 limits。
         - *Requirements*: FR-209。
-    - [ ] 11.5. 验证并提交 diff backend
+    - [x] 11.5. 验证并提交 diff backend
         - *Goal*: 独立交付可靠文件 diff。
         - *Details*: 运行 diff/storage/repository tests、Ruff、迁移 checks 后提交。
         - *Requirements*: FR-209。

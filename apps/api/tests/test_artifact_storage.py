@@ -12,6 +12,7 @@ from app.artifacts.storage import (
     ArtifactStorageError,
     LocalArtifactStorage,
     S3ArtifactStorage,
+    build_diff_key,
     build_published_key,
     build_quarantine_key,
 )
@@ -116,6 +117,21 @@ def test_same_version_with_distinct_suffixes_has_distinct_keys() -> None:
     second = build_published_key(**common, suffix="bbbbbbbbbb")
 
     assert first != second
+
+
+def test_build_diff_key_is_private_and_rejects_unsafe_identifiers() -> None:
+    assert build_diff_key("artifact_123", "diff_456") == (
+        "artifacts/artifact_123/diffs/diff_456.json"
+    )
+
+    for artifact_id, diff_id in (
+        ("../artifact", "diff_456"),
+        ("artifact_123", "../diff"),
+        ("artifact/123", "diff_456"),
+        ("artifact_123", "diff/456"),
+    ):
+        with pytest.raises(ArtifactStorageError, match="Invalid"):
+            build_diff_key(artifact_id, diff_id)
 
 
 def test_local_storage_is_idempotent_and_never_overwrites(tmp_path: Path) -> None:

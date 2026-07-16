@@ -97,6 +97,12 @@ def build_content_key(artifact_id: str, file_id: str) -> str:
     return f"artifacts/{artifact_id}/files/{file_id}.txt"
 
 
+def build_diff_key(artifact_id: str, diff_id: str) -> str:
+    validate_path_segment(artifact_id, "artifact_id")
+    validate_path_segment(diff_id, "diff_id")
+    return f"artifacts/{artifact_id}/diffs/{diff_id}.json"
+
+
 def validate_path_segment(value: str, label: str) -> None:
     if value in {"", ".", ".."} or not SAFE_PATH_SEGMENT.fullmatch(value):
         raise ArtifactStorageError("invalid_path_segment", f"Invalid {label}")

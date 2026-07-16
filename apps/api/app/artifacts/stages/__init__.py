@@ -2,6 +2,7 @@
 
 from .base import ReviewStage, StageContext, StageOutcome, StageOutcomeKind
 from .category import CategoryStage
+from .diff_graph import DiffGraphStage
 from .llm_package import LlmPackageStage
 from .llm_file import LlmFileStage
 from .llm_summary import LlmSummaryStage
@@ -12,6 +13,7 @@ from .static_scan import StaticScanStage
 __all__ = [
     "PrecheckStage",
     "CategoryStage",
+    "DiffGraphStage",
     "LlmPackageStage",
     "LlmFileStage",
     "LlmSummaryStage",
