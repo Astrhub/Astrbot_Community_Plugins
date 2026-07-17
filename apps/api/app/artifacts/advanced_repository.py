@@ -357,7 +357,17 @@ class PgAdvancedReviewRepositoryMixin:
                         )
                     if not row:
                         return None
-                    await self._insert_review_policy_event(connection, policy_id, event)
+                    policy_event = await self._insert_review_policy_event(
+                        connection,
+                        policy_id,
+                        event,
+                    )
+                    await self._insert_review_policy_notification(
+                        connection,
+                        row,
+                        normalized_action,
+                        policy_event,
+                    )
             return _record(row)
         except asyncpg.UniqueViolationError as exc:
             raise ValueError(ArtifactErrorCode.REVIEW_POLICY_ACTIVATION_CONFLICT.value) from exc
@@ -555,6 +565,45 @@ class PgAdvancedReviewRepositoryMixin:
             payload.get("base_version", ""),
             dict(payload.get("diff") or {}),
             payload["idempotency_key"],
+        )
+
+    async def _insert_review_policy_notification(
+        self,
+        connection: asyncpg.Connection,
+        policy: Mapping[str, Any],
+        action: ReviewPolicyEventAction,
+        event: Mapping[str, Any],
+    ) -> None:
+        event_type = {
+            ReviewPolicyEventAction.ACTIVATE: "review_policy_activated",
+            ReviewPolicyEventAction.RETIRE: "review_policy_retired",
+            ReviewPolicyEventAction.ROLLBACK: "review_policy_rolled_back",
+        }.get(action)
+        if not event_type:
+            return
+        policy_id = str(policy["id"])
+        policy_event_id = str(event["id"])
+        await connection.execute(
+            """
+            INSERT INTO outbox_events (
+                id, event_type, aggregate_type, aggregate_id,
+                recipient_user_id, payload, dedupe_key
+            )
+            VALUES ($1, $2, 'review_policy', $3, NULL, $4::jsonb, $5)
+            ON CONFLICT (dedupe_key) DO UPDATE
+               SET dedupe_key = EXCLUDED.dedupe_key
+            """,
+            new_domain_id("outbox"),
+            event_type,
+            policy_id,
+            {
+                "policy_id": policy_id,
+                "version": str(policy["version"]),
+                "action": action.value,
+                "status": str(policy["status"]),
+                "reason": str(event.get("reason") or ""),
+            },
+            f"review-policy:{policy_id}:{policy_event_id}",
         )
 
     @staticmethod
@@ -2651,7 +2700,12 @@ class InMemoryAdvancedReviewRepositoryMixin:
                     event=event,
                     now=now,
                 )
-            self._append_review_policy_event_locked(policy_id, event)
+            policy_event = self._append_review_policy_event_locked(policy_id, event)
+            self._append_review_policy_notification_locked(
+                policy,
+                normalized_action,
+                policy_event,
+            )
             return deepcopy(policy)
 
     def _transition_review_policy_state_locked(
@@ -2785,6 +2839,50 @@ class InMemoryAdvancedReviewRepositoryMixin:
         }
         self.policy_events[event["id"]] = event
         return event
+
+    def _append_review_policy_notification_locked(
+        self,
+        policy: Mapping[str, Any],
+        action: ReviewPolicyEventAction,
+        policy_event: Mapping[str, Any],
+    ) -> None:
+        event_type = {
+            ReviewPolicyEventAction.ACTIVATE: "review_policy_activated",
+            ReviewPolicyEventAction.RETIRE: "review_policy_retired",
+            ReviewPolicyEventAction.ROLLBACK: "review_policy_rolled_back",
+        }.get(action)
+        if not event_type:
+            return
+        policy_id = str(policy["id"])
+        dedupe_key = f"review-policy:{policy_id}:{policy_event['id']}"
+        if any(item["dedupe_key"] == dedupe_key for item in self.outbox.values()):
+            return
+        now = _utc_now()
+        event = {
+            "id": new_domain_id("outbox"),
+            "event_type": event_type,
+            "aggregate_type": "review_policy",
+            "aggregate_id": policy_id,
+            "recipient_user_id": None,
+            "payload": {
+                "policy_id": policy_id,
+                "version": str(policy["version"]),
+                "action": action.value,
+                "status": str(policy["status"]),
+                "reason": str(policy_event.get("reason") or ""),
+            },
+            "dedupe_key": dedupe_key,
+            "status": "queued",
+            "attempts": 0,
+            "available_at": now,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "delivered_at": None,
+            "last_error": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.outbox[event["id"]] = event
 
     @staticmethod
     def _validate_review_policy_event_identity(

@@ -1,6 +1,8 @@
 # 架构
 
-AstrBot Community Plugins 是一个服务端驱动的插件市场。FastAPI 负责可信控制面（市场 API、SPA 与插件源），独立 `artifact-worker` 负责 ZIP 预检、静态扫描、不可变对象发布和通知 outbox。P0/P1 不执行插件代码；后续 runtime smoke test 也不得进入 API 进程。
+AstrBot Community Plugins 是一个服务端驱动的插件市场。FastAPI 负责可信控制面（市场 API、SPA 与插件
+源），独立 `artifact-worker` 负责预检、静态/恶意软件/依赖/LLM 审查、不可变对象发布和通知 outbox；
+独立 `runtime-runner` 只负责调度一次性隔离容器。任何插件代码都不得进入 API 或 artifact worker 进程。
 
 ## 系统全景
 
@@ -268,7 +270,11 @@ artifact migration 另建 `plugin_artifacts`、`artifact_files`、`review_runs`�
 
 ### 通知系统
 
-评论回复、插件点赞和评论点赞沿用站内通知。artifact 状态通知先写 `outbox_events`，再由独立 Worker 以 lease 领取，发送站内信和可选邮件；站内信使用 outbox event dedupe key 条件写入，worker 重试不会重复建站内记录。邮件只含状态、原因和 `/plugin-workbench?artifact=...` 链接，不附带源码或证据片段。
+评论回复、插件点赞和评论点赞沿用站内通知。artifact 状态与 policy activate/retire/rollback 先写
+`outbox_events`，再由独立 Worker 以 lease 领取，发送站内信和可选邮件；policy lifecycle event 与 outbox 在
+同一数据库事务提交。站内信使用 outbox event dedupe key 条件写入，worker 重试不会重复建站内记录。
+邮件正文完全由 event type 白名单生成，只含插件/策略名称、版本、固定状态、固定短原因和工作台链接；
+自由文本 reason/code、源码、diff、evidence、日志、requirements、comment、对象 key 和凭据不参与邮件渲染。
 
 站内通知以 PostgreSQL 唯一键实现 exactly-once 可见记录；外部 SMTP/Cloudflare 邮件是 at-least-once 提醒，进程在发送成功但确认 outbox 前崩溃时可能产生重复邮件。系统不以邮件投递结果作为审查或发布状态依据。
 
@@ -350,8 +356,10 @@ store 管理的状态与 action 按域分组：插件 CRUD、评论、点赞、�
 
 可用部署方式：
 
-- **Docker Compose** — 默认 app + PostgreSQL + Redis；`--profile artifacts` 增加共享隔离卷与独立 artifact-worker。
-- **systemd** — API 与 `astrbot-artifact-worker.service` 分进程运行，并只向配置的 artifact 目录授予写权限。
+- **Docker Compose** — 默认 app + PostgreSQL + Redis；`artifacts` 增加独立 worker，`runtime-runner` 增加
+  rootless runner 和受限 package proxy。API/worker 不挂 Docker socket，runner 只读 artifact、只写 result。
+- **systemd** — API、artifact worker、runtime runner 使用不同用户、env 文件和文件系统授权；runner unit 不
+  携带 Redis、LLM、站点邮件或对象存储凭据。
 
 尚未提供：Kubernetes/Helm、Nginx/Caddy 反向代理模板和 Terraform。CI 仅 lint + 测试 + 前端构建，不含部署。
 

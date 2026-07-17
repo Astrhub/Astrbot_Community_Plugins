@@ -51,9 +51,7 @@ class RoutingStage:
                 ),
                 "policy_version_id": context.artifact.get("policy_version_id"),
                 "input_sha256": evaluation.coverage_sha256,
-                "idempotency_key": (
-                    f"routing-run:{context.job['id']}:attempt-{context.attempt}"
-                ),
+                "idempotency_key": (f"routing-run:{context.job['id']}:attempt-{context.attempt}"),
                 "coverage": {"stage_name": ROUTING_STAGE_NAME},
             }
         )
@@ -148,9 +146,7 @@ class RoutingStage:
                 artifact_id,
                 reason=evaluation.summary,
                 expected_repo_version=str(context.artifact.get("repo_version") or ""),
-                expected_normalized_version=str(
-                    context.artifact.get("normalized_version") or ""
-                ),
+                expected_normalized_version=str(context.artifact.get("normalized_version") or ""),
                 expected_version=str(context.artifact.get("version") or ""),
                 idempotency_key=decision_key,
                 policy_version_id=policy_id,
@@ -351,5 +347,9 @@ async def _emit_route_status(
     await context.with_snapshots(artifact=artifact).emit_status(
         event_type,
         suffix,
-        {"reason_codes": list(evaluation.reason_codes)},
+        {
+            "reason_codes": list(evaluation.reason_codes),
+            "risk_level": evaluation.risk_level,
+            "critical": evaluation.risk_level == "critical",
+        },
     )

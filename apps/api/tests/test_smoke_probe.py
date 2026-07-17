@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from app.runtime_runner.probe.smoke import (
-    ASTRBOT_4265_SOURCE_COMMIT,
-    AstrBot4265LifecycleSession,
+    ASTRBOT_4266_SOURCE_COMMIT,
+    AstrBot4266LifecycleSession,
     AstrBotLifecycleSession,
     AstrBotPluginObservation,
     AstrBotSmokeProbe,
@@ -167,9 +167,9 @@ def test_source_backed_factory_is_locked_to_version_and_commit(tmp_path: Path) -
         tmp_path,
         "astrbot_plugin_demo",
     )
-    assert isinstance(session, AstrBot4265LifecycleSession)
+    assert isinstance(session, AstrBot4266LifecycleSession)
     assert isinstance(session, AstrBotLifecycleSession)
-    assert ASTRBOT_4265_SOURCE_COMMIT == "adebd2958ed8"
+    assert ASTRBOT_4266_SOURCE_COMMIT == "5d10e0d428b41308cc63215db00359c61ee17195"
 
     changed = request.model_copy(
         update={"target": request.target.model_copy(update={"astrbot_version": "4.27.0"})}
@@ -185,4 +185,4 @@ def test_source_backed_session_requires_exactly_one_non_reserved_plugin(tmp_path
     second.mkdir()
 
     with pytest.raises(ValueError, match="not_isolated"):
-        AstrBot4265LifecycleSession(tmp_path, "astrbot_plugin_demo")
+        AstrBot4266LifecycleSession(tmp_path, "astrbot_plugin_demo")

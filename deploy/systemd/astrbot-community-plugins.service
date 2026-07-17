@@ -5,17 +5,25 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=astrbot-market
+User=astrbot-market-api
 Group=astrbot-market
 WorkingDirectory=/opt/astrbot-community-plugins/apps/api
-EnvironmentFile=/etc/astrbot-community-plugins/astrbot-community-plugins.env
+EnvironmentFile=/etc/astrbot-community-plugins/api.env
 ExecStart=/opt/astrbot-community-plugins/apps/api/.venv/bin/uvicorn app.main:app --host ${HOST} --port ${PORT}
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ReadWritePaths=/opt/astrbot-community-plugins/apps/api /var/lib/astrbot-market/artifacts
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+PrivateDevices=true
+InaccessiblePaths=/var/lib/astrbot-runtime-results
+ReadWritePaths=/var/lib/astrbot-market/artifacts
+UMask=0007
 
 [Install]
 WantedBy=multi-user.target

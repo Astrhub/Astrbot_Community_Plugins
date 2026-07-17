@@ -18,9 +18,14 @@ socket。
 - artifact 目录在 runner 中只读，结果目录单独可写；
 - 不向插件容器传入数据库 URL、Redis URL、对象存储密钥或 LLM 凭据。
 
-Compose 的 `runtime-runner` profile 挂载 `/var/run/docker.sock`，并显式设置
-`RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT=true`。这只是本地非生产验证路径。即使其余
-网络检查通过，结果 attestation 仍为 `unknown`，不能参与自动批准。
+Compose 的 `runtime-runner` profile 默认挂载独立服务用户的
+`/run/user/10001/docker.sock`，并设置 `RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT=false`。可通过
+`RUNTIME_RUNNER_UID_GID` 和 `RUNTIME_RUNNER_DOCKER_SOCKET` 对齐目标节点的 rootless 用户。显式改用 root
+socket 只属于本地非生产排障路径；即使其余网络检查通过，结果 attestation 仍不能作为生产自动批准证据。
+
+当前 lifecycle adapter 固定 AstrBot `4.26.6` 和提交
+`5d10e0d428b41308cc63215db00359c61ee17195`。源码版本变化后必须先运行 source audit、比较 lifecycle 相关
+diff，再更新 adapter 和 runtime target catalog。
 
 ## 本地 Compose
 
@@ -110,3 +115,5 @@ API 测试为 `344 passed, 12 skipped`，Ruff 和 Compose 配置检查通过。�
 执行环境的 Docker daemon 是 rootful，因此 attestation 按设计保持 `unknown`，上述记录只
 证明开发隔离路径和失败关闭逻辑，不能替代生产 rootless 节点验收。生产部署必须使用 registry
 digest 重新固定镜像，并在目标节点重复真实 fixture 后才可启用自动批准。
+
+策略回滚、孤儿清理和事故处置步骤见 [plugin-review-operations.md](plugin-review-operations.md)。

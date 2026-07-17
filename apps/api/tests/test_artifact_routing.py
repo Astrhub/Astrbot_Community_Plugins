@@ -333,9 +333,7 @@ def test_fail_closed_policy_rejects_production_runtime_failure() -> None:
 def test_finding_threshold_and_policy_snapshot_filter_are_explicit() -> None:
     below_threshold = _evaluate(
         policy=_policy(auto_approve=True),
-        findings=[
-            _finding(severity="low", deterministic=True, source="static", fingerprint="low")
-        ],
+        findings=[_finding(severity="low", deterministic=True, source="static", fingerprint="low")],
     )
     cross_policy_runs = _runs()
     cross_policy_runs.append(
@@ -553,9 +551,7 @@ async def _repository_fixture(
         runs=await repository.list_review_runs(artifact["id"]),
         findings=[],
     )
-    assert evaluation.kind is (
-        RouteKind.AUTO_APPROVE if auto_approve else RouteKind.MANUAL_REVIEW
-    )
+    assert evaluation.kind is (RouteKind.AUTO_APPROVE if auto_approve else RouteKind.MANUAL_REVIEW)
     return repository, current_artifact, policy, evaluation
 
 
@@ -739,7 +735,7 @@ def test_routing_stage_manual_path_records_run_without_automatic_decision(
 def test_routing_stage_auto_rejects_deterministic_critical_with_audit_inputs(
     tmp_path: Path,
 ) -> None:
-    async def scenario() -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    async def scenario() -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
         repository, artifact, policy, _ = await _repository_fixture(auto_approve=True)
         static_run = next(
             item
@@ -771,9 +767,12 @@ def test_routing_stage_auto_rejects_deterministic_critical_with_audit_inputs(
         current = await repository.get_artifact(artifact["id"])
         decisions = await repository.list_review_decisions(artifact["id"])
         assert current is not None
-        return outcome, current, decisions[0]
+        alert = next(
+            item for item in repository.outbox.values() if item["event_type"] == "artifact_rejected"
+        )
+        return outcome, current, decisions[0], alert
 
-    outcome, artifact, decision = asyncio.run(scenario())
+    outcome, artifact, decision, alert = asyncio.run(scenario())
 
     assert outcome.kind is StageOutcomeKind.COMPLETED
     assert artifact["review_status"] == "rejected"
@@ -783,15 +782,15 @@ def test_routing_stage_auto_rejects_deterministic_critical_with_audit_inputs(
     assert decision["input_fingerprints"] == ["deterministic-critical-route"]
     assert decision["input_run_ids"] == ["run-runtime", "run-static"]
     assert decision["metadata"]["routing"]["route"] == "auto_reject"
+    assert alert["payload"]["critical"] is True
+    assert alert["payload"]["risk_level"] == "critical"
 
 
 def test_routing_stage_auto_approve_is_recoverable_after_job_ack_loss(tmp_path: Path) -> None:
     async def scenario() -> tuple[Any, Any, dict[str, Any], list[Any], list[Any], list[Any]]:
         repository, artifact, policy, _ = await _repository_fixture(auto_approve=True)
         storage = LocalArtifactStorage(tmp_path, "https://cdn.example.test")
-        first = await RoutingStage().execute(
-            _stage_context(repository, storage, artifact, policy)
-        )
+        first = await RoutingStage().execute(_stage_context(repository, storage, artifact, policy))
         current = await repository.get_artifact(artifact["id"])
         assert current is not None
         recovered = await RoutingStage().execute(
@@ -835,8 +834,7 @@ def test_routing_stage_recovers_crash_after_decision_before_run_completion(tmp_p
             }
         )
         decision_key = (
-            f"routing:{artifact['id']}:{policy['id']}:auto_approve:"
-            f"{evaluation.coverage_sha256}"
+            f"routing:{artifact['id']}:{policy['id']}:auto_approve:{evaluation.coverage_sha256}"
         )
         await repository.auto_approve_artifact(
             artifact["id"],

@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 from app.runtime_runner.probe.smoke import (
-    ASTRBOT_4265_SOURCE_COMMIT,
-    ASTRBOT_4265_VERSION,
+    ASTRBOT_4266_SOURCE_COMMIT,
+    ASTRBOT_4266_VERSION,
 )
 
 SOURCE_VALUE = os.environ.get("ASTRBOT_SOURCE_PATH", "")
@@ -23,19 +23,17 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_astrbot_source_snapshot_matches_runtime_adapter() -> None:
-    project = tomllib.loads((SOURCE_PATH / "pyproject.toml").read_text(encoding="utf-8"))[
-        "project"
-    ]
+    project = tomllib.loads((SOURCE_PATH / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     commit = subprocess.run(
-        ["git", "-C", str(SOURCE_PATH), "rev-parse", "--short=12", "HEAD"],
+        ["git", "-C", str(SOURCE_PATH), "rev-parse", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
 
-    assert project["version"] == ASTRBOT_4265_VERSION
+    assert project["version"] == ASTRBOT_4266_VERSION
     assert project["requires-python"] == ">=3.12"
-    assert commit == ASTRBOT_4265_SOURCE_COMMIT
+    assert commit == ASTRBOT_4266_SOURCE_COMMIT
 
 
 def test_astrbot_source_keeps_required_lifecycle_contract() -> None:
@@ -62,18 +60,12 @@ class _ClassContract:
 def _class_contract(path: Path, class_name: str) -> _ClassContract:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     class_node = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == class_name
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name
     )
     methods = {
         node.name
         for node in class_node.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    attributes = {
-        node.attr
-        for node in ast.walk(class_node)
-        if isinstance(node, ast.Attribute)
-    }
+    attributes = {node.attr for node in ast.walk(class_node) if isinstance(node, ast.Attribute)}
     return _ClassContract(methods, attributes)

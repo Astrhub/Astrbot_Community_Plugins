@@ -1,0 +1,34 @@
+[Unit]
+Description=AstrBot Plugin Runtime Runner
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=astrbot-runtime
+Group=astrbot-runtime
+SupplementaryGroups=astrbot-market
+WorkingDirectory=/opt/astrbot-community-plugins/apps/api
+EnvironmentFile=/etc/astrbot-community-plugins/runtime-runner.env
+ExecStart=/opt/astrbot-community-plugins/apps/api/.venv/bin/python -m app.runtime_runner
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadOnlyPaths=/var/lib/astrbot-market/artifacts
+ReadWritePaths=/var/lib/astrbot-runtime-results
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

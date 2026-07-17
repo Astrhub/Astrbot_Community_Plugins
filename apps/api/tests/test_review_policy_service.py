@@ -144,6 +144,17 @@ def test_policy_draft_validation_activation_and_retry_are_audited() -> None:
         ReviewPolicyEventAction.ACTIVATE.value,
     ]
     assert len(repository.policy_events) == 3
+    policy_notifications = list(repository.outbox.values())
+    assert len(policy_notifications) == 1
+    assert policy_notifications[0]["event_type"] == "review_policy_activated"
+    assert policy_notifications[0]["recipient_user_id"] is None
+    assert policy_notifications[0]["payload"] == {
+        "policy_id": active["id"],
+        "version": "policy-1",
+        "action": "activate",
+        "status": "active",
+        "reason": "Enable advanced review",
+    }
 
 
 def test_active_policy_can_be_explicitly_retired_with_an_audit_event() -> None:
@@ -184,6 +195,10 @@ def test_active_policy_can_be_explicitly_retired_with_an_audit_event() -> None:
     assert current is None
     assert events[-1]["action"] == ReviewPolicyEventAction.RETIRE.value
     assert events[-1]["reason"] == "Disable advanced policy"
+    assert [event["event_type"] for event in repository.outbox.values()] == [
+        "review_policy_activated",
+        "review_policy_retired",
+    ]
 
 
 def test_activation_retires_current_policy_and_rollback_restores_prior_snapshot() -> None:
@@ -233,6 +248,11 @@ def test_activation_retires_current_policy_and_rollback_restores_prior_snapshot(
     assert ReviewPolicyEventAction.ROLLBACK.value in {
         event["action"] for event in repository.policy_events.values()
     }
+    assert [event["event_type"] for event in repository.outbox.values()] == [
+        "review_policy_activated",
+        "review_policy_activated",
+        "review_policy_rolled_back",
+    ]
 
     audit_json = json.dumps(repository.policy_events, sort_keys=True)
     assert "4.26.5" not in audit_json

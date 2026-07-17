@@ -3,10 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: api
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
     image: astrbot-community-plugins:local
+    user: "${API_UID_GID:-10001:10001}"
+    init: true
     restart: unless-stopped
     depends_on:
       postgres:
@@ -24,12 +27,14 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       ENABLE_DEV_AUTH: ${ENABLE_DEV_AUTH:-false}
     volumes:
-      - ./apps/api/.env:/app/apps/api/.env
+      - ${API_ENV_FILE:-./apps/api/.env}:/app/apps/api/.env:rw
       - artifact-data:/var/lib/astrbot-market/artifacts
 
   artifact-worker:
     profiles: ["artifacts"]
     image: astrbot-community-plugins:local
+    user: "${ARTIFACT_WORKER_UID_GID:-10001:10001}"
+    init: true
     restart: unless-stopped
     command: ["python", "-m", "app.artifacts.worker"]
     depends_on:
@@ -41,7 +46,7 @@ services:
       APP_ENV_FILE: /app/apps/api/.env
       ARTIFACT_RUNTIME_RESULT_ROOT: /var/lib/astrbot-runtime-results
     volumes:
-      - ./apps/api/.env:/app/apps/api/.env
+      - ${ARTIFACT_WORKER_ENV_FILE:-./deploy/compose/artifact-worker.env.example}:/app/apps/api/.env:ro
       - artifact-data:/var/lib/astrbot-market/artifacts
       - runtime-results:/var/lib/astrbot-runtime-results:ro
 
@@ -101,6 +106,8 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
     image: astrbot-community-plugins-runtime-runner:local
+    user: "${RUNTIME_RUNNER_UID_GID:-10001:10001}"
+    init: true
     restart: unless-stopped
     command: ["python", "-m", "app.runtime_runner"]
     depends_on:
@@ -121,7 +128,8 @@ services:
       RUNTIME_RUNNER_PACKAGE_INDEX_URL: https://pypi.org/simple
       RUNTIME_RUNNER_INSTALL_PROXY_URL: http://astrbot-runtime-package-proxy:3128
       RUNTIME_RUNNER_INSTALL_PROXY_CONTAINER: astrbot-runtime-package-proxy
-      RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT: "true"
+      RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT: ${RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT:-false}
+      HOME: /tmp/runtime-runner
     read_only: true
     cap_drop: ["ALL"]
     security_opt:
@@ -130,7 +138,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${RUNTIME_RUNNER_DOCKER_SOCKET:-/run/user/10001/docker.sock}:/var/run/docker.sock
       - artifact-data:/var/lib/astrbot-market/artifacts:ro
       - runtime-results:/var/lib/astrbot-runtime-results
 

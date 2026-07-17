@@ -99,24 +99,31 @@ cd apps/market-web && vp test --run  # 运行前端 Vite+ 测试
 
 ```bash
 cp apps/api/.env.docker.example apps/api/.env
+sudo chown 10001:10001 apps/api/.env
 docker compose up -d --build
 ```
 
-打开 `http://127.0.0.1:8787/setup` 完成初始化。compose 内置服务地址：
+API 容器默认使用非 root UID/GID `10001:10001`；上面的 owner 设置让一次性 `/setup` 能原子写回该文件。
+完成初始化后可将文件改为只读挂载。打开 `http://127.0.0.1:8787/setup` 完成初始化。compose 内置服务地址：
 
 - PostgreSQL：host `postgres` / port `5432` / 默认库名、用户、密码均为 `market`（可用 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 覆盖）
 - Redis：host `redis` / port `6379`
 
-启用插件包功能时，先在 `apps/api/.env` 配置 `ARTIFACTS_ENABLED=true`、CDN 与存储，再启动独立 Worker：
+启用插件包功能时，API 与 worker 使用分离配置。复制 worker 示例到不提交的私有文件，配置数据库、CDN、
+存储和所需工具，最后显式设置 `ARTIFACTS_ENABLED=true`；通过
+`ARTIFACT_WORKER_ENV_FILE` 指向它后再启动独立 Worker：
 
 ```bash
-docker compose --profile artifacts up -d --build
+ARTIFACT_WORKER_ENV_FILE=/etc/astrbot-community-plugins/artifact-worker.env \
+  docker compose --profile artifacts up -d --build
 docker compose logs -f artifact-worker
 ```
 
 API 进程不执行插件源码；P0/P1 的 Worker 只读取 ZIP、YAML 和 Python AST。runtime smoke
 test 使用独立 runner 和一次性容器，部署边界见
-[docs/runtime-runner.md](docs/runtime-runner.md)。
+[docs/runtime-runner.md](docs/runtime-runner.md)。完整启动、策略回滚、孤儿清理和事故处置见
+[docs/plugin-review-operations.md](docs/plugin-review-operations.md)。当前 source-backed adapter 固定为
+AstrBot `4.26.6`（`5d10e0d428b41308cc63215db00359c61ee17195`）；源码更新后必须重新审计和验证。
 
 容器镜像：`node:24`（前端构建）、`python:3.11` + `uv:0.9.7`（后端）、`postgres:16-alpine`、`redis:7-alpine`。对外端口默认 `8787`，可用 `APP_PORT` 覆盖。
 
@@ -131,17 +138,20 @@ docker compose down
 
 ### Systemd（裸机源码部署）
 
-示例路径 `/opt/astrbot-community-plugins`，服务用户 `astrbot-market`：
+示例路径 `/opt/astrbot-community-plugins`。生产使用 `astrbot-market-api`、
+`astrbot-market-worker`、`astrbot-runtime` 三个服务用户和分离的 env 文件；共享 artifact 目录通过受限组授权。
+具体建用户、目录权限和 rootless engine 步骤见运维手册。安装 unit 与示例配置：
 
 ```bash
-sudo useradd --system --create-home --shell /usr/sbin/nologin astrbot-market
 sudo mkdir -p /opt /etc/astrbot-community-plugins
 sudo rsync -a --delete ./ /opt/astrbot-community-plugins/
-sudo chown -R astrbot-market:astrbot-market /opt/astrbot-community-plugins
 cd /opt/astrbot-community-plugins
-sudo cp deploy/systemd/astrbot-community-plugins.env.example /etc/astrbot-community-plugins/astrbot-community-plugins.env
+sudo cp deploy/systemd/astrbot-community-plugins-api.env.example /etc/astrbot-community-plugins/api.env
+sudo cp deploy/systemd/astrbot-artifact-worker.env.example /etc/astrbot-community-plugins/artifact-worker.env
+sudo cp deploy/systemd/astrbot-runtime-runner.env.example /etc/astrbot-community-plugins/runtime-runner.env
 sudo cp deploy/systemd/astrbot-community-plugins.service /etc/systemd/system/
 sudo cp deploy/systemd/astrbot-artifact-worker.service /etc/systemd/system/
+sudo cp deploy/systemd/astrbot-runtime-runner.service /etc/systemd/system/
 ```
 
 构建与安装依赖：
@@ -169,20 +179,23 @@ PYPI_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 docker compose build
 ```
 
-systemd service 已启用安全加固（`NoNewPrivileges` / `PrivateTmp` / `ProtectSystem=full` / `ReadWritePaths` 限定后端目录）。编辑 env 后启动：
+systemd service 已启用安全加固（`NoNewPrivileges` / `PrivateTmp` / `ProtectSystem=strict` / 受限
+`ReadWritePaths`）。编辑 env 后启动：
 
 ```bash
 sudo systemctl daemon-reload
-sudo mkdir -p /var/lib/astrbot-market/artifacts
-sudo chown -R astrbot-market:astrbot-market /var/lib/astrbot-market
+# 必须先按 docs/plugin-review-operations.md 创建三个服务用户、共享组和目录权限。
 sudo systemctl enable --now astrbot-community-plugins
 # 仅在 ARTIFACTS_ENABLED=true 且存储/CDN 配置完整时启用：
 sudo systemctl enable --now astrbot-artifact-worker
+# 仅在 rootless engine、安装代理、最小权限数据库角色和 runner env 验证完成后启用：
+sudo systemctl enable --now astrbot-runtime-runner
 sudo systemctl status astrbot-community-plugins
 journalctl -u astrbot-community-plugins -f
 ```
 
-若 `.env` 中暂不填写 `DATABASE_URL` 与 `REDIS_URL`，首次访问 `/setup` 完成初始化；初始化成功后后端会写入 `apps/api/.env`。生产环境通常还需在前置 Nginx/Caddy 启用 HTTPS，并相应设置 `COOKIE_SECURE=true`。
+systemd 示例将 `/etc` 配置视为不可变，启用前应完成数据库、核心管理员和 secret 配置；它不支持让 Web
+setup 写 `/etc`。生产环境还需在前置 Nginx/Caddy 启用 HTTPS，并设置 `COOKIE_SECURE=true`。
 
 ### 首次启动向导
 

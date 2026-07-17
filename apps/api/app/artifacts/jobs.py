@@ -45,6 +45,7 @@ from .stages import (
     ReviewStage,
     StageContext,
     StageOutcome,
+    StageOutcomeKind,
     StaticScanStage,
     YaraStage,
     RoutingStage,
@@ -573,6 +574,7 @@ class ArtifactJobRunner:
         )
         try:
             outcome = await stage.execute(context)
+            await self._emit_review_stage_notification(job, artifact, outcome)
             if self.advanced_review_enabled and outcome.completes_job:
                 await self.review_orchestrator.reconcile(str(artifact["id"]))
         except ArtifactStorageError as exc:
@@ -600,6 +602,58 @@ class ArtifactJobRunner:
             outcome.error_code or "artifact_stage_failed",
             outcome.summary,
             retryable=outcome.retryable,
+        )
+
+    async def _emit_review_stage_notification(
+        self,
+        job: Mapping[str, Any],
+        artifact: Mapping[str, Any],
+        outcome: StageOutcome,
+    ) -> None:
+        job_type = str(job.get("type") or "")
+        event_type = ""
+        recipient_user_id: Any = artifact.get("submitted_by")
+        if job_type in {JobType.RUNTIME_DISPATCH.value, JobType.RUNTIME_COLLECT.value} and (
+            outcome.kind in {StageOutcomeKind.BLOCKED, StageOutcomeKind.DEGRADED}
+        ):
+            event_type = "artifact_runtime_failed"
+        elif job_type == JobType.DEPENDENCY_SCAN.value and outcome.kind in {
+            StageOutcomeKind.BLOCKED,
+            StageOutcomeKind.DEGRADED,
+        }:
+            event_type = "artifact_dependency_failed"
+        elif (
+            job_type
+            in {
+                JobType.DIFF_GRAPH.value,
+                JobType.CATEGORY.value,
+                JobType.LLM_PACKAGE.value,
+                JobType.LLM_FILE.value,
+                JobType.LLM_SUMMARY.value,
+            }
+            and outcome.kind is StageOutcomeKind.DEGRADED
+        ):
+            event_type = "artifact_review_tool_degraded"
+            recipient_user_id = None
+        if not event_type:
+            return
+        await self.repository.enqueue_outbox(
+            {
+                "event_type": event_type,
+                "aggregate_type": "artifact",
+                "aggregate_id": artifact["id"],
+                "recipient_user_id": recipient_user_id,
+                "payload": {
+                    "artifact_id": artifact["id"],
+                    "plugin_id": artifact["plugin_id"],
+                    "stage": job_type,
+                    "outcome": outcome.kind.value,
+                    "code": outcome.error_code,
+                },
+                "dedupe_key": (
+                    f"artifact:{artifact['id']}:stage-alert:{job['id']}:{outcome.kind.value}"
+                ),
+            }
         )
 
     async def _run_publish(self, job: Mapping[str, Any]) -> None:

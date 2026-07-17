@@ -27,7 +27,7 @@ def test_container_pipeline_runs_all_phases_and_returns_signed_result() -> None:
 
     assert result.dispatch_id == "dispatch_01"
     assert result.target.resolved_python_version == "3.12.0"
-    assert result.install.astrbot_version == "4.26.5"
+    assert result.install.astrbot_version == "4.26.6"
     assert result.smoke.metadata.name == "astrbot_plugin_demo"
     assert result.cleanup.status.value == "passed"
     assert output.private_objects[0].key == result.install.sbom_key

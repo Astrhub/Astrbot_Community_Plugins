@@ -30,13 +30,19 @@ RUN if [ -n "$PYPI_INDEX_URL" ]; then \
         uv sync --project apps/api --locked --no-dev --no-install-project; \
     fi
 COPY apps/api ./apps/api
+RUN groupadd --gid 10001 astrbot-market \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin astrbot-market \
+    && mkdir -p /var/lib/astrbot-market/artifacts /var/lib/astrbot-runtime-results \
+    && chown -R 10001:10001 /var/lib/astrbot-market /var/lib/astrbot-runtime-results
 WORKDIR /app/apps/api
 
 FROM api-base AS api
 COPY --from=web-build /src/apps/market-web/dist /app/apps/market-web/dist
 EXPOSE 8787
+USER 10001:10001
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8787"]
 
 FROM api-base AS runtime-runner
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+USER 10001:10001
 CMD ["python", "-m", "app.runtime_runner"]

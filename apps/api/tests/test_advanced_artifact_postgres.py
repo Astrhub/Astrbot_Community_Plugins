@@ -678,6 +678,22 @@ async def run_concurrent_review_policy_activation_scenario(url: str) -> None:
             idempotency_key="concurrent-base-activate",
             reason="Concurrent activation base",
         )
+        repeated_base = await service.activate(
+            base["id"],
+            actor=actor,
+            request_id="concurrent-base-activate",
+            idempotency_key="concurrent-base-activate",
+            reason="Concurrent activation base",
+        )
+        assert repeated_base["id"] == base["id"]
+        async with pool.acquire() as connection:
+            base_notifications = await connection.fetch(
+                "SELECT event_type, aggregate_id, payload FROM outbox_events"
+            )
+        assert len(base_notifications) == 1
+        assert base_notifications[0]["event_type"] == "review_policy_activated"
+        assert base_notifications[0]["aggregate_id"] == base["id"]
+        assert dict(base_notifications[0]["payload"])["version"] == "concurrent-base"
 
         candidates: list[dict[str, Any]] = []
         for index, version in enumerate(("4.27.0", "4.28.0"), start=1):
@@ -729,6 +745,12 @@ async def run_concurrent_review_policy_activation_scenario(url: str) -> None:
                     "SELECT count(*) FROM review_policies WHERE status = 'active' AND is_default"
                 )
                 == 1
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT count(*) FROM outbox_events WHERE event_type = 'review_policy_activated'"
+                )
+                == 2
             )
     finally:
         if pool is not None:

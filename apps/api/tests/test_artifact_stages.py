@@ -38,8 +38,9 @@ class _RecordingRepository:
 class _OutcomeStage:
     job_type = "contract_stage"
 
-    def __init__(self, outcome: StageOutcome) -> None:
+    def __init__(self, outcome: StageOutcome, *, job_type: str = "contract_stage") -> None:
         self.outcome = outcome
+        self.job_type = job_type
 
     async def execute(self, context: StageContext) -> StageOutcome:
         return self.outcome
@@ -200,3 +201,71 @@ def test_runner_completes_handled_stage_outcomes(outcome: StageOutcome) -> None:
         )
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("job_type", "outcome", "event_type", "recipient_user_id"),
+    [
+        (
+            "runtime_dispatch",
+            StageOutcome.blocked("runtime_probe_failed", "private runtime failure"),
+            "artifact_runtime_failed",
+            "owner-1",
+        ),
+        (
+            "runtime_collect",
+            StageOutcome.degraded("runtime_result_unavailable", "private runtime detail"),
+            "artifact_runtime_failed",
+            "owner-1",
+        ),
+        (
+            "dependency_scan",
+            StageOutcome.blocked("dependency_vulnerability", "private dependency detail"),
+            "artifact_dependency_failed",
+            "owner-1",
+        ),
+        (
+            "llm_package",
+            StageOutcome.degraded("llm_invalid_response", "private model response"),
+            "artifact_review_tool_degraded",
+            None,
+        ),
+    ],
+)
+def test_runner_emits_bounded_stage_alerts(
+    job_type: str,
+    outcome: StageOutcome,
+    event_type: str,
+    recipient_user_id: str | None,
+) -> None:
+    async def scenario() -> list[dict[str, Any]]:
+        repository = _RecordingRepository()
+        stage = _OutcomeStage(outcome, job_type=job_type)
+        runner = ArtifactJobRunner(
+            repository=cast(ArtifactRepository, repository),
+            storage=cast(ArtifactStorage, object()),
+            prechecker=cast(Any, object()),
+            scanner=cast(Any, object()),
+            worker_id="stage-contract-worker",
+            lease_seconds=60,
+            poll_seconds=1,
+            review_stages={stage.job_type: stage},
+        )
+        await runner._run_review_stage(
+            {"id": "job-alert-1", "artifact_id": "artifact-1", "type": stage.job_type}
+        )
+        return repository.events
+
+    events = asyncio.run(scenario())
+
+    assert len(events) == 1
+    assert events[0]["event_type"] == event_type
+    assert events[0]["recipient_user_id"] == recipient_user_id
+    assert events[0]["payload"] == {
+        "artifact_id": "artifact-1",
+        "plugin_id": "astrbot_plugin_demo",
+        "stage": job_type,
+        "outcome": outcome.kind.value,
+        "code": outcome.error_code,
+    }
+    assert "private" not in str(events[0])

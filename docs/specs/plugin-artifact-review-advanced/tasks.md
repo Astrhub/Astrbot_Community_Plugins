@@ -436,24 +436,24 @@
         - *Details*: 运行 Ruff/API/OpenAPI/`vp check`/Vitest/build 和并发 PG tests后提交。
         - *Requirements*: FR-220、FR-221、FR-223、FR-224。
 
-- [ ] 20. **通知、部署与安全运行手册**
-    - [ ] 20.1. 扩展状态通知事件
+- [x] 20. **通知、部署与安全运行手册**
+    - [x] 20.1. 扩展状态通知事件
         - *Goal*: 覆盖 runtime/malware/dependency/要求修改/critical/degraded/policy 相关提醒。
         - *Details*: 邮件只含插件、版本、状态、简短原因和工作台链接；源码/diff/evidence/log/key 只在站内鉴权页面；保持外部邮件 at-least-once 语义。
         - *Requirements*: FR-222。
-    - [ ] 20.2. 完善 Compose/systemd/env 示例
+    - [x] 20.2. 完善 Compose/systemd/env 示例
         - *Goal*: 运维可配置 runner、LLM、ClamAV/YARA、advisory、network profiles 和 policy flags。
         - *Details*: 不提交真实凭据；app/worker/runner 最小权限分离；服务依赖/readiness；feature flags 默认安全。
         - *Requirements*: FR-219 至 FR-222；部署。
-    - [ ] 20.3. 更新架构、安全和操作文档
+    - [x] 20.3. 更新架构、安全和操作文档
         - *Goal*: 说明信任边界、版本语义、失败/降级、自动路由、下架和已知限制。
         - *Details*: 更新 README、architecture/security、API、runner runbook、policy rollback、orphan cleanup 和 incident handling；不承诺绝对安全。
         - *Requirements*: 非功能需求、完成定义。
-    - [ ] 20.4. 增加通知内容和部署配置测试
+    - [x] 20.4. 增加通知内容和部署配置测试
         - *Goal*: 防止源码/凭据进入邮件、日志和健康接口，配置可解析。
         - *Details*: 恶意 error/requirements/comment 输入；outbox dedupe；Compose config；缺服务 fail-visible。
         - *Requirements*: FR-221、FR-222；安全。
-    - [ ] 20.5. 验证并提交运维闭环
+    - [x] 20.5. 验证并提交运维闭环
         - *Goal*: 运维和通知材料与实现一致。
         - *Details*: 运行 notification/config/docs link/Compose/Ruff tests，敏感信息扫描后提交。
         - *Requirements*: FR-219 至 FR-222。

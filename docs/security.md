@@ -114,15 +114,25 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 - **标签上限**：受 `MAX_PLUGIN_TAGS`（默认 8）限制。
 - **Markdown 渲染**：前端使用 `DOMPurify` 清理渲染输出，`marked` + `highlight.js` 渲染；审核操作在服务端存储。
 - **评论软删除**：删除根评论会隐藏其回复（`deleted` 标记 + partial index `WHERE deleted = false`），保留审计痕迹。
-- **审查内容最小披露**：P1 API 不提供完整源码接口；仅返回有限 `evidence_excerpt`。状态邮件只包含状态、原因与站内链接，不包含源码或 finding 证据。
+- **审查内容最小披露**：源码、diff、finding evidence 和运行日志只通过 owner/admin 鉴权接口按需读取。
+  状态邮件由事件白名单生成，只包含插件或策略名称、版本、固定状态、固定短原因和工作台链接；payload 的
+  reason/code、requirements、comment、内部路径、对象 key 与凭据不会进入邮件。
 
 ## 网络与部署安全
 
 - **CORS**：`CORS_ORIGIN` 控制允许的前端来源（逗号分隔）；开发态默认允许 `http://127.0.0.1:3000`。生产同源部署时设为站点自身域名。
 - **Cookie**：生产 HTTPS 必须设 `COOKIE_SECURE=true`，配合反向代理（Nginx/Caddy）启用 TLS。
-- **systemd 加固**：`deploy/systemd/` 的 service 启用 `NoNewPrivileges`、`PrivateTmp`、`ProtectSystem=full`，并通过 `ReadWritePaths` 限定仅后端目录可写。
+- **systemd 加固**：`deploy/systemd/` 的 service 使用分离用户/env、`NoNewPrivileges`、`PrivateTmp`、
+  `ProtectSystem=strict` 和受限 `ReadWritePaths`。API 无法访问 runtime result；runner 只读 artifact，并以
+  `ProtectHome=read-only` 保留 rootless 用户 socket 的可连接性。
 - **Worker 分离**：Docker 使用 `artifacts` profile 启动独立 Worker；systemd 使用单独 unit。两者通过 PostgreSQL lease 协调，不在 Redis 保存审查状态。
-- **Runtime Runner 分离**：生产 runner 使用独立 rootless engine 和最小权限数据库角色；Compose `runtime-runner` profile 的 root socket 只用于本地降级验证，不能报告为生产级隔离。详见 [runtime-runner.md](runtime-runner.md)。
+- **Runtime Runner 分离**：生产 runner 使用独立 rootless engine 和最小权限数据库角色；Compose 默认使用
+  rootless 用户 socket 且 rootful 开关关闭。显式 root socket 只用于本地降级验证，不能报告为生产级隔离。
+  详见 [runtime-runner.md](runtime-runner.md)。
+- **失败可见**：配置存在不代表工具 ready。worker/runner heartbeat 缺失或过期、ClamAV/YARA/advisory 数据
+  过期、LLM 输出无效、runtime 隔离证明不足时必须 degraded/blocked，不能显示 clean 或参与 auto approve。
+- **安全结论边界**：自动扫描、LLM 建议和人工复核都不能承诺绝对安全。重大风险仍需按
+  [plugin-review-operations.md](plugin-review-operations.md) 执行关联、下架、凭据轮换和重新审查。
 - **开发认证**：`ENABLE_DEV_AUTH` 生产必须为 `false`，否则任何人可通过 `X-Dev-GitHub-Login` 头伪造登录。Docker 模板（`.env.docker.example`）默认已设 `false`。
 - **OAuth callback URL**：当 GitHub 登录启用时，系统拒绝本地回环 callback，防止开发态配置泄漏到生产（测试 `test_system_settings_reject_local_oauth_callback_when_enabled`）。callback URL 优先级：运行时数据库 options > `.env` > 初始设置。
 

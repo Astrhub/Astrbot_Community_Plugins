@@ -27,11 +27,11 @@ def runtime_request(
                 "source_commit_sha": "b" * 40,
             },
             "target": {
-                "astrbot_version": "4.26.5",
+                "astrbot_version": "4.26.6",
                 "python_version": "3.12",
                 "image_digest": f"sha256:{'c' * 64}",
                 "platform": "linux/amd64",
-                "astrbot_commit": "adebd2958ed8",
+                "astrbot_commit": "5d10e0d428b41308cc63215db00359c61ee17195",
             },
             "limits": {
                 "cpu": 1,

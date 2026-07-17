@@ -25,8 +25,8 @@ from ...artifacts.runner_contract import (
 )
 from .command import redact_probe_text
 
-ASTRBOT_4265_VERSION = "4.26.5"
-ASTRBOT_4265_SOURCE_COMMIT = "adebd2958ed8"
+ASTRBOT_4266_VERSION = "4.26.6"
+ASTRBOT_4266_SOURCE_COMMIT = "5d10e0d428b41308cc63215db00359c61ee17195"
 
 _PLUGIN_DIR = re.compile(r"^astrbot_plugin_[a-z0-9][a-z0-9_]{0,95}$")
 _HOOK_EVENT_NAMES = {
@@ -238,17 +238,17 @@ def build_astrbot_lifecycle_session(
     runtime_root: Path,
     plugin_dir_name: str,
 ) -> AstrBotLifecycleSession:
-    if request.target.astrbot_version != ASTRBOT_4265_VERSION:
+    if request.target.astrbot_version != ASTRBOT_4266_VERSION:
         raise ValueError("unsupported_astrbot_smoke_adapter")
     if (
         request.target.astrbot_commit
-        and request.target.astrbot_commit != ASTRBOT_4265_SOURCE_COMMIT
+        and request.target.astrbot_commit != ASTRBOT_4266_SOURCE_COMMIT
     ):
         raise ValueError("astrbot_smoke_adapter_commit_mismatch")
-    return AstrBot4265LifecycleSession(runtime_root, plugin_dir_name)
+    return AstrBot4266LifecycleSession(runtime_root, plugin_dir_name)
 
 
-class AstrBot4265LifecycleSession:
+class AstrBot4266LifecycleSession:
     def __init__(self, runtime_root: Path, plugin_dir_name: str) -> None:
         self.runtime_root = runtime_root.resolve(strict=True)
         if not _PLUGIN_DIR.fullmatch(plugin_dir_name):
@@ -272,9 +272,7 @@ class AstrBot4265LifecycleSession:
             "ASTRBOT_RELOAD": "0",
             "TESTING": "1",
         }
-        self._previous_environment = {
-            name: os.environ.get(name) for name in runtime_environment
-        }
+        self._previous_environment = {name: os.environ.get(name) for name in runtime_environment}
         os.environ.update(runtime_environment)
         root_path = str(self.runtime_root)
         if root_path not in sys.path:
@@ -282,7 +280,7 @@ class AstrBot4265LifecycleSession:
             self._path_inserted = True
         before_tasks = set(asyncio.all_tasks())
         installed_version = importlib.metadata.version("AstrBot")
-        if installed_version != ASTRBOT_4265_VERSION:
+        if installed_version != ASTRBOT_4266_VERSION:
             raise RuntimeError("installed_astrbot_version_mismatch")
         importlib.invalidate_caches()
         from astrbot.core import LogBroker, db_helper

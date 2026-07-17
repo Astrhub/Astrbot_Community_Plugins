@@ -182,7 +182,7 @@ smoke 使用新的容器实例：
 - 检查 `failed_plugin_dict`、`StarMetadata`、`star_handler_full_names` 和 plugin-owned LLM tools；
 - 调用正常 shutdown/`terminate()`，然后强制销毁容器。
 
-当前源码基线为 AstrBot `4.26.5`（`adebd2958ed8`），其加载路径会验证 metadata 和 `astrbot_version`、恢复 requirements、实例化 `Star`、绑定 Handler/LLM Tool、调用 `initialize()`。runner 使用版本适配器，不把该内部调用约定硬编码为跨版本永恒契约。
+当前源码基线为 AstrBot `4.26.6`（`5d10e0d428b41308cc63215db00359c61ee17195`），其加载路径会验证 metadata 和 `astrbot_version`、恢复 requirements、实例化 `Star`、绑定 Handler/LLM Tool、调用 `initialize()`。runner 使用版本适配器，不把该内部调用约定硬编码为跨版本永恒契约；仓库版本变化后必须先审计 lifecycle diff，再更新适配器。
 
 ### AstrBot 目标版本解析
 
@@ -421,7 +421,7 @@ Policy JSON 使用版本化 Pydantic/JSON Schema，主要字段：
 {
   "schema_version": "1",
   "required_stages": ["static", "runtime", "dependency"],
-  "runtime_targets": [{"astrbot": "4.26.5", "python": "3.12"}],
+  "runtime_targets": [{"astrbot": "4.26.6", "python": "3.12"}],
   "limits": {"cpu": 1, "memory_mb": 768, "pids": 128, "timeout_seconds": 120},
   "network_profiles": {"install": "pypi-only-v1", "smoke": "none"},
   "llm": {

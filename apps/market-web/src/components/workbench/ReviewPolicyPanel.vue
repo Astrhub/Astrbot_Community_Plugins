@@ -135,7 +135,7 @@ function loadEditor(policy: ReviewPolicyRecord | null): void {
 }
 
 function addRuntimeTarget(): void {
-  editor.value.runtime_targets.push({ astrbot: "4.26.5", python: "3.12" });
+  editor.value.runtime_targets.push({ astrbot: "4.26.6", python: "3.12" });
 }
 
 function removeRuntimeTarget(index: number): void {
@@ -435,7 +435,7 @@ function formatDuration(milliseconds: number): string {
               <NInput
                 v-model:value="target.astrbot"
                 :disabled="!isCoreAdmin || busy"
-                placeholder="AstrBot 4.26.5"
+                placeholder="AstrBot 4.26.6"
               />
               <NInput
                 v-model:value="target.python"

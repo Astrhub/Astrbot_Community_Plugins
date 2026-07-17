@@ -85,9 +85,9 @@ def prepare_paths(
 def test_install_probe_uses_exact_argv_and_emits_dependency_snapshots_and_sbom(
     tmp_path: Path,
 ) -> None:
-    before = package_list(("AstrBot", "4.26.5"), ("fastapi", "1.0.0"))
+    before = package_list(("AstrBot", "4.26.6"), ("fastapi", "1.0.0"))
     after = package_list(
-        ("AstrBot", "4.26.5"),
+        ("AstrBot", "4.26.6"),
         ("demo-lib", "1.0.0"),
         ("fastapi", "1.1.0"),
         requires={"demo-lib": ["fastapi>=1"]},
@@ -106,7 +106,7 @@ def test_install_probe_uses_exact_argv_and_emits_dependency_snapshots_and_sbom(
     )
 
     assert output.result.status.value == "passed"
-    assert output.result.astrbot_version == "4.26.5"
+    assert output.result.astrbot_version == "4.26.6"
     assert output.result.core_before_sha256 != output.result.core_after_sha256
     assert output.requirements_sha256
     assert output.result.requirements_sha256 == output.requirements_sha256
@@ -118,7 +118,7 @@ def test_install_probe_uses_exact_argv_and_emits_dependency_snapshots_and_sbom(
     assert sbom["specVersion"] == "1.5"
     demo_dependency = next(item for item in sbom["dependencies"] if "demo-lib" in item["ref"])
     assert demo_dependency["dependsOn"] == ["pkg:pypi/fastapi@1.1.0"]
-    assert runner.calls[1][-1] == "AstrBot==4.26.5"
+    assert runner.calls[1][-1] == "AstrBot==4.26.6"
     assert runner.calls[3][-2:] == ("--requirement", str(plugin / "requirements.txt"))
     assert runner.calls[2][1] == "-c"
     assert "importlib.metadata" in runner.calls[2][2]
