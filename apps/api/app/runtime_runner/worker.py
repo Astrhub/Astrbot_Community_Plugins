@@ -16,6 +16,7 @@ from .queue import (
 from .storage import RuntimeResultStorageError, RuntimeResultWriter
 
 logger = logging.getLogger("astrbot.runtime_runner")
+RUNTIME_RUNNER_VERSION = "runtime-runner-v1"
 
 
 class _LeaseLost(RuntimeError):
@@ -45,6 +46,7 @@ class RuntimeRunnerWorker:
         self._stop.set()
 
     async def run_once(self) -> int:
+        await self._publish_heartbeat(active_count=0)
         await self._maybe_cleanup_orphans(force=self._last_orphan_cleanup == 0.0)
         work_items = await self.queue.claim(
             limit=self.settings.claim_limit,
@@ -52,13 +54,18 @@ class RuntimeRunnerWorker:
         )
         if not work_items:
             return 0
-        await asyncio.gather(*(self._process_work(work) for work in work_items))
+        await self._publish_heartbeat(active_count=len(work_items))
+        try:
+            await asyncio.gather(*(self._process_work(work) for work in work_items))
+        finally:
+            await self._publish_heartbeat(active_count=0)
         return len(work_items)
 
     async def run_forever(self) -> None:
         await self._maybe_cleanup_orphans(force=True)
         try:
             while not self._stop.is_set():
+                await self._publish_heartbeat(active_count=len(self._active))
                 await self._reap_finished()
                 await self._maybe_cleanup_orphans()
                 capacity = self.settings.claim_limit - len(self._active)
@@ -203,6 +210,7 @@ class RuntimeRunnerWorker:
         interval = self.heartbeat_interval_seconds or max(1.0, self.settings.lease_seconds / 3)
         while True:
             await asyncio.sleep(interval)
+            await self._publish_heartbeat(active_count=max(1, len(self._active)))
             try:
                 renewed = await self.queue.renew(
                     work,
@@ -217,6 +225,24 @@ class RuntimeRunnerWorker:
                 return
             if not renewed:
                 return
+
+    async def _publish_heartbeat(self, *, active_count: int) -> None:
+        publish = getattr(self.queue, "publish_heartbeat", None)
+        if publish is None:
+            return
+        ttl_seconds = max(
+            15,
+            min(3600, int(max(self.settings.lease_seconds, self.settings.poll_seconds * 6))),
+        )
+        try:
+            await publish(
+                ttl_seconds=ttl_seconds,
+                capacity=self.settings.claim_limit,
+                active_count=min(active_count, self.settings.claim_limit),
+                version=RUNTIME_RUNNER_VERSION,
+            )
+        except Exception as exc:
+            logger.warning("Runtime runner heartbeat failed: %s", type(exc).__name__)
 
     async def _complete_failure(
         self,

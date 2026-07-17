@@ -47,6 +47,7 @@ describe("review workspace route selection", () => {
     expect(invalid.lineEnd).toBeNull();
     expect(invalid.status).toBe("");
     expect(invalid.risk).toBe("");
+    expect(parseReviewSelection({ view: "policy" }).view).toBe("policy");
   });
 
   it("merges query state and removes cleared selections", () => {

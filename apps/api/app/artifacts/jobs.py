@@ -62,6 +62,7 @@ from .storage import (
 )
 
 LOGGER = logging.getLogger(__name__)
+ARTIFACT_WORKER_VERSION = "artifact-worker-v1"
 _LEASE_PRESERVING_REVIEW_JOBS = {
     JobType.RUNTIME_DISPATCH.value,
     JobType.RUNTIME_COLLECT.value,
@@ -118,6 +119,13 @@ class ArtifactJobRunner:
         self.runtime_controller = runtime_controller
         self.runtime_result_storage = runtime_result_storage
         self.dependency_provider = dependency_provider or UnavailableDependencyAdvisoryProvider()
+        self._llm_ready = llm_provider is not None
+        self._heartbeat_ttl_seconds = max(
+            30,
+            min(3600, max(lease_seconds, poll_seconds * 6)),
+        )
+        self._heartbeat_capacity = 1
+        self._active_jobs = 0
         runtime_stage = RuntimeDispatchStage(
             runtime_controller,
             image_digest=runtime_image_digest,
@@ -266,17 +274,24 @@ class ArtifactJobRunner:
                 pass
 
     async def run_once(self, *, limit: int = 1) -> int:
+        self._heartbeat_capacity = max(1, int(limit))
+        await self._publish_worker_heartbeat(capacity=limit)
         jobs = await self.repository.claim_jobs(
             self.worker_id,
             limit,
             self.lease_seconds,
         )
-        for job in jobs:
-            await self._execute(job)
-        delivered = 0
-        if self.notification_dispatcher is not None:
-            delivered = await self.notification_dispatcher.run_once(limit=10)
-        return len(jobs) if jobs else delivered
+        self._active_jobs = len(jobs)
+        try:
+            for job in jobs:
+                await self._execute(job)
+            delivered = 0
+            if self.notification_dispatcher is not None:
+                delivered = await self.notification_dispatcher.run_once(limit=10)
+            return len(jobs) if jobs else delivered
+        finally:
+            self._active_jobs = 0
+            await self._publish_worker_heartbeat(capacity=limit)
 
     def rebind_store(self, store: Any) -> None:
         if self.notification_dispatcher is not None:
@@ -287,6 +302,71 @@ class ArtifactJobRunner:
         for stage in self._review_stages.values():
             if hasattr(stage, "advanced_review_enabled"):
                 stage.advanced_review_enabled = bool(enabled)
+
+    def heartbeat_components(self) -> dict[str, dict[str, object]]:
+        yara_ruleset = getattr(self.yara_scanner, "ruleset", None)
+        dependency_snapshot = getattr(self.dependency_provider, "snapshot", None)
+        generated_at = str(getattr(dependency_snapshot, "generated_at", "") or "")
+        return {
+            "artifact_worker": _heartbeat_component(
+                ready=True,
+                version=ARTIFACT_WORKER_VERSION,
+            ),
+            "llm": _heartbeat_component(
+                ready=self._llm_ready,
+                version=str(getattr(self.llm_provider, "version", "") or ""),
+                reason="" if self._llm_ready else "llm_tool_not_configured",
+            ),
+            "clamav": _heartbeat_component(
+                ready=bool(getattr(self.clamav_scanner, "ready", False)),
+                version=str(getattr(self.clamav_scanner, "version", "") or ""),
+                reason=str(
+                    getattr(self.clamav_scanner, "unavailable_reason", "")
+                    or (
+                        "" if getattr(self.clamav_scanner, "ready", False) else "clamav_unavailable"
+                    )
+                ),
+            ),
+            "yara": _heartbeat_component(
+                ready=bool(getattr(self.yara_scanner, "ready", False)),
+                version=str(getattr(self.yara_scanner, "version", "") or ""),
+                reason=str(
+                    getattr(self.yara_scanner, "unavailable_reason", "")
+                    or ("" if getattr(self.yara_scanner, "ready", False) else "yara_unavailable")
+                ),
+                data_updated_at=getattr(yara_ruleset, "activated_at", ""),
+            ),
+            "dependency": _heartbeat_component(
+                ready=bool(getattr(self.dependency_provider, "ready", False))
+                and self.runtime_result_storage is not None,
+                version=str(getattr(self.dependency_provider, "version", "") or ""),
+                reason=str(
+                    getattr(self.dependency_provider, "unavailable_reason", "")
+                    or (
+                        "dependency_runtime_evidence_unavailable"
+                        if self.runtime_result_storage is None
+                        else ""
+                    )
+                ),
+                data_updated_at=generated_at,
+            ),
+        }
+
+    async def _publish_worker_heartbeat(self, *, capacity: int) -> None:
+        publish = getattr(self.repository, "upsert_review_worker_heartbeat", None)
+        if publish is None:
+            return
+        try:
+            await publish(
+                worker_kind="artifact_worker",
+                worker_id=self.worker_id,
+                components=self.heartbeat_components(),
+                ttl_seconds=self._heartbeat_ttl_seconds,
+                capacity=max(1, int(capacity)),
+                active_count=min(self._active_jobs, max(1, int(capacity))),
+            )
+        except Exception as exc:
+            LOGGER.warning("Artifact worker heartbeat failed: %s", type(exc).__name__)
 
     async def _execute(self, job: Mapping[str, Any]) -> None:
         job_id = str(job["id"])
@@ -453,6 +533,7 @@ class ArtifactJobRunner:
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except TimeoutError:
+                await self._publish_worker_heartbeat(capacity=self._heartbeat_capacity)
                 if not await self.repository.renew_job_lease(
                     job_id, self.worker_id, self.lease_seconds
                 ):
@@ -758,3 +839,23 @@ def _revoke_event_extra(value: Any) -> dict[str, Any]:
 
 def worker_id() -> str:
     return f"artifact-worker-{secrets.token_hex(6)}"
+
+
+def _heartbeat_component(
+    *,
+    ready: bool,
+    version: str,
+    reason: str = "",
+    data_updated_at: object = "",
+) -> dict[str, object]:
+    timestamp = ""
+    if data_updated_at:
+        isoformat = getattr(data_updated_at, "isoformat", None)
+        timestamp = isoformat() if callable(isoformat) else str(data_updated_at)
+        timestamp = timestamp.replace("+00:00", "Z")
+    return {
+        "ready": bool(ready),
+        "reason": str(reason or "").strip(),
+        "version": str(version or "").strip(),
+        "data_updated_at": timestamp,
+    }

@@ -92,6 +92,23 @@ class ArtifactRepository(Protocol):
 
     async def list_review_policies(self, limit: int, offset: int) -> list[dict[str, Any]]: ...
 
+    async def upsert_review_worker_heartbeat(
+        self,
+        *,
+        worker_kind: str,
+        worker_id: str,
+        components: Mapping[str, Any],
+        ttl_seconds: int,
+        capacity: int,
+        active_count: int,
+    ) -> dict[str, Any]: ...
+
+    async def list_review_worker_heartbeats(self, limit: int = 100) -> list[dict[str, Any]]: ...
+
+    async def list_latest_review_tool_runs(self) -> list[dict[str, Any]]: ...
+
+    async def get_review_observability_snapshot(self, since: datetime) -> dict[str, Any]: ...
+
     async def append_review_policy_event(self, payload: Mapping[str, Any]) -> dict[str, Any]: ...
 
     async def list_review_policy_events(self, policy_id: str) -> list[dict[str, Any]]: ...
@@ -2375,6 +2392,7 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         self.outbox: dict[str, dict[str, Any]] = {}
         self.policies: dict[str, dict[str, Any]] = {}
         self.policy_events: dict[str, dict[str, Any]] = {}
+        self.worker_heartbeats: dict[tuple[str, str], dict[str, Any]] = {}
         self.diffs: dict[str, list[dict[str, Any]]] = {}
         self.dependency_edges: dict[str, list[dict[str, Any]]] = {}
         self.dispatches: dict[str, dict[str, Any]] = {}

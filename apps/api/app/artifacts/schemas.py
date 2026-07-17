@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .policy import ReviewPolicyV1
+
 
 ArtifactReviewStatus = Literal[
     "quarantined",
@@ -551,3 +553,237 @@ class PluginRegistrationPayload(BaseModel):
             if tag and tag not in tags:
                 tags.append(tag)
         return tags
+
+
+class ReviewPolicyValidationIssue(PublicResponseModel):
+    path: str = Field(max_length=300)
+    code: str = Field(max_length=100)
+    message: str = Field(max_length=300)
+
+
+class ReviewPolicyValidationSummary(PublicResponseModel):
+    valid: bool = False
+    schema_version: str = Field(default="", max_length=32)
+    policy_sha256: str = Field(default="", max_length=64)
+    readiness_checked: bool = False
+    issues: list[ReviewPolicyValidationIssue] = Field(default_factory=list, max_length=100)
+
+
+class PublicReviewPolicy(PublicResponseModel):
+    id: str
+    version: str
+    schema_version: str
+    status: Literal["draft", "active", "retired"]
+    is_default: bool
+    policy: ReviewPolicyV1
+    policy_sha256: str
+    base_policy_id: str | None = None
+    created_by_nickname: str = ""
+    validation_summary: ReviewPolicyValidationSummary
+    validated_at: datetime | None = None
+    activated_at: datetime | None = None
+    retired_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReviewPolicyDiff(PublicResponseModel):
+    redacted: Literal[True] = True
+    before_sha256: str = ""
+    after_sha256: str = ""
+    added_paths: list[str] = Field(default_factory=list, max_length=200)
+    removed_paths: list[str] = Field(default_factory=list, max_length=200)
+    changed_paths: list[str] = Field(default_factory=list, max_length=200)
+    path_count: int = Field(default=0, ge=0)
+    truncated: bool = False
+
+
+class ReviewPolicyEnvelope(PublicResponseModel):
+    policy: PublicReviewPolicy
+    diff: ReviewPolicyDiff
+
+
+class ReviewPolicyListResponse(PublicResponseModel):
+    items: list[PublicReviewPolicy]
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+
+
+class ActiveReviewPolicyResponse(PublicResponseModel):
+    policy: PublicReviewPolicy | None
+
+
+class ReviewPolicyDraftPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    policy: dict[str, Any]
+    reason: str = Field(default="", max_length=2000)
+    base_policy_id: str | None = Field(default=None, max_length=200)
+    idempotency_key: str = Field(default="", max_length=200)
+
+    @field_validator("reason", "idempotency_key")
+    @classmethod
+    def clean_policy_draft_text(cls, value: str) -> str:
+        return " ".join(value.split()) if value else ""
+
+    @field_validator("base_policy_id")
+    @classmethod
+    def clean_base_policy_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class ReviewPolicyValidatePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=2000)
+    idempotency_key: str = Field(default="", max_length=200)
+
+    @field_validator("reason", "idempotency_key")
+    @classmethod
+    def clean_policy_validation_text(cls, value: str) -> str:
+        return " ".join(value.split()) if value else ""
+
+
+class ReviewPolicyTransitionPayload(ReviewPolicyValidatePayload):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ReviewHealthComponent(PublicResponseModel):
+    enabled: bool
+    configured: bool
+    ready: bool
+    degraded: bool
+    status: Literal["disabled", "ready", "degraded"]
+    reasons: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ReviewHealthComponents(PublicResponseModel):
+    runtime: ReviewHealthComponent
+    llm: ReviewHealthComponent
+    clamav: ReviewHealthComponent
+    yara: ReviewHealthComponent
+    dependency: ReviewHealthComponent
+    policy: ReviewHealthComponent
+
+
+class ReviewAggregateHealth(PublicResponseModel):
+    enabled: bool
+    configured: bool
+    ready: bool
+    degraded: bool
+    auto_approve_enabled: bool
+    policy_auto_approve_enabled: bool = False
+    auto_approve_effective: bool = False
+    components: ReviewHealthComponents
+
+
+class ReviewWorkerHealth(PublicResponseModel):
+    kind: Literal["artifact_worker", "runtime_runner"]
+    status: Literal["ready", "degraded"]
+    ready: bool
+    degraded: bool
+    live_instances: int = Field(ge=0)
+    stale_instances: int = Field(ge=0)
+    capacity: int = Field(ge=0)
+    active_count: int = Field(ge=0)
+    last_observed_at: datetime | None = None
+    reasons: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ReviewToolHealth(PublicResponseModel):
+    name: Literal["policy", "runtime", "llm", "clamav", "yara", "dependency"]
+    enabled: bool
+    configured: bool
+    ready: bool
+    degraded: bool
+    status: Literal["disabled", "ready", "degraded"]
+    reasons: list[str] = Field(default_factory=list, max_length=20)
+    version: str = Field(default="", max_length=160)
+    data_updated_at: datetime | None = None
+    freshness: Literal["current", "stale", "unknown", "not_applicable"]
+    observed_at: datetime | None = None
+
+
+class ReviewOperationsHealth(PublicResponseModel):
+    review: ReviewAggregateHealth
+    workers: list[ReviewWorkerHealth] = Field(max_length=2)
+    tools: list[ReviewToolHealth] = Field(max_length=6)
+
+
+class ReviewQueueMetric(PublicResponseModel):
+    job_type: Literal[
+        "precheck",
+        "static_scan",
+        "publish",
+        "revoke",
+        "outbox",
+        "cleanup_orphan",
+        "diff_graph",
+        "clamav_scan",
+        "yara_scan",
+        "runtime_dispatch",
+        "runtime_collect",
+        "dependency_scan",
+        "category",
+        "llm_package",
+        "llm_file",
+        "llm_summary",
+        "route_review",
+    ]
+    status: Literal["queued", "running"]
+    count: int = Field(ge=0)
+
+
+class ReviewStageMetric(PublicResponseModel):
+    run_type: ReviewRunType
+    sample_count: int = Field(ge=0)
+    failure_count: int = Field(ge=0)
+    timeout_count: int = Field(ge=0)
+    average_duration_ms: float = Field(ge=0, allow_inf_nan=False)
+    p95_duration_ms: float = Field(ge=0, allow_inf_nan=False)
+
+
+class ReviewManualWaitMetric(PublicResponseModel):
+    waiting_count: int = Field(ge=0)
+    average_wait_seconds: float = Field(ge=0, allow_inf_nan=False)
+    max_wait_seconds: float = Field(ge=0, allow_inf_nan=False)
+
+
+class ReviewRoutingMetric(PublicResponseModel):
+    action: Literal[
+        "auto_reject",
+        "auto_approve",
+        "approve",
+        "reject",
+        "request_changes",
+        "retry_publish",
+        "revoke",
+        "emergency_override",
+        "policy_migrate",
+    ]
+    source: Literal["admin", "system", "policy"]
+    count: int = Field(ge=0)
+
+
+class ReviewRevokeMetric(PublicResponseModel):
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    count: int = Field(ge=0)
+
+
+class ReviewOperationsMetrics(PublicResponseModel):
+    available: bool
+    window_started_at: datetime
+    collected_at: datetime
+    queue: list[ReviewQueueMetric]
+    stages: list[ReviewStageMetric]
+    manual_wait: ReviewManualWaitMetric
+    routing: list[ReviewRoutingMetric]
+    revoke: list[ReviewRevokeMetric]
+
+
+class ReviewOperationsResponse(PublicResponseModel):
+    health: ReviewOperationsHealth
+    metrics: ReviewOperationsMetrics

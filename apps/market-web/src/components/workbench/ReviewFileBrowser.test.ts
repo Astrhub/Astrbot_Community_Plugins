@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vite-plus/test";
 import ReviewFileBrowser from "./ReviewFileBrowser.vue";
 import type {
@@ -70,10 +70,14 @@ describe("ReviewFileBrowser", () => {
         loadingContent: false,
       },
     });
+    await flushPromises();
 
     expect(wrapper.text()).toContain("<img src=x onerror=window.__unsafe=1>");
     expect(wrapper.find("img").exists()).toBe(false);
-    await wrapper.findAll(".code-line")[1]?.trigger("click");
+    const secondLine = wrapper.findAll(".code-line")[1];
+    expect(secondLine).toBeDefined();
+    await secondLine?.trigger("click");
+    await flushPromises();
 
     expect(wrapper.emitted("selectLine")).toEqual([
       [{ fileId: "file-main", lineStart: 2, lineEnd: 2 }],

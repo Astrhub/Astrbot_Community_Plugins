@@ -145,7 +145,7 @@ def test_health_reports_redacted_artifact_readiness() -> None:
     assert artifacts["storage_ready"] is True
     assert artifacts["available"] is True
     assert artifacts["review"]["degraded"] is True
-    assert artifacts["review"]["components"]["policy"]["reasons"] == ["active_policy_missing"]
+    assert set(artifacts["review"]) == {"enabled", "configured", "ready", "degraded"}
     rendered = str(artifacts)
     assert "private-storage" not in rendered
     assert "private-access-key" not in rendered
@@ -430,9 +430,9 @@ def test_static_only_active_policy_can_be_ready_without_external_tools() -> None
             idempotency_key="health-static-activate",
             reason="Activate static health policy",
         )
-        status = await runtime.health_status()
+        status = await runtime.review_operations_status()
         await runtime.close()
-        return status
+        return status["health"]
 
     review = asyncio.run(scenario())["review"]
 
@@ -476,11 +476,25 @@ def test_configured_runtime_stays_degraded_until_real_health_is_reported() -> No
             idempotency_key="health-runtime-activate",
             reason="Activate runtime health policy",
         )
-        unknown = await runtime.health_status()
-        runtime.set_tool_health("runtime", ready=True)
-        ready = await runtime.health_status()
+        unknown = await runtime.review_operations_status()
+        await runtime.repository.upsert_review_worker_heartbeat(
+            worker_kind="runtime_runner",
+            worker_id="runtime-health-test",
+            components={
+                "runtime": {
+                    "ready": True,
+                    "reason": "",
+                    "version": "runtime-runner-v1",
+                    "data_updated_at": "",
+                }
+            },
+            ttl_seconds=30,
+            capacity=1,
+            active_count=0,
+        )
+        ready = await runtime.review_operations_status()
         await runtime.close()
-        return unknown, ready
+        return unknown["health"], ready["health"]
 
     unknown, ready = asyncio.run(scenario())
     unknown_review = unknown["review"]

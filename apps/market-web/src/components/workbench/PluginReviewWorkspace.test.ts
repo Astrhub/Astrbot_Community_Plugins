@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it } from "vite-plus/test";
 import PluginReviewWorkspace from "./PluginReviewWorkspace.vue";
 
@@ -17,6 +17,7 @@ describe("PluginReviewWorkspace", () => {
       },
       global: { stubs: { teleport: true } },
     });
+    await flushPromises();
 
     expect(wrapper.find('[data-region="header"]').exists()).toBe(true);
     expect(wrapper.find('[data-region="main"]').exists()).toBe(true);
@@ -24,10 +25,12 @@ describe("PluginReviewWorkspace", () => {
     expect(wrapper.find(".review-workspace__thread").classes()).toContain(
       "review-workspace__pane--mobile-active",
     );
-    await wrapper
+    const queueButton = wrapper
       .findAll("button")
-      .find((button) => button.text().includes("版本队列"))
-      ?.trigger("click");
+      .find((button) => button.text().includes("版本队列"));
+    expect(queueButton).toBeDefined();
+    await queueButton?.trigger("click");
+    await flushPromises();
     expect(wrapper.emitted("update:drawerOpen")).toEqual([[true]]);
   });
 });

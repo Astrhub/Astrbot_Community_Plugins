@@ -19,6 +19,13 @@ from .models import (
     TERMINAL_REVIEW_STATUSES,
     new_domain_id,
 )
+from .observability import (
+    METRIC_JOB_STATUSES,
+    METRIC_RUN_STATUSES,
+    normalize_worker_heartbeat,
+    percentile_cont,
+    timestamp,
+)
 
 
 class PgAdvancedReviewRepositoryMixin:
@@ -109,6 +116,169 @@ class PgAdvancedReviewRepositoryMixin:
             offset,
         )
         return [_record(row) for row in rows]
+
+    async def upsert_review_worker_heartbeat(
+        self,
+        *,
+        worker_kind: str,
+        worker_id: str,
+        components: Mapping[str, Any],
+        ttl_seconds: int,
+        capacity: int,
+        active_count: int,
+    ) -> dict[str, Any]:
+        heartbeat = normalize_worker_heartbeat(
+            worker_kind=worker_kind,
+            worker_id=worker_id,
+            components=components,
+            ttl_seconds=ttl_seconds,
+            capacity=capacity,
+            active_count=active_count,
+        )
+        row = await self._advanced_pool().fetchrow(
+            """
+            WITH expired AS (
+                DELETE FROM review_worker_heartbeats
+                 WHERE expires_at < now() - interval '7 days'
+            )
+            INSERT INTO review_worker_heartbeats (
+                worker_kind, worker_id, components, capacity, active_count,
+                observed_at, expires_at, updated_at
+            )
+            VALUES ($1, $2, $3::jsonb, $4, $5, now(), now() + ($6 * interval '1 second'), now())
+            ON CONFLICT (worker_kind, worker_id) DO UPDATE
+               SET components = EXCLUDED.components,
+                   capacity = EXCLUDED.capacity,
+                   active_count = EXCLUDED.active_count,
+                   observed_at = now(),
+                   expires_at = now() + ($6 * interval '1 second'),
+                   updated_at = now()
+            RETURNING *
+            """,
+            heartbeat["worker_kind"],
+            heartbeat["worker_id"],
+            heartbeat["components"],
+            heartbeat["capacity"],
+            heartbeat["active_count"],
+            heartbeat["ttl_seconds"],
+        )
+        return _record(row)
+
+    async def list_review_worker_heartbeats(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = await self._advanced_pool().fetch(
+            """
+            SELECT *, expires_at > now() AS live
+              FROM review_worker_heartbeats
+          ORDER BY worker_kind ASC, live DESC, observed_at DESC, worker_id ASC
+             LIMIT $1
+            """,
+            max(1, min(int(limit), 100)),
+        )
+        return [_record(row) for row in rows]
+
+    async def list_latest_review_tool_runs(self) -> list[dict[str, Any]]:
+        rows = await self._advanced_pool().fetch(
+            """
+            SELECT DISTINCT ON (type)
+                   type, status, tool_name, tool_version, ruleset_version,
+                   coverage, error_code, completed_at, created_at
+              FROM review_runs
+             WHERE type IN ('runtime', 'llm_package', 'llm_file', 'llm_summary',
+                            'clamav', 'yara', 'dependency')
+          ORDER BY type, COALESCE(completed_at, created_at) DESC, id DESC
+            """
+        )
+        return [_record(row) for row in rows]
+
+    async def get_review_observability_snapshot(self, since: datetime) -> dict[str, Any]:
+        pool = self._advanced_pool()
+        queue_rows = await pool.fetch(
+            """
+            SELECT type, status, count(*)::bigint AS count
+              FROM artifact_jobs
+             WHERE status IN ('queued', 'running')
+          GROUP BY type, status
+          ORDER BY type, status
+            """
+        )
+        stage_rows = await pool.fetch(
+            """
+            SELECT type,
+                   count(*)::bigint AS sample_count,
+                   count(*) FILTER (WHERE status = 'failed')::bigint AS failure_count,
+                   count(*) FILTER (WHERE status = 'timed_out')::bigint AS timeout_count,
+                   COALESCE(
+                       avg(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)
+                           FILTER (WHERE started_at IS NOT NULL AND completed_at IS NOT NULL),
+                       0
+                   ) AS average_duration_ms,
+                   COALESCE(
+                       percentile_cont(0.95) WITHIN GROUP (
+                           ORDER BY EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000
+                       ) FILTER (WHERE started_at IS NOT NULL AND completed_at IS NOT NULL),
+                       0
+                   ) AS p95_duration_ms
+              FROM review_runs
+             WHERE queued_at >= $1
+          GROUP BY type
+          ORDER BY type
+            """,
+            since,
+        )
+        manual_row = await pool.fetchrow(
+            """
+            SELECT count(*)::bigint AS waiting_count,
+                   COALESCE(avg(EXTRACT(EPOCH FROM (
+                       now() - COALESCE(automated_review_completed_at, updated_at, created_at)
+                   ))), 0) AS average_wait_seconds,
+                   COALESCE(max(EXTRACT(EPOCH FROM (
+                       now() - COALESCE(automated_review_completed_at, updated_at, created_at)
+                   ))), 0) AS max_wait_seconds
+              FROM plugin_artifacts
+             WHERE review_status = 'pending_review'
+            """
+        )
+        routing_rows = await pool.fetch(
+            """
+            SELECT action, source, count(*)::bigint AS count
+              FROM review_decisions
+             WHERE created_at >= $1
+          GROUP BY action, source
+          ORDER BY action, source
+            """,
+            since,
+        )
+        revoke_rows = await pool.fetch(
+            """
+            SELECT status, count(*)::bigint AS count
+              FROM artifact_jobs
+             WHERE type = 'revoke'
+               AND created_at >= $1
+          GROUP BY status
+          ORDER BY status
+            """,
+            since,
+        )
+        latest_rows = await pool.fetch(
+            """
+            SELECT DISTINCT ON (type)
+                   type, status, tool_name, tool_version, ruleset_version,
+                   coverage, error_code, completed_at, created_at
+              FROM review_runs
+             WHERE type IN ('runtime', 'llm_package', 'llm_file', 'llm_summary',
+                            'clamav', 'yara', 'dependency')
+          ORDER BY type, COALESCE(completed_at, created_at) DESC, id DESC
+            """
+        )
+        return {
+            "window_started_at": since,
+            "queue": [_record(row) for row in queue_rows],
+            "stages": [_record(row) for row in stage_rows],
+            "manual_wait": _record(manual_row),
+            "routing": [_record(row) for row in routing_rows],
+            "revoke": [_record(row) for row in revoke_rows],
+            "latest_tool_runs": [_record(row) for row in latest_rows],
+        }
 
     async def append_review_policy_event(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         pool = self._advanced_pool()
@@ -2220,6 +2390,198 @@ class InMemoryAdvancedReviewRepositoryMixin:
             reverse=True,
         )
         return deepcopy(values[offset : offset + limit])
+
+    async def upsert_review_worker_heartbeat(
+        self,
+        *,
+        worker_kind: str,
+        worker_id: str,
+        components: Mapping[str, Any],
+        ttl_seconds: int,
+        capacity: int,
+        active_count: int,
+    ) -> dict[str, Any]:
+        heartbeat = normalize_worker_heartbeat(
+            worker_kind=worker_kind,
+            worker_id=worker_id,
+            components=components,
+            ttl_seconds=ttl_seconds,
+            capacity=capacity,
+            active_count=active_count,
+        )
+        async with self._lock:
+            now = datetime.now(UTC)
+            retention_cutoff = now - timedelta(days=7)
+            for stale_key, stale in list(self.worker_heartbeats.items()):
+                if (_as_datetime(stale.get("expires_at")) or now) < retention_cutoff:
+                    self.worker_heartbeats.pop(stale_key, None)
+            key = (heartbeat["worker_kind"], heartbeat["worker_id"])
+            previous = self.worker_heartbeats.get(key)
+            row = {
+                "worker_kind": heartbeat["worker_kind"],
+                "worker_id": heartbeat["worker_id"],
+                "components": deepcopy(heartbeat["components"]),
+                "capacity": heartbeat["capacity"],
+                "active_count": heartbeat["active_count"],
+                "observed_at": now,
+                "expires_at": now + timedelta(seconds=heartbeat["ttl_seconds"]),
+                "created_at": previous["created_at"] if previous else now,
+                "updated_at": now,
+            }
+            self.worker_heartbeats[key] = row
+            return _record(row)
+
+    async def list_review_worker_heartbeats(self, limit: int = 100) -> list[dict[str, Any]]:
+        now = datetime.now(UTC)
+        items = [
+            {**deepcopy(item), "live": (_as_datetime(item.get("expires_at")) or now) > now}
+            for item in self.worker_heartbeats.values()
+        ]
+        items.sort(
+            key=lambda item: (
+                str(item["worker_kind"]),
+                not bool(item["live"]),
+                -(_as_datetime(item["observed_at"]) or now).timestamp(),
+                str(item["worker_id"]),
+            )
+        )
+        return [_record(item) for item in items[: max(1, min(int(limit), 100))]]
+
+    async def list_latest_review_tool_runs(self) -> list[dict[str, Any]]:
+        latest_runs: dict[str, dict[str, Any]] = {}
+        observed_types = {
+            "runtime",
+            "llm_package",
+            "llm_file",
+            "llm_summary",
+            "clamav",
+            "yara",
+            "dependency",
+        }
+        for run in self.runs.values():
+            run_type = str(run.get("type") or "")
+            if run_type not in observed_types:
+                continue
+            latest_at = timestamp(run.get("completed_at") or run.get("created_at"))
+            current = latest_runs.get(run_type)
+            current_at = timestamp(
+                (current or {}).get("completed_at") or (current or {}).get("created_at")
+            )
+            if latest_at and (current_at is None or latest_at > current_at):
+                latest_runs[run_type] = deepcopy(run)
+        return [deepcopy(item) for _, item in sorted(latest_runs.items())]
+
+    async def get_review_observability_snapshot(self, since: datetime) -> dict[str, Any]:
+        normalized_since = since.astimezone(UTC)
+        now = datetime.now(UTC)
+        queue_counts: dict[tuple[str, str], int] = {}
+        for job in self.jobs.values():
+            status = str(job.get("status") or "")
+            if status in METRIC_JOB_STATUSES:
+                key = (str(job.get("type") or ""), status)
+                queue_counts[key] = queue_counts.get(key, 0) + 1
+
+        stage_data: dict[str, dict[str, Any]] = {}
+        latest_runs: dict[str, dict[str, Any]] = {}
+        observed_types = {
+            "runtime",
+            "llm_package",
+            "llm_file",
+            "llm_summary",
+            "clamav",
+            "yara",
+            "dependency",
+        }
+        for run in self.runs.values():
+            created = timestamp(run.get("queued_at") or run.get("created_at"))
+            run_type = str(run.get("type") or "")
+            status = str(run.get("status") or "")
+            if run_type in observed_types:
+                latest_at = timestamp(run.get("completed_at") or run.get("created_at"))
+                current = latest_runs.get(run_type)
+                current_at = timestamp(
+                    (current or {}).get("completed_at") or (current or {}).get("created_at")
+                )
+                if latest_at and (current_at is None or latest_at > current_at):
+                    latest_runs[run_type] = deepcopy(run)
+            if created is None or created < normalized_since or status not in METRIC_RUN_STATUSES:
+                continue
+            entry = stage_data.setdefault(
+                run_type,
+                {"sample_count": 0, "failure_count": 0, "timeout_count": 0, "durations": []},
+            )
+            entry["sample_count"] += 1
+            entry["failure_count"] += int(status == "failed")
+            entry["timeout_count"] += int(status == "timed_out")
+            started = timestamp(run.get("started_at"))
+            completed = timestamp(run.get("completed_at"))
+            if started and completed and completed >= started:
+                entry["durations"].append((completed - started).total_seconds() * 1000)
+
+        waiting = [
+            artifact
+            for artifact in self.artifacts.values()
+            if artifact.get("review_status") == "pending_review"
+        ]
+        wait_seconds = []
+        for artifact in waiting:
+            started = timestamp(
+                artifact.get("automated_review_completed_at")
+                or artifact.get("updated_at")
+                or artifact.get("created_at")
+            )
+            if started:
+                wait_seconds.append(max(0.0, (now - started).total_seconds()))
+
+        routing_counts: dict[tuple[str, str], int] = {}
+        for decision in self.decisions.values():
+            created = timestamp(decision.get("created_at"))
+            if created and created >= normalized_since:
+                key = (str(decision.get("action") or ""), str(decision.get("source") or ""))
+                routing_counts[key] = routing_counts.get(key, 0) + 1
+
+        revoke_counts: dict[str, int] = {}
+        for job in self.jobs.values():
+            created = timestamp(job.get("created_at"))
+            if job.get("type") == "revoke" and created and created >= normalized_since:
+                status = str(job.get("status") or "")
+                revoke_counts[status] = revoke_counts.get(status, 0) + 1
+
+        stages = []
+        for run_type, entry in sorted(stage_data.items()):
+            durations = entry.pop("durations")
+            stages.append(
+                {
+                    "type": run_type,
+                    **entry,
+                    "average_duration_ms": (sum(durations) / len(durations) if durations else 0.0),
+                    "p95_duration_ms": percentile_cont(durations, 0.95),
+                }
+            )
+        return {
+            "window_started_at": normalized_since,
+            "queue": [
+                {"type": key[0], "status": key[1], "count": count}
+                for key, count in sorted(queue_counts.items())
+            ],
+            "stages": stages,
+            "manual_wait": {
+                "waiting_count": len(waiting),
+                "average_wait_seconds": (
+                    sum(wait_seconds) / len(wait_seconds) if wait_seconds else 0.0
+                ),
+                "max_wait_seconds": max(wait_seconds, default=0.0),
+            },
+            "routing": [
+                {"action": key[0], "source": key[1], "count": count}
+                for key, count in sorted(routing_counts.items())
+            ],
+            "revoke": [
+                {"status": status, "count": count}
+                for status, count in sorted(revoke_counts.items())
+            ],
+            "latest_tool_runs": [deepcopy(item) for _, item in sorted(latest_runs.items())],
+        }
 
     async def append_review_policy_event(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         async with self._lock:

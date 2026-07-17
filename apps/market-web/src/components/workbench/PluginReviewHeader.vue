@@ -9,6 +9,7 @@ defineProps<{
   itemCount: number;
   refreshing?: boolean;
   artifact: PluginArtifact | null;
+  policyMode?: boolean;
 }>();
 
 defineEmits<{
@@ -28,13 +29,13 @@ defineEmits<{
       <div>
         <p class="workbench-header__eyebrow">插件工作台</p>
         <h1 class="workbench-header__title">
-          {{ isAdmin ? "版本审查队列" : "版本与发布" }}
+          {{ policyMode ? "审查策略与工具" : isAdmin ? "版本审查队列" : "版本与发布" }}
         </h1>
       </div>
-      <NTag class="workbench-header__count" size="small" round :bordered="false">
+      <NTag v-if="!policyMode" class="workbench-header__count" size="small" round :bordered="false">
         {{ itemCount }} 个版本
       </NTag>
-      <div v-if="artifact" class="workbench-header__context">
+      <div v-if="artifact && !policyMode" class="workbench-header__context">
         <NTag size="small" type="info">{{ artifact.version || "版本待解析" }}</NTag>
         <span :title="artifact.source_commit_sha || artifact.source_ref || ''">
           {{ artifact.source_type }} ·

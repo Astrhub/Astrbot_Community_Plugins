@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import inspect
 import re
+import uuid
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile
+from pydantic import ValidationError
 
-from ..auth import can_edit_plugin, is_admin
+from ..auth import can_edit_plugin, is_admin, is_core_admin
 from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
 from .comments import ReviewCommentError
 from .content import ArtifactContentError
@@ -16,7 +18,14 @@ from .findings import StableRiskError
 from .github_source import GithubSourceError
 from .history import ReviewHistoryError
 from .models import ArtifactStateError
+from .policy_service import (
+    ReviewPolicyPermissionError,
+    ReviewPolicyService,
+    ReviewPolicyServiceError,
+    redacted_policy_diff,
+)
 from .schemas import (
+    ActiveReviewPolicyResponse,
     ArtifactDecisionPayload,
     ArtifactDiffContentResponse,
     ArtifactDiffListResponse,
@@ -35,6 +44,12 @@ from .schemas import (
     ReviewCommentStateMutationPayload,
     ReviewHistoryResponse,
     ReviewRunListResponse,
+    ReviewOperationsResponse,
+    ReviewPolicyDraftPayload,
+    ReviewPolicyEnvelope,
+    ReviewPolicyListResponse,
+    ReviewPolicyTransitionPayload,
+    ReviewPolicyValidatePayload,
     StableRiskPayload,
     StableRiskResponse,
 )
@@ -555,6 +570,189 @@ def build_artifact_router() -> APIRouter:
             _raise_artifact_error(exc)
 
     @router.get(
+        "/v1/admin/review-policies/active",
+        tags=["reviews"],
+        summary="查看当前生效审查策略",
+        response_model=ActiveReviewPolicyResponse,
+    )
+    async def active_review_policy(
+        request: Request,
+        response: Response,
+    ) -> dict[str, Any]:
+        policy_service = _require_policy_service(request)
+        await _require_admin(request)
+        _private_read_headers(response)
+        try:
+            active = await policy_service.repository.get_active_review_policy()
+        except Exception as exc:
+            raise _http_error(
+                503,
+                "review_policy_unavailable",
+                "Review policy snapshot is temporarily unavailable",
+            ) from exc
+        return {"policy": _public_review_policy(active) if active else None}
+
+    @router.get(
+        "/v1/core-admin/review-policies",
+        tags=["core-admin"],
+        summary="列出审查策略版本",
+        response_model=ReviewPolicyListResponse,
+    )
+    async def list_review_policies(
+        request: Request,
+        response: Response,
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        policy_service = _require_policy_service(request)
+        await _require_core_admin(request)
+        _private_read_headers(response)
+        try:
+            items = await policy_service.repository.list_review_policies(limit, offset)
+        except Exception as exc:
+            raise _http_error(
+                503,
+                "review_policy_unavailable",
+                "Review policies are temporarily unavailable",
+            ) from exc
+        return {
+            "items": [_public_review_policy(item) for item in items],
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @router.post(
+        "/v1/core-admin/review-policies",
+        tags=["core-admin"],
+        summary="创建审查策略草稿",
+        response_model=ReviewPolicyEnvelope,
+        status_code=201,
+    )
+    async def create_review_policy(
+        request: Request,
+        response: Response,
+        payload: ReviewPolicyDraftPayload,
+    ) -> dict[str, Any]:
+        policy_service = _require_policy_service(request)
+        actor = await _require_core_admin(request)
+        _private_read_headers(response)
+        try:
+            policy = await policy_service.create_draft(
+                version=payload.version,
+                policy=payload.policy,
+                actor=actor,
+                request_id=_policy_request_id(request),
+                idempotency_key=_policy_idempotency_key(request, payload.idempotency_key),
+                reason=payload.reason,
+                base_policy_id=payload.base_policy_id,
+            )
+            return await _policy_envelope(policy_service, policy)
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.post(
+        "/v1/core-admin/review-policies/{policy_id}/validate",
+        tags=["core-admin"],
+        summary="校验审查策略草稿",
+        response_model=ReviewPolicyEnvelope,
+    )
+    async def validate_review_policy(
+        request: Request,
+        response: Response,
+        policy_id: str,
+        payload: ReviewPolicyValidatePayload,
+    ) -> dict[str, Any]:
+        policy_service = _require_policy_service(request)
+        actor = await _require_core_admin(request)
+        _private_read_headers(response)
+        try:
+            policy = await policy_service.validate_draft(
+                policy_id,
+                actor=actor,
+                request_id=_policy_request_id(request),
+                idempotency_key=_policy_idempotency_key(request, payload.idempotency_key),
+                reason=payload.reason,
+            )
+            return await _policy_envelope(policy_service, policy)
+        except Exception as exc:
+            _raise_artifact_error(exc)
+
+    @router.post(
+        "/v1/core-admin/review-policies/{policy_id}/activate",
+        tags=["core-admin"],
+        summary="激活审查策略",
+        response_model=ReviewPolicyEnvelope,
+    )
+    async def activate_review_policy(
+        request: Request,
+        response: Response,
+        policy_id: str,
+        payload: ReviewPolicyTransitionPayload,
+    ) -> dict[str, Any]:
+        return await _transition_policy(
+            request,
+            response,
+            policy_id,
+            payload,
+            action="activate",
+        )
+
+    @router.post(
+        "/v1/core-admin/review-policies/{policy_id}/retire",
+        tags=["core-admin"],
+        summary="退役审查策略",
+        response_model=ReviewPolicyEnvelope,
+    )
+    async def retire_review_policy(
+        request: Request,
+        response: Response,
+        policy_id: str,
+        payload: ReviewPolicyTransitionPayload,
+    ) -> dict[str, Any]:
+        return await _transition_policy(
+            request,
+            response,
+            policy_id,
+            payload,
+            action="retire",
+        )
+
+    @router.post(
+        "/v1/core-admin/review-policies/{policy_id}/rollback",
+        tags=["core-admin"],
+        summary="回滚到审查策略版本",
+        response_model=ReviewPolicyEnvelope,
+    )
+    async def rollback_review_policy(
+        request: Request,
+        response: Response,
+        policy_id: str,
+        payload: ReviewPolicyTransitionPayload,
+    ) -> dict[str, Any]:
+        return await _transition_policy(
+            request,
+            response,
+            policy_id,
+            payload,
+            action="rollback",
+        )
+
+    @router.get(
+        "/v1/core-admin/review-tools/health",
+        tags=["core-admin"],
+        summary="查看审查工具健康与指标",
+        response_model=ReviewOperationsResponse,
+    )
+    async def review_tools_health(
+        request: Request,
+        response: Response,
+    ) -> dict[str, Any]:
+        _require_service(request)
+        await _require_core_admin(request)
+        _private_read_headers(response)
+        return await request.app.state.artifact_runtime.review_operations_status()
+
+    @router.get(
         "/v1/admin/artifacts",
         tags=["reviews"],
         summary="待审 Artifact 队列",
@@ -744,6 +942,21 @@ def _require_service(request: Request) -> ArtifactService:
     return runtime.service
 
 
+def _require_policy_service(request: Request) -> ReviewPolicyService:
+    _require_service(request)
+    runtime = request.app.state.artifact_runtime
+    if runtime.repository is None:
+        raise _http_error(
+            503,
+            "review_policy_unavailable",
+            "Review policy repository is unavailable",
+        )
+    return ReviewPolicyService(
+        runtime.repository,
+        readiness_validator=runtime.review_policy_readiness_issues,
+    )
+
+
 async def _call_store(request: Request, method_name: str, *args: Any) -> Any:
     method = getattr(request.app.state.store, method_name)
     result = method(*args)
@@ -772,6 +985,13 @@ async def _require_admin(request: Request) -> dict[str, Any]:
     user = await _require_user(request)
     if not is_admin(user):
         raise _http_error(403, "admin_required", "Forbidden")
+    return user
+
+
+async def _require_core_admin(request: Request) -> dict[str, Any]:
+    user = await _require_user(request)
+    if not is_core_admin(user):
+        raise _http_error(403, "core_admin_required", "Forbidden")
     return user
 
 
@@ -804,6 +1024,21 @@ def _raise_artifact_error(exc: Exception) -> None:
         raise exc
     if isinstance(exc, ArtifactServiceError):
         raise _http_error(exc.status_code, exc.code, str(exc)) from exc
+    if isinstance(exc, ReviewPolicyPermissionError):
+        raise _http_error(403, exc.code, "Forbidden") from exc
+    if isinstance(exc, ReviewPolicyServiceError):
+        status = 400
+        if exc.code in {
+            "idempotency_key_conflict",
+            "review_policy_version_conflict",
+            "review_policy_activation_conflict",
+        }:
+            status = 409
+        elif exc.code == "review_policy_unavailable":
+            status = 503
+        raise _http_error(status, exc.code, "Review policy request was rejected") from exc
+    if isinstance(exc, ValidationError):
+        raise _http_error(400, "review_policy_invalid", "Review policy is invalid") from exc
     if isinstance(exc, ReviewHistoryError):
         raise _http_error(
             exc.status_code,
@@ -923,3 +1158,101 @@ def _private_read_headers(response: Response) -> None:
 
 def _request_idempotency_key(request: Request, payload_value: str | None) -> str:
     return str(payload_value or request.headers.get("idempotency-key", "")).strip()
+
+
+def _policy_idempotency_key(request: Request, payload_value: str | None) -> str:
+    value = _request_idempotency_key(request, payload_value)
+    if not value:
+        raise _http_error(400, "idempotency_key_required", "Idempotency key is required")
+    return value
+
+
+def _policy_request_id(request: Request) -> str:
+    value = request.headers.get("x-request-id", "").strip()
+    return value or f"policy-request-{uuid.uuid4().hex}"
+
+
+def _public_review_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
+    summary = dict(policy.get("validation_summary") or {})
+    return {
+        "id": str(policy["id"]),
+        "version": str(policy["version"]),
+        "schema_version": str(policy["schema_version"]),
+        "status": str(policy["status"]),
+        "is_default": bool(policy.get("is_default", True)),
+        "policy": dict(policy.get("policy") or {}),
+        "policy_sha256": str(policy.get("policy_sha256") or ""),
+        "base_policy_id": policy.get("base_policy_id"),
+        "created_by_nickname": str(policy.get("created_by_nickname") or ""),
+        "validation_summary": {
+            "valid": summary.get("valid") is True,
+            "schema_version": str(summary.get("schema_version") or ""),
+            "policy_sha256": str(summary.get("policy_sha256") or ""),
+            "readiness_checked": summary.get("readiness_checked") is True,
+            "issues": [
+                {
+                    "path": str(item.get("path") or "")[:300],
+                    "code": str(item.get("code") or "validation_error")[:100],
+                    "message": str(item.get("message") or "Invalid policy")[:300],
+                }
+                for item in summary.get("issues") or []
+                if isinstance(item, Mapping)
+            ][:100],
+        },
+        "validated_at": policy.get("validated_at"),
+        "activated_at": policy.get("activated_at"),
+        "retired_at": policy.get("retired_at"),
+        "created_at": policy["created_at"],
+        "updated_at": policy["updated_at"],
+    }
+
+
+async def _policy_envelope(
+    service: ReviewPolicyService,
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    base = None
+    base_policy_id = str(policy.get("base_policy_id") or "")
+    if base_policy_id:
+        try:
+            base = await service.repository.get_review_policy(base_policy_id)
+        except Exception:
+            # The mutation has already committed. A best-effort diff lookup must not
+            # turn a successful policy transition into a misleading API failure.
+            base = None
+    return {
+        "policy": _public_review_policy(policy),
+        "diff": redacted_policy_diff(
+            base.get("policy") if base else None,
+            policy.get("policy") or {},
+        ),
+    }
+
+
+async def _transition_policy(
+    request: Request,
+    response: Response,
+    policy_id: str,
+    payload: ReviewPolicyTransitionPayload,
+    *,
+    action: str,
+) -> dict[str, Any]:
+    service = _require_policy_service(request)
+    actor = await _require_core_admin(request)
+    _private_read_headers(response)
+    method = {
+        "activate": service.activate,
+        "retire": service.retire,
+        "rollback": service.rollback,
+    }[action]
+    try:
+        policy = await method(
+            policy_id,
+            actor=actor,
+            request_id=_policy_request_id(request),
+            idempotency_key=_policy_idempotency_key(request, payload.idempotency_key),
+            reason=payload.reason,
+        )
+        return await _policy_envelope(service, policy)
+    except Exception as exc:
+        _raise_artifact_error(exc)

@@ -6,7 +6,7 @@ import json
 import os
 import uuid
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -131,7 +131,8 @@ async def run_p1_upgrade_scenario(url: str) -> None:
             "20260710_002_artifact_advanced_review"
         ]
         assert await apply_schema_migrations(connection, migrations) == [
-            "20260715_003_review_policy_snapshot"
+            "20260715_003_review_policy_snapshot",
+            "20260717_004_review_observability",
         ]
         assert await apply_schema_migrations(connection, migrations) == []
 
@@ -206,6 +207,97 @@ def test_category_precedence_and_concurrency_against_postgres() -> None:
 
 def test_history_projection_and_emergency_revoke_against_postgres() -> None:
     asyncio.run(run_history_revoke_scenario(database_url()))
+
+
+def test_review_observability_heartbeat_and_metrics_against_postgres() -> None:
+    asyncio.run(run_review_observability_scenario(database_url()))
+
+
+async def run_review_observability_scenario(url: str) -> None:
+    connection, transaction = await begin_isolated_schema(url)
+    try:
+        await apply_schema_migrations(connection, discover_schema_migrations())
+        await seed_market(connection)
+        repository = PgArtifactRepository(RepositoryStore(connection))
+        runtime_repository = PgRuntimeRunnerRepository(SingleConnectionPool(connection))
+        artifact_heartbeat = await repository.upsert_review_worker_heartbeat(
+            worker_kind="artifact_worker",
+            worker_id="artifact-worker-1",
+            components={
+                "artifact_worker": {
+                    "ready": True,
+                    "reason": "",
+                    "version": "artifact-worker-v1",
+                    "data_updated_at": "",
+                }
+            },
+            ttl_seconds=30,
+            capacity=4,
+            active_count=1,
+        )
+        runtime_heartbeat = await runtime_repository.upsert_review_worker_heartbeat(
+            worker_kind="runtime_runner",
+            worker_id="runtime-runner-1",
+            components={
+                "runtime": {
+                    "ready": True,
+                    "reason": "",
+                    "version": "runtime-runner-v1",
+                    "data_updated_at": "",
+                }
+            },
+            ttl_seconds=30,
+            capacity=2,
+            active_count=0,
+        )
+        assert artifact_heartbeat["worker_kind"] == "artifact_worker"
+        assert runtime_heartbeat["worker_kind"] == "runtime_runner"
+        heartbeats = await repository.list_review_worker_heartbeats()
+        assert [(item["worker_kind"], item["live"]) for item in heartbeats] == [
+            ("artifact_worker", True),
+            ("runtime_runner", True),
+        ]
+
+        artifact = await repository.create_artifact(artifact_payload("o"))
+        await connection.execute(
+            "UPDATE plugin_artifacts SET review_status = 'pending_review' WHERE id = $1",
+            artifact["id"],
+        )
+        run = await repository.create_review_run(
+            {
+                "artifact_id": artifact["id"],
+                "type": "static",
+                "status": "running",
+                "idempotency_key": "observability-run",
+            }
+        )
+        await repository.complete_review_run(
+            run["id"],
+            {
+                "status": "failed",
+                "summary": "Static stage failed",
+                "error_code": "static_scan_failed",
+            },
+        )
+        await repository.enqueue_job(
+            {
+                "artifact_id": artifact["id"],
+                "type": "static_scan",
+                "payload": {},
+                "idempotency_key": "observability-job",
+            }
+        )
+
+        snapshot = await repository.get_review_observability_snapshot(
+            datetime.now(UTC) - timedelta(hours=24)
+        )
+        assert snapshot["queue"] == [{"type": "static_scan", "status": "queued", "count": 1}]
+        assert snapshot["stages"][0]["type"] == "static"
+        assert snapshot["stages"][0]["failure_count"] == 1
+        assert snapshot["manual_wait"]["waiting_count"] == 1
+    finally:
+        await transaction.rollback()
+        await connection.close()
 
 
 async def run_history_revoke_scenario(url: str) -> None:

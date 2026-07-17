@@ -414,24 +414,24 @@
         - *Details*: 运行 unit/contract/runtime/DAG/routing/Ruff tests，检查 SBOM/URL 凭据不泄露后提交。
         - *Requirements*: FR-218。
 
-- [ ] 19. **Policy API、工具健康、可观测性与核心管理员 UI**
-    - [ ] 19.1. 实现 core-admin policy API
+- [x] 19. **Policy API、工具健康、可观测性与核心管理员 UI**
+    - [x] 19.1. 实现 core-admin policy API
         - *Goal*: 提供 list/create/validate/activate/retire/rollback typed endpoints。
         - *Details*: core admin only；普通 admin read-only snapshot；stable errors、idempotency、OpenAPI 角色过滤。
         - *Requirements*: FR-220、FR-223。
-    - [ ] 19.2. 实现工具健康和指标
+    - [x] 19.2. 实现工具健康和指标
         - *Goal*: 暴露 configured/ready/degraded 而不泄露凭据。
         - *Details*: runner/LLM/ClamAV/YARA/advisory/policy freshness；队列深度、stage latency、failure/timeout、manual wait、routing/revoke metrics。
         - *Requirements*: FR-221。
-    - [ ] 19.3. 实现 `ReviewPolicyPanel`
+    - [x] 19.3. 实现 `ReviewPolicyPanel`
         - *Goal*: 核心管理员管理 policy 并查看工具状态。
         - *Details*: draft editor 使用 structured controls；validate diff/errors；activation reason；非核心管理员不可见 mutation；不显示 secret refs 值。
         - *Requirements*: FR-220、FR-224。
-    - [ ] 19.4. 增加权限、并发和脱敏测试
+    - [x] 19.4. 增加权限、并发和脱敏测试
         - *Goal*: 无效策略/并发激活/普通管理员不能改变 active，health 不泄密。
         - *Details*: API/OpenAPI/frontend/metrics label cardinality tests。
         - *Requirements*: P4 验收、安全、可观测性。
-    - [ ] 19.5. 验证并提交 policy workbench
+    - [x] 19.5. 验证并提交 policy workbench
         - *Goal*: 完成策略治理用户面。
         - *Details*: 运行 Ruff/API/OpenAPI/`vp check`/Vitest/build 和并发 PG tests后提交。
         - *Requirements*: FR-220、FR-221、FR-223、FR-224。

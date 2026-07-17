@@ -7,6 +7,8 @@ from typing import Any
 
 import asyncpg
 
+from ..artifacts.observability import normalize_worker_heartbeat
+
 _ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
 _TERMINAL_STATUSES = {"succeeded", "failed", "timed_out", "cancelled"}
 
@@ -32,6 +34,53 @@ class PgRuntimeRunnerRepository:
 
     async def close(self) -> None:
         await self._pool.close()
+
+    async def upsert_review_worker_heartbeat(
+        self,
+        *,
+        worker_kind: str,
+        worker_id: str,
+        components: Mapping[str, Any],
+        ttl_seconds: int,
+        capacity: int,
+        active_count: int,
+    ) -> dict[str, Any]:
+        heartbeat = normalize_worker_heartbeat(
+            worker_kind=worker_kind,
+            worker_id=worker_id,
+            components=components,
+            ttl_seconds=ttl_seconds,
+            capacity=capacity,
+            active_count=active_count,
+        )
+        row = await self._pool.fetchrow(
+            """
+            WITH expired AS (
+                DELETE FROM review_worker_heartbeats
+                 WHERE expires_at < now() - interval '7 days'
+            )
+            INSERT INTO review_worker_heartbeats (
+                worker_kind, worker_id, components, capacity, active_count,
+                observed_at, expires_at, updated_at
+            )
+            VALUES ($1, $2, $3::jsonb, $4, $5, now(), now() + ($6 * interval '1 second'), now())
+            ON CONFLICT (worker_kind, worker_id) DO UPDATE
+               SET components = EXCLUDED.components,
+                   capacity = EXCLUDED.capacity,
+                   active_count = EXCLUDED.active_count,
+                   observed_at = now(),
+                   expires_at = now() + ($6 * interval '1 second'),
+                   updated_at = now()
+            RETURNING *
+            """,
+            heartbeat["worker_kind"],
+            heartbeat["worker_id"],
+            heartbeat["components"],
+            heartbeat["capacity"],
+            heartbeat["active_count"],
+            heartbeat["ttl_seconds"],
+        )
+        return dict(row)
 
     async def claim_runtime_dispatches(
         self,

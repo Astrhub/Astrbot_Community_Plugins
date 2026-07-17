@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from pydantic import ValidationError
@@ -34,8 +34,14 @@ class ReviewPolicyPermissionError(PermissionError):
 
 
 class ReviewPolicyService:
-    def __init__(self, repository: ArtifactRepository) -> None:
+    def __init__(
+        self,
+        repository: ArtifactRepository,
+        readiness_validator: Callable[[ReviewPolicyV1], Awaitable[Sequence[Mapping[str, str]]]]
+        | None = None,
+    ) -> None:
         self.repository = repository
+        self.readiness_validator = readiness_validator
 
     async def create_draft(
         self,
@@ -113,6 +119,25 @@ class ReviewPolicyService:
         self._require_core_admin(actor)
         record = await self._require_policy(policy_id)
         summary = review_policy_validation_summary(record)
+        if summary["valid"] and self.readiness_validator is not None:
+            try:
+                readiness_issues = await self.readiness_validator(
+                    parse_review_policy(record.get("policy") or {})
+                )
+            except Exception:
+                readiness_issues = (
+                    {
+                        "path": "tools",
+                        "code": "review_tool_readiness_unavailable",
+                        "message": "Review tool readiness could not be verified",
+                    },
+                )
+            normalized_issues = _readiness_issues(readiness_issues)
+            summary["issues"].extend(normalized_issues)
+            summary["valid"] = not summary["issues"]
+            summary["readiness_checked"] = True
+        else:
+            summary["readiness_checked"] = self.readiness_validator is not None
         base = await self._base_policy(record)
         event = _event_payload(
             action=ReviewPolicyEventAction.VALIDATE,
@@ -511,3 +536,21 @@ def _service_error(exc: ValueError) -> ReviewPolicyServiceError:
     return ReviewPolicyServiceError(
         code if code in known else ArtifactErrorCode.REVIEW_POLICY_INVALID
     )
+
+
+def _readiness_issues(
+    issues: Sequence[Mapping[str, str]],
+) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for issue in issues[:100]:
+        raw_code = str(issue.get("code") or "review_tool_not_ready").strip().lower()
+        code = re.sub(r"[^a-z0-9_]+", "_", raw_code).strip("_")[:96]
+        message = " ".join(str(issue.get("message") or "Review tool is not ready").split())
+        result.append(
+            {
+                "path": _redact_path(str(issue.get("path") or "tools")),
+                "code": code or "review_tool_not_ready",
+                "message": message[:300] or "Review tool is not ready",
+            }
+        )
+    return result

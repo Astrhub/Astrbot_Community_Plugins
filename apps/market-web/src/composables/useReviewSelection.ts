@@ -12,7 +12,14 @@ import type {
   ReviewWorkspaceView,
 } from "@/types/artifacts";
 
-const VIEWS = new Set<ReviewWorkspaceView>(["summary", "files", "diff", "comments", "history"]);
+const VIEWS = new Set<ReviewWorkspaceView>([
+  "summary",
+  "files",
+  "diff",
+  "comments",
+  "history",
+  "policy",
+]);
 const SIDES = new Set<ReviewCommentSide>(["base", "current"]);
 const STATUSES = new Set<ArtifactReviewStatus>([
   "quarantined",

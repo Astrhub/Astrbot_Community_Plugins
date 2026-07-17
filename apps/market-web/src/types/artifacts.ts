@@ -145,7 +145,7 @@ export interface ArtifactDetail {
   decisions: ArtifactDecision[];
 }
 
-export type ReviewWorkspaceView = "summary" | "files" | "diff" | "comments" | "history";
+export type ReviewWorkspaceView = "summary" | "files" | "diff" | "comments" | "history" | "policy";
 export type ReviewCommentSide = "base" | "current";
 
 export interface ArtifactFile {
@@ -387,4 +387,215 @@ export interface StableRiskResponse {
   affects_current_release: true;
   correlation: StableRiskEvidence;
   stable_artifact: PluginArtifact;
+}
+
+export type ReviewPolicyStage =
+  | "static"
+  | "diff"
+  | "import_graph"
+  | "runtime"
+  | "category"
+  | "clamav"
+  | "yara"
+  | "dependency"
+  | "llm_package"
+  | "llm_file"
+  | "llm_summary";
+
+export type ReviewPolicySeverity = "info" | "low" | "medium" | "high" | "critical";
+export type ReviewToolFailureAction = "manual_review" | "fail_closed";
+export type ReviewPluginCategory =
+  | "ai_tools"
+  | "entertainment"
+  | "integrations"
+  | "productivity"
+  | "utilities"
+  | "other";
+
+export interface ReviewPolicyDocument {
+  schema_version: "1";
+  required_stages: ReviewPolicyStage[];
+  runtime_targets: Array<{ astrbot: string; python: string }>;
+  limits: {
+    cpu: number;
+    memory_mb: number;
+    pids: number;
+    timeout_seconds: number;
+    disk_mb: number;
+    tmpfs_mb: number;
+    max_log_bytes: number;
+  };
+  network_profiles: {
+    install: string;
+    smoke: string;
+    on_unverified: ReviewToolFailureAction;
+  };
+  llm: {
+    enabled: boolean;
+    provider_config_ref: string;
+    model: string;
+    prompt_version: string;
+    max_tokens: number;
+    max_cost_microusd: number;
+    input_cost_microusd_per_million_tokens: number;
+    output_cost_microusd_per_million_tokens: number;
+    max_files: number;
+    max_file_bytes: number;
+    required_files: string[];
+    timeout_seconds: number;
+    max_retries: number;
+  };
+  malware: {
+    clamav: boolean;
+    clamav_config_ref: string;
+    yara_ruleset: string | null;
+    max_database_age_hours: number;
+    on_unknown: ReviewToolFailureAction;
+    max_files: number;
+    max_file_bytes: number;
+    max_total_bytes: number;
+    timeout_seconds: number;
+    per_file_timeout_seconds: number;
+    max_matches: number;
+    max_offsets_per_match: number;
+    max_output_bytes: number;
+    subprocess_memory_mb: number;
+  };
+  dependency: {
+    enabled: boolean;
+    advisory_config_ref: string;
+    max_severity: ReviewPolicySeverity;
+    max_data_age_hours: number;
+    on_unavailable: ReviewToolFailureAction;
+    allow_direct_urls: boolean;
+    allow_vcs: boolean;
+    denied_licenses: string[];
+    private_package_prefixes: string[];
+  };
+  category: {
+    enabled: boolean;
+    provider_config_ref: string;
+    model: string;
+    minimum_confidence: number;
+    allowed_categories: ReviewPluginCategory[];
+    default_category: ReviewPluginCategory;
+    max_input_chars: number;
+    max_output_tokens: number;
+    prompt_version: string;
+  };
+  routing: {
+    auto_approve: boolean;
+    manual_review_at: ReviewPolicySeverity;
+    deterministic_reject_at: ReviewPolicySeverity;
+    degraded_action: ReviewToolFailureAction;
+    require_complete_coverage: boolean;
+  };
+}
+
+export interface ReviewPolicyValidationIssue {
+  path: string;
+  code: string;
+  message: string;
+}
+
+export interface ReviewPolicyValidationSummary {
+  valid: boolean;
+  schema_version: string;
+  policy_sha256: string;
+  readiness_checked: boolean;
+  issues: ReviewPolicyValidationIssue[];
+}
+
+export interface ReviewPolicyRecord {
+  id: string;
+  version: string;
+  schema_version: string;
+  status: "draft" | "active" | "retired";
+  is_default: boolean;
+  policy: ReviewPolicyDocument;
+  policy_sha256: string;
+  base_policy_id: string | null;
+  created_by_nickname: string;
+  validation_summary: ReviewPolicyValidationSummary;
+  validated_at: string | null;
+  activated_at: string | null;
+  retired_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewPolicyDiff {
+  redacted: true;
+  before_sha256: string;
+  after_sha256: string;
+  added_paths: string[];
+  removed_paths: string[];
+  changed_paths: string[];
+  path_count: number;
+  truncated: boolean;
+}
+
+export interface ReviewWorkerHealth {
+  kind: "artifact_worker" | "runtime_runner";
+  status: "ready" | "degraded";
+  ready: boolean;
+  degraded: boolean;
+  live_instances: number;
+  stale_instances: number;
+  capacity: number;
+  active_count: number;
+  last_observed_at: string | null;
+  reasons: string[];
+}
+
+export interface ReviewToolHealth {
+  name: "policy" | "runtime" | "llm" | "clamav" | "yara" | "dependency";
+  enabled: boolean;
+  configured: boolean;
+  ready: boolean;
+  degraded: boolean;
+  status: "disabled" | "ready" | "degraded";
+  reasons: string[];
+  version: string;
+  data_updated_at: string | null;
+  freshness: "current" | "stale" | "unknown" | "not_applicable";
+  observed_at: string | null;
+}
+
+export interface ReviewOperationsResponse {
+  health: {
+    review: {
+      enabled: boolean;
+      configured: boolean;
+      ready: boolean;
+      degraded: boolean;
+      auto_approve_enabled: boolean;
+      policy_auto_approve_enabled: boolean;
+      auto_approve_effective: boolean;
+      components: Record<string, unknown>;
+    };
+    workers: ReviewWorkerHealth[];
+    tools: ReviewToolHealth[];
+  };
+  metrics: {
+    available: boolean;
+    window_started_at: string;
+    collected_at: string;
+    queue: Array<{ job_type: string; status: string; count: number }>;
+    stages: Array<{
+      run_type: string;
+      sample_count: number;
+      failure_count: number;
+      timeout_count: number;
+      average_duration_ms: number;
+      p95_duration_ms: number;
+    }>;
+    manual_wait: {
+      waiting_count: number;
+      average_wait_seconds: number;
+      max_wait_seconds: number;
+    };
+    routing: Array<{ action: string; source: string; count: number }>;
+    revoke: Array<{ status: string; count: number }>;
+  };
 }

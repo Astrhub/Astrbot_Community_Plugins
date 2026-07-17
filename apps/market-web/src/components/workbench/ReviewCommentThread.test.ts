@@ -91,6 +91,7 @@ describe("ReviewCommentThread", () => {
         busy: false,
       },
     });
+    await flushPromises();
 
     expect(wrapper.text()).toContain("<img src=x onerror=window.__unsafe=1>");
     expect(wrapper.text()).toContain("<script>unsafe()</script>");
@@ -99,10 +100,10 @@ describe("ReviewCommentThread", () => {
 
     await wrapper.find('[data-testid="new-comment"] textarea').setValue("请移除动态执行");
     await flushPromises();
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("发布评论"))
-      ?.trigger("click");
+    const publish = wrapper.findAll("button").find((button) => button.text().includes("发布评论"));
+    expect(publish).toBeDefined();
+    await publish?.trigger("click");
+    await flushPromises();
     expect(wrapper.emitted("create")).toEqual([
       [
         {
@@ -117,10 +118,10 @@ describe("ReviewCommentThread", () => {
       ],
     ]);
 
-    await wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("解决"))
-      ?.trigger("click");
+    const resolve = wrapper.findAll("button").find((button) => button.text().includes("解决"));
+    expect(resolve).toBeDefined();
+    await resolve?.trigger("click");
+    await flushPromises();
     expect(wrapper.emitted("resolve")).toEqual([[{ threadId: "thread-1", version: 2 }]]);
   });
 

@@ -36,6 +36,8 @@ tags:
     description: 插件包提交、版本历史与结构化自动审查结果
   - name: Reviews
     description: 管理员人工决策、发布重试与安全撤回
+  - name: Review Policy
+    description: 生效策略只读快照、核心管理员策略生命周期、工具健康与低基数指标
 paths:
   /health:
     get:
@@ -767,265 +769,356 @@ paths:
     post:
       tags: [Artifacts]
       summary: 登记稳定插件身份
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       responses:
-        "200": {description: 已登记或返回现有插件}
-        "403": {description: 仓库/插件所有权不匹配}
-        "503": {description: artifact 功能未就绪}
+        "200": { description: 已登记或返回现有插件 }
+        "403": { description: 仓库/插件所有权不匹配 }
+        "503": { description: artifact 功能未就绪 }
   /v1/plugins/{id}/artifacts/upload:
     post:
       tags: [Artifacts]
       summary: 流式上传 ZIP artifact；可关联要求修改的 supersedes artifact
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/PluginId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PluginId" }]
       responses:
-        "202": {description: 已隔离并创建预检任务}
-        "429": {description: 用户或来源 IP 超过 artifact 提交频率限制}
-        "413": {description: 上传超过限制}
+        "202": { description: 已隔离并创建预检任务 }
+        "429": { description: 用户或来源 IP 超过 artifact 提交频率限制 }
+        "413": { description: 上传超过限制 }
   /v1/plugins/{id}/artifacts/github:
     post:
       tags: [Artifacts]
       summary: 固定公开 GitHub ref 到 commit 并创建 artifact；可关联 supersedes artifact
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/PluginId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PluginId" }]
       responses:
-        "202": {description: 已固定 commit、隔离并创建预检任务}
-        "429": {description: 用户或来源 IP 超过 artifact 提交频率限制}
+        "202": { description: 已固定 commit、隔离并创建预检任务 }
+        "429": { description: 用户或来源 IP 超过 artifact 提交频率限制 }
   /v1/me/artifacts:
     get:
       tags: [Artifacts]
       summary: 当前作者的 artifact 版本历史
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       responses:
-        "200": {description: Artifact 分页列表}
+        "200": { description: Artifact 分页列表 }
   /v1/artifacts/{artifact_id}:
     get:
       tags: [Artifacts]
       summary: Artifact、runs、findings 与 decisions 详情
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
       responses:
-        "200": {description: 结构化审查详情（不含完整源码）}
-        "403": {description: 非作者且非管理员}
+        "200": { description: 结构化审查详情（不含完整源码） }
+        "403": { description: 非作者且非管理员 }
   /v1/artifacts/{artifact_id}/runs:
     get:
       tags: [Artifacts]
       summary: 自动审查运行记录
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
       responses:
-        "200": {description: Review runs}
+        "200": { description: Review runs }
   /v1/artifacts/{artifact_id}/findings:
     get:
       tags: [Artifacts]
       summary: 结构化 findings
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
       responses:
-        "200": {description: Findings（仅有限 evidence excerpt）}
+        "200": { description: Findings（仅有限 evidence excerpt） }
   /v1/artifacts/{artifact_id}/files:
     get:
       tags: [Artifacts]
       summary: 分页列出已登记 Artifact 文件树
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {in: query, name: limit, schema: {type: integer, default: 200}}
-        - {in: query, name: offset, schema: {type: integer, default: 0}}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { in: query, name: limit, schema: { type: integer, default: 200 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
       responses:
-        "200": {description: 文件 metadata；不含 content key 或私有对象 URL}
-        "403": {description: 非作者且非管理员}
+        "200": { description: 文件 metadata；不含 content key 或私有对象 URL }
+        "403": { description: 非作者且非管理员 }
   /v1/artifacts/{artifact_id}/files/{file_id}/content:
     get:
       tags: [Artifacts]
       summary: 按 1-based 行号分页读取已登记 UTF-8 文本
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {$ref: "#/components/parameters/ArtifactFileId"}
-        - {in: query, name: start_line, schema: {type: integer, default: 1}}
-        - {in: query, name: line_limit, schema: {type: integer, default: 200}}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { $ref: "#/components/parameters/ArtifactFileId" }
+        - { in: query, name: start_line, schema: { type: integer, default: 1 } }
+        - { in: query, name: line_limit, schema: { type: integer, default: 200 } }
       responses:
-        "200": {description: SHA/tree 绑定的受限纯文本行；Cache-Control no-store}
-        "415": {description: 文件不是已登记 UTF-8 文本}
-        "416": {description: 行范围无效}
+        "200": { description: SHA/tree 绑定的受限纯文本行；Cache-Control no-store }
+        "415": { description: 文件不是已登记 UTF-8 文本 }
+        "416": { description: 行范围无效 }
   /v1/artifacts/{artifact_id}/diff:
     get:
       tags: [Artifacts]
       summary: 分页列出 SHA/tree 绑定的 Artifact diff 摘要
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {in: query, name: limit, schema: {type: integer, default: 200}}
-        - {in: query, name: offset, schema: {type: integer, default: 0}}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { in: query, name: limit, schema: { type: integer, default: 200 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
       responses:
-        "200": {description: Diff metadata；不含 hunks key}
+        "200": { description: Diff metadata；不含 hunks key }
   /v1/artifacts/{artifact_id}/diff/{diff_id}:
     get:
       tags: [Artifacts]
       summary: 读取已登记、校验后的受限 diff hunks
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {$ref: "#/components/parameters/ArtifactDiffId"}
-        - {in: query, name: hunk_id, schema: {type: string}}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { $ref: "#/components/parameters/ArtifactDiffId" }
+        - { in: query, name: hunk_id, schema: { type: string } }
       responses:
-        "200": {description: 结构化纯文本 hunks；Cache-Control no-store}
-        "409": {description: Diff object、file SHA 或两端 tree 已漂移}
+        "200": { description: 结构化纯文本 hunks；Cache-Control no-store }
+        "409": { description: Diff object、file SHA 或两端 tree 已漂移 }
   /v1/artifacts/{artifact_id}/comments:
     get:
       tags: [Artifacts]
       summary: 分页查看行级审查线程和追加事件
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {in: query, name: limit, schema: {type: integer, default: 20}}
-        - {in: query, name: offset, schema: {type: integer, default: 0}}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { in: query, name: limit, schema: { type: integer, default: 20 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
       responses:
-        "200": {description: 纯文本评论投影；不含用户 ID、幂等键或私有对象 key；Cache-Control no-store}
-        "403": {description: 非作者且非管理员}
+        "200":
+          { description: 纯文本评论投影；不含用户 ID、幂等键或私有对象 key；Cache-Control no-store }
+        "403": { description: 非作者且非管理员 }
   /v1/artifacts/{artifact_id}/history:
     get:
       tags: [Artifacts]
       summary: 以稳定 cursor 分页查看审查和发布事实时间线
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {in: query, name: limit, schema: {type: integer, default: 30, minimum: 1, maximum: 50}}
-        - {in: query, name: cursor, schema: {type: string, maxLength: 1000}}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - {
+            in: query,
+            name: limit,
+            schema: { type: integer, default: 30, minimum: 1, maximum: 50 },
+          }
+        - { in: query, name: cursor, schema: { type: string, maxLength: 1000 } }
       responses:
-        "200": {description: runs、findings/events、comments、decisions、policy 与 publication 的脱敏投影；Cache-Control no-store}
-        "400": {description: cursor 或 page size 无效}
-        "403": {description: 非作者且非管理员}
+        "200":
+          {
+            description: runs、findings/events、comments、decisions、policy 与 publication 的脱敏投影；Cache-Control no-store,
+          }
+        "400": { description: cursor 或 page size 无效 }
+        "403": { description: 非作者且非管理员 }
   /v1/artifacts/{artifact_id}/comments/{thread_id}/replies:
     post:
       tags: [Artifacts]
       summary: 作者或管理员以 optimistic version 回复线程
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {$ref: "#/components/parameters/ReviewThreadId"}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { $ref: "#/components/parameters/ReviewThreadId" }
       responses:
-        "200": {description: 已追加 reply event}
-        "409": {description: 版本冲突或线程已被最终决定锁定}
+        "200": { description: 已追加 reply event }
+        "409": { description: 版本冲突或线程已被最终决定锁定 }
   /v1/artifacts/{artifact_id}/comments/{thread_id}/author-addressed:
     post:
       tags: [Artifacts]
       summary: 作者标记审查意见已处理；不等同于管理员 resolve
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {$ref: "#/components/parameters/ReviewThreadId"}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { $ref: "#/components/parameters/ReviewThreadId" }
       responses:
-        "200": {description: 已追加 author_addressed event}
-        "403": {description: 只有 artifact 作者可执行}
+        "200": { description: 已追加 author_addressed event }
+        "403": { description: 只有 artifact 作者可执行 }
+  /v1/admin/review-policies/active:
+    get:
+      tags: [Review Policy]
+      summary: 管理员查看当前生效审查策略快照
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          {
+            description: 仅返回 active typed snapshot；无 active 时 policy 为 null；Cache-Control no-store,
+          }
+        "403": { description: 需要管理员权限 }
+        "503": { description: 策略仓储不可用 }
+  /v1/core-admin/review-policies:
+    get:
+      tags: [Review Policy]
+      summary: 核心管理员分页列出 immutable 策略版本
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          {
+            description: draft、active、retired typed policy 列表；不返回 secret 正文或 actor user ID,
+          }
+        "403": { description: 需要核心管理员权限 }
+    post:
+      tags: [Review Policy]
+      summary: 核心管理员创建 immutable 策略草稿
+      security: [{ cookieAuth: [] }]
+      responses:
+        "201": { description: 已创建或幂等重放同一草稿，含 redacted diff }
+        "400": { description: schema、版本、request ID 或 idempotency key 无效 }
+        "409": { description: 策略版本或幂等身份冲突 }
+  /v1/core-admin/review-policies/{policy_id}/validate:
+    post:
+      tags: [Review Policy]
+      summary: 校验策略 schema、跨字段约束和工具 readiness
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ReviewPolicyId" }]
+      responses:
+        "200": { description: validation issues 与 redacted diff；校验失败不改变 active }
+        "403": { description: 需要核心管理员权限 }
+  /v1/core-admin/review-policies/{policy_id}/activate:
+    post:
+      tags: [Review Policy]
+      summary: 原子激活已校验策略并退役旧 active
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ReviewPolicyId" }]
+      responses:
+        "200": { description: 已激活或幂等重放；artifact 既有 snapshot 不变 }
+        "400": { description: 策略或工具 readiness 未通过 }
+        "409": { description: active、版本或幂等并发冲突 }
+  /v1/core-admin/review-policies/{policy_id}/retire:
+    post:
+      tags: [Review Policy]
+      summary: 退役策略版本
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ReviewPolicyId" }]
+      responses:
+        "200": { description: 已退役并保存原因与审计事件 }
+        "409": { description: active 已并发变化 }
+  /v1/core-admin/review-policies/{policy_id}/rollback:
+    post:
+      tags: [Review Policy]
+      summary: 原子回滚到已校验策略版本
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ReviewPolicyId" }]
+      responses:
+        "200": { description: 目标版本 active，原 active retired }
+        "409": { description: active 已并发变化 }
+  /v1/core-admin/review-tools/health:
+    get:
+      tags: [Review Policy]
+      summary: 核心管理员查看 worker、工具健康和 24 小时聚合指标
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          {
+            description: 固定组件 live/fresh/version 与 queue/stage/manual/routing/revoke 指标；Cache-Control no-store,
+          }
+        "403": { description: 需要核心管理员权限 }
   /v1/admin/artifacts:
     get:
       tags: [Reviews]
       summary: 管理员 artifact 审查队列
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       responses:
-        "200": {description: 可按状态与风险筛选的分页队列}
-        "403": {description: 需要管理员权限}
+        "200": { description: 可按状态与风险筛选的分页队列 }
+        "403": { description: 需要管理员权限 }
   /v1/admin/artifacts/{artifact_id}/comments:
     post:
       tags: [Reviews]
       summary: 在已登记 current/base 文本或 diff hunk 行上创建审查线程
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
       responses:
-        "201": {description: 已创建 SHA/line 绑定线程和 create event}
-        "400": {description: 正文、文件、side、行范围或 source thread 无效}
-        "409": {description: Artifact 已作最终决定或内容绑定已漂移}
+        "201": { description: 已创建 SHA/line 绑定线程和 create event }
+        "400": { description: 正文、文件、side、行范围或 source thread 无效 }
+        "409": { description: Artifact 已作最终决定或内容绑定已漂移 }
   /v1/admin/artifacts/{artifact_id}/findings/{finding_id}/stable-risk:
     post:
       tags: [Reviews]
       summary: 以确定性证据或管理员明确确认关联当前稳定版本并紧急撤回
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {$ref: "#/components/parameters/ReviewFindingId"}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { $ref: "#/components/parameters/ReviewFindingId" }
       responses:
-        "200": {description: 已保存 finding/correlation/actor/policy/reason，先移出插件源并创建异步撤回任务}
-        "400": {description: 原因、finding version 或幂等键无效}
-        "403": {description: 需要管理员权限}
-        "409": {description: 没有当前稳定版本确定性关联、LLM-only 未经人工确认、版本冲突或幂等冲突}
+        "200":
+          {
+            description: 已保存 finding/correlation/actor/policy/reason，先移出插件源并创建异步撤回任务,
+          }
+        "400": { description: 原因、finding version 或幂等键无效 }
+        "403": { description: 需要管理员权限 }
+        "409":
+          { description: 没有当前稳定版本确定性关联、LLM-only 未经人工确认、版本冲突或幂等冲突 }
   /v1/admin/artifacts/{artifact_id}/comments/{thread_id}/edit:
     post:
       tags: [Reviews]
       summary: 管理员编辑自己创建且未锁定的根评论
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {$ref: "#/components/parameters/ReviewThreadId"}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { $ref: "#/components/parameters/ReviewThreadId" }
       responses:
-        "200": {description: 已追加 edit event 并更新线程投影}
-        "403": {description: 不能编辑其他管理员或作者的内容}
+        "200": { description: 已追加 edit event 并更新线程投影 }
+        "403": { description: 不能编辑其他管理员或作者的内容 }
   /v1/admin/artifacts/{artifact_id}/comments/{thread_id}/resolve:
     post:
       tags: [Reviews]
       summary: 管理员解决审查线程
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {$ref: "#/components/parameters/ReviewThreadId"}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { $ref: "#/components/parameters/ReviewThreadId" }
       responses:
-        "200": {description: 已追加 resolve event}
-        "409": {description: optimistic version 冲突或线程已锁定}
+        "200": { description: 已追加 resolve event }
+        "409": { description: optimistic version 冲突或线程已锁定 }
   /v1/admin/artifacts/{artifact_id}/comments/{thread_id}/reopen:
     post:
       tags: [Reviews]
       summary: 管理员重开审查线程
-      security: [{cookieAuth: []}]
+      security: [{ cookieAuth: [] }]
       parameters:
-        - {$ref: "#/components/parameters/ArtifactId"}
-        - {$ref: "#/components/parameters/ReviewThreadId"}
+        - { $ref: "#/components/parameters/ArtifactId" }
+        - { $ref: "#/components/parameters/ReviewThreadId" }
       responses:
-        "200": {description: 已追加 reopen event}
-        "409": {description: optimistic version 冲突或线程已锁定}
+        "200": { description: 已追加 reopen event }
+        "409": { description: optimistic version 冲突或线程已锁定 }
   /v1/admin/artifacts/{artifact_id}/approve:
     post:
       tags: [Reviews]
       summary: 人工批准并原子创建发布任务
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
       responses:
-        "200": {description: 已批准并排队发布}
-        "409": {description: 状态、强制 runs 或 repo_version 已变化}
+        "200": { description: 已批准并排队发布 }
+        "409": { description: 状态、强制 runs 或 repo_version 已变化 }
   /v1/admin/artifacts/{artifact_id}/reject:
     post:
       tags: [Reviews]
       summary: 人工拒绝 artifact
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
       responses:
-        "200": {description: 已拒绝，不发布 CDN URL}
+        "200": { description: 已拒绝，不发布 CDN URL }
   /v1/admin/artifacts/{artifact_id}/request-changes:
     post:
       tags: [Reviews]
       summary: 要求作者修改 artifact
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
       responses:
-        "200": {description: 已锁定审查结果并标记为需要修改，不发布 CDN URL}
-        "400": {description: 必须提供修改原因}
-        "409": {description: Artifact 不处于待人工审查状态}
+        "200": { description: 已锁定审查结果并标记为需要修改，不发布 CDN URL }
+        "400": { description: 必须提供修改原因 }
+        "409": { description: Artifact 不处于待人工审查状态 }
   /v1/admin/artifacts/{artifact_id}/retry-publish:
     post:
       tags: [Reviews]
       summary: 重试已批准 artifact 的 CDN 发布
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/ArtifactId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/ArtifactId" }]
       responses:
-        "200": {description: 已重新排队}
+        "200": { description: 已重新排队 }
   /v1/admin/plugins/{id}/revoke-release:
     post:
       tags: [Reviews]
       summary: 安全撤回当前 CDN artifact
-      security: [{cookieAuth: []}]
-      parameters: [{$ref: "#/components/parameters/PluginId"}]
+      security: [{ cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/PluginId" }]
       responses:
-        "200": {description: 已原子记录决策、移出插件源并创建撤回任务}
+        "200": { description: 已原子记录决策、移出插件源并创建撤回任务 }
 components:
   parameters:
     PluginId:
@@ -1098,6 +1191,13 @@ components:
       schema:
         type: string
       description: 必须属于路径中候选 Artifact 的 critical finding ID
+    ReviewPolicyId:
+      in: path
+      name: policy_id
+      required: true
+      schema:
+        type: string
+      description: immutable 审查策略版本 ID
   securitySchemes:
     cookieAuth:
       type: apiKey

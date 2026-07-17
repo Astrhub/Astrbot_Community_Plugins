@@ -104,7 +104,7 @@ def filter_openapi_by_role(schema: dict[str, Any], role: str) -> dict[str, Any]:
             if op_tags & allowed:
                 ops[method] = operation
         if ops:
-            filtered_paths[path] = {**path_item, **ops}
+            filtered_paths[path] = ops
 
     filtered_tags = [tag for tag in schema.get("tags", []) if tag.get("name") in allowed]
 

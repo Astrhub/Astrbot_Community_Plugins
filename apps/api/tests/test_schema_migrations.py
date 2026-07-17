@@ -105,6 +105,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20260710_001_artifact_foundation",
         "20260710_002_artifact_advanced_review",
         "20260715_003_review_policy_snapshot",
+        "20260717_004_review_observability",
     ]
     sql = migrations[0].sql
     for table in (
@@ -164,6 +165,17 @@ def test_artifact_advanced_review_migration_declares_required_schema() -> None:
     assert "enforce_runtime_dispatch_run_artifact" in sql
 
 
+def test_review_observability_migration_declares_bounded_heartbeat_schema() -> None:
+    migrations = discover_schema_migrations()
+
+    sql = migrations[3].sql
+    assert "CREATE TABLE IF NOT EXISTS review_worker_heartbeats" in sql
+    assert "worker_kind IN ('artifact_worker', 'runtime_runner')" in sql
+    assert "jsonb_typeof(components) = 'object'" in sql
+    assert "active_count <= capacity" in sql
+    assert "review_worker_heartbeats_fresh_idx" in sql
+
+
 def test_review_policy_snapshot_migration_adds_explicit_migration_audit_action() -> None:
     sql = discover_schema_migrations()[2].sql
 
@@ -195,6 +207,7 @@ async def run_artifact_migrations(database_url: str) -> None:
             "20260710_001_artifact_foundation",
             "20260710_002_artifact_advanced_review",
             "20260715_003_review_policy_snapshot",
+            "20260717_004_review_observability",
         ]
         assert second == []
         table_names = await connection.fetch(

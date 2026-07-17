@@ -37,6 +37,8 @@ def test_openapi_public_excludes_admin_and_core():
     assert "/v1/admin/users" not in paths
     assert "/v1/core/users" not in paths
     assert "/v1/admin/settings" not in paths
+    assert "/v1/admin/review-policies/active" not in paths
+    assert "/v1/core-admin/review-policies" not in paths
     assert "/v1/artifacts/{artifact_id}/files" not in paths
     assert "/v1/artifacts/{artifact_id}/files/{file_id}/content" not in paths
     # public routes MUST appear
@@ -66,8 +68,11 @@ def test_openapi_admin_includes_admin_routes():
     paths = resp.json().get("paths", {})
     assert "/v1/admin/users" in paths
     assert "/v1/admin/plugins" in paths
+    assert "/v1/admin/review-policies/active" in paths
     # core-admin still hidden
     assert "/v1/core/users" not in paths
+    assert "/v1/core-admin/review-policies" not in paths
+    assert "/v1/core-admin/review-tools/health" not in paths
 
 
 def test_artifact_report_openapi_is_typed_and_role_filtered():
@@ -173,6 +178,52 @@ def test_openapi_core_admin_sees_all():
     assert "/v1/admin/settings" in paths
     assert "/v1/core/users" in paths
     assert "/v1/setup" in paths
+    assert "/v1/admin/review-policies/active" in paths
+    assert "/v1/core-admin/review-policies" in paths
+    assert "/v1/core-admin/review-policies/{policy_id}/validate" in paths
+    assert "/v1/core-admin/review-policies/{policy_id}/activate" in paths
+    assert "/v1/core-admin/review-policies/{policy_id}/retire" in paths
+    assert "/v1/core-admin/review-policies/{policy_id}/rollback" in paths
+    assert "/v1/core-admin/review-tools/health" in paths
+    schemas = resp.json()["components"]["schemas"]
+    policy_fields = set(schemas["PublicReviewPolicy"]["properties"])
+    worker_fields = set(schemas["ReviewWorkerHealth"]["properties"])
+    tool_fields = set(schemas["ReviewToolHealth"]["properties"])
+    metrics_fields = set(schemas["ReviewOperationsMetrics"]["properties"])
+    assert {"policy", "policy_sha256", "validation_summary", "status"} <= policy_fields
+    assert {"created_by_user_id", "events", "request_id"}.isdisjoint(policy_fields)
+    assert {"kind", "live_instances", "stale_instances", "capacity"} <= worker_fields
+    assert {"worker_id", "endpoint", "host"}.isdisjoint(worker_fields)
+    assert {"name", "ready", "freshness", "version"} <= tool_fields
+    assert {"endpoint", "token", "path", "object_key"}.isdisjoint(tool_fields)
+    assert metrics_fields == {
+        "available",
+        "window_started_at",
+        "collected_at",
+        "queue",
+        "stages",
+        "manual_wait",
+        "routing",
+        "revoke",
+    }
+
+
+def test_openapi_filter_removes_disallowed_methods_on_shared_path():
+    from app.openapi_filter import filter_openapi_by_role
+
+    schema = {
+        "paths": {
+            "/mixed": {
+                "get": {"tags": ["admin"]},
+                "post": {"tags": ["core-admin"]},
+            }
+        },
+        "tags": [],
+    }
+
+    filtered = filter_openapi_by_role(schema, "admin")
+
+    assert set(filtered["paths"]["/mixed"]) == {"get"}
 
 
 def test_openapi_tags_present_on_operations():
@@ -227,3 +278,4 @@ def test_llms_txt_admin_includes_admin_section():
     content = resp.text
     assert "GET /v1/admin/plugins" in content
     assert "/v1/core/" not in content
+    assert "/v1/core-admin/" not in content

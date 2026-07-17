@@ -3,10 +3,14 @@ import { NButton, NDrawer, NDrawerContent, NIcon } from "naive-ui";
 import { MenuOutline } from "@vicons/ionicons5";
 import type { ReviewWorkspaceView } from "@/types/artifacts";
 
-defineProps<{
-  activeView: ReviewWorkspaceView;
-  drawerOpen: boolean;
-}>();
+withDefaults(
+  defineProps<{
+    activeView: ReviewWorkspaceView;
+    drawerOpen: boolean;
+    policyMode?: boolean;
+  }>(),
+  { policyMode: false },
+);
 
 defineEmits<{
   "update:drawerOpen": [open: boolean];
@@ -27,7 +31,7 @@ defineSlots<{
     <header class="review-workspace__header">
       <slot name="header" />
     </header>
-    <div class="review-workspace__mobile-toolbar">
+    <div v-if="!policyMode" class="review-workspace__mobile-toolbar">
       <NButton quaternary aria-label="打开版本队列" @click="$emit('update:drawerOpen', true)">
         <template #icon
           ><NIcon><MenuOutline /></NIcon
@@ -35,7 +39,7 @@ defineSlots<{
         版本队列
       </NButton>
     </div>
-    <div class="review-workspace__body">
+    <div class="review-workspace__body" :class="{ 'review-workspace__body--policy': policyMode }">
       <aside class="review-workspace__sidebar">
         <slot name="sidebar" />
       </aside>
@@ -129,6 +133,22 @@ defineSlots<{
 
 .review-workspace__mobile-toolbar {
   display: none;
+}
+
+.review-workspace__body--policy {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.review-workspace__body--policy .review-workspace__sidebar,
+.review-workspace__body--policy .review-workspace__rail {
+  display: none;
+}
+
+.review-workspace__body--policy .review-workspace__main {
+  box-sizing: border-box;
+  width: min(1500px, 100%);
+  margin: 0 auto;
+  overflow: visible;
 }
 
 @media (max-width: 1240px) and (min-width: 861px) {

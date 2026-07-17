@@ -44,6 +44,17 @@ class RuntimeDispatchWorkItem:
 
 @runtime_checkable
 class RuntimeRunnerRepository(Protocol):
+    async def upsert_review_worker_heartbeat(
+        self,
+        *,
+        worker_kind: str,
+        worker_id: str,
+        components: Mapping[str, Any],
+        ttl_seconds: int,
+        capacity: int,
+        active_count: int,
+    ) -> dict[str, Any]: ...
+
     async def claim_runtime_dispatches(
         self,
         runner_id: str,
@@ -115,6 +126,30 @@ class RuntimeRunnerQueue:
                 )
             )
         return tuple(work)
+
+    async def publish_heartbeat(
+        self,
+        *,
+        ttl_seconds: int,
+        capacity: int,
+        active_count: int,
+        version: str,
+    ) -> None:
+        await self.repository.upsert_review_worker_heartbeat(
+            worker_kind="runtime_runner",
+            worker_id=self.runner_id,
+            components={
+                "runtime": {
+                    "ready": True,
+                    "reason": "",
+                    "version": version,
+                    "data_updated_at": "",
+                }
+            },
+            ttl_seconds=ttl_seconds,
+            capacity=capacity,
+            active_count=active_count,
+        )
 
     async def renew(self, work: RuntimeDispatchWorkItem, *, lease_seconds: int) -> bool:
         if lease_seconds < 10 or lease_seconds > 3600:

@@ -12,11 +12,13 @@ import ReviewDecisionPanel from "@/components/workbench/ReviewDecisionPanel.vue"
 import ReviewDiffViewer from "@/components/workbench/ReviewDiffViewer.vue";
 import ReviewFileBrowser from "@/components/workbench/ReviewFileBrowser.vue";
 import ReviewHistoryTimeline from "@/components/workbench/ReviewHistoryTimeline.vue";
+import ReviewPolicyPanel from "@/components/workbench/ReviewPolicyPanel.vue";
 import ReviewSummaryPanel from "@/components/workbench/ReviewSummaryPanel.vue";
 import { useReviewSelection } from "@/composables/useReviewSelection";
 import { useArtifactStore } from "@/stores/artifacts";
 import { useReviewWorkspaceStore, WorkspaceApiError } from "@/stores/reviewWorkspace";
 import { usePluginStore } from "@/stores/plugins";
+import { useReviewPolicyStore } from "@/stores/reviewPolicy";
 import type { Plugin } from "@/types";
 import type {
   ArtifactFinding,
@@ -25,6 +27,7 @@ import type {
   ReviewAnchor,
   ReviewCommentCreateInput,
   ReviewCommentSide,
+  ReviewPolicyDocument,
   ReviewWorkspaceView,
 } from "@/types/artifacts";
 
@@ -34,6 +37,7 @@ const message = useMessage();
 const pluginStore = usePluginStore();
 const artifactStore = useArtifactStore();
 const workspaceStore = useReviewWorkspaceStore();
+const policyStore = useReviewPolicyStore();
 const reviewRoute = useReviewSelection(route, router);
 
 const { currentUser } = storeToRefs(pluginStore);
@@ -63,6 +67,14 @@ const {
   commentsError,
   historyError,
 } = storeToRefs(workspaceStore);
+const {
+  policies,
+  operations: policyOperations,
+  lastDiff: policyDiff,
+  loading: loadingPolicy,
+  mutating: mutatingPolicy,
+  error: policyError,
+} = storeToRefs(policyStore);
 
 const myPlugins = shallowRef<Plugin[]>([]);
 const initialized = shallowRef(false);
@@ -74,6 +86,7 @@ const selectedId = computed(() => selection.value.artifactId);
 const isAdmin = computed(() =>
   ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
 );
+const isCoreAdmin = computed(() => String(currentUser.value?.role || "") === "core_admin");
 const currentNickname = computed(
   () =>
     String(
@@ -132,7 +145,7 @@ async function refreshList(): Promise<void> {
     } else {
       await artifactStore.loadMine();
     }
-    if (!selectedId.value && visibleItems.value[0]) {
+    if (selection.value.view !== "policy" && !selectedId.value && visibleItems.value[0]) {
       await reviewRoute.setArtifact(visibleItems.value[0].id);
     }
   } catch (error) {
@@ -141,6 +154,10 @@ async function refreshList(): Promise<void> {
 }
 
 async function refreshAll(): Promise<void> {
+  if (selection.value.view === "policy" && isAdmin.value) {
+    await loadPolicyWorkspace();
+    return;
+  }
   await refreshList();
   if (selectedId.value) await loadSelected(selectedId.value);
 }
@@ -173,6 +190,10 @@ async function loadSelected(artifactId: string): Promise<void> {
 
 async function ensureViewData(): Promise<void> {
   const state = selection.value;
+  if (state.view === "policy") {
+    if (isAdmin.value) await loadPolicyWorkspace();
+    return;
+  }
   const artifactId = state.artifactId;
   if (!artifactId || activeArtifactId.value !== artifactId) return;
   try {
@@ -207,6 +228,14 @@ async function ensureViewData(): Promise<void> {
     }
   } catch {
     // Component error panels expose bounded read failures without duplicate toasts.
+  }
+}
+
+async function loadPolicyWorkspace(): Promise<void> {
+  try {
+    await policyStore.load(isCoreAdmin.value);
+  } catch (error) {
+    message.error(errorMessage(error, "策略工作台加载失败"));
   }
 }
 
@@ -521,6 +550,47 @@ async function stableRisk(payload: {
   }
 }
 
+async function createPolicy(input: {
+  version: string;
+  policy: ReviewPolicyDocument;
+  reason: string;
+  basePolicyId?: string;
+}): Promise<void> {
+  try {
+    await policyStore.createDraft(input);
+    message.success("策略草稿已创建");
+    await policyStore.load(true);
+  } catch (error) {
+    message.error(errorMessage(error, "策略草稿创建失败"));
+  }
+}
+
+async function validatePolicy(input: { policyId: string; reason: string }): Promise<void> {
+  try {
+    const policy = await policyStore.validatePolicy(input.policyId, input.reason);
+    if (policy.validation_summary.valid) message.success("策略校验通过");
+    else message.warning("策略校验未通过");
+    await policyStore.load(true);
+  } catch (error) {
+    message.error(errorMessage(error, "策略校验失败"));
+  }
+}
+
+async function transitionPolicy(
+  action: "activate" | "retire" | "rollback",
+  input: { policyId: string; reason: string },
+): Promise<void> {
+  try {
+    await policyStore.transitionPolicy(input.policyId, action, input.reason);
+    message.success(
+      { activate: "策略已激活", retire: "策略已退役", rollback: "策略已回滚" }[action],
+    );
+    await policyStore.load(true);
+  } catch (error) {
+    message.error(errorMessage(error, "策略状态变更失败"));
+  }
+}
+
 async function focusResubmission(): Promise<void> {
   await reviewRoute.setView("summary");
   await nextTick();
@@ -551,7 +621,10 @@ watch(
       selection.value.lineStart,
     ] as const,
   () => {
-    if (initialized.value && activeArtifactId.value === selectedId.value) {
+    if (
+      initialized.value &&
+      (selection.value.view === "policy" || activeArtifactId.value === selectedId.value)
+    ) {
       void ensureViewData();
     }
   },
@@ -560,23 +633,35 @@ watch(
 onMounted(async () => {
   await pluginStore.loadCurrentUser();
   if (!currentUser.value) return;
+  if (selection.value.view === "policy" && !isAdmin.value) {
+    await reviewRoute.setView("summary");
+  }
   if (!isAdmin.value) {
     myPlugins.value = await pluginStore.loadMyPlugins().catch(() => []);
   }
   initialized.value = true;
   await refreshList();
-  if (selectedId.value) await loadSelected(selectedId.value);
+  if (selection.value.view === "policy") {
+    await loadPolicyWorkspace();
+  } else if (selectedId.value) {
+    await loadSelected(selectedId.value);
+  }
 });
 </script>
 
 <template>
-  <PluginReviewWorkspace v-model:drawer-open="drawerOpen" :active-view="selection.view">
+  <PluginReviewWorkspace
+    v-model:drawer-open="drawerOpen"
+    :active-view="selection.view"
+    :policy-mode="selection.view === 'policy'"
+  >
     <template #header>
       <PluginReviewHeader
         :is-admin="isAdmin"
-        :item-count="visibleItems.length"
-        :refreshing="loadingList || loadingDetail"
+        :item-count="selection.view === 'policy' ? policies.length : visibleItems.length"
+        :refreshing="loadingList || loadingDetail || loadingPolicy"
         :artifact="detail?.artifact || null"
+        :policy-mode="selection.view === 'policy'"
         @back="router.back()"
         @refresh="refreshAll"
       />
@@ -664,9 +749,26 @@ onMounted(async () => {
           @load-more="workspaceStore.loadHistory(selectedId)"
         />
       </NTabPane>
+      <NTabPane v-if="isAdmin" name="policy" tab="策略">
+        <ReviewPolicyPanel
+          :policies="policies"
+          :operations="policyOperations"
+          :last-diff="policyDiff"
+          :loading="loadingPolicy"
+          :busy="mutatingPolicy"
+          :is-core-admin="isCoreAdmin"
+          :error="policyError"
+          @refresh="loadPolicyWorkspace"
+          @create="createPolicy"
+          @validate="validatePolicy"
+          @activate="transitionPolicy('activate', $event)"
+          @retire="transitionPolicy('retire', $event)"
+          @rollback="transitionPolicy('rollback', $event)"
+        />
+      </NTabPane>
     </NTabs>
 
-    <template #thread>
+    <template v-if="selection.view !== 'policy'" #thread>
       <ReviewCommentThread
         :comments="comments"
         :anchor="selectedAnchor"
@@ -686,7 +788,7 @@ onMounted(async () => {
       />
     </template>
 
-    <template #decision>
+    <template v-if="selection.view !== 'policy'" #decision>
       <ReviewDecisionPanel
         :artifact="detail?.artifact || null"
         :findings="detail?.findings || []"
