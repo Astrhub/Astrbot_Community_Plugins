@@ -61,9 +61,7 @@ class CategoryStage:
                 "prompt_version": category_policy.prompt_version,
                 "policy_version_id": context.artifact.get("policy_version_id"),
                 "input_sha256": str((context.job.get("payload") or {}).get("input_sha256") or ""),
-                "idempotency_key": (
-                    f"category-run:{context.job['id']}:attempt-{context.attempt}"
-                ),
+                "idempotency_key": (f"category-run:{context.job['id']}:attempt-{context.attempt}"),
                 "coverage": {"stage_name": "category"},
             }
         )

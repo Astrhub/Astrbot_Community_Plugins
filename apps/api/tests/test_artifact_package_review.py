@@ -13,7 +13,11 @@ from pydantic import ValidationError
 
 from app.artifacts.jobs import ArtifactJobRunner
 from app.artifacts.models import ReviewStatus
-from app.artifacts.package_review import PackageInputBuilder, PackageReviewResultV1, PackageReviewService
+from app.artifacts.package_review import (
+    PackageInputBuilder,
+    PackageReviewResultV1,
+    PackageReviewService,
+)
 from app.artifacts.policy import LlmPolicy, ReviewPolicyV1, review_policy_sha256
 from app.artifacts.repository import InMemoryArtifactRepository
 from app.artifacts.service import public_review_run
@@ -332,9 +336,7 @@ def test_long_file_tree_is_trimmed_with_explicit_coverage(tmp_path: Path) -> Non
         )
         with pytest.raises(LlmOutputInvalid, match="bounded package input"):
             await PackageReviewService(
-                DeterministicStructuredLlmProvider(
-                    _result(suggested_files=[omitted])
-                ),
+                DeterministicStructuredLlmProvider(_result(suggested_files=[omitted])),
                 retry_delay_seconds=0,
             ).evaluate(prepared, manifest=files, policy=policy)
         return prepared
@@ -380,8 +382,7 @@ def test_service_rejects_suggested_file_over_policy_size(tmp_path: Path) -> None
         prepared = await PackageInputBuilder(repository, storage).build(artifact, policy)
         manifest = await repository.list_artifact_files(artifact["id"])
         oversized = [
-            {**item, "size_bytes": 1025} if item["path"] == "main.py" else item
-            for item in manifest
+            {**item, "size_bytes": 1025} if item["path"] == "main.py" else item for item in manifest
         ]
         with pytest.raises(LlmOutputInvalid, match="size limit"):
             await PackageReviewService(
@@ -402,13 +403,7 @@ def test_openai_adapter_uses_strict_schema_and_does_not_send_credentials(tmp_pat
             200,
             json={
                 "choices": [
-                    {
-                        "message": {
-                            "content": [
-                                {"type": "text", "text": json.dumps(_result())}
-                            ]
-                        }
-                    }
+                    {"message": {"content": [{"type": "text", "text": json.dumps(_result())}]}}
                 ],
                 "usage": {"prompt_tokens": 500, "completion_tokens": 120, "total_tokens": 620},
             },
@@ -456,9 +451,7 @@ def test_service_retries_429_but_does_not_retry_invalid_json(tmp_path: Path) -> 
         policy = _llm_policy(max_retries=2)
         prepared = await PackageInputBuilder(repository, storage).build(artifact, policy)
         manifest = await repository.list_artifact_files(artifact["id"])
-        retrying = DeterministicStructuredLlmProvider(
-            _result(), errors=[LlmProviderRateLimited()]
-        )
+        retrying = DeterministicStructuredLlmProvider(_result(), errors=[LlmProviderRateLimited()])
         evaluation = await PackageReviewService(
             retrying,
             retry_delay_seconds=0,
@@ -694,9 +687,7 @@ def test_missing_private_input_content_degrades_to_manual_review(tmp_path: Path)
     async def scenario() -> tuple[Any, dict[str, Any]]:
         repository, storage, artifact, policy, job = await _fixture(tmp_path)
         readme = next(
-            item
-            for item in repository.files[artifact["id"]]
-            if item["path"] == "README.md"
+            item for item in repository.files[artifact["id"]] if item["path"] == "README.md"
         )
         readme["content_key"] = "artifacts/missing/readme.txt"
         stage = LlmPackageStage(

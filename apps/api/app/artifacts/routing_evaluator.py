@@ -83,9 +83,7 @@ class RoutingEvaluator:
         if not policy_id:
             raise ValueError("review_policy_unavailable")
         current_runs = [
-            item
-            for item in runs
-            if str(item.get("policy_version_id") or "") == policy_id
+            item for item in runs if str(item.get("policy_version_id") or "") == policy_id
         ]
         current_run_ids = {str(item.get("id") or "") for item in current_runs}
         units, missing = _required_unit_results(policy, current_runs)
@@ -115,8 +113,7 @@ class RoutingEvaluator:
         degraded = [
             item
             for item in units
-            if item.status != "succeeded"
-            or item.outcome in {"degraded", "failed", "skipped"}
+            if item.status != "succeeded" or item.outcome in {"degraded", "failed", "skipped"}
         ]
         blocked = [item for item in units if item.outcome == "blocked"]
         deterministic_degraded = [
@@ -155,7 +152,9 @@ class RoutingEvaluator:
         if deterministic_blockers or deterministic_blocked:
             kind = RouteKind.AUTO_REJECT
             reasons = _reasons(
-                "deterministic_finding_reject" if deterministic_blockers else "required_stage_blocked"
+                "deterministic_finding_reject"
+                if deterministic_blockers
+                else "required_stage_blocked"
             )
         elif (
             deterministic_degraded

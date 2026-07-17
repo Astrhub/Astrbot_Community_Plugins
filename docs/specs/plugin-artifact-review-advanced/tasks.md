@@ -458,24 +458,24 @@
         - *Details*: 运行 notification/config/docs link/Compose/Ruff tests，敏感信息扫描后提交。
         - *Requirements*: FR-219 至 FR-222。
 
-- [ ] 21. **端到端完成度审计与最终回归**
-    - [ ] 21.1. 建立需求到证据矩阵
+- [x] 21. **端到端完成度审计与最终回归**
+    - [x] 21.1. 建立需求到证据矩阵
         - *Goal*: 对 FR-201 至 FR-224 和每条验收逐项提供代码、测试或真实运行证据。
         - *Details*: 未验证外部工具/容器门禁明确标为未完成，不能用 mock、接口或 UI 存在代替生产证据。
         - *Requirements*: 完成定义。
-    - [ ] 21.2. 执行真实端到端场景
+    - [x] 21.2. 执行真实端到端场景
         - *Goal*: 从提交 artifact 到发布/拒绝/修改/下架覆盖完整业务。
         - *Details*: 正常发布；仓库版本更新未过审旧 CDN 不冒充新版本；runtime failure；LLM invalid；request changes/resubmit；critical stable correlation/revoke；tool degraded。
         - *Requirements*: P2-P4 验收、全局回归。
-    - [ ] 21.3. 执行全量后端验证
+    - [x] 21.3. 执行全量后端验证
         - *Goal*: 证明迁移、API、worker、runner、policy、安全工具和旧市场行为无回归。
         - *Details*: Ruff check/format、全量 pytest、真实 PG 可选门禁、OpenAPI、Compose、迁移 checksum 和敏感信息检查。
         - *Requirements*: 全局回归。
-    - [ ] 21.4. 执行全量前端验证
+    - [x] 21.4. 执行全量前端验证
         - *Goal*: 证明工作台、路由和旧市场页面均可构建和测试。
         - *Details*: `vp check`、全量 Vitest、production build；桌面/移动截图检查文本、重叠、loading/error/empty 状态和交互。
         - *Requirements*: FR-224、全局回归。
-    - [ ] 21.5. 审查 Git 差异并提交最终修正
+    - [x] 21.5. 审查 Git 差异并提交最终修正
         - *Goal*: 只在全部要求有当前证据后结束目标。
         - *Details*: 查看 status/diff/staged，排除 `.env`、凭据、`.codegraph`、构建产物和用户无关改动；提交最终审计修正；不自动 push。
         - *Requirements*: 完成定义、Git 安全。

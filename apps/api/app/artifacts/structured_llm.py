@@ -75,6 +75,7 @@ class LlmError(RuntimeError):
             and isinstance(value, (bool, int))
         }
 
+
 class LlmProviderTimeout(LlmError):
     def __init__(self, *, attempts: int = 0) -> None:
         super().__init__(
@@ -347,9 +348,7 @@ class StructuredLlmCaller:
             if not error.retryable or attempts > max_retries:
                 raise error
             if self.retry_delay_seconds:
-                await asyncio.sleep(
-                    min(self.retry_delay_seconds * (2 ** (attempts - 1)), 5.0)
-                )
+                await asyncio.sleep(min(self.retry_delay_seconds * (2 ** (attempts - 1)), 5.0))
 
 
 def estimate_tokens(value: str) -> int:
@@ -372,7 +371,12 @@ def estimate_structured_prompt_tokens(
         separators=(",", ":"),
         sort_keys=True,
     )
-    return estimate_tokens(system_prompt) + estimate_tokens(input_json) + estimate_tokens(schema_json) + 32
+    return (
+        estimate_tokens(system_prompt)
+        + estimate_tokens(input_json)
+        + estimate_tokens(schema_json)
+        + 32
+    )
 
 
 def redact_llm_text(value: str, *, maximum: int) -> str:
@@ -452,8 +456,7 @@ def reject_control_fields(value: Any, *, forbidden: frozenset[str]) -> None:
 def redact_private_payload(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
-            str(key)[:128]: redact_private_payload(item)
-            for key, item in list(value.items())[:300]
+            str(key)[:128]: redact_private_payload(item) for key, item in list(value.items())[:300]
         }
     if isinstance(value, (list, tuple)):
         return [redact_private_payload(item) for item in value[:300]]
@@ -467,6 +470,7 @@ def redact_private_payload(value: Any) -> Any:
 def _redact_secrets(value: str) -> str:
     normalized = value
     for pattern in _SECRET_PATTERNS:
+
         def replace(match: re.Match[str]) -> str:
             prefix = "".join(group or "" for group in match.groups())
             replacement = f"{prefix}[REDACTED]"
@@ -534,9 +538,13 @@ def _normalize_usage(value: Any) -> Mapping[str, int]:
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw > 10_000_000:
             continue
         result[key] = raw
-    if "total_tokens" not in result and {
-        "prompt_tokens",
-        "completion_tokens",
-    } <= result.keys():
+    if (
+        "total_tokens" not in result
+        and {
+            "prompt_tokens",
+            "completion_tokens",
+        }
+        <= result.keys()
+    ):
         result["total_tokens"] = result["prompt_tokens"] + result["completion_tokens"]
     return result

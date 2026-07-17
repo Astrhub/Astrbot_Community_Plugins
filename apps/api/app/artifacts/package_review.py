@@ -450,9 +450,7 @@ class PackageInputBuilder:
             max_suggested_files=policy.max_files,
             max_file_bytes=policy.max_file_bytes,
             manual_review_at=str(routing_data.get("manual_review_at") or "low"),
-            deterministic_reject_at=str(
-                routing_data.get("deterministic_reject_at") or "critical"
-            ),
+            deterministic_reject_at=str(routing_data.get("deterministic_reject_at") or "critical"),
             auto_approve_enabled=bool(routing_data.get("auto_approve")),
         )
         truncated_reasons: set[str] = set()
@@ -661,9 +659,7 @@ class PackageReviewService:
             if not error.retryable or attempts > max_retries:
                 raise error
             if self.retry_delay_seconds:
-                await asyncio.sleep(
-                    min(self.retry_delay_seconds * (2 ** (attempts - 1)), 5.0)
-                )
+                await asyncio.sleep(min(self.retry_delay_seconds * (2 ** (attempts - 1)), 5.0))
 
 
 def validate_artifact_path(value: str) -> str:
@@ -723,9 +719,7 @@ def _fit_package_budget(
                 file_total=file_total,
                 file_included=len(current_tree),
                 requirement_entry_total=requirement_total,
-                requirement_entry_included=sum(
-                    len(item.entries) for item in current_requirements
-                ),
+                requirement_entry_included=sum(len(item.entries) for item in current_requirements),
                 deterministic_finding_total=finding_total,
                 deterministic_finding_included=len(current_findings),
                 changed_path_total=changed_path_total,
@@ -788,15 +782,11 @@ def _fit_package_budget(
             truncated_reasons.add("diff_paths_budget_truncated")
             continue
         if current_tree:
-            removable = [
-                item.path for item in current_tree if item.path not in protected_paths
-            ]
+            removable = [item.path for item in current_tree if item.path not in protected_paths]
             if removable:
                 remove = max(1, len(removable) // 4)
                 removed_paths = set(removable[-remove:])
-                current_tree = [
-                    item for item in current_tree if item.path not in removed_paths
-                ]
+                current_tree = [item for item in current_tree if item.path not in removed_paths]
                 truncated_reasons.add("file_tree_budget_truncated")
                 continue
         break
@@ -824,9 +814,7 @@ def estimate_llm_cost_microusd(
 
 def _precheck_metadata(runs: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     candidates = [
-        run
-        for run in runs
-        if run.get("type") == "precheck" and run.get("status") == "succeeded"
+        run for run in runs if run.get("type") == "precheck" and run.get("status") == "succeeded"
     ]
     if not candidates:
         return None
@@ -936,7 +924,9 @@ def _graph_summary(
 
 def _is_requirement_path(path: str) -> bool:
     name = PurePosixPath(path).name.casefold()
-    return name == "requirements.txt" or (name.startswith("requirements-") and name.endswith(".txt"))
+    return name == "requirements.txt" or (
+        name.startswith("requirements-") and name.endswith(".txt")
+    )
 
 
 def _protected_tree_paths(
@@ -949,18 +939,14 @@ def _protected_tree_paths(
     paths.update(diff.changed_paths)
     for item in tree:
         name = PurePosixPath(item.path).name.casefold()
-        if (
-            name
-            in {
-                "metadata.yaml",
-                "metadata.yml",
-                "readme",
-                "readme.md",
-                "readme.rst",
-                "readme.txt",
-            }
-            or _is_requirement_path(item.path)
-        ):
+        if name in {
+            "metadata.yaml",
+            "metadata.yml",
+            "readme",
+            "readme.md",
+            "readme.rst",
+            "readme.txt",
+        } or _is_requirement_path(item.path):
             paths.add(item.path)
     return paths
 

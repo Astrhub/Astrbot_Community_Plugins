@@ -64,9 +64,7 @@ class LlmPackageStage:
                 "prompt_version": llm_policy.prompt_version,
                 "result_schema_version": "1",
                 "policy_version_id": context.artifact.get("policy_version_id"),
-                "input_sha256": str(
-                    (context.job.get("payload") or {}).get("input_sha256") or ""
-                ),
+                "input_sha256": str((context.job.get("payload") or {}).get("input_sha256") or ""),
                 "idempotency_key": (
                     f"llm-package-run:{context.job['id']}:attempt-{context.attempt}"
                 ),
@@ -102,9 +100,7 @@ class LlmPackageStage:
                 allowed_categories=policy.category.allowed_categories,
             )
             input_sha256 = prepared.input_sha256
-            manifest = await context.repository.list_artifact_files(
-                str(context.artifact["id"])
-            )
+            manifest = await context.repository.list_artifact_files(str(context.artifact["id"]))
             evaluation = await self.service.evaluate(
                 prepared,
                 manifest=manifest,
@@ -146,7 +142,8 @@ class LlmPackageStage:
         effective_risk = _higher_risk(evaluation.result.risk_level.value, deterministic_risk)
         manual_threshold = policy.routing.manual_review_at.value
         manual_review_required = bool(
-            evaluation.result.needs_manual_review or not input_complete
+            evaluation.result.needs_manual_review
+            or not input_complete
             or risk_rank(effective_risk) >= risk_rank(manual_threshold)
         )
         coverage = {

@@ -28,7 +28,10 @@ _LANGUAGE = re.compile(r"^[a-z0-9_+.-]{0,64}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SECRET_PATTERNS = (
-    re.compile(r"-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----.*?-----END(?: [A-Z]+)? PRIVATE KEY-----", re.DOTALL),
+    re.compile(
+        r"-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----.*?-----END(?: [A-Z]+)? PRIVATE KEY-----",
+        re.DOTALL,
+    ),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9]{24,}\b"),
@@ -326,7 +329,9 @@ class OpenAICompatibleCategoryProvider:
         except httpx.HTTPError as exc:
             raise CategoryProviderUnavailable() from exc
         if len(response.content) > MAX_CATEGORY_RESPONSE_BYTES:
-            raise CategoryResultInvalid("Category provider response exceeds the private audit limit")
+            raise CategoryResultInvalid(
+                "Category provider response exceeds the private audit limit"
+            )
         raw: Any = {"body": response.text[:MAX_CATEGORY_RESPONSE_BYTES]}
         try:
             raw = response.json()
@@ -467,7 +472,9 @@ class CategoryInputBuilder:
             max(maximum, 1),
             str(item.get("sha256") or ""),
         )
-        return redact_category_text(content.decode("utf-8", errors="replace"), maximum=MAX_README_CHARS)
+        return redact_category_text(
+            content.decode("utf-8", errors="replace"), maximum=MAX_README_CHARS
+        )
 
 
 def redact_category_text(value: str, *, maximum: int) -> str:
@@ -482,8 +489,7 @@ def redact_category_text(value: str, *, maximum: int) -> str:
 def redact_private_payload(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
-            str(key)[:128]: redact_private_payload(item)
-            for key, item in list(value.items())[:200]
+            str(key)[:128]: redact_private_payload(item) for key, item in list(value.items())[:200]
         }
     if isinstance(value, (list, tuple)):
         return [redact_private_payload(item) for item in value[:200]]
@@ -496,9 +502,7 @@ def redact_private_payload(value: Any) -> Any:
 
 def _precheck_metadata(runs: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     candidates = [
-        run
-        for run in runs
-        if run.get("type") == "precheck" and run.get("status") == "succeeded"
+        run for run in runs if run.get("type") == "precheck" and run.get("status") == "succeeded"
     ]
     if not candidates:
         return None
@@ -512,13 +516,17 @@ def _fit_input_budget(input_data: CategoryInputV1, maximum: int) -> CategoryInpu
     current = input_data
     while len(current.canonical_json()) > maximum and current.readme_summary:
         over = len(current.canonical_json()) - maximum
-        keep = max(0, len(current.readme_summary) - max(over + 32, len(current.readme_summary) // 4))
+        keep = max(
+            0, len(current.readme_summary) - max(over + 32, len(current.readme_summary) // 4)
+        )
         current = current.model_copy(update={"readme_summary": current.readme_summary[:keep]})
     while len(current.canonical_json()) > maximum and current.file_tree:
         remove = max(1, len(current.file_tree) // 8)
         current = current.model_copy(update={"file_tree": current.file_tree[:-remove]})
     if len(current.canonical_json()) > maximum:
-        raise CategoryError("category_input_too_large", "Category metadata exceeds policy input budget")
+        raise CategoryError(
+            "category_input_too_large", "Category metadata exceeds policy input budget"
+        )
     return current
 
 

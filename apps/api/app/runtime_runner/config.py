@@ -154,14 +154,10 @@ def load_runtime_runner_settings(
         default=False,
         errors=errors,
     )
-    docker_seccomp_profile = str(
-        source.get("RUNTIME_RUNNER_SECCOMP_PROFILE", "builtin")
-    ).strip()
+    docker_seccomp_profile = str(source.get("RUNTIME_RUNNER_SECCOMP_PROFILE", "builtin")).strip()
     if docker_seccomp_profile != "builtin":
         errors.append("runtime_runner_seccomp_profile_invalid")
-    docker_apparmor_profile = str(
-        source.get("RUNTIME_RUNNER_APPARMOR_PROFILE", "")
-    ).strip()
+    docker_apparmor_profile = str(source.get("RUNTIME_RUNNER_APPARMOR_PROFILE", "")).strip()
     if docker_apparmor_profile and not re.fullmatch(
         r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
         docker_apparmor_profile,

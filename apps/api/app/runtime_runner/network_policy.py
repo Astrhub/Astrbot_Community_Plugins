@@ -74,11 +74,9 @@ class DockerNetworkPolicy:
             peer_labels = await self._container_labels(name)
             if name == self.proxy_container:
                 proxy_seen = True
-                if (
-                    peer_labels.get("astrbot.runtime.package-proxy") != "true"
-                    or peer_labels.get("astrbot.runtime.package-index-sha256")
-                    != package_index_sha256(self.package_index_url)
-                ):
+                if peer_labels.get("astrbot.runtime.package-proxy") != "true" or peer_labels.get(
+                    "astrbot.runtime.package-index-sha256"
+                ) != package_index_sha256(self.package_index_url):
                     raise _unverified()
             elif peer_labels.get("astrbot.runtime.managed") != "true":
                 raise _unverified()
@@ -104,7 +102,9 @@ class DockerNetworkPolicy:
         )
         _require_success(inspected)
         labels = _json_object(inspected.stdout)
-        if not all(isinstance(key, str) and isinstance(value, str) for key, value in labels.items()):
+        if not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in labels.items()
+        ):
             raise _unverified()
         return {str(key): str(value) for key, value in labels.items()}
 

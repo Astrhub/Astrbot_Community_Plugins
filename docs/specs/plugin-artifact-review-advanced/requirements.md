@@ -315,51 +315,51 @@ runtime 必须识别至少：依赖冲突、导入失败、metadata/入口不匹
 
 ### 7.1 P2 runtime 与 AI
 
-- [ ] API 和普通 worker 中不存在插件 import、requirements 安装或插件 subprocess 执行路径。
-- [ ] runtime job 只能由独立执行器在一次性受限容器内运行，并在成功、失败、超时后销毁。
-- [ ] smoke test 结构化记录 AstrBot/Python/镜像版本、依赖安装、import、startup、注册和清理结果。
-- [ ] requirements 破坏 AstrBot 依赖、导入失败和 handler/tool 注册失败均有稳定 finding。
-- [ ] runtime 容器无法访问站点数据库、Redis、Docker socket、云 metadata 和 smoke 阶段外网。
-- [ ] AI 分类遵循 reviewer/user/ai 优先级并保存置信度和理由。
-- [ ] 包级 LLM 不接收全量源码，文件级 LLM 只能读取服务端验证的选择集合。
-- [ ] 所有 LLM 输出通过 JSON schema；无效、超时或超预算进入明确失败/人工复核。
-- [ ] LLM finding 行号和 evidence 经服务端文件 SHA/行范围复核。
-- [ ] LLM 不能降低确定性 finding 严重度，不能直接批准或撤回。
-- [ ] 自动通过默认关闭；开启时仍满足全部确定性条件并产生可审计 `auto_approve` decision。
+- [x] API 和普通 worker 中不存在插件 import、requirements 安装或插件 subprocess 执行路径。
+- [x] runtime job 只能由独立执行器在一次性受限容器内运行，并在成功、失败、超时后销毁。
+- [x] smoke test 结构化记录 AstrBot/Python/镜像版本、依赖安装、import、startup、注册和清理结果。
+- [x] requirements 破坏 AstrBot 依赖、导入失败和 handler/tool 注册失败均有稳定 finding。
+- [x] runtime 容器无法访问站点数据库、Redis、Docker socket、云 metadata 和 smoke 阶段外网。
+- [x] AI 分类遵循 reviewer/user/ai 优先级并保存置信度和理由。
+- [x] 包级 LLM 不接收全量源码，文件级 LLM 只能读取服务端验证的选择集合。
+- [x] 所有 LLM 输出通过 JSON schema；无效、超时或超预算进入明确失败/人工复核。
+- [x] LLM finding 行号和 evidence 经服务端文件 SHA/行范围复核。
+- [x] LLM 不能降低确定性 finding 严重度，不能直接批准或撤回。
+- [x] 自动通过默认关闭；开启时仍满足全部确定性条件并产生可审计 `auto_approve` decision。
 
 ### 7.2 P3 diff 与工作台
 
-- [ ] added/deleted/modified/unchanged/确定 rename 的文件 diff 与 tree hash 一致。
-- [ ] Python import 图不执行代码，并正确计算入口依赖、反向依赖和删除文件影响。
-- [ ] 动态 import、语法错误、base 缺失等情况显式退化全量或人工复核。
-- [ ] requirements/metadata 变化始终触发完整 runtime/依赖审查。
-- [ ] 作者不能读取其他作者的文件、diff、评论或历史；管理员权限测试通过。
-- [ ] 文件内容 API 拒绝二进制、任意路径、超限响应和未登记对象 key。
-- [ ] diff 行级评论校验 side、SHA 和行范围；并发回复/解决不丢事件。
-- [ ] `request_changes` 不发布当前候选，重新提交生成新 artifact 并保留关联历史。
-- [ ] 工作台提供文件浏览、diff、线程、决定和版本时间线，所有不可信文本以转义方式显示。
-- [ ] 候选 critical 不会无证据撤回稳定版本；确认关联后先移出 feed 再撤回对象。
-- [ ] 更新未通过时当前 artifact 指针和旧 CDN 对象不变，`repo` 始终保留。
+- [x] added/deleted/modified/unchanged/确定 rename 的文件 diff 与 tree hash 一致。
+- [x] Python import 图不执行代码，并正确计算入口依赖、反向依赖和删除文件影响。
+- [x] 动态 import、语法错误、base 缺失等情况显式退化全量或人工复核。
+- [x] requirements/metadata 变化始终触发完整 runtime/依赖审查。
+- [x] 作者不能读取其他作者的文件、diff、评论或历史；管理员权限测试通过。
+- [x] 文件内容 API 拒绝二进制、任意路径、超限响应和未登记对象 key。
+- [x] diff 行级评论校验 side、SHA 和行范围；并发回复/解决不丢事件。
+- [x] `request_changes` 不发布当前候选，重新提交生成新 artifact 并保留关联历史。
+- [x] 工作台提供文件浏览、diff、线程、决定和版本时间线，所有不可信文本以转义方式显示。
+- [x] 候选 critical 不会无证据撤回稳定版本；确认关联后先移出 feed 再撤回对象。
+- [x] 更新未通过时当前 artifact 指针和旧 CDN 对象不变，`repo` 始终保留。
 
 ### 7.3 P4 安全增强与策略
 
-- [ ] EICAR/受控测试签名被 ClamAV 测试适配器识别并阻断，clean/unknown/error 三态不混淆。
-- [ ] YARA 规则 hash、版本、超时和命中位置可审计，恶意规则不能无限消耗资源。
-- [ ] requirements 与最终安装图生成结构化 SBOM，已知漏洞和修复版本可查询。
-- [ ] 漏洞数据过期/不可用显示 degraded，不显示“无漏洞”。
-- [ ] install/smoke 网络 profile 被基础设施强制，并有私网/metadata/站点服务阻断测试。
-- [ ] 非核心管理员不能创建或激活策略；无效策略不能替换 active 版本。
-- [ ] 并发激活只产生一个 active 版本，每个 artifact 固定完整 policy snapshot。
-- [ ] 策略、病毒库、YARA、依赖数据和模型版本进入 run/decision 审计。
+- [x] EICAR/受控测试签名被 ClamAV 测试适配器识别并阻断，clean/unknown/error 三态不混淆。
+- [x] YARA 规则 hash、版本、超时和命中位置可审计，恶意规则不能无限消耗资源。
+- [x] requirements 与最终安装图生成结构化 SBOM，已知漏洞和修复版本可查询。
+- [x] 漏洞数据过期/不可用显示 degraded，不显示“无漏洞”。
+- [x] install/smoke 网络 profile 被基础设施强制，并有私网/metadata/站点服务阻断测试。
+- [x] 非核心管理员不能创建或激活策略；无效策略不能替换 active 版本。
+- [x] 并发激活只产生一个 active 版本，每个 artifact 固定完整 policy snapshot。
+- [x] 策略、病毒库、YARA、依赖数据和模型版本进入 run/decision 审计。
 
 ### 7.4 全局回归
 
-- [ ] 现有 P0/P1 API、旧 listed 插件、GitHub metadata 同步和 AstrBot feed 契约不回归。
-- [ ] CDN key 继续使用 `{author_id}/{repo_name}/{version}/{plugin_name}-{version}-{suffix}.zip`，重试不改变 URL。
-- [ ] repo_version/published_version 不一致时 CDN URL 为空，但 `repo` 保留。
-- [ ] 后端 Ruff、全量 pytest、前端 `vp check`/Vitest/build、OpenAPI、Compose 和部署配置全部通过。
-- [ ] 至少在可用的容器运行时执行一次真实 smoke fixture；环境不具备时必须明确保留集成门禁，不能用 mock 冒充生产验证。
-- [ ] 文档准确说明信任边界、运维前置、失败语义和已知限制。
+- [x] 现有 P0/P1 API、旧 listed 插件、GitHub metadata 同步和 AstrBot feed 契约不回归。
+- [x] CDN key 继续使用 `{author_id}/{repo_name}/{version}/{plugin_name}-{version}-{suffix}.zip`，重试不改变 URL。
+- [x] repo_version/published_version 不一致时 CDN URL 为空，但 `repo` 保留。
+- [x] 后端 Ruff、全量 pytest、前端 `vp check`/Vitest/build、OpenAPI、Compose 和部署配置全部通过。
+- [x] 至少在可用的容器运行时执行一次真实 smoke fixture；环境不具备时必须明确保留集成门禁，不能用 mock 冒充生产验证。
+- [x] 文档准确说明信任边界、运维前置、失败语义和已知限制。
 
 ## 8. 非功能需求
 
