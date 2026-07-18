@@ -228,6 +228,8 @@ apps/market-web/blob-report/
 .env.local
 .DS_Store
 .codex/
+.ccg/
+.codegraph/
 
 # Project runtime data
 apps/api/data/
