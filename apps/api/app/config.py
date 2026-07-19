@@ -10,7 +10,7 @@ from .env_file import read_env_file
 
 DEFAULT_ENV_FILE_PATH = Path(__file__).resolve().parents[1] / ".env"
 DEFAULT_SITE_ICON_URL = "/logo.webp"
-DEFAULT_SITE_NAME = "AstrBot Community Plugins"
+DEFAULT_SITE_NAME = "Astrhub 插件市场"
 DEFAULT_SITE_SUBTITLE = "全新社区插件市场"
 DEFAULT_SITE_DESCRIPTION = "发现、评价和提交 AstrBot 插件。"
 DEFAULT_SITE_DOCS_URL = "https://docs.astrbot.app/dev/star/plugin-new.html"
