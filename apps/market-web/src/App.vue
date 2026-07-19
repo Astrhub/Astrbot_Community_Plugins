@@ -18,6 +18,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
+import { useHead } from "@unhead/vue";
 import { useRoute, useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
@@ -37,6 +38,10 @@ const router = useRouter();
 const isFormPage = computed(() =>
   ["/submit", "/settings", "/admin", "/admin/settings"].includes(route.path),
 );
+
+useHead(() => ({
+  meta: route.meta.noindex ? [{ name: "robots", content: "noindex,nofollow" }] : [],
+}));
 
 onMounted(async () => {
   store.initTheme();

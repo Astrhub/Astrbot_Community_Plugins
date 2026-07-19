@@ -1,7 +1,12 @@
 FROM node:24-bookworm-slim AS web-build
 WORKDIR /src/apps/market-web
+RUN apt-get update && apt-get install -y --no-install-recommends chromium \
+    && rm -rf /var/lib/apt/lists/*
 COPY apps/market-web/package*.json ./
 ARG NPM_REGISTRY=""
+ARG VITE_BASE_URL=""
+ENV VITE_BASE_URL=$VITE_BASE_URL \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
     && npm ci
 COPY apps/market-web/ ./

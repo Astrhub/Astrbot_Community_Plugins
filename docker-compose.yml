@@ -6,6 +6,7 @@ services:
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
+        VITE_BASE_URL: ${SITE_URL:-https://plugins.eloina.cn}
     image: astrbot-community-plugins:local
     restart: unless-stopped
     depends_on:

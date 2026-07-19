@@ -9,6 +9,7 @@
         :show-size-picker="false"
         :show-quick-jumper="showQuickJumper"
         :page-slot="pageSlot"
+        :label="renderPaginationLabel"
         aria-label="页面导航"
         ref="paginationRef"
       >
@@ -24,8 +25,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, nextTick, watch } from "vue";
-import { NPagination } from "naive-ui";
+import { computed, h, ref, onMounted, onUnmounted, nextTick, watch } from "vue";
+import { RouterLink, useRoute } from "vue-router";
+import { NPagination, type PaginationRenderLabel } from "naive-ui";
 
 const props = defineProps({
   modelValue: {
@@ -42,6 +44,7 @@ const props = defineProps({
   },
 });
 
+const route = useRoute();
 const paginationRef = ref(null);
 const quickJumperId = ref("pagination-quick-jumper-" + Math.random().toString(36).substr(2, 9));
 const quickJumperLabelId = computed(() => `${quickJumperId.value}-label`);
@@ -87,6 +90,23 @@ const pageSlot = computed(() => {
 
 const handlePageChange = (page) => {
   emit("update:modelValue", page);
+};
+
+const renderPaginationLabel: PaginationRenderLabel = (info) => {
+  if (info.type !== "page") return info.node;
+  return h(
+    RouterLink,
+    {
+      to: {
+        path: route.path,
+        query: { ...route.query, page: info.node > 1 ? String(info.node) : undefined },
+      },
+      class: "pagination-link",
+      "aria-current": info.active ? "page" : undefined,
+      onClick: (event: MouseEvent) => event.stopPropagation(),
+    },
+    () => String(info.node),
+  );
 };
 
 const handleResize = () => {
@@ -143,6 +163,15 @@ onUnmounted(() => {
     background: var(--pagination-bg-hover, rgba(255, 255, 255, 0.08));
     transform: translateY(-2px);
   }
+}
+
+:deep(.pagination-link) {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  color: inherit;
+  text-decoration: none;
 }
 
 :deep(.n-pagination) {
