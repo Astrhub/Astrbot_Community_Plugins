@@ -26,6 +26,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from redis.exceptions import RedisError
 
 from .artifacts import build_artifact_runtime
 from .artifacts.routes import build_artifact_router
@@ -59,6 +60,7 @@ from .schemas import (
     AnnouncementCreate,
     ApiKeyCreate,
     CommentCreate,
+    GithubTokenVerifyPayload,
     InternalLoginPayload,
     InternalUserCreate,
     MuteUserPayload,
@@ -133,6 +135,9 @@ GITHUB_METADATA_SYNC_WORKER_SLEEP_SECONDS = 60
 GITHUB_RATE_LIMIT_MESSAGE = (
     "GitHub API rate limit reached. Provide a read-only GitHub token and try again."
 )
+README_CACHE_TTL_SECONDS = 3600
+README_MAX_CONTENT_BYTES = 1_000_000
+README_CANDIDATES = ("README.md", "Readme.md", "readme.md", "README.MD", "README")
 SYSTEM_OPTION_KEYS = {
     "CLOUDFLARE_EMAIL_ACCOUNT_ID",
     "CLOUDFLARE_EMAIL_API_TOKEN",
@@ -423,6 +428,40 @@ def register_routes(app: FastAPI) -> None:
             "restart_required": settings_restart_required(settings, updated_runtime_config),
             "settings": updated,
         }
+
+    @app.post(
+        "/v1/admin/settings/github-tokens/verify",
+        tags=["core-admin"],
+        summary="重新验证 GitHub API Token",
+        description="重新验证 Token 池中的指定 Token，并更新脱敏状态。仅核心管理员可用。",
+        responses={
+            200: {"description": "验证完成"},
+            400: {"description": "Token 索引无效"},
+            401: {"description": "未登录"},
+            403: {"description": "需要核心管理员权限"},
+        },
+    )
+    async def verify_admin_github_token(
+        request: Request,
+        payload: GithubTokenVerifyPayload,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        if not is_core_admin(user):
+            raise error(403, "Only core admin can manage system settings")
+        settings = get_settings(request)
+        runtime_config = await effective_runtime_config(request)
+        market_settings = build_market_settings(settings, runtime_config)
+        token_value = str(market_settings.get("api_token") or "")
+        tokens = parse_github_api_tokens(token_value)
+        if payload.index >= len(tokens):
+            raise error(400, "GitHub API token index is out of range")
+        await verify_github_api_token(
+            get_store(request),
+            token_value,
+            tokens[payload.index],
+        )
+        updated_runtime_config = await effective_runtime_config(request)
+        return redact_market_settings(build_market_settings(settings, updated_runtime_config))
 
     @app.post(
         "/v1/admin/settings/email/test",
@@ -1101,6 +1140,44 @@ def register_routes(app: FastAPI) -> None:
         plugin = await get_plugin_or_404(request, plugin_id)
         user = await current_user(request)
         return await plugin_with_interaction_state(request, plugin, user)
+
+    @app.get(
+        "/v1/plugins/{plugin_id}/readme",
+        tags=["plugins"],
+        summary="获取插件 README",
+        description="从服务端缓存或 GitHub 获取插件 README/仓库内 Markdown 文件。无需登录。",
+        responses={
+            200: {"description": "README 内容"},
+            400: {"description": "仓库路径无效"},
+            404: {"description": "插件或 README 不存在"},
+        },
+    )
+    async def plugin_readme(
+        request: Request,
+        plugin_id: str,
+        path: str = "",
+    ) -> dict[str, Any]:
+        plugin = await get_plugin_or_404(request, plugin_id)
+        return await plugin_readme_response(request, plugin, path, refresh=False)
+
+    @app.post(
+        "/v1/plugins/{plugin_id}/readme/refresh",
+        tags=["plugins"],
+        summary="刷新插件 README 缓存",
+        description="绕过服务端缓存重新获取插件 README/仓库内 Markdown 文件。无需登录。",
+        responses={
+            200: {"description": "README 内容"},
+            400: {"description": "仓库路径无效"},
+            404: {"description": "插件或 README 不存在"},
+        },
+    )
+    async def refresh_plugin_readme(
+        request: Request,
+        plugin_id: str,
+        path: str = "",
+    ) -> dict[str, Any]:
+        plugin = await get_plugin_or_404(request, plugin_id)
+        return await plugin_readme_response(request, plugin, path, refresh=True)
 
     @app.patch(
         "/v1/plugins/{plugin_id}",
@@ -2100,6 +2177,103 @@ async def get_plugin_or_404(request: Request, plugin_id: str) -> dict[str, Any]:
     return plugin
 
 
+async def plugin_readme_response(
+    request: Request,
+    plugin: dict[str, Any],
+    path: str,
+    *,
+    refresh: bool,
+) -> dict[str, Any]:
+    normalized_path = normalize_plugin_readme_path(path)
+    cache_key = plugin_readme_cache_key(
+        str(plugin.get("id") or ""),
+        str(plugin.get("repo") or ""),
+        normalized_path,
+    )
+    if refresh:
+        await delete_plugin_readme_cache(request, cache_key)
+    else:
+        cached = await load_plugin_readme_cache(request, cache_key)
+        if cached:
+            return cached
+    try:
+        document = await fetch_plugin_readme_document(request.app, plugin, normalized_path)
+    except (GithubMetadataError, httpx.HTTPError, UnicodeError, ValueError) as exc:
+        LOGGER.info(
+            "Plugin README fetch failed",
+            extra={"plugin_id": plugin.get("id"), "path": normalized_path},
+        )
+        raise error(404, "Plugin README not found") from exc
+    if not document or not str(document.get("content") or ""):
+        raise error(404, "Plugin README not found")
+    await save_plugin_readme_cache(request, cache_key, document)
+    return document
+
+
+def normalize_plugin_readme_path(value: str) -> str:
+    path = unquote(str(value or "")).strip().lstrip("/")
+    if not path:
+        return ""
+    if len(path) > 512 or "\\" in path or any(ord(char) < 32 for char in path):
+        raise error(400, "Invalid README path")
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise error(400, "Invalid README path")
+    return "/".join(parts)
+
+
+def plugin_readme_cache_key(plugin_id: str, repo: str, path: str) -> str:
+    digest = hashlib.sha256(f"{plugin_id}\0{repo}\0{path}".encode("utf-8")).hexdigest()
+    return f"market:plugin-readme:v1:{digest}"
+
+
+async def load_plugin_readme_cache(
+    request: Request,
+    cache_key: str,
+) -> dict[str, Any] | None:
+    redis_client = getattr(get_store(request), "redis", None)
+    if not redis_client:
+        return None
+    try:
+        raw = await redis_client.get(cache_key)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw) if raw else None
+    except (UnicodeError, json.JSONDecodeError, TypeError, OSError, RuntimeError, RedisError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
+        return None
+    return {**payload, "cached": True}
+
+
+async def save_plugin_readme_cache(
+    request: Request,
+    cache_key: str,
+    payload: dict[str, Any],
+) -> None:
+    redis_client = getattr(get_store(request), "redis", None)
+    if not redis_client:
+        return
+    try:
+        await redis_client.set(
+            cache_key,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            ex=README_CACHE_TTL_SECONDS,
+        )
+    except (OSError, RuntimeError, TypeError, RedisError):
+        return
+
+
+async def delete_plugin_readme_cache(request: Request, cache_key: str) -> None:
+    redis_client = getattr(get_store(request), "redis", None)
+    if not redis_client:
+        return
+    try:
+        await redis_client.delete(cache_key)
+    except (OSError, RuntimeError, TypeError, RedisError):
+        return
+
+
 def notification_preference_enabled(user: dict[str, Any] | None, key: str) -> bool:
     if not user:
         return False
@@ -2768,6 +2942,123 @@ async def safe_fetch_plugin_github_metadata(
         return {}
 
 
+async def fetch_plugin_readme_document(
+    app: FastAPI,
+    plugin: dict[str, Any],
+    path: str,
+) -> dict[str, Any] | None:
+    match = GITHUB_REPO_PATTERN.fullmatch(str(plugin.get("repo") or "").strip())
+    if not match:
+        return None
+    owner = match.group("owner")
+    repo_name = match.group("repo")
+    settings = await runtime_settings_for_app(app)
+    runtime_config = await load_system_options(app.state.store)
+    token_statuses = parse_github_api_token_statuses(
+        runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
+    )
+    token = next_system_github_api_token(app, settings, token_statuses)
+    headers = github_api_headers(settings=settings, token=token, token_statuses=token_statuses)
+    status_store = app.state.store if token else None
+    api_path = f"contents/{quote(path, safe='/')}" if path else "readme"
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        response = await github_get(
+            client,
+            f"https://api.github.com/repos/{owner}/{repo_name}/{api_path}",
+            headers,
+            store=status_store,
+        )
+        raise_for_github_rate_limit(response)
+        document = github_content_document(response)
+        if document:
+            return document
+
+        branches = await github_readme_branches(
+            client,
+            owner,
+            repo_name,
+            headers,
+            store=status_store,
+        )
+        candidates = (path,) if path else README_CANDIDATES
+        for branch in branches:
+            for candidate in candidates:
+                raw_url = (
+                    "https://raw.githubusercontent.com/"
+                    f"{owner}/{repo_name}/{quote(branch, safe='')}/{quote(candidate, safe='/')}"
+                )
+                raw_response = await client.get(
+                    raw_url,
+                    headers={"accept": "text/plain", "user-agent": "astrbot-community-plugins"},
+                )
+                if raw_response.status_code != 200:
+                    continue
+                content = github_response_text(raw_response)
+                if content:
+                    return build_plugin_readme_document(content, raw_url)
+    return None
+
+
+def github_content_document(response: Any) -> dict[str, Any] | None:
+    if int(getattr(response, "status_code", 0) or 0) != 200:
+        return None
+    data = response.json()
+    if not isinstance(data, dict) or data.get("type") not in {None, "file"}:
+        return None
+    content = str(data.get("content") or "")
+    if content and str(data.get("encoding") or "base64").lower() == "base64":
+        try:
+            decoded = base64.b64decode(re.sub(r"\s+", "", content)).decode(
+                "utf-8",
+                errors="replace",
+            )
+        except (ValueError, TypeError):
+            decoded = ""
+        if decoded and len(decoded.encode("utf-8")) <= README_MAX_CONTENT_BYTES:
+            source_url = str(data.get("download_url") or data.get("html_url") or "")
+            return build_plugin_readme_document(decoded, source_url)
+    return None
+
+
+async def github_readme_branches(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo_name: str,
+    headers: dict[str, str],
+    *,
+    store: Any | None,
+) -> list[str]:
+    response = await github_get(
+        client,
+        f"https://api.github.com/repos/{owner}/{repo_name}",
+        headers,
+        store=store,
+    )
+    raise_for_github_rate_limit(response)
+    default_branch = ""
+    if response.status_code == 200:
+        data = response.json()
+        if isinstance(data, dict):
+            default_branch = str(data.get("default_branch") or "").strip()
+    return list(dict.fromkeys(branch for branch in (default_branch, "main", "master") if branch))
+
+
+def github_response_text(response: Any) -> str:
+    content = bytes(getattr(response, "content", b"") or b"")
+    if not content or len(content) > README_MAX_CONTENT_BYTES:
+        return ""
+    return content.decode("utf-8", errors="replace")
+
+
+def build_plugin_readme_document(content: str, source_url: str) -> dict[str, Any]:
+    return {
+        "content": content,
+        "source_url": source_url,
+        "fetched_at": isoformat_utc(datetime.now(UTC)),
+        "cached": False,
+    }
+
+
 async def fetch_plugin_submission_metadata_preview(
     repo: str,
     settings: Settings,
@@ -2982,10 +3273,77 @@ async def record_github_api_token_response(store: Any, token: str, response: Any
     token_pool = runtime_config.get("GITHUB_API_TOKEN", "")
     if token not in parse_github_api_tokens(token_pool):
         return
-    statuses = clean_github_api_token_statuses(
+    await save_github_api_token_status(
+        store,
         token_pool,
-        runtime_config.get("GITHUB_API_TOKEN_STATUS", ""),
+        token,
+        status,
+        status_value=runtime_config.get("GITHUB_API_TOKEN_STATUS", ""),
     )
+
+
+async def verify_github_api_token(store: Any, token_value: str, token: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            response = await client.get(
+                "https://api.github.com/rate_limit",
+                headers=github_api_headers(token=token),
+            )
+        status = github_api_token_verification_status(response)
+    except httpx.HTTPError as exc:
+        status = {
+            "disabled": False,
+            "status": "error",
+            "error_code": 0,
+            "error_message": str(exc)[:200] or "GitHub API verification failed",
+            "retry_after_seconds": 0,
+            "reset_at": "",
+            "checked_at": isoformat_utc(datetime.now(UTC)),
+        }
+    await save_github_api_token_status(store, token_value, token, status)
+
+
+def github_api_token_verification_status(response: Any) -> dict[str, Any]:
+    mapped = github_api_token_status_from_response(response)
+    if mapped:
+        return mapped
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    checked_at = isoformat_utc(datetime.now(UTC))
+    if 200 <= status_code < 400:
+        return {
+            "disabled": False,
+            "status": "active",
+            "error_code": 0,
+            "error_message": "",
+            "retry_after_seconds": 0,
+            "reset_at": "",
+            "checked_at": checked_at,
+        }
+    return {
+        "disabled": False,
+        "status": "error",
+        "error_code": status_code,
+        "error_message": github_response_message(response) or "GitHub API verification failed",
+        "retry_after_seconds": 0,
+        "reset_at": "",
+        "checked_at": checked_at,
+    }
+
+
+async def save_github_api_token_status(
+    store: Any,
+    token_value: str,
+    token: str,
+    status: dict[str, Any],
+    *,
+    status_value: str | None = None,
+) -> None:
+    if token not in parse_github_api_tokens(token_value):
+        return
+    if status_value is None:
+        runtime_config = await load_system_options(store)
+        status_value = runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
+    statuses = clean_github_api_token_statuses(token_value, status_value)
     statuses[github_api_token_hash(token)] = status
     await save_system_options_to_store(
         store,

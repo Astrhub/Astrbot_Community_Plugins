@@ -389,6 +389,10 @@ class SystemSettingsPayload(BaseModel):
     email: EmailSetupConfig = Field(default_factory=EmailSetupConfig)
 
 
+class GithubTokenVerifyPayload(BaseModel):
+    index: int = Field(ge=0)
+
+
 class TestEmailPayload(BaseModel):
     to: str
     subject: str = "AstrBot Community Plugins test email"
