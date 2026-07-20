@@ -28,10 +28,12 @@ import IrisMask from "./components/IrisMask.vue";
 import BackToTop from "./components/BackToTop.vue";
 
 import { darkThemeOverrides, lightThemeOverrides } from "./config/darkTheme";
+import { usePageZoom } from "./composables/usePageZoom";
 import { usePluginStore } from "./stores/plugins";
 
 const store = usePluginStore();
 const { irisMaskActive, irisMaskPosition, isDarkMode } = storeToRefs(store);
+usePageZoom();
 
 const route = useRoute();
 const router = useRouter();
