@@ -4,12 +4,14 @@ import secrets
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import asyncpg
 from redis import asyncio as redis_asyncio
 
 from .auth import Role, normalize_role
+from .schema_migrations import apply_schema_migrations
 
 
 def utc_now() -> str:
@@ -27,6 +29,8 @@ def serialize_value(value: Any) -> Any:
         return [serialize_value(item) for item in value]
     if isinstance(value, dict):
         return {key: serialize_value(item) for key, item in value.items()}
+    if isinstance(value, Decimal):
+        return float(value)
     return value
 
 
@@ -261,10 +265,15 @@ class InMemoryMarketStore:
         return self._find("comments", "id", comment_id)
 
     def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        plugin_id = payload.get("id") or payload["name"]
+        existing = self.get_plugin(plugin_id)
+        if existing and existing.get("owner_user_id") != user.get("id"):
+            raise PermissionError("plugin_owner_mismatch")
         plugin = self._normalize_plugin(
             {
+                **(existing or {}),
                 **plugin_metadata_from_payload(payload),
-                "id": payload.get("id") or payload["name"],
+                "id": plugin_id,
                 "name": payload["name"],
                 "display_name": payload.get("display_name") or payload["name"],
                 "desc": payload["desc"],
@@ -272,13 +281,21 @@ class InMemoryMarketStore:
                 "repo": payload["repo"],
                 "tags": payload.get("tags", []),
                 "social_link": payload.get("social_link", ""),
+                "category": payload.get("category", (existing or {}).get("category", "other")),
+                "category_source": (
+                    "user"
+                    if "category" in payload
+                    else (existing or {}).get("category_source", "user")
+                ),
+                "repo_version": (existing or {}).get("repo_version", ""),
+                "current_artifact_id": (existing or {}).get("current_artifact_id"),
                 "owner_user_id": user["id"],
                 "owner_github_login": user["github_login"],
-                "status": "pending",
-                "stars": 0,
-                "likes": 0,
-                "comments_count": 0,
-                "created_at": utc_now(),
+                "status": (existing or {}).get("status", "pending"),
+                "stars": int((existing or {}).get("stars") or 0),
+                "likes": int((existing or {}).get("likes") or 0),
+                "comments_count": int((existing or {}).get("comments_count") or 0),
+                "created_at": (existing or {}).get("created_at") or utc_now(),
                 "updated_at": utc_now(),
             }
         )
@@ -290,6 +307,40 @@ class InMemoryMarketStore:
                 "payload": deepcopy(payload),
                 "status": "pending",
                 "created_at": utc_now(),
+            }
+        )
+        self._upsert_plugin(plugin)
+        return deepcopy(plugin)
+
+    def register_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        plugin_id = payload.get("id") or payload["name"]
+        existing = self.get_plugin(plugin_id)
+        if existing:
+            if existing.get("owner_user_id") != user.get("id"):
+                raise PermissionError("plugin_owner_mismatch")
+            return existing
+        plugin = self._normalize_plugin(
+            {
+                **plugin_metadata_from_payload(payload),
+                "id": plugin_id,
+                "name": payload["name"],
+                "display_name": payload.get("display_name") or payload["name"],
+                "desc": payload["desc"],
+                "author": payload["author"],
+                "repo": payload["repo"],
+                "tags": payload.get("tags", []),
+                "category": payload.get("category", "other"),
+                "category_source": "user",
+                "owner_user_id": user["id"],
+                "owner_github_login": user.get("github_login", ""),
+                "status": "pending",
+                "stars": 0,
+                "likes": 0,
+                "comments_count": 0,
+                "repo_version": payload.get("version", ""),
+                "current_artifact_id": None,
+                "created_at": utc_now(),
+                "updated_at": utc_now(),
             }
         )
         self._upsert_plugin(plugin)
@@ -655,6 +706,29 @@ class InMemoryMarketStore:
         self.state["notifications"].insert(0, notification)
         return deepcopy(notification)
 
+    def create_notification_once(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        notification_type: str,
+        metadata: dict[str, Any],
+        dedupe_key: str,
+    ) -> dict[str, Any]:
+        for notification in self.state["notifications"]:
+            if notification.get("dedupe_key") == dedupe_key:
+                return deepcopy(notification)
+        notification = self.create_notification(
+            user_id,
+            title,
+            body,
+            notification_type,
+            metadata,
+        )
+        self.state["notifications"][0]["dedupe_key"] = dedupe_key
+        notification["dedupe_key"] = dedupe_key
+        return notification
+
     def list_notifications(
         self,
         user_id: str,
@@ -883,6 +957,13 @@ class InMemoryMarketStore:
             "likes": int(plugin.get("likes") or 0),
             "comments_count": int(plugin.get("comments_count") or 0),
             "status": plugin.get("status") or "pending",
+            "suggested_category": str(plugin.get("suggested_category") or ""),
+            "category_confidence": (
+                float(plugin["category_confidence"])
+                if plugin.get("category_confidence") is not None
+                else None
+            ),
+            "category_reason": str(plugin.get("category_reason") or ""),
         }
 
     def _comment_with_user(self, comment: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
@@ -911,6 +992,13 @@ PLUGIN_COLUMN_KEYS = {
     "likes",
     "comments_count",
     "moderated_by",
+    "repo_version",
+    "current_artifact_id",
+    "category",
+    "category_source",
+    "suggested_category",
+    "category_confidence",
+    "category_reason",
 }
 
 
@@ -1064,11 +1152,15 @@ CREATE TABLE IF NOT EXISTS market_notifications (
     title text NOT NULL,
     body text NOT NULL,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    dedupe_key text,
     read boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS market_notifications_user_idx
     ON market_notifications(user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS market_notifications_dedupe_idx
+    ON market_notifications(dedupe_key)
+    WHERE dedupe_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS market_api_keys (
     id text PRIMARY KEY,
@@ -1221,6 +1313,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 "ALTER TABLE market_notifications ADD COLUMN IF NOT EXISTS read boolean "
                 "NOT NULL DEFAULT false"
             )
+            await apply_schema_migrations(connection)
 
     async def _apply_email_notification_defaults_migration(
         self,
@@ -1465,11 +1558,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
                            repo = EXCLUDED.repo,
                            tags = EXCLUDED.tags,
                            social_link = EXCLUDED.social_link,
-                           owner_user_id = EXCLUDED.owner_user_id,
-                           owner_github_login = EXCLUDED.owner_github_login,
                            metadata = EXCLUDED.metadata,
-                           status = 'pending',
                            updated_at = now()
+                     WHERE market_plugins.owner_user_id = EXCLUDED.owner_user_id
                     RETURNING *
                     """,
                     plugin_id,
@@ -1484,6 +1575,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     user["github_login"],
                     metadata,
                 )
+                if not row:
+                    raise PermissionError("plugin_owner_mismatch")
                 await connection.execute(
                     """
                     INSERT INTO market_submissions (id, plugin_id, user_id, payload, status)
@@ -1495,6 +1588,43 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     payload,
                 )
                 return self._plugin_from_record(row)
+
+    async def register_plugin(
+        self, user: dict[str, Any], payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        plugin_id = payload.get("id") or payload["name"]
+        metadata = plugin_metadata_from_payload(payload)
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO market_plugins (
+                id, name, display_name, desc_text, author, repo, tags, social_link,
+                owner_user_id, owner_github_login, status, stars, likes, comments_count,
+                metadata, category, category_source, repo_version
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
+                    'pending', 0, 0, 0, $11::jsonb, $12, 'user', $13)
+            ON CONFLICT (id) DO UPDATE
+               SET id = market_plugins.id
+             WHERE market_plugins.owner_user_id = EXCLUDED.owner_user_id
+            RETURNING *
+            """,
+            plugin_id,
+            payload["name"],
+            payload.get("display_name") or payload["name"],
+            payload["desc"],
+            payload["author"],
+            payload["repo"],
+            payload.get("tags", []),
+            payload.get("social_link", ""),
+            user["id"],
+            user.get("github_login", ""),
+            metadata,
+            payload.get("category", "other"),
+            payload.get("version", ""),
+        )
+        if not row:
+            raise PermissionError("plugin_owner_mismatch")
+        return self._plugin_from_record(row)
 
     async def list_submissions(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(
@@ -1671,7 +1801,13 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    likes = $13,
                    comments_count = $14,
                    moderated_by = $15,
-                   metadata = $16::jsonb,
+                   repo_version = $16,
+                   category = $17,
+                   category_source = $18,
+                   suggested_category = $19,
+                   category_confidence = $20,
+                   category_reason = $21,
+                   metadata = $22::jsonb,
                    updated_at = now()
              WHERE id = $1
          RETURNING *
@@ -1691,6 +1827,12 @@ class PgRedisMarketStore(InMemoryMarketStore):
             int(updated.get("likes") or 0),
             int(updated.get("comments_count") or 0),
             updated.get("moderated_by"),
+            updated.get("repo_version", ""),
+            updated.get("category", "other"),
+            updated.get("category_source", "user"),
+            updated.get("suggested_category", ""),
+            updated.get("category_confidence"),
+            updated.get("category_reason", ""),
             metadata,
         )
         return self._plugin_from_record(row) if row else None
@@ -2191,6 +2333,42 @@ class PgRedisMarketStore(InMemoryMarketStore):
             metadata or {},
         )
         return self._notification_from_record(row)
+
+    async def create_notification_once(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        notification_type: str,
+        metadata: dict[str, Any],
+        dedupe_key: str,
+    ) -> dict[str, Any]:
+        async with self._pool().acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                INSERT INTO market_notifications (
+                    id, user_id, type, title, body, metadata, dedupe_key
+                )
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                new_id("notification"),
+                user_id,
+                notification_type,
+                title,
+                body,
+                metadata,
+                dedupe_key,
+            )
+            if row is None:
+                row = await connection.fetchrow(
+                    "SELECT * FROM market_notifications WHERE dedupe_key = $1",
+                    dedupe_key,
+                )
+            if row is None:
+                raise RuntimeError("notification_deduplication_failed")
+            return self._notification_from_record(row)
 
     async def list_notifications(
         self,

@@ -1,0 +1,12 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates squid squidclient \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/squid \
+    && chown proxy:proxy /run/squid
+
+COPY deploy/runtime-runner/squid.conf /etc/squid/squid.conf
+
+EXPOSE 3128
+ENTRYPOINT ["squid", "-N", "-f", "/etc/squid/squid.conf"]

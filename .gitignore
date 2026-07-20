@@ -220,11 +220,16 @@ __marimo__/
 # Node / frontend
 node_modules/
 dist/
+apps/market-web/playwright-report/
+apps/market-web/test-results/
+apps/market-web/blob-report/
 
 # Local environment
 .env.local
 .DS_Store
 .codex/
+.ccg/
+.codegraph/
 
 # Project runtime data
 apps/api/data/

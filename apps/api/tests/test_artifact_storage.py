@@ -1,0 +1,314 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import io
+from pathlib import Path
+
+import pytest
+from botocore.exceptions import ClientError
+
+from app.artifacts.storage import (
+    ArtifactStorageError,
+    LocalArtifactStorage,
+    S3ArtifactStorage,
+    build_content_key,
+    build_diff_key,
+    build_published_key,
+    build_quarantine_key,
+)
+from app.config import load_settings
+
+
+async def byte_stream(*chunks: bytes):
+    for chunk in chunks:
+        yield chunk
+
+
+class FakeS3Client:
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], tuple[bytes, dict[str, str]]] = {}
+
+    def put_object(self, **kwargs):
+        location = (kwargs["Bucket"], kwargs["Key"])
+        if kwargs.get("IfNoneMatch") == "*" and location in self.objects:
+            raise ClientError(
+                {
+                    "Error": {"Code": "PreconditionFailed", "Message": "exists"},
+                    "ResponseMetadata": {"HTTPStatusCode": 412},
+                },
+                "PutObject",
+            )
+        body = kwargs["Body"]
+        content = body.read() if hasattr(body, "read") else bytes(body)
+        self.objects[location] = (content, dict(kwargs.get("Metadata") or {}))
+        return {}
+
+    def head_object(self, *, Bucket: str, Key: str):
+        location = (Bucket, Key)
+        if location not in self.objects:
+            raise ClientError(
+                {
+                    "Error": {"Code": "NotFound", "Message": "missing"},
+                    "ResponseMetadata": {"HTTPStatusCode": 404},
+                },
+                "HeadObject",
+            )
+        content, metadata = self.objects[location]
+        return {"ContentLength": len(content), "Metadata": metadata}
+
+    def download_file(self, bucket: str, key: str, filename: str) -> None:
+        content, _ = self.objects[(bucket, key)]
+        Path(filename).write_bytes(content)
+
+    def get_object(self, *, Bucket: str, Key: str):
+        content, _ = self.objects[(Bucket, Key)]
+        return {"Body": io.BytesIO(content)}
+
+    def delete_object(self, *, Bucket: str, Key: str):
+        self.objects.pop((Bucket, Key), None)
+        return {}
+
+
+def test_build_published_key_uses_required_cdn_shape() -> None:
+    key = build_published_key(
+        author_id="10001",
+        repo_name="astrbot_plugin_demo",
+        version="v1.2.0",
+        plugin_name="astrbot_plugin_demo",
+        suffix="a1b2c3d4e5",
+    )
+
+    assert key == ("10001/astrbot_plugin_demo/v1.2.0/astrbot_plugin_demo-v1.2.0-a1b2c3d4e5.zip")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("author_id", "../100"),
+        ("repo_name", "owner/repo"),
+        ("version", "v1%2F2"),
+        ("plugin_name", ""),
+        ("suffix", "short"),
+    ],
+)
+def test_build_published_key_rejects_unsafe_segments(field: str, value: str) -> None:
+    payload = {
+        "author_id": "100",
+        "repo_name": "repo",
+        "version": "v1.0.0",
+        "plugin_name": "astrbot_plugin_demo",
+        "suffix": "a1b2c3d4e5",
+    }
+    payload[field] = value
+
+    with pytest.raises(ArtifactStorageError):
+        build_published_key(**payload)
+
+
+def test_same_version_with_distinct_suffixes_has_distinct_keys() -> None:
+    common = {
+        "author_id": "100",
+        "repo_name": "repo",
+        "version": "v1.0.0",
+        "plugin_name": "astrbot_plugin_demo",
+    }
+
+    first = build_published_key(**common, suffix="aaaaaaaaaa")
+    second = build_published_key(**common, suffix="bbbbbbbbbb")
+
+    assert first != second
+
+
+def test_build_diff_key_is_private_and_rejects_unsafe_identifiers() -> None:
+    assert build_diff_key("artifact_123", "diff_456") == (
+        "artifacts/artifact_123/diffs/diff_456.json"
+    )
+
+    for artifact_id, diff_id in (
+        ("../artifact", "diff_456"),
+        ("artifact_123", "../diff"),
+        ("artifact/123", "diff_456"),
+        ("artifact_123", "diff/456"),
+    ):
+        with pytest.raises(ArtifactStorageError, match="Invalid"):
+            build_diff_key(artifact_id, diff_id)
+
+
+def test_local_storage_is_idempotent_and_never_overwrites(tmp_path: Path) -> None:
+    storage = LocalArtifactStorage(tmp_path, "https://cdn.example.com")
+    quarantine_key = build_quarantine_key("artifact_123")
+    published_key = build_published_key(
+        author_id="100",
+        repo_name="repo",
+        version="v1.0.0",
+        plugin_name="astrbot_plugin_demo",
+        suffix="a1b2c3d4e5",
+    )
+    content = b"plugin-archive"
+    digest = hashlib.sha256(content).hexdigest()
+
+    async def scenario() -> None:
+        first = await storage.put_quarantine(
+            byte_stream(content[:5], content[5:]), quarantine_key, 1024, digest
+        )
+        second = await storage.put_quarantine(byte_stream(content), quarantine_key, 1024, digest)
+        assert first.sha256 == second.sha256 == digest
+
+        published = await storage.publish_if_absent(quarantine_key, published_key, digest)
+        repeated = await storage.publish_if_absent(quarantine_key, published_key, digest)
+        assert published == repeated
+        assert storage.public_url(published_key).endswith(published_key)
+
+        await storage.revoke_published(published_key)
+        assert await storage.stat_published(published_key) is None
+
+    asyncio.run(scenario())
+
+
+def test_local_storage_rejects_conflicting_object(tmp_path: Path) -> None:
+    storage = LocalArtifactStorage(tmp_path, "https://cdn.example.com")
+    key = build_quarantine_key("artifact_conflict")
+
+    async def scenario() -> None:
+        await storage.put_quarantine(byte_stream(b"first"), key, 1024)
+        with pytest.raises(ArtifactStorageError, match="different content"):
+            await storage.put_quarantine(byte_stream(b"second"), key, 1024)
+
+    asyncio.run(scenario())
+
+
+def test_private_content_range_validates_size_sha_and_bounds(tmp_path: Path) -> None:
+    storage = LocalArtifactStorage(tmp_path, "https://cdn.example.com")
+    key = build_content_key("artifact_range", "file_range")
+    content = b"alpha\nbeta\ngamma\n"
+    digest = hashlib.sha256(content).hexdigest()
+
+    async def scenario() -> None:
+        await storage.put_text_content(key, content)
+        stat = await storage.stat_text_content(key)
+        assert stat is not None
+        assert stat.size_bytes == len(content)
+        assert stat.sha256 == digest
+
+        result = await storage.read_text_content_range(
+            key,
+            start_byte=6,
+            max_bytes=4,
+            max_object_bytes=1024,
+            expected_size_bytes=len(content),
+            expected_sha256=digest,
+        )
+        assert result.content == b"beta"
+        assert result.start_byte == 6
+        assert result.end_byte == 10
+        assert result.size_bytes == len(content)
+        assert result.sha256 == digest
+        assert result.truncated is True
+
+        with pytest.raises(ArtifactStorageError, match="range"):
+            await storage.read_text_content_range(
+                key,
+                start_byte=-1,
+                max_bytes=4,
+                max_object_bytes=1024,
+            )
+        with pytest.raises(ArtifactStorageError, match="size"):
+            await storage.read_text_content_range(
+                key,
+                start_byte=0,
+                max_bytes=4,
+                max_object_bytes=1024,
+                expected_size_bytes=len(content) + 1,
+            )
+        with pytest.raises(ArtifactStorageError, match="does not match"):
+            await storage.read_text_content_range(
+                key,
+                start_byte=0,
+                max_bytes=4,
+                max_object_bytes=1024,
+                expected_sha256="0" * 64,
+            )
+
+    asyncio.run(scenario())
+
+
+def test_s3_storage_uses_conditional_create_and_digest_metadata(tmp_path: Path) -> None:
+    settings = load_settings(
+        {
+            "ARTIFACTS_ENABLED": "true",
+            "ARTIFACT_STORAGE_BACKEND": "s3",
+            "ARTIFACT_CDN_BASE_URL": "https://cdn.example.com",
+            "ARTIFACT_S3_ENDPOINT_URL": "https://s3.example.com",
+            "ARTIFACT_S3_ACCESS_KEY_ID": "access",
+            "ARTIFACT_S3_SECRET_ACCESS_KEY": "secret",
+            "ARTIFACT_QUARANTINE_BUCKET": "quarantine",
+            "ARTIFACT_PUBLISHED_BUCKET": "published",
+            "DATABASE_URL": "postgresql://example.invalid/market",
+        }
+    )
+    client = FakeS3Client()
+    storage = S3ArtifactStorage(settings.artifacts, client=client)
+    source_key = build_quarantine_key("artifact_s3")
+    published_key = build_published_key(
+        author_id="100",
+        repo_name="repo",
+        version="v1.0.0",
+        plugin_name="astrbot_plugin_demo",
+        suffix="0123456789",
+    )
+    content = b"s3-plugin"
+    digest = hashlib.sha256(content).hexdigest()
+
+    async def scenario() -> None:
+        await storage.put_quarantine(byte_stream(content), source_key, 1024, digest)
+        result_key = "runtime/results/dispatch-1/result.json"
+        result_content = b'{"status":"passed"}'
+        result_sha256 = hashlib.sha256(result_content).hexdigest()
+        await storage.put_text_content(result_key, result_content)
+        stat = await storage.stat_text_content(result_key)
+        assert stat is not None
+        assert stat.size_bytes == len(result_content)
+        ranged = await storage.read_text_content_range(
+            result_key,
+            start_byte=2,
+            max_bytes=6,
+            max_object_bytes=1024,
+            expected_size_bytes=len(result_content),
+            expected_sha256=result_sha256,
+        )
+        assert ranged.content == result_content[2:8]
+        assert ranged.truncated is True
+        client.objects[(settings.artifacts.quarantine_bucket, result_key)] = (
+            b'{"status":"failed"}',
+            {},
+        )
+        with pytest.raises(ArtifactStorageError, match="does not match"):
+            await storage.read_text_content_range(
+                result_key,
+                start_byte=0,
+                max_bytes=8,
+                max_object_bytes=1024,
+                expected_size_bytes=len(result_content),
+                expected_sha256=result_sha256,
+            )
+        client.objects[(settings.artifacts.quarantine_bucket, result_key)] = (
+            result_content,
+            {"sha256": result_sha256},
+        )
+        assert await storage.read_text_content(result_key, 1024, result_sha256) == result_content
+        with pytest.raises(ArtifactStorageError, match="exceeds limit"):
+            await storage.read_text_content(result_key, 4, result_sha256)
+        with pytest.raises(ArtifactStorageError, match="does not match"):
+            await storage.read_text_content(result_key, 1024, "0" * 64)
+        first = await storage.publish_if_absent(source_key, published_key, digest)
+        second = await storage.publish_if_absent(source_key, published_key, digest)
+        assert first == second
+        assert await storage.stat_published(published_key) == first
+        destination = tmp_path / "downloaded.zip"
+        downloaded = await storage.download_quarantine(source_key, destination)
+        assert downloaded.sha256 == digest
+        await storage.revoke_published(published_key)
+        assert await storage.stat_published(published_key) is None
+
+    asyncio.run(scenario())
