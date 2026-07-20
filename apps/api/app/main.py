@@ -114,6 +114,17 @@ RESERVED_WEB_PATHS = {
     "redoc",
 }
 RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
+FRONTEND_EXACT_ROUTES = {
+    "",
+    "submit",
+    "setup",
+    "settings",
+    "notifications",
+    "admin",
+    "docs/rest",
+    "plugin",
+}
+FRONTEND_ROUTE_PREFIXES = ("settings/", "admin/", "plugin/")
 POSTGRES_MAINTENANCE_DATABASE = "postgres"
 GITHUB_METADATA_SYNC_BATCH_SIZE = 10
 GITHUB_METADATA_SYNC_WORKER_SLEEP_SECONDS = 60
@@ -229,6 +240,16 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["content-type", "authorization", "x-dev-github-login"],
     )
+
+    @app.middleware("http")
+    async def add_cache_control(request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        response.headers["Cache-Control"] = cache_control_for_path(
+            request.url.path,
+            response.headers.get("content-type", ""),
+        )
+        return response
+
     app.add_exception_handler(HTTPException, http_exception_handler)
     register_routes(app)
     register_market_web_routes(app)
@@ -1749,17 +1770,49 @@ def serve_market_web_file(full_path: str) -> FileResponse:
         raise error(404, "Market web build is missing. Run npm run build:web first.")
 
     requested_file = resolve_market_web_file(full_path)
-    return FileResponse(requested_file or index_file)
+    if requested_file:
+        return FileResponse(requested_file)
+    status_code = 200 if is_known_frontend_route(full_path) else 404
+    return FileResponse(index_file, status_code=status_code)
 
 
 def resolve_market_web_file(full_path: str) -> Path | None:
     dist_dir = MARKET_WEB_DIST.resolve()
-    candidate = (dist_dir / full_path).resolve()
-    try:
-        candidate.relative_to(dist_dir)
-    except ValueError:
-        return None
-    return candidate if candidate.is_file() else None
+    candidates = [(dist_dir / full_path).resolve()]
+    if full_path.strip("/"):
+        candidates.append((dist_dir / full_path / "index.html").resolve())
+    for candidate in candidates:
+        try:
+            candidate.relative_to(dist_dir)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def is_known_frontend_route(full_path: str) -> bool:
+    path = full_path.strip("/")
+    return path in FRONTEND_EXACT_ROUTES or path.startswith(FRONTEND_ROUTE_PREFIXES)
+
+
+def cache_control_for_path(path: str, content_type: str = "") -> str:
+    normalized = "/" + path.lstrip("/")
+    if normalized.startswith("/assets/"):
+        return "public, max-age=31536000, immutable"
+    if normalized in {"/plugins.json", "/plugins-md5.json"} or normalized.startswith(
+        "/v1/astrbot/"
+    ):
+        return "public, max-age=300"
+    if normalized in {"/sitemap.xml", "/robots.txt", "/llms.txt"}:
+        return "public, max-age=3600"
+    if normalized in {"/v1/plugins", "/v1/site"}:
+        return "public, max-age=60"
+    if normalized.startswith("/v1/"):
+        return "private, no-store"
+    if "text/html" in content_type:
+        return "public, max-age=0, must-revalidate"
+    return "private, no-store"
 
 
 def is_reserved_api_path(full_path: str) -> bool:

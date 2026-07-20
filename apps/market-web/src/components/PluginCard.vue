@@ -4,15 +4,16 @@
     :bordered="false"
     :style="{ borderRadius: `var(--card-radius)`, '--card-index': String(index) }"
     :content-style="{ padding: '8px 16px' }"
-    @click="showDetails"
     role="article"
     :aria-label="`插件: ${displayName}`"
     aria-roledescription="插件卡片"
-    :aria-expanded="showPluginDetails"
-    tabindex="0"
     ref="cardRef"
-    @keydown="handleCardKeydown"
   >
+    <router-link
+      class="plugin-card__detail-link"
+      :to="{ name: 'PluginDetails', params: { name: plugin.id } }"
+      :aria-label="`查看 ${displayName} 插件详情`"
+    />
     <template #header>
       <div class="card-header" role="banner" :aria-labelledby="headerId">
         <div
@@ -196,9 +197,6 @@
     </div>
   </n-card>
 
-  <!-- 插件详情模态框 -->
-  <plugin-details v-model:show="showPluginDetails" :plugin="plugin" />
-
   <n-modal
     v-model:show="showUnlistModal"
     preset="card"
@@ -246,12 +244,8 @@ import {
   PersonOutline,
   CheckmarkOutline,
 } from "@vicons/ionicons5";
-import { defineAsyncComponent } from "vue";
 import { storeToRefs } from "pinia";
 import { usePluginStore } from "@/stores/plugins";
-const PluginDetails = defineAsyncComponent(() => import("./PluginDetails.vue"));
-
-const showPluginDetails = ref(false);
 const props = defineProps({
   plugin: {
     type: Object,
@@ -384,23 +378,6 @@ const openUrl = (url, e) => {
   }
 };
 
-const showDetails = () => {
-  showPluginDetails.value = true;
-};
-
-function handleCardKeydown(event) {
-  if (!["Enter", " "].includes(event.key)) return;
-  const target = event.target;
-  if (
-    target instanceof Element &&
-    target.closest('button, a, input, textarea, select, [role="button"], [role="link"]')
-  ) {
-    return;
-  }
-  event.preventDefault();
-  showDetails();
-}
-
 function searchAuthor(event) {
   event.stopPropagation();
   const author = String(props.plugin.author || "").trim();
@@ -476,6 +453,25 @@ const handleLogoError = (event) => {
   animation: cardAppear 0.5s cubic-bezier(0.23, 1, 0.32, 1) backwards;
   animation-delay: calc(0.4s + (var(--card-index, 0) * 0.08s));
   border-radius: var(--card-radius);
+}
+
+.plugin-card__detail-link {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+}
+
+.plugin-card__detail-link:focus-visible {
+  outline: 3px solid var(--primary-color);
+  outline-offset: 3px;
+}
+
+.plugin-card :deep(button),
+.plugin-card .author,
+.plugin-card a:not(.plugin-card__detail-link) {
+  position: relative;
+  z-index: 2;
 }
 
 .plugin-card:hover {

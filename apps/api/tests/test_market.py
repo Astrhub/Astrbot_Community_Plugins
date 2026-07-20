@@ -80,7 +80,7 @@ def setup_payload(
     postgres_database: str = "market",
     postgres_port: int = 5432,
     redis_port: int = 6379,
-    site_name: str = "AstrBot Community Plugins",
+    site_name: str = "Astrhub 插件市场",
 ) -> dict[str, object]:
     return {
         "site": {"name": site_name, "icon_url": "/custom-logo.webp"},
@@ -1197,7 +1197,7 @@ def test_top_level_comment_notifies_plugin_owner_by_email(monkeypatch) -> None:
 
     assert comment.status_code == 201
     assert sent[0]["receiver"] == "notify@example.com"
-    assert sent[0]["subject"] == "AstrBot Community Plugins - 你的插件有新评论"
+    assert sent[0]["subject"] == "Astrhub 插件市场 - 你的插件有新评论"
     assert "bob 评论了 Demo：Great plugin" in sent[0]["content"]
     assert "个人设置的通知偏好" in sent[0]["content"]
     client.get("/v1/auth/debug-login?login=alice")
@@ -1232,7 +1232,7 @@ def test_notification_email_falls_back_to_github_email(monkeypatch) -> None:
 
     assert like.status_code == 200
     assert sent[0]["receiver"] == "alice-oauth@example.com"
-    assert sent[0]["subject"] == "AstrBot Community Plugins - 你的插件收到了点赞"
+    assert sent[0]["subject"] == "Astrhub 插件市场 - 你的插件收到了点赞"
     assert "bob 点赞了 Demo" in sent[0]["content"]
 
 
@@ -1348,9 +1348,9 @@ def test_review_and_unlist_notifications_can_send_email(monkeypatch) -> None:
     assert listed.status_code == 200
     assert unlisted.status_code == 200
     assert [item["receiver"] for item in sent] == ["owner@example.com", "owner@example.com"]
-    assert sent[0]["subject"] == "AstrBot Community Plugins - 插件审核通过"
+    assert sent[0]["subject"] == "Astrhub 插件市场 - 插件审核通过"
     assert "Demo 已通过审核并上架" in sent[0]["content"]
-    assert sent[1]["subject"] == "AstrBot Community Plugins - 插件已下架"
+    assert sent[1]["subject"] == "Astrhub 插件市场 - 插件已下架"
     assert "插件无法正常安装" in sent[1]["content"]
 
 
@@ -1406,7 +1406,7 @@ def test_pending_review_email_is_sent_to_one_opted_in_admin(monkeypatch) -> None
     assert pending.status_code == 201
     assert len(sent) == 1
     assert sent[0]["receiver"] == "core@example.com"
-    assert sent[0]["subject"] == "AstrBot Community Plugins - 有新的插件待审查"
+    assert sent[0]["subject"] == "Astrhub 插件市场 - 有新的插件待审查"
     assert "astrbot_plugin_pending_b" in sent[0]["content"]
 
 
@@ -1671,7 +1671,7 @@ def test_first_run_setup_can_save_structured_env_file(tmp_path) -> None:
     assert status.json()["restart_required"] is False
     assert status.json()["saved_setup"]["postgres"]["host"] == "127.0.0.1"
     assert status.json()["saved_setup"]["postgres"]["password"] == ""
-    assert status.json()["site"]["name"] == "AstrBot Community Plugins"
+    assert status.json()["site"]["name"] == "Astrhub 插件市场"
 
     response = client.post("/v1/setup", json=setup_payload(site_name="AstrHub Plugins"))
 

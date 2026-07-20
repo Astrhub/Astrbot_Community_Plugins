@@ -123,7 +123,7 @@ export const getPluginCategoryLabel = (value: unknown): string => {
 };
 
 const DEFAULT_SITE_CONFIG: SiteConfig = Object.freeze({
-  name: "AstrBot Community Plugins",
+  name: "Astrhub 插件市场",
   icon_url: "/logo.webp",
   web_url: BASE_URL,
   subtitle: "全新社区插件市场",
@@ -319,37 +319,9 @@ export const usePluginStore = defineStore("plugins", () => {
     };
   }
 
-  function setMetaContent(
-    name: string,
-    content: string,
-    attribute: "name" | "property" = "name",
-  ): void {
-    if (typeof document === "undefined") return;
-    const element = document.querySelector(`meta[${attribute}="${name}"]`);
-    if (element) element.setAttribute("content", content);
-  }
-
-  function updateLink(rel: string, href: string): void {
-    if (typeof document === "undefined") return;
-    const element = document.querySelector(`link[rel="${rel}"]`);
-    if (element) element.setAttribute("href", href);
-  }
-
-  function applySiteMetadata(config: SiteConfig): void {
-    if (typeof document === "undefined") return;
-    document.title = config.name;
-    setMetaContent("application-name", config.name);
-    setMetaContent("og:title", config.name, "property");
-    setMetaContent("og:image", config.icon_url, "property");
-    updateLink("icon", config.icon_url);
-    updateLink("shortcut icon", config.icon_url);
-    updateLink("preload", config.icon_url);
-  }
-
   function applySiteConfig(value: Partial<SiteConfig>): SiteConfig {
     const config = normalizeSiteConfig(value);
     siteConfig.value = config;
-    applySiteMetadata(config);
     return config;
   }
 

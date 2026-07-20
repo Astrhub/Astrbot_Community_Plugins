@@ -42,7 +42,7 @@
 
     <section class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">{{ siteSubtitle }}</p>
+        <h1 class="eyebrow">{{ siteSubtitle || "AstrBot 社区插件发现与分享" }}</h1>
         <p class="hero-subtitle">{{ siteDescription }}</p>
       </div>
       <div class="hero-toolbar">
