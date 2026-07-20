@@ -86,6 +86,21 @@ export interface PluginDetail extends Plugin {
   readme?: string;
 }
 
+export interface PluginReadmeContext {
+  owner: string;
+  repo: string;
+  branch: string;
+  path: string;
+}
+
+export interface PluginReadmeDocument {
+  content: string;
+  source_url: string;
+  fetched_at: string;
+  cached: boolean;
+  context: PluginReadmeContext;
+}
+
 /** 通知项。 */
 export interface AppNotification {
   id: number | string;

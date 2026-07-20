@@ -278,16 +278,20 @@
                     />
                   </div>
                   <div class="form-grid">
-                    <n-form-item
-                      label="新增 GitHub API Token"
-                      path="market.api_token"
-                      class="form-row-full"
-                    >
+                    <n-form-item path="market.api_token" class="form-row-full">
+                      <template #label>
+                        <span class="field-label">
+                          新增 GitHub API Token
+                          <field-hint
+                            content="每行一个只读 Token，也可用逗号或分号分隔；保存时追加到现有池，不会覆盖未移除的 Token。"
+                          />
+                        </span>
+                      </template>
                       <n-input
                         v-model:value="formData.market.api_token"
                         type="textarea"
                         :autosize="{ minRows: 3, maxRows: 7 }"
-                        placeholder="每行一个只读 Token，也可用逗号或分号分隔；保存后追加到现有池"
+                        placeholder="ghp_..."
                       />
                       <template #feedback>
                         <div class="token-feedback">
@@ -309,12 +313,20 @@
                               <div class="token-preview-main">
                                 <span>Token {{ item.index + 1 }}: {{ item.token }}</span>
                                 <div
-                                  v-if="item.errorCode || item.status !== 'active'"
+                                  v-if="
+                                    item.errorCode || item.status !== 'active' || item.checkedAt
+                                  "
                                   class="token-status-line"
                                 >
                                   <n-tag
                                     size="small"
-                                    :type="item.disabled ? 'error' : 'warning'"
+                                    :type="
+                                      item.disabled
+                                        ? 'error'
+                                        : item.status === 'active'
+                                          ? 'success'
+                                          : 'warning'
+                                    "
                                     :bordered="false"
                                   >
                                     {{ tokenStatusLabels[item.status] || item.status }}
@@ -325,16 +337,33 @@
                                   </span>
                                   <span v-else-if="item.resetAt">重置于 {{ item.resetAt }}</span>
                                   <span v-if="item.errorMessage">{{ item.errorMessage }}</span>
+                                  <span v-if="item.checkedAt">
+                                    验证于 {{ formatSettingsTime(item.checkedAt) }}
+                                  </span>
                                 </div>
                               </div>
-                              <n-button
-                                tertiary
-                                size="tiny"
-                                :type="item.removing ? 'default' : 'error'"
-                                @click="toggleMarketTokenRemoval(item.index)"
-                              >
-                                {{ item.removing ? "撤销" : "移除" }}
-                              </n-button>
+                              <div class="token-preview-actions">
+                                <n-button
+                                  tertiary
+                                  size="tiny"
+                                  :loading="verifyingTokenIndex === item.index"
+                                  :disabled="item.removing"
+                                  @click="verifyMarketToken(item.index)"
+                                >
+                                  <template #icon>
+                                    <n-icon><refresh-outline /></n-icon>
+                                  </template>
+                                  验证
+                                </n-button>
+                                <n-button
+                                  tertiary
+                                  size="tiny"
+                                  :type="item.removing ? 'default' : 'error'"
+                                  @click="toggleMarketTokenRemoval(item.index)"
+                                >
+                                  {{ item.removing ? "撤销" : "移除" }}
+                                </n-button>
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -414,16 +443,17 @@
                     <n-form-item label="SMTP 账号" path="email.smtp.username">
                       <n-input v-model:value="formData.email.smtp.username" />
                     </n-form-item>
-                    <n-form-item label="SMTP 密码" path="email.smtp.password">
+                    <n-form-item path="email.smtp.password">
+                      <template #label>
+                        <span class="field-label">
+                          SMTP 密码
+                          <field-hint content="已配置时留空会保持原值；输入新值才会更新。" />
+                        </span>
+                      </template>
                       <n-input
                         v-model:value="formData.email.smtp.password"
                         type="password"
                         show-password-on="click"
-                        :placeholder="
-                          formData.email.smtp.password_configured
-                            ? '已配置，留空保持不变'
-                            : '请输入 SMTP 密码'
-                        "
                       />
                       <template #feedback>
                         {{
@@ -462,16 +492,17 @@
                     <n-form-item label="Cloudflare Account ID" path="email.cloudflare.account_id">
                       <n-input v-model:value="formData.email.cloudflare.account_id" />
                     </n-form-item>
-                    <n-form-item label="Cloudflare API Token" path="email.cloudflare.api_token">
+                    <n-form-item path="email.cloudflare.api_token">
+                      <template #label>
+                        <span class="field-label">
+                          Cloudflare API Token
+                          <field-hint content="已配置时留空会保持原值；输入新值才会更新。" />
+                        </span>
+                      </template>
                       <n-input
                         v-model:value="formData.email.cloudflare.api_token"
                         type="password"
                         show-password-on="click"
-                        :placeholder="
-                          formData.email.cloudflare.api_token_configured
-                            ? '已配置，留空保持不变'
-                            : '请输入 Cloudflare API Token'
-                        "
                       />
                       <template #feedback>
                         {{
@@ -601,8 +632,9 @@ import {
   NTag,
   useMessage,
 } from "naive-ui";
-import { ArrowBack } from "@vicons/ionicons5";
+import { ArrowBack, RefreshOutline } from "@vicons/ionicons5";
 import { usePluginStore } from "@/stores/plugins";
+import FieldHint from "@/components/FieldHint.vue";
 import ThemeModeButton from "@/components/ThemeModeButton.vue";
 import AdminUserManagement from "@/components/settings/AdminUserManagement.vue";
 
@@ -639,6 +671,7 @@ const {
   loadAdminUsers,
   loadSystemSettings,
   saveSystemSettings,
+  verifySystemGithubToken,
   sendTestEmail,
   publishAnnouncement,
   createInternalUser,
@@ -653,6 +686,7 @@ const loading = ref(true);
 const saving = ref(false);
 const testingEmail = ref(false);
 const publishingAnnouncement = ref(false);
+const verifyingTokenIndex = shallowRef<number | null>(null);
 const loadingUsers = shallowRef(false);
 const creatingUser = shallowRef(false);
 const adminUsers = shallowRef([]);
@@ -677,12 +711,14 @@ const marketTokenPreviewRows = computed(() => {
     errorMessage: item.error_message || "",
     retryAfterSeconds: Number(item.retry_after_seconds || 0),
     resetAt: item.reset_at || "",
+    checkedAt: item.checked_at || "",
   }));
 });
 const tokenStatusLabels = {
   active: "正常",
   disabled: "已停用",
   rate_limited: "限流",
+  error: "验证失败",
 };
 const smtpEncryptionFeedback = computed(() => {
   const messages: Record<string, string> = {
@@ -1026,6 +1062,25 @@ function toggleMarketTokenRemoval(index) {
   formData.market.api_token_remove_indexes = Array.from(indexes).sort((a, b) => a - b);
 }
 
+function formatSettingsTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+async function verifyMarketToken(index) {
+  verifyingTokenIndex.value = index;
+  try {
+    await verifySystemGithubToken(index);
+    await loadSettings();
+    message.success("GitHub Token 验证完成");
+  } catch (error) {
+    message.error(error.message || "GitHub Token 验证失败");
+  } finally {
+    verifyingTokenIndex.value = null;
+  }
+}
+
 async function loadSettings() {
   loading.value = true;
   try {
@@ -1314,6 +1369,12 @@ h1 {
   grid-column: 1 / -1;
 }
 
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .infra-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1418,6 +1479,13 @@ h1 {
   min-width: 0;
 }
 
+.token-preview-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .token-status-line {
   display: flex;
   flex-wrap: wrap;
@@ -1463,6 +1531,11 @@ h1 {
     justify-content: space-between;
     overflow-x: auto;
     padding-bottom: 2px;
+  }
+
+  .token-preview-item {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .form-grid,

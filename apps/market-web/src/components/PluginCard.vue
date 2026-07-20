@@ -16,27 +16,30 @@
     />
     <template #header>
       <div class="card-header" role="banner" :aria-labelledby="headerId">
-        <div
-          :id="headerId"
-          class="plugin-name-container"
-          ref="nameContainer"
-          role="heading"
-          aria-level="2"
-          aria-label="插件卡片标题区域"
-        >
-          <h3
-            class="plugin-name"
-            :class="{ marquee: isTextOverflow }"
-            ref="pluginNameEl"
+        <div class="plugin-title-group">
+          <div
+            :id="headerId"
+            class="plugin-name-container"
+            ref="nameContainer"
             role="heading"
-            aria-level="3"
-            :aria-label="displayName"
-            :aria-description="`插件：${displayName}，版本 ${pluginVersion}`"
+            aria-level="2"
+            aria-label="插件卡片标题区域"
           >
-            <span class="plugin-name-text" ref="nameTextEl" :aria-hidden="isTextOverflow">{{
-              displayName
-            }}</span>
-          </h3>
+            <h3
+              class="plugin-name"
+              :class="{ marquee: isTextOverflow }"
+              ref="pluginNameEl"
+              role="heading"
+              aria-level="3"
+              :aria-label="displayName"
+              :aria-description="`插件：${displayName}，版本 ${pluginVersion}`"
+            >
+              <span class="plugin-name-text" ref="nameTextEl" :aria-hidden="isTextOverflow">{{
+                displayName
+              }}</span>
+            </h3>
+          </div>
+          <span v-if="isNew" class="new-badge" aria-label="新发布插件">NEW</span>
         </div>
         <n-tag
           type="success"
@@ -94,16 +97,24 @@
               作者: {{ plugin.author }}
             </button>
             <div class="metric-list" role="group" aria-label="插件互动数据">
-              <span class="metric-item" role="text" :aria-label="`星标数：${plugin.stars || 0}`">
+              <span
+                class="metric-item metric-item--star"
+                role="text"
+                :aria-label="`星标数：${plugin.stars || 0}`"
+              >
                 <n-icon aria-hidden="true"><star-sharp /></n-icon>
                 {{ plugin.stars || 0 }}
               </span>
-              <span class="metric-item" role="text" :aria-label="`点赞数：${plugin.likes || 0}`">
+              <span
+                class="metric-item metric-item--like"
+                role="text"
+                :aria-label="`点赞数：${plugin.likes || 0}`"
+              >
                 <n-icon aria-hidden="true"><heart-outline /></n-icon>
                 {{ plugin.likes || 0 }}
               </span>
               <span
-                class="metric-item"
+                class="metric-item metric-item--comment"
                 role="text"
                 :aria-label="`评论数：${plugin.comments_count || 0}`"
               >
@@ -246,6 +257,7 @@ import {
 } from "@vicons/ionicons5";
 import { storeToRefs } from "pinia";
 import { usePluginStore } from "@/stores/plugins";
+import { isNewPlugin } from "@/utils/pluginFreshness";
 const props = defineProps({
   plugin: {
     type: Object,
@@ -279,6 +291,7 @@ const formattedVersion = computed(() => {
   return pluginVersion.value.startsWith("v") ? pluginVersion.value : `v${pluginVersion.value}`;
 });
 const displayName = computed(() => props.plugin.display_name || props.plugin.name);
+const isNew = computed(() => isNewPlugin(props.plugin.created_at));
 const headerId = computed(() => {
   const rawId = String(props.plugin.id || props.plugin.name || `plugin-${props.index}`);
   const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, "-");
@@ -474,6 +487,17 @@ const handleLogoError = (event) => {
   z-index: 2;
 }
 
+.new-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  color: var(--primary-color);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+}
+
 .plugin-card:hover {
   transform: translateY(-5px) scale(1.005);
   border-color: var(--primary-color);
@@ -492,7 +516,12 @@ const handleLogoError = (event) => {
   align-items: center;
   padding: 10px 18px;
   border-bottom: 1px solid var(--border-base);
-  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(37, 99, 235, 0.04) 50%, rgba(37, 99, 235, 0.08) 100%);
+  background: linear-gradient(
+    135deg,
+    var(--bg-card) 0%,
+    rgba(37, 99, 235, 0.04) 50%,
+    rgba(37, 99, 235, 0.08) 100%
+  );
   border-radius: var(--card-radius) var(--card-radius) 0 0;
   min-height: 46px;
 }
@@ -507,8 +536,17 @@ const handleLogoError = (event) => {
   padding-bottom: 6px !important;
 }
 
-.plugin-name-container {
+.plugin-title-group {
   max-width: 75%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plugin-name-container {
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   position: relative;
 }
@@ -579,7 +617,7 @@ const handleLogoError = (event) => {
 }
 
 @media (max-width: 768px) {
-  .plugin-name-container {
+  .plugin-title-group {
     max-width: 70%;
   }
 
@@ -603,7 +641,7 @@ const handleLogoError = (event) => {
 }
 
 @media (max-width: 480px) {
-  .plugin-name-container {
+  .plugin-title-group {
     max-width: 65%;
   }
 
@@ -622,7 +660,7 @@ const handleLogoError = (event) => {
   border-radius: 999px;
   font-size: 0.78em;
   letter-spacing: 0.3px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 .card-content-wrapper {
@@ -642,7 +680,9 @@ const handleLogoError = (event) => {
   background: var(--logo-bg);
   border: 1.5px solid var(--logo-border);
   overflow: hidden;
-  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.3s ease;
+  transition:
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.3s ease;
 }
 
 .plugin-card:hover .plugin-logo-container {
@@ -762,7 +802,9 @@ const handleLogoError = (event) => {
   padding: 3px 8px;
   text-align: left;
   font-size: 0.9em;
-  transition: background-color 0.2s ease, color 0.2s ease;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
 }
 
 .author:hover,
@@ -792,8 +834,22 @@ const handleLogoError = (event) => {
 }
 
 .metric-item :deep(.n-icon) {
-  color: var(--metric-icon);
   font-size: 14px;
+}
+
+.metric-item--star,
+.metric-item--star :deep(.n-icon) {
+  color: var(--metric-star);
+}
+
+.metric-item--like,
+.metric-item--like :deep(.n-icon) {
+  color: var(--metric-like);
+}
+
+.metric-item--comment,
+.metric-item--comment :deep(.n-icon) {
+  color: var(--metric-comment);
 }
 
 .plugin-links {
@@ -821,16 +877,26 @@ const handleLogoError = (event) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%) !important;
+  background: linear-gradient(
+    135deg,
+    var(--primary-color) 0%,
+    var(--primary-hover) 100%
+  ) !important;
   border: none !important;
   color: #ffffff !important;
   font-weight: 700;
   font-size: 0.88em;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
 }
 
 .button-group :deep(.main-button:hover) {
-  background: linear-gradient(135deg, var(--primary-hover) 0%, var(--primary-active) 100%) !important;
+  background: linear-gradient(
+    135deg,
+    var(--primary-hover) 0%,
+    var(--primary-active) 100%
+  ) !important;
   transform: translateY(-1px);
   box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
 }

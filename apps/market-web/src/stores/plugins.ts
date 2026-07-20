@@ -13,6 +13,7 @@ import type {
   Plugin,
   PluginCategory,
   PluginDetail,
+  PluginReadmeDocument,
   PluginSortBy,
   PluginSubmissionMetadataPreview,
   RawPlugin,
@@ -840,6 +841,26 @@ export const usePluginStore = defineStore("plugins", () => {
     return data;
   }
 
+  async function loadPluginReadme(
+    pluginId: number | string,
+    path = "",
+    options: { refresh?: boolean } = {},
+  ): Promise<Omit<PluginReadmeDocument, "context">> {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const suffix = options.refresh ? "/refresh" : "";
+    const response = await fetch(
+      `${apiBaseUrl}/v1/plugins/${encodeURIComponent(String(pluginId))}/readme${suffix}${query}`,
+      {
+        method: options.refresh ? "POST" : "GET",
+        credentials: "include",
+        cache: "no-store",
+      },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "加载 README 失败"));
+    return data as Omit<PluginReadmeDocument, "context">;
+  }
+
   async function likePlugin(pluginId: number | string): Promise<Record<string, unknown>> {
     const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/like`, {
       method: "POST",
@@ -1084,6 +1105,18 @@ export const usePluginStore = defineStore("plugins", () => {
       });
     }
     return data;
+  }
+
+  async function verifySystemGithubToken(index: number): Promise<SetupConfig["market"]> {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/settings/github-tokens/verify`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ index }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "验证 GitHub Token 失败"));
+    return data as SetupConfig["market"];
   }
 
   async function sendTestEmail(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -1331,6 +1364,7 @@ export const usePluginStore = defineStore("plugins", () => {
     requestPluginListing,
     unlistOwnPlugin,
     loadPluginDetail,
+    loadPluginReadme,
     likePlugin,
     unlikePlugin,
     addPluginComment,
@@ -1347,6 +1381,7 @@ export const usePluginStore = defineStore("plugins", () => {
     deleteNotifications,
     clearNotifications,
     saveSystemSettings,
+    verifySystemGithubToken,
     sendTestEmail,
     publishAnnouncement,
     submitPlugin,

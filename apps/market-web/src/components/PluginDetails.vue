@@ -1,13 +1,18 @@
 <template>
-  <n-modal
-    v-model:show="show"
-    :mask-closable="true"
-    preset="card"
-    :class="['plugin-details', { 'plugin-details--dark': isDarkMode }]"
-    style="max-width: 900px; width: 90%"
-    :bordered="false"
+  <component
+    :is="embedded ? 'section' : NModal"
+    :show="embedded ? undefined : show"
+    :mask-closable="embedded ? undefined : true"
+    :preset="embedded ? undefined : 'card'"
+    :class="[
+      'plugin-details',
+      { 'plugin-details--dark': isDarkMode, 'plugin-details--embedded': embedded },
+    ]"
+    :style="embedded ? undefined : 'max-width: 900px; width: 90%'"
+    :bordered="embedded ? undefined : false"
+    @update:show="handleShowUpdate"
   >
-    <template #header>
+    <template v-if="!embedded" #header>
       <div class="plugin-details__header">
         <n-h2 class="plugin-details__title">
           <n-space align="center" :size="12">
@@ -25,7 +30,7 @@
 
     <div class="plugin-details__content">
       <n-space vertical size="large">
-        <div class="plugin-actions">
+        <div v-if="!embedded" class="plugin-actions">
           <n-button
             v-if="likesEnabled"
             secondary
@@ -49,6 +54,8 @@
           <span v-if="!likesEnabled" class="muted-text">点赞已关闭</span>
         </div>
 
+        <h2 v-if="embedded" class="embedded-section-title">README</h2>
+
         <div v-if="loading" class="readme-loading">
           <n-spin size="medium">
             <template #description> 正在加载 README... </template>
@@ -62,6 +69,27 @@
           </n-empty>
         </div>
         <template v-else>
+          <div v-if="readmeSource" class="readme-meta">
+            <div class="readme-meta__text">
+              <n-tag
+                size="small"
+                :type="readmeSource.cached ? 'success' : 'info'"
+                :bordered="false"
+              >
+                {{ readmeSource.cached ? "缓存命中" : "实时获取" }}
+              </n-tag>
+              <span>{{ readmeSourceLabel }}</span>
+              <span v-if="readmeSource.fetched_at">
+                {{ formatReadmeTime(readmeSource.fetched_at) }}
+              </span>
+            </div>
+            <n-button size="small" tertiary :loading="loading" @click="refreshReadmeCache">
+              <template #icon
+                ><n-icon><refresh-outline /></n-icon
+              ></template>
+              刷新缓存
+            </n-button>
+          </div>
           <div v-if="readmeHtml && readmeNavigationVisible" class="readme-navigation">
             <div class="readme-navigation__main">
               <n-button v-if="canGoBackReadme" size="small" tertiary @click="goBackReadmeFile">
@@ -103,7 +131,7 @@
       </n-space>
     </div>
 
-    <template #footer>
+    <template v-if="!embedded" #footer>
       <div class="plugin-details__footer">
         <n-space justify="end" :size="12">
           <n-button secondary type="primary" @click="openUrl(plugin?.repo)">
@@ -116,7 +144,7 @@
         </n-space>
       </div>
     </template>
-  </n-modal>
+  </component>
 
   <n-modal
     v-model:show="showRefreshModal"
@@ -129,12 +157,20 @@
         Token 只需要公开仓库读取权限。留空会使用已保存的个人 Token 或站点兜底 Token。
       </n-alert>
       <n-form label-placement="top">
-        <n-form-item label="临时 GitHub Token" path="github_token">
+        <n-form-item path="github_token">
+          <template #label>
+            <span class="field-label">
+              临时 GitHub Token
+              <field-hint
+                content="可选。只需公开仓库读取权限；留空时使用个人已保存 Token 或站点 Token 池。"
+              />
+            </span>
+          </template>
           <n-input
             v-model:value="refreshForm.github_token"
             type="password"
             show-password-on="click"
-            placeholder="可选，ghp_… 或 fine-grained token…"
+            placeholder="ghp_..."
           />
         </n-form-item>
         <n-checkbox v-model:checked="refreshForm.save_token">
@@ -187,21 +223,33 @@ import {
 import { storeToRefs } from "pinia";
 import { usePluginStore } from "../stores/plugins";
 import PluginComment from "./PluginComment.vue";
+import FieldHint from "./FieldHint.vue";
 import { githubRawUrl } from "../utils/github";
+import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
+import { usePluginReadme } from "../composables/usePluginReadme";
+import type { Plugin, PluginDetail } from "../types";
 import {
   ArrowBackOutline,
   DocumentTextOutline,
   ExtensionPuzzleOutline,
   HeartOutline,
   LogoGithub,
+  RefreshOutline,
 } from "@vicons/ionicons5";
 
-const props = defineProps({
-  show: Boolean,
-  plugin: Object,
-});
+const props = withDefaults(
+  defineProps<{
+    show?: boolean;
+    plugin?: Plugin | PluginDetail | null;
+    embedded?: boolean;
+  }>(),
+  { show: false, plugin: null, embedded: false },
+);
 
-const emit = defineEmits(["update:show"]);
+const emit = defineEmits<{
+  "update:show": [value: boolean];
+  updated: [plugin: PluginDetail];
+}>();
 
 const show = ref(props.show);
 const loading = ref(false);
@@ -231,6 +279,8 @@ const comments = computed(() => detail.value?.comments || []);
 const store = usePluginStore();
 const message = useMessage();
 const dialog = useDialog();
+const { confirmExternalOpen } = useExternalOpenConfirm();
+const { document: readmeSource, load: loadPluginReadme } = usePluginReadme(() => props.plugin);
 const { siteConfig, currentUser, isDarkMode } = storeToRefs(store);
 const {
   addPluginComment,
@@ -280,6 +330,15 @@ const readmeViewTitle = computed(() => {
   if (readmeView.value.path) return readmeView.value.path;
   return "README";
 });
+const readmeSourceLabel = computed(() => {
+  const source = readmeSource.value?.source_url;
+  if (!source) return "GitHub";
+  try {
+    return new URL(source).hostname;
+  } catch {
+    return "GitHub";
+  }
+});
 const canManagePlugin = computed(() => {
   const user = currentUser.value;
   const plugin = activePlugin.value;
@@ -307,99 +366,47 @@ watch(show, (newVal) => {
   }
 });
 
+watch(
+  [() => props.embedded, () => props.plugin?.id],
+  ([isEmbedded, pluginId]) => {
+    if (!isEmbedded || !pluginId) return;
+    detail.value = (props.plugin as PluginDetail) || null;
+    liked.value = Boolean(detail.value?.liked);
+    loadCurrentUser();
+    fetchReadme();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.plugin,
+  (plugin) => {
+    if (!props.embedded || !plugin) return;
+    detail.value = plugin as PluginDetail;
+    liked.value = Boolean(detail.value.liked);
+  },
+);
+
+function handleShowUpdate(value: boolean): void {
+  if (!props.embedded) show.value = value;
+}
+
 const openUrl = (url) => {
   if (url) {
     confirmExternalOpen(url);
   }
 };
 
-async function fetchReadme() {
+async function fetchReadme(options: { refresh?: boolean } = {}) {
   if (!props.plugin?.repo) return;
 
   loading.value = true;
   error.value = false;
 
   try {
-    const repoInfo = parseGithubRepo(props.plugin.repo);
-    if (!repoInfo) throw new Error("Invalid GitHub repo URL");
-    const { owner, repo } = repoInfo;
-
-    let readmeText = "";
-    let readmeContext = {
-      owner,
-      repo,
-      branch: "main",
-      path: "README.md",
-    };
-
-    try {
-      const apiResp = await fetchWithTimeout(
-        `https://api.github.com/repos/${owner}/${repo}/readme`,
-        {
-          method: "GET",
-          headers: {
-            Accept: "application/vnd.github+json",
-          },
-        },
-        10000,
-      );
-
-      if (apiResp.ok) {
-        const data = await apiResp.json();
-        readmeText = decodeBase64Content(data.content || "");
-        readmeContext = {
-          owner,
-          repo,
-          branch:
-            data.download_url?.split("/")[5] ||
-            data.html_url?.split("/blob/")[1]?.split("/")[0] ||
-            "main",
-          path: data.path || "README.md",
-        };
-      } else {
-        throw new Error(`GitHub API /readme returned ${apiResp.status}`);
-      }
-    } catch (apiErr) {
-      const branches = ["main", "master"];
-      const candidates = ["README.md", "Readme.md", "readme.md", "README.MD", "README"];
-
-      let found = false;
-      for (const branch of branches) {
-        for (const filename of candidates) {
-          try {
-            const resp = await fetchWithTimeout(
-              githubRawUrl(
-                `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filename}`,
-              ),
-              {
-                method: "GET",
-                headers: {
-                  Accept: "text/plain",
-                },
-              },
-              10000,
-            );
-            if (resp.ok) {
-              readmeText = await resp.text();
-              readmeContext = { owner, repo, branch, path: filename };
-              found = true;
-              break;
-            }
-          } catch (_) {
-            // 忽略，尝试下一个候选
-          }
-        }
-        if (found) break;
-      }
-
-      if (!found) {
-        throw new Error("无法获取 README（API 与镜像均失败）");
-      }
-    }
-
-    if (!readmeText) {
-      throw new Error("README 内容为空");
-    }
+    const source = await loadPluginReadme({ refresh: options.refresh });
+    const readmeText = source.content;
+    const readmeContext = source.context;
 
     setReadmeDocument({
       html: renderReadmeHtml(readmeText, readmeContext),
@@ -420,12 +427,24 @@ async function fetchReadme() {
   }
 }
 
+async function refreshReadmeCache(): Promise<void> {
+  await fetchReadme({ refresh: true });
+  if (!error.value) message.success("README 缓存已刷新");
+}
+
+function formatReadmeTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
 async function fetchDetail() {
   if (!props.plugin?.id) return;
   try {
     detail.value = await loadPluginDetail(props.plugin.id);
     updatePluginInList(detail.value);
     liked.value = Boolean(detail.value?.liked);
+    emit("updated", detail.value);
   } catch (err) {
     message.error(err.message || "加载互动信息失败");
   }
@@ -1264,24 +1283,53 @@ function updateCommentInDetail(updated) {
     ),
   };
 }
-
-function confirmExternalOpen(url) {
-  if (!url) return;
-  dialog.info({
-    title: "即将打开外链",
-    content: `将跳转到：${url}`,
-    positiveText: "继续打开",
-    negativeText: "取消",
-    onPositiveClick: () => {
-      window.open(url, "_blank", "noopener,noreferrer");
-    },
-  });
-}
 </script>
 
 <style scoped>
 .plugin-details {
   --modal-padding: 24px !important;
+}
+
+.plugin-details--embedded {
+  min-width: 0;
+  display: block;
+}
+
+.plugin-details--embedded .plugin-details__content {
+  min-width: 0;
+}
+
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.readme-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-base);
+}
+
+.readme-meta__text {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.embedded-section-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 20px;
+  line-height: 1.35;
 }
 
 .plugin-details :deep(.n-modal) {
