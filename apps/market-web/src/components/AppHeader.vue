@@ -414,7 +414,7 @@ onUnmounted(() => {
 <style scoped>
 .app-header {
   padding: 20px;
-  margin-bottom: 28px;
+  margin-bottom: 32px;
   background: var(--header-gradient);
   border-bottom: 1px solid var(--border-base);
   position: relative;
@@ -499,8 +499,8 @@ onUnmounted(() => {
 
 .hero {
   display: grid;
-  gap: 18px;
-  padding: 28px 0 24px;
+  gap: 22px;
+  padding: 36px 0 28px;
 }
 
 .hero-copy {
@@ -509,16 +509,27 @@ onUnmounted(() => {
 
 .eyebrow {
   color: var(--primary-color);
-  font-weight: 700;
-  margin: 0 0 8px;
+  font-weight: 800;
+  margin: 0 0 10px;
+  font-size: clamp(1.5rem, 2.5vw, 2rem);
+  letter-spacing: -0.5px;
+  line-height: 1.15;
+  font-family:
+    "Lexend",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
 }
 
 .hero-subtitle {
   max-width: 760px;
   margin: 0;
   color: var(--text-secondary);
-  font-size: 16px;
-  line-height: 1.55;
+  font-size: clamp(1rem, 1.2vw, 1.15rem);
+  line-height: 1.6;
+  opacity: 0.92;
 }
 
 .hero-toolbar {
@@ -529,8 +540,19 @@ onUnmounted(() => {
 }
 
 .source-copy-button {
-  min-height: 44px;
+  min-height: 48px;
   white-space: nowrap;
+  border-radius: 12px !important;
+  font-weight: 700 !important;
+  font-size: 0.95em !important;
+  padding: 0 20px !important;
+  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.2) !important;
+  transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+.source-copy-button:hover {
+  transform: translateY(-2px) !important;
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.3) !important;
 }
 
 .hero-search-toolbar {

@@ -2,7 +2,7 @@
   <n-card
     class="plugin-card"
     :bordered="false"
-    :style="{ borderRadius: '8px', '--card-index': String(index) }"
+    :style="{ borderRadius: `var(--card-radius)`, '--card-index': String(index) }"
     :content-style="{ padding: '8px 16px' }"
     @click="showDetails"
     role="article"
@@ -462,10 +462,10 @@ const handleLogoError = (event) => {
   overflow: visible;
   contain: content;
   transition:
-    transform 0.3s ease,
-    border-color 0.3s ease,
-    box-shadow 0.3s ease;
-  border: 2px solid var(--border-base);
+    transform 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.35s ease,
+    box-shadow 0.35s ease;
+  border: 1.5px solid var(--border-base);
   box-shadow: var(--shadow-sm);
   background-color: var(--bg-card);
   min-height: 180px;
@@ -475,13 +475,13 @@ const handleLogoError = (event) => {
   min-width: 100%;
   animation: cardAppear 0.5s cubic-bezier(0.23, 1, 0.32, 1) backwards;
   animation-delay: calc(0.4s + (var(--card-index, 0) * 0.08s));
-  border-radius: 4px;
+  border-radius: var(--card-radius);
 }
 
 .plugin-card:hover {
-  transform: translateY(-4px);
+  transform: translateY(-5px) scale(1.005);
   border-color: var(--primary-color);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-card-hover);
 }
 
 .unlist-modal-actions {
@@ -494,11 +494,11 @@ const handleLogoError = (event) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 16px;
+  padding: 10px 18px;
   border-bottom: 1px solid var(--border-base);
-  background: linear-gradient(90deg, var(--bg-card) 0%, rgba(37, 99, 235, 0.08) 100%);
-  border-radius: 4px 4px 0 0;
-  min-height: 44px;
+  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(37, 99, 235, 0.04) 50%, rgba(37, 99, 235, 0.08) 100%);
+  border-radius: var(--card-radius) var(--card-radius) 0 0;
+  min-height: 46px;
 }
 
 :deep(.n-card__header) {
@@ -617,13 +617,16 @@ const handleLogoError = (event) => {
 }
 
 .version-tag {
-  background-color: var(--primary-color) !important;
-  color: #ffffff !important;
+  background-color: var(--version-bg) !important;
+  color: var(--version-text) !important;
   border: none !important;
-  padding: 2px 10px !important;
+  padding: 3px 10px !important;
   font-weight: 700;
   flex-shrink: 0;
-  border-radius: 3px;
+  border-radius: 999px;
+  font-size: 0.78em;
+  letter-spacing: 0.3px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
 }
 
 .card-content-wrapper {
@@ -634,22 +637,28 @@ const handleLogoError = (event) => {
 
 .plugin-logo-container {
   flex-shrink: 0;
-  width: 60px;
-  height: 60px;
+  width: 68px;
+  height: 68px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
-  background-color: rgba(37, 99, 235, 0.08);
-  border: 1px solid var(--border-base);
+  border-radius: var(--card-inner-radius);
+  background: var(--logo-bg);
+  border: 1.5px solid var(--logo-border);
   overflow: hidden;
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.3s ease;
+}
+
+.plugin-card:hover .plugin-logo-container {
+  transform: scale(1.04);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.1);
 }
 
 .plugin-logo {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: 6px;
+  border-radius: calc(var(--card-inner-radius) - 2px);
 }
 
 .card-main-content {
@@ -665,8 +674,8 @@ const handleLogoError = (event) => {
 }
 
 .description {
-  margin: 4px 0;
-  line-height: 1.5;
+  margin: 6px 0;
+  line-height: 1.55;
   font-size: 0.9em;
   height: 3em;
   overflow: hidden;
@@ -712,21 +721,22 @@ const handleLogoError = (event) => {
     box-shadow 0.2s ease,
     transform 0.2s ease;
   margin-bottom: 2px;
-  background-color: rgba(37, 99, 235, 0.12) !important;
-  color: var(--primary-color) !important;
-  border: 1px solid var(--primary-color) !important;
-  padding: 2px 8px !important;
+  background-color: var(--tag-bg) !important;
+  color: var(--tag-text) !important;
+  border: 1px solid var(--tag-border) !important;
+  padding: 3px 10px !important;
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  border-radius: 3px;
-  font-weight: 600;
+  border-radius: 999px;
+  font-weight: 500;
+  font-size: 0.82em;
 }
 
 .plugin-tag:hover {
-  transform: scale(1.05);
-  background-color: rgba(37, 99, 235, 0.2) !important;
-  box-shadow: 0 0 8px rgba(37, 99, 235, 0.18);
+  transform: translateY(-1px);
+  background-color: var(--tag-bg-hover) !important;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.06);
 }
 
 .plugin-meta {
@@ -734,9 +744,9 @@ const handleLogoError = (event) => {
   justify-content: space-between;
   align-items: center;
   font-size: 0.85em;
-  padding: 4px 0;
-  margin: 0px 0;
-  border-top: 1px solid var(--border-base);
+  padding: 6px 0;
+  margin: 2px 0;
+  border-top: 1px dashed var(--border-base);
   color: var(--text-secondary);
   min-height: 28px;
 }
@@ -744,34 +754,37 @@ const handleLogoError = (event) => {
 .author {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   font-weight: 600;
-  color: var(--primary-color);
+  color: var(--text-secondary);
   appearance: none;
   border: 0;
   background: transparent;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   font: inherit;
-  padding: 2px 4px;
+  padding: 3px 8px;
   text-align: left;
+  font-size: 0.9em;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 .author:hover,
 .author:focus-visible {
-  background: rgba(37, 99, 235, 0.1);
+  background: var(--tag-bg);
+  color: var(--primary-color);
   outline: none;
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
 }
 
 .metric-list {
-  color: var(--primary-color);
-  font-weight: 700;
+  color: var(--metric-color);
+  font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
 }
 
 .metric-item {
@@ -779,6 +792,12 @@ const handleLogoError = (event) => {
   align-items: center;
   gap: 4px;
   white-space: nowrap;
+  font-size: 0.92em;
+}
+
+.metric-item :deep(.n-icon) {
+  color: var(--metric-icon);
+  font-size: 14px;
 }
 
 .plugin-links {
@@ -800,48 +819,51 @@ const handleLogoError = (event) => {
 }
 
 .button-group :deep(.main-button) {
-  border-radius: 4px;
-  height: 28px;
-  padding: 0 12px;
+  border-radius: 8px;
+  height: 30px;
+  padding: 0 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: var(--primary-color) !important;
-  border: 1px solid var(--primary-color) !important;
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%) !important;
+  border: none !important;
   color: #ffffff !important;
   font-weight: 700;
+  font-size: 0.88em;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .button-group :deep(.main-button:hover) {
-  background-color: var(--primary-hover) !important;
-  box-shadow: 0 0 10px rgba(37, 99, 235, 0.32);
+  background: linear-gradient(135deg, var(--primary-hover) 0%, var(--primary-active) 100%) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
 }
 
 .icon-buttons :deep(.n-button) {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--text-secondary);
-  background-color: rgba(37, 99, 235, 0.08);
-  border: 1px solid var(--primary-color);
+  background-color: var(--tag-bg);
+  border: 1px solid var(--tag-border);
   transition:
     background-color 0.2s ease,
     border-color 0.2s ease,
     box-shadow 0.2s ease,
     color 0.2s ease,
     transform 0.2s ease;
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 .icon-buttons :deep(.n-button:hover) {
   color: #ffffff;
   border-color: var(--primary-color);
   background-color: var(--primary-color);
-  transform: translateY(-1px);
-  box-shadow: 0 0 8px rgba(37, 99, 235, 0.28);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
 }
 
 @media (max-width: 480px) {
@@ -864,8 +886,8 @@ const handleLogoError = (event) => {
   }
 
   .plugin-logo-container {
-    width: 50px;
-    height: 50px;
+    width: 56px;
+    height: 56px;
   }
 }
 
