@@ -17,14 +17,17 @@ describe("calculatePageZoom", () => {
 });
 
 describe("usePageZoom", () => {
-  it("keeps body teleports in the same zoomed coordinate system and restores styles", async () => {
+  it("scales the app root without scaling body teleports and restores styles", async () => {
     const originalWidth = window.innerWidth;
     const originalZoom = document.body.style.getPropertyValue("zoom");
     const originalPageZoom = document.body.dataset.pageZoom;
+    const appRoot = document.createElement("div");
+    appRoot.id = "app";
+    appRoot.style.setProperty("zoom", "0.9");
+    appRoot.dataset.pageZoom = "existing";
+    document.body.appendChild(appRoot);
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1920 });
-    document.body.style.setProperty("zoom", "0.9");
-    document.body.dataset.pageZoom = "existing";
 
     const wrapper = mount(
       defineComponent({
@@ -36,22 +39,23 @@ describe("usePageZoom", () => {
       { attachTo: document.body },
     );
 
-    expect(Number(document.body.style.getPropertyValue("zoom"))).toBeCloseTo(
+    expect(Number(appRoot.style.getPropertyValue("zoom"))).toBeCloseTo(
       calculatePageZoom(1920),
     );
+    expect(document.body.style.getPropertyValue("zoom")).toBe(originalZoom);
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
     window.dispatchEvent(new Event("resize"));
     await nextTick();
-    expect(document.body.style.getPropertyValue("zoom")).toBe("1");
+    expect(appRoot.style.getPropertyValue("zoom")).toBe("1");
 
     wrapper.unmount();
-    expect(document.body.style.getPropertyValue("zoom")).toBe("0.9");
-    expect(document.body.dataset.pageZoom).toBe("existing");
+    expect(document.body.style.getPropertyValue("zoom")).toBe(originalZoom);
+    expect(appRoot.style.getPropertyValue("zoom")).toBe("0.9");
+    expect(appRoot.dataset.pageZoom).toBe("existing");
+    appRoot.remove();
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
-    if (originalZoom) document.body.style.setProperty("zoom", originalZoom);
-    else document.body.style.removeProperty("zoom");
     if (originalPageZoom !== undefined) document.body.dataset.pageZoom = originalPageZoom;
     else delete document.body.dataset.pageZoom;
   });
