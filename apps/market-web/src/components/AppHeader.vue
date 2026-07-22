@@ -547,7 +547,9 @@ onUnmounted(() => {
   font-size: 0.95em !important;
   padding: 0 20px !important;
   box-shadow: 0 4px 16px rgba(37, 99, 235, 0.2) !important;
-  transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease !important;
 }
 
 .source-copy-button:hover {

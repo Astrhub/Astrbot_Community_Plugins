@@ -39,9 +39,7 @@ describe("usePageZoom", () => {
       { attachTo: document.body },
     );
 
-    expect(Number(appRoot.style.getPropertyValue("zoom"))).toBeCloseTo(
-      calculatePageZoom(1920),
-    );
+    expect(Number(appRoot.style.getPropertyValue("zoom"))).toBeCloseTo(calculatePageZoom(1920));
     expect(document.body.style.getPropertyValue("zoom")).toBe(originalZoom);
 
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
