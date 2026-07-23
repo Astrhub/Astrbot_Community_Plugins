@@ -2,40 +2,44 @@
   <n-card
     class="plugin-card"
     :bordered="false"
-    :style="{ borderRadius: '8px', '--card-index': String(index) }"
+    :style="{ borderRadius: `var(--card-radius)`, '--card-index': String(index) }"
     :content-style="{ padding: '8px 16px' }"
-    @click="showDetails"
     role="article"
     :aria-label="`插件: ${displayName}`"
     aria-roledescription="插件卡片"
-    :aria-expanded="showPluginDetails"
-    tabindex="0"
     ref="cardRef"
-    @keydown="handleCardKeydown"
   >
+    <router-link
+      class="plugin-card__detail-link"
+      :to="{ name: 'PluginDetails', params: { name: plugin.id } }"
+      :aria-label="`查看 ${displayName} 插件详情`"
+    />
     <template #header>
       <div class="card-header" role="banner" :aria-labelledby="headerId">
-        <div
-          :id="headerId"
-          class="plugin-name-container"
-          ref="nameContainer"
-          role="heading"
-          aria-level="2"
-          aria-label="插件卡片标题区域"
-        >
-          <h3
-            class="plugin-name"
-            :class="{ marquee: isTextOverflow }"
-            ref="pluginNameEl"
+        <div class="plugin-title-group">
+          <div
+            :id="headerId"
+            class="plugin-name-container"
+            ref="nameContainer"
             role="heading"
-            aria-level="3"
-            :aria-label="displayName"
-            :aria-description="`插件：${displayName}，版本 ${pluginVersion}`"
+            aria-level="2"
+            aria-label="插件卡片标题区域"
           >
-            <span class="plugin-name-text" ref="nameTextEl" :aria-hidden="isTextOverflow">{{
-              displayName
-            }}</span>
-          </h3>
+            <h3
+              class="plugin-name"
+              :class="{ marquee: isTextOverflow }"
+              ref="pluginNameEl"
+              role="heading"
+              aria-level="3"
+              :aria-label="displayName"
+              :aria-description="`插件：${displayName}，版本 ${pluginVersion}`"
+            >
+              <span class="plugin-name-text" ref="nameTextEl" :aria-hidden="isTextOverflow">{{
+                displayName
+              }}</span>
+            </h3>
+          </div>
+          <span v-if="isNew" class="new-badge" aria-label="新发布插件">NEW</span>
         </div>
         <n-tag
           type="success"
@@ -93,16 +97,24 @@
               作者: {{ plugin.author }}
             </button>
             <div class="metric-list" role="group" aria-label="插件互动数据">
-              <span class="metric-item" role="text" :aria-label="`星标数：${plugin.stars || 0}`">
+              <span
+                class="metric-item metric-item--star"
+                role="text"
+                :aria-label="`星标数：${plugin.stars || 0}`"
+              >
                 <n-icon aria-hidden="true"><star-sharp /></n-icon>
                 {{ plugin.stars || 0 }}
               </span>
-              <span class="metric-item" role="text" :aria-label="`点赞数：${plugin.likes || 0}`">
+              <span
+                class="metric-item metric-item--like"
+                role="text"
+                :aria-label="`点赞数：${plugin.likes || 0}`"
+              >
                 <n-icon aria-hidden="true"><heart-outline /></n-icon>
                 {{ plugin.likes || 0 }}
               </span>
               <span
-                class="metric-item"
+                class="metric-item metric-item--comment"
                 role="text"
                 :aria-label="`评论数：${plugin.comments_count || 0}`"
               >
@@ -196,9 +208,6 @@
     </div>
   </n-card>
 
-  <!-- 插件详情模态框 -->
-  <plugin-details v-model:show="showPluginDetails" :plugin="plugin" />
-
   <n-modal
     v-model:show="showUnlistModal"
     preset="card"
@@ -246,12 +255,9 @@ import {
   PersonOutline,
   CheckmarkOutline,
 } from "@vicons/ionicons5";
-import { defineAsyncComponent } from "vue";
 import { storeToRefs } from "pinia";
 import { usePluginStore } from "@/stores/plugins";
-const PluginDetails = defineAsyncComponent(() => import("./PluginDetails.vue"));
-
-const showPluginDetails = ref(false);
+import { isNewPlugin } from "@/utils/pluginFreshness";
 const props = defineProps({
   plugin: {
     type: Object,
@@ -285,6 +291,7 @@ const formattedVersion = computed(() => {
   return pluginVersion.value.startsWith("v") ? pluginVersion.value : `v${pluginVersion.value}`;
 });
 const displayName = computed(() => props.plugin.display_name || props.plugin.name);
+const isNew = computed(() => isNewPlugin(props.plugin.created_at));
 const headerId = computed(() => {
   const rawId = String(props.plugin.id || props.plugin.name || `plugin-${props.index}`);
   const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, "-");
@@ -384,23 +391,6 @@ const openUrl = (url, e) => {
   }
 };
 
-const showDetails = () => {
-  showPluginDetails.value = true;
-};
-
-function handleCardKeydown(event) {
-  if (!["Enter", " "].includes(event.key)) return;
-  const target = event.target;
-  if (
-    target instanceof Element &&
-    target.closest('button, a, input, textarea, select, [role="button"], [role="link"]')
-  ) {
-    return;
-  }
-  event.preventDefault();
-  showDetails();
-}
-
 function searchAuthor(event) {
   event.stopPropagation();
   const author = String(props.plugin.author || "").trim();
@@ -462,10 +452,10 @@ const handleLogoError = (event) => {
   overflow: visible;
   contain: content;
   transition:
-    transform 0.3s ease,
-    border-color 0.3s ease,
-    box-shadow 0.3s ease;
-  border: 2px solid var(--border-base);
+    transform 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.35s ease,
+    box-shadow 0.35s ease;
+  border: 1.5px solid var(--border-base);
   box-shadow: var(--shadow-sm);
   background-color: var(--bg-card);
   min-height: 180px;
@@ -475,13 +465,43 @@ const handleLogoError = (event) => {
   min-width: 100%;
   animation: cardAppear 0.5s cubic-bezier(0.23, 1, 0.32, 1) backwards;
   animation-delay: calc(0.4s + (var(--card-index, 0) * 0.08s));
-  border-radius: 4px;
+  border-radius: var(--card-radius);
+}
+
+.plugin-card__detail-link {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+}
+
+.plugin-card__detail-link:focus-visible {
+  outline: 3px solid var(--primary-color);
+  outline-offset: 3px;
+}
+
+.plugin-card :deep(button),
+.plugin-card .author,
+.plugin-card a:not(.plugin-card__detail-link) {
+  position: relative;
+  z-index: 2;
+}
+
+.new-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  color: var(--primary-color);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
 }
 
 .plugin-card:hover {
-  transform: translateY(-4px);
+  transform: translateY(-5px) scale(1.005);
   border-color: var(--primary-color);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-card-hover);
 }
 
 .unlist-modal-actions {
@@ -494,11 +514,16 @@ const handleLogoError = (event) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 16px;
+  padding: 10px 18px;
   border-bottom: 1px solid var(--border-base);
-  background: linear-gradient(90deg, var(--bg-card) 0%, rgba(37, 99, 235, 0.08) 100%);
-  border-radius: 4px 4px 0 0;
-  min-height: 44px;
+  background: linear-gradient(
+    135deg,
+    var(--bg-card) 0%,
+    rgba(37, 99, 235, 0.04) 50%,
+    rgba(37, 99, 235, 0.08) 100%
+  );
+  border-radius: var(--card-radius) var(--card-radius) 0 0;
+  min-height: 46px;
 }
 
 :deep(.n-card__header) {
@@ -511,8 +536,17 @@ const handleLogoError = (event) => {
   padding-bottom: 6px !important;
 }
 
-.plugin-name-container {
+.plugin-title-group {
   max-width: 75%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plugin-name-container {
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   position: relative;
 }
@@ -583,7 +617,7 @@ const handleLogoError = (event) => {
 }
 
 @media (max-width: 768px) {
-  .plugin-name-container {
+  .plugin-title-group {
     max-width: 70%;
   }
 
@@ -607,7 +641,7 @@ const handleLogoError = (event) => {
 }
 
 @media (max-width: 480px) {
-  .plugin-name-container {
+  .plugin-title-group {
     max-width: 65%;
   }
 
@@ -617,13 +651,16 @@ const handleLogoError = (event) => {
 }
 
 .version-tag {
-  background-color: var(--primary-color) !important;
-  color: #ffffff !important;
+  background-color: var(--version-bg) !important;
+  color: var(--version-text) !important;
   border: none !important;
-  padding: 2px 10px !important;
+  padding: 3px 10px !important;
   font-weight: 700;
   flex-shrink: 0;
-  border-radius: 3px;
+  border-radius: 999px;
+  font-size: 0.78em;
+  letter-spacing: 0.3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 .card-content-wrapper {
@@ -634,22 +671,30 @@ const handleLogoError = (event) => {
 
 .plugin-logo-container {
   flex-shrink: 0;
-  width: 60px;
-  height: 60px;
+  width: 68px;
+  height: 68px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
-  background-color: rgba(37, 99, 235, 0.08);
-  border: 1px solid var(--border-base);
+  border-radius: var(--card-inner-radius);
+  background: var(--logo-bg);
+  border: 1.5px solid var(--logo-border);
   overflow: hidden;
+  transition:
+    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.3s ease;
+}
+
+.plugin-card:hover .plugin-logo-container {
+  transform: scale(1.04);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.1);
 }
 
 .plugin-logo {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: 6px;
+  border-radius: calc(var(--card-inner-radius) - 2px);
 }
 
 .card-main-content {
@@ -665,8 +710,8 @@ const handleLogoError = (event) => {
 }
 
 .description {
-  margin: 4px 0;
-  line-height: 1.5;
+  margin: 6px 0;
+  line-height: 1.55;
   font-size: 0.9em;
   height: 3em;
   overflow: hidden;
@@ -712,21 +757,22 @@ const handleLogoError = (event) => {
     box-shadow 0.2s ease,
     transform 0.2s ease;
   margin-bottom: 2px;
-  background-color: rgba(37, 99, 235, 0.12) !important;
-  color: var(--primary-color) !important;
-  border: 1px solid var(--primary-color) !important;
-  padding: 2px 8px !important;
+  background-color: var(--tag-bg) !important;
+  color: var(--tag-text) !important;
+  border: 1px solid var(--tag-border) !important;
+  padding: 3px 10px !important;
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  border-radius: 3px;
-  font-weight: 600;
+  border-radius: 999px;
+  font-weight: 500;
+  font-size: 0.82em;
 }
 
 .plugin-tag:hover {
-  transform: scale(1.05);
-  background-color: rgba(37, 99, 235, 0.2) !important;
-  box-shadow: 0 0 8px rgba(37, 99, 235, 0.18);
+  transform: translateY(-1px);
+  background-color: var(--tag-bg-hover) !important;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.06);
 }
 
 .plugin-meta {
@@ -734,9 +780,9 @@ const handleLogoError = (event) => {
   justify-content: space-between;
   align-items: center;
   font-size: 0.85em;
-  padding: 4px 0;
-  margin: 0px 0;
-  border-top: 1px solid var(--border-base);
+  padding: 6px 0;
+  margin: 2px 0;
+  border-top: 1px dashed var(--border-base);
   color: var(--text-secondary);
   min-height: 28px;
 }
@@ -744,34 +790,39 @@ const handleLogoError = (event) => {
 .author {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   font-weight: 600;
-  color: var(--primary-color);
+  color: var(--text-secondary);
   appearance: none;
   border: 0;
   background: transparent;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   font: inherit;
-  padding: 2px 4px;
+  padding: 3px 8px;
   text-align: left;
+  font-size: 0.9em;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
 }
 
 .author:hover,
 .author:focus-visible {
-  background: rgba(37, 99, 235, 0.1);
+  background: var(--tag-bg);
+  color: var(--primary-color);
   outline: none;
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
 }
 
 .metric-list {
-  color: var(--primary-color);
-  font-weight: 700;
+  color: var(--metric-color);
+  font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
 }
 
 .metric-item {
@@ -779,6 +830,26 @@ const handleLogoError = (event) => {
   align-items: center;
   gap: 4px;
   white-space: nowrap;
+  font-size: 0.92em;
+}
+
+.metric-item :deep(.n-icon) {
+  font-size: 14px;
+}
+
+.metric-item--star,
+.metric-item--star :deep(.n-icon) {
+  color: var(--metric-star);
+}
+
+.metric-item--like,
+.metric-item--like :deep(.n-icon) {
+  color: var(--metric-like);
+}
+
+.metric-item--comment,
+.metric-item--comment :deep(.n-icon) {
+  color: var(--metric-comment);
 }
 
 .plugin-links {
@@ -800,48 +871,61 @@ const handleLogoError = (event) => {
 }
 
 .button-group :deep(.main-button) {
-  border-radius: 4px;
-  height: 28px;
-  padding: 0 12px;
+  border-radius: 8px;
+  height: 30px;
+  padding: 0 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: var(--primary-color) !important;
-  border: 1px solid var(--primary-color) !important;
+  background: linear-gradient(
+    135deg,
+    var(--primary-color) 0%,
+    var(--primary-hover) 100%
+  ) !important;
+  border: none !important;
   color: #ffffff !important;
   font-weight: 700;
+  font-size: 0.88em;
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
 }
 
 .button-group :deep(.main-button:hover) {
-  background-color: var(--primary-hover) !important;
-  box-shadow: 0 0 10px rgba(37, 99, 235, 0.32);
+  background: linear-gradient(
+    135deg,
+    var(--primary-hover) 0%,
+    var(--primary-active) 100%
+  ) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
 }
 
 .icon-buttons :deep(.n-button) {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--text-secondary);
-  background-color: rgba(37, 99, 235, 0.08);
-  border: 1px solid var(--primary-color);
+  background-color: var(--tag-bg);
+  border: 1px solid var(--tag-border);
   transition:
     background-color 0.2s ease,
     border-color 0.2s ease,
     box-shadow 0.2s ease,
     color 0.2s ease,
     transform 0.2s ease;
-  border-radius: 4px;
+  border-radius: 8px;
 }
 
 .icon-buttons :deep(.n-button:hover) {
   color: #ffffff;
   border-color: var(--primary-color);
   background-color: var(--primary-color);
-  transform: translateY(-1px);
-  box-shadow: 0 0 8px rgba(37, 99, 235, 0.28);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
 }
 
 @media (max-width: 480px) {
@@ -864,8 +948,8 @@ const handleLogoError = (event) => {
   }
 
   .plugin-logo-container {
-    width: 50px;
-    height: 50px;
+    width: 56px;
+    height: 56px;
   }
 }
 

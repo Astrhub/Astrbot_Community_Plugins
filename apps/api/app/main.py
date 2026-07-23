@@ -26,7 +26,10 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from redis.exceptions import RedisError
 
+from .artifacts import build_artifact_runtime
+from .artifacts.routes import build_artifact_router
 from .auth import (
     Role,
     can_edit_plugin,
@@ -57,6 +60,7 @@ from .schemas import (
     AnnouncementCreate,
     ApiKeyCreate,
     CommentCreate,
+    GithubTokenVerifyPayload,
     InternalLoginPayload,
     InternalUserCreate,
     MuteUserPayload,
@@ -114,12 +118,26 @@ RESERVED_WEB_PATHS = {
     "redoc",
 }
 RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
+FRONTEND_EXACT_ROUTES = {
+    "",
+    "submit",
+    "setup",
+    "settings",
+    "notifications",
+    "admin",
+    "docs/rest",
+    "plugin",
+}
+FRONTEND_ROUTE_PREFIXES = ("settings/", "admin/", "plugin/")
 POSTGRES_MAINTENANCE_DATABASE = "postgres"
 GITHUB_METADATA_SYNC_BATCH_SIZE = 10
 GITHUB_METADATA_SYNC_WORKER_SLEEP_SECONDS = 60
 GITHUB_RATE_LIMIT_MESSAGE = (
     "GitHub API rate limit reached. Provide a read-only GitHub token and try again."
 )
+README_CACHE_TTL_SECONDS = 3600
+README_MAX_CONTENT_BYTES = 1_000_000
+README_CANDIDATES = ("README.md", "Readme.md", "readme.md", "README.MD", "README")
 SYSTEM_OPTION_KEYS = {
     "CLOUDFLARE_EMAIL_ACCOUNT_ID",
     "CLOUDFLARE_EMAIL_API_TOKEN",
@@ -180,7 +198,6 @@ PLUGIN_METADATA_SYNC_FIELDS = (
     "version",
     "astrbot_version",
     "category",
-    "download_url",
     "support_platforms",
 )
 OFFICIAL_PLUGIN_CATEGORIES = {
@@ -206,6 +223,8 @@ def create_app(
         openapi_tags=[
             {"name": "plugins", "description": "插件浏览与详情"},
             {"name": "submissions", "description": "插件提交与管理"},
+            {"name": "artifacts", "description": "插件包与自动审查结果"},
+            {"name": "reviews", "description": "插件包人工复核与发布"},
             {"name": "comments", "description": "评论与点赞"},
             {"name": "integration", "description": "AstrBot 插件源"},
             {"name": "auth", "description": "认证与会话"},
@@ -218,6 +237,11 @@ def create_app(
     )
     app.state.settings = settings or load_settings()
     app.state.store = store or create_store(app.state.settings)
+    app.state.artifact_runtime = build_artifact_runtime(
+        app.state.settings,
+        app.state.store,
+        allow_in_memory_artifacts=store is not None,
+    )
     app.state.email_daily_counter = {"date": "", "count": 0}
     app.state.github_api_token_index = 0
     app.state.rate_limit_counters = {}
@@ -227,10 +251,27 @@ def create_app(
         allow_origins=list(app.state.settings.cors_origins),
         allow_credentials=True,
         allow_methods=["*"],
-        allow_headers=["content-type", "authorization", "x-dev-github-login"],
+        allow_headers=[
+            "content-type",
+            "authorization",
+            "x-dev-github-login",
+            "idempotency-key",
+        ],
     )
+
+    @app.middleware("http")
+    async def add_cache_control(request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        if "cache-control" not in response.headers:
+            response.headers["Cache-Control"] = cache_control_for_path(
+                request.url.path,
+                response.headers.get("content-type", ""),
+            )
+        return response
+
     app.add_exception_handler(HTTPException, http_exception_handler)
     register_routes(app)
+    app.include_router(build_artifact_router())
     register_market_web_routes(app)
     return app
 
@@ -258,6 +299,7 @@ def create_store(settings: Settings) -> InMemoryMarketStore | PgRedisMarketStore
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await maybe_call_store_lifecycle(app, "connect")
+    await app.state.artifact_runtime.start(app.state.store)
     await bootstrap_internal_core_admin(app)
     sync_task = asyncio.create_task(github_metadata_sync_worker(app))
     try:
@@ -269,6 +311,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except asyncio.CancelledError:
             # Expected during application shutdown after cancelling the sync worker.
             pass
+        await app.state.artifact_runtime.close()
         await maybe_call_store_lifecycle(app, "close")
 
 
@@ -308,13 +351,14 @@ def register_routes(app: FastAPI) -> None:
         summary="健康检查",
         description="返回服务状态，包括数据库和 Redis 连接情况。",
     )
-    async def health(request: Request) -> dict[str, str]:
+    async def health(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
         return {
             "status": "ok",
             "setup": "required" if settings.is_setup_required() else "complete",
             "database": "configured" if settings.database_url else "missing",
             "redis": "configured" if settings.redis_url else "missing",
+            "artifacts": await request.app.state.artifact_runtime.health_status(),
         }
 
     @app.get(
@@ -378,11 +422,46 @@ def register_routes(app: FastAPI) -> None:
             payload,
             runtime_config,
         )
+        request.app.state.artifact_runtime.update_settings(request.app.state.settings)
         return {
             "saved": True,
             "restart_required": settings_restart_required(settings, updated_runtime_config),
             "settings": updated,
         }
+
+    @app.post(
+        "/v1/admin/settings/github-tokens/verify",
+        tags=["core-admin"],
+        summary="重新验证 GitHub API Token",
+        description="重新验证 Token 池中的指定 Token，并更新脱敏状态。仅核心管理员可用。",
+        responses={
+            200: {"description": "验证完成"},
+            400: {"description": "Token 索引无效"},
+            401: {"description": "未登录"},
+            403: {"description": "需要核心管理员权限"},
+        },
+    )
+    async def verify_admin_github_token(
+        request: Request,
+        payload: GithubTokenVerifyPayload,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        if not is_core_admin(user):
+            raise error(403, "Only core admin can manage system settings")
+        settings = get_settings(request)
+        runtime_config = await effective_runtime_config(request)
+        market_settings = build_market_settings(settings, runtime_config)
+        token_value = str(market_settings.get("api_token") or "")
+        tokens = parse_github_api_tokens(token_value)
+        if payload.index >= len(tokens):
+            raise error(400, "GitHub API token index is out of range")
+        await verify_github_api_token(
+            get_store(request),
+            token_value,
+            tokens[payload.index],
+        )
+        updated_runtime_config = await effective_runtime_config(request)
+        return redact_market_settings(build_market_settings(settings, updated_runtime_config))
 
     @app.post(
         "/v1/admin/settings/email/test",
@@ -897,7 +976,8 @@ def register_routes(app: FastAPI) -> None:
         responses={200: {"description": "插件列表"}},
     )
     async def list_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
-        return {"items": await call_store(request, "list_public_plugins")}
+        plugins = await list_public_plugins_with_artifacts(request)
+        return {"items": [public_market_plugin(plugin) for plugin in plugins]}
 
     @app.get(
         "/plugins.json",
@@ -906,7 +986,7 @@ def register_routes(app: FastAPI) -> None:
         description="返回 AstrBot 插件市场的完整插件源数据（机器可读格式）。无需登录。",
     )
     async def astrbot_plugin_source(request: Request) -> dict[str, dict[str, Any]]:
-        return build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
+        return build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
 
     @app.get(
         "/plugins-md5.json",
@@ -915,13 +995,13 @@ def register_routes(app: FastAPI) -> None:
         description="返回插件源数据的 MD5 校验值，用于增量更新检测。无需登录。",
     )
     async def astrbot_plugin_source_md5(request: Request) -> dict[str, str]:
-        feed = build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
+        feed = build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
         return {"md5": digest_plugin_source(feed)}
 
     @app.get("/v1/astrbot/plugins", tags=["integration"], summary="AstrBot 插件源 v1")
     @app.get("/v1/astrbot/plugins.json", tags=["integration"], summary="AstrBot 插件源 v1")
     async def astrbot_plugin_source_v1(request: Request) -> dict[str, dict[str, Any]]:
-        return build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
+        return build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
 
     @app.get(
         "/v1/astrbot/plugins-md5.json",
@@ -999,10 +1079,14 @@ def register_routes(app: FastAPI) -> None:
     )
     async def submit_plugin(request: Request, payload: PluginSubmission) -> dict[str, Any]:
         user = await require_user(request)
+        muted_until = parse_iso_datetime(user.get("muted_until"))
+        if muted_until and muted_until > datetime.now(UTC):
+            raise error(403, "Muted users cannot submit plugin versions")
         settings = await runtime_settings_for_app(request.app)
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
         data = payload.model_dump()
+        data["category_explicit"] = "category" in payload.model_fields_set
         validate_plugin_submission(data, settings)
         validate_repo_owner(data["repo"], user)
         data.update(
@@ -1013,6 +1097,27 @@ def register_routes(app: FastAPI) -> None:
                 store=request.app.state.store,
             )
         )
+        artifact_runtime = request.app.state.artifact_runtime
+        if artifact_runtime.available and artifact_runtime.service is not None:
+            try:
+                plugin = await call_store(request, "register_plugin", user, data)
+                artifact = await artifact_runtime.service.submit_github(
+                    plugin=plugin,
+                    user=user,
+                    source_ref="",
+                )
+            except PermissionError as exc:
+                raise error(403, "Plugin is already owned by another user") from exc
+            except Exception as exc:
+                from .artifacts.github_source import GithubSourceError
+                from .artifacts.storage import ArtifactStorageError
+
+                if isinstance(exc, GithubSourceError):
+                    raise error(503 if exc.retryable else 400, str(exc)) from exc
+                if isinstance(exc, ArtifactStorageError):
+                    raise error(413 if exc.code == "archive_too_large" else 400, str(exc)) from exc
+                raise
+            return {**plugin, "artifact": artifact}
         plugin = await call_store(request, "submit_plugin", user, data)
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
@@ -1035,6 +1140,44 @@ def register_routes(app: FastAPI) -> None:
         plugin = await get_plugin_or_404(request, plugin_id)
         user = await current_user(request)
         return await plugin_with_interaction_state(request, plugin, user)
+
+    @app.get(
+        "/v1/plugins/{plugin_id}/readme",
+        tags=["plugins"],
+        summary="获取插件 README",
+        description="从服务端缓存或 GitHub 获取插件 README/仓库内 Markdown 文件。无需登录。",
+        responses={
+            200: {"description": "README 内容"},
+            400: {"description": "仓库路径无效"},
+            404: {"description": "插件或 README 不存在"},
+        },
+    )
+    async def plugin_readme(
+        request: Request,
+        plugin_id: str,
+        path: str = "",
+    ) -> dict[str, Any]:
+        plugin = await get_plugin_or_404(request, plugin_id)
+        return await plugin_readme_response(request, plugin, path, refresh=False)
+
+    @app.post(
+        "/v1/plugins/{plugin_id}/readme/refresh",
+        tags=["plugins"],
+        summary="刷新插件 README 缓存",
+        description="绕过服务端缓存重新获取插件 README/仓库内 Markdown 文件。无需登录。",
+        responses={
+            200: {"description": "README 内容"},
+            400: {"description": "仓库路径无效"},
+            404: {"description": "插件或 README 不存在"},
+        },
+    )
+    async def refresh_plugin_readme(
+        request: Request,
+        plugin_id: str,
+        path: str = "",
+    ) -> dict[str, Any]:
+        plugin = await get_plugin_or_404(request, plugin_id)
+        return await plugin_readme_response(request, plugin, path, refresh=True)
 
     @app.patch(
         "/v1/plugins/{plugin_id}",
@@ -1075,6 +1218,8 @@ def register_routes(app: FastAPI) -> None:
             )
         if "category" in patch:
             patch["category"] = validate_plugin_category(patch.get("category", ""))
+            patch["category_source"] = "reviewer" if is_admin(user) else "user"
+            patch["category_explicit"] = True
         updated = await call_store(
             request,
             "update_plugin_metadata",
@@ -1749,17 +1894,49 @@ def serve_market_web_file(full_path: str) -> FileResponse:
         raise error(404, "Market web build is missing. Run npm run build:web first.")
 
     requested_file = resolve_market_web_file(full_path)
-    return FileResponse(requested_file or index_file)
+    if requested_file:
+        return FileResponse(requested_file)
+    status_code = 200 if is_known_frontend_route(full_path) else 404
+    return FileResponse(index_file, status_code=status_code)
 
 
 def resolve_market_web_file(full_path: str) -> Path | None:
     dist_dir = MARKET_WEB_DIST.resolve()
-    candidate = (dist_dir / full_path).resolve()
-    try:
-        candidate.relative_to(dist_dir)
-    except ValueError:
-        return None
-    return candidate if candidate.is_file() else None
+    candidates = [(dist_dir / full_path).resolve()]
+    if full_path.strip("/"):
+        candidates.append((dist_dir / full_path / "index.html").resolve())
+    for candidate in candidates:
+        try:
+            candidate.relative_to(dist_dir)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def is_known_frontend_route(full_path: str) -> bool:
+    path = full_path.strip("/")
+    return path in FRONTEND_EXACT_ROUTES or path.startswith(FRONTEND_ROUTE_PREFIXES)
+
+
+def cache_control_for_path(path: str, content_type: str = "") -> str:
+    normalized = "/" + path.lstrip("/")
+    if normalized.startswith("/assets/"):
+        return "public, max-age=31536000, immutable"
+    if normalized in {"/plugins.json", "/plugins-md5.json"} or normalized.startswith(
+        "/v1/astrbot/"
+    ):
+        return "public, max-age=300"
+    if normalized in {"/sitemap.xml", "/robots.txt", "/llms.txt"}:
+        return "public, max-age=3600"
+    if normalized in {"/v1/plugins", "/v1/site"}:
+        return "public, max-age=60"
+    if normalized.startswith("/v1/"):
+        return "private, no-store"
+    if "text/html" in content_type:
+        return "public, max-age=0, must-revalidate"
+    return "private, no-store"
 
 
 def is_reserved_api_path(full_path: str) -> bool:
@@ -1998,6 +2175,103 @@ async def get_plugin_or_404(request: Request, plugin_id: str) -> dict[str, Any]:
     if not plugin:
         raise error(404, "Plugin not found")
     return plugin
+
+
+async def plugin_readme_response(
+    request: Request,
+    plugin: dict[str, Any],
+    path: str,
+    *,
+    refresh: bool,
+) -> dict[str, Any]:
+    normalized_path = normalize_plugin_readme_path(path)
+    cache_key = plugin_readme_cache_key(
+        str(plugin.get("id") or ""),
+        str(plugin.get("repo") or ""),
+        normalized_path,
+    )
+    if refresh:
+        await delete_plugin_readme_cache(request, cache_key)
+    else:
+        cached = await load_plugin_readme_cache(request, cache_key)
+        if cached:
+            return cached
+    try:
+        document = await fetch_plugin_readme_document(request.app, plugin, normalized_path)
+    except (GithubMetadataError, httpx.HTTPError, UnicodeError, ValueError) as exc:
+        LOGGER.info(
+            "Plugin README fetch failed",
+            extra={"plugin_id": plugin.get("id"), "path": normalized_path},
+        )
+        raise error(404, "Plugin README not found") from exc
+    if not document or not str(document.get("content") or ""):
+        raise error(404, "Plugin README not found")
+    await save_plugin_readme_cache(request, cache_key, document)
+    return document
+
+
+def normalize_plugin_readme_path(value: str) -> str:
+    path = unquote(str(value or "")).strip().lstrip("/")
+    if not path:
+        return ""
+    if len(path) > 512 or "\\" in path or any(ord(char) < 32 for char in path):
+        raise error(400, "Invalid README path")
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise error(400, "Invalid README path")
+    return "/".join(parts)
+
+
+def plugin_readme_cache_key(plugin_id: str, repo: str, path: str) -> str:
+    digest = hashlib.sha256(f"{plugin_id}\0{repo}\0{path}".encode("utf-8")).hexdigest()
+    return f"market:plugin-readme:v1:{digest}"
+
+
+async def load_plugin_readme_cache(
+    request: Request,
+    cache_key: str,
+) -> dict[str, Any] | None:
+    redis_client = getattr(get_store(request), "redis", None)
+    if not redis_client:
+        return None
+    try:
+        raw = await redis_client.get(cache_key)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw) if raw else None
+    except (UnicodeError, json.JSONDecodeError, TypeError, OSError, RuntimeError, RedisError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
+        return None
+    return {**payload, "cached": True}
+
+
+async def save_plugin_readme_cache(
+    request: Request,
+    cache_key: str,
+    payload: dict[str, Any],
+) -> None:
+    redis_client = getattr(get_store(request), "redis", None)
+    if not redis_client:
+        return
+    try:
+        await redis_client.set(
+            cache_key,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            ex=README_CACHE_TTL_SECONDS,
+        )
+    except (OSError, RuntimeError, TypeError, RedisError):
+        return
+
+
+async def delete_plugin_readme_cache(request: Request, cache_key: str) -> None:
+    redis_client = getattr(get_store(request), "redis", None)
+    if not redis_client:
+        return
+    try:
+        await redis_client.delete(cache_key)
+    except (OSError, RuntimeError, TypeError, RedisError):
+        return
 
 
 def notification_preference_enabled(user: dict[str, Any] | None, key: str) -> bool:
@@ -2642,6 +2916,12 @@ async def refresh_plugin_github_metadata_for_plugin(
         return plugin
     if not metadata:
         return plugin
+    repo_version = str(metadata.pop("version", "") or "").strip()
+    metadata.pop("download_url", None)
+    if repo_version:
+        metadata["repo_version"] = repo_version
+        # 保留旧市场 API 的 version 字段，但发布判断只读取 repo_version。
+        metadata["version"] = repo_version
     metadata.update(github_sync_success_metadata(settings, user))
     return await resolve_optional_awaitable(
         app.state.store.update_plugin_metadata(plugin["id"], metadata)
@@ -2660,6 +2940,123 @@ async def safe_fetch_plugin_github_metadata(
         return await fetch_plugin_github_metadata(repo, settings, user, token=token, store=store)
     except GithubMetadataError:
         return {}
+
+
+async def fetch_plugin_readme_document(
+    app: FastAPI,
+    plugin: dict[str, Any],
+    path: str,
+) -> dict[str, Any] | None:
+    match = GITHUB_REPO_PATTERN.fullmatch(str(plugin.get("repo") or "").strip())
+    if not match:
+        return None
+    owner = match.group("owner")
+    repo_name = match.group("repo")
+    settings = await runtime_settings_for_app(app)
+    runtime_config = await load_system_options(app.state.store)
+    token_statuses = parse_github_api_token_statuses(
+        runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
+    )
+    token = next_system_github_api_token(app, settings, token_statuses)
+    headers = github_api_headers(settings=settings, token=token, token_statuses=token_statuses)
+    status_store = app.state.store if token else None
+    api_path = f"contents/{quote(path, safe='/')}" if path else "readme"
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        response = await github_get(
+            client,
+            f"https://api.github.com/repos/{owner}/{repo_name}/{api_path}",
+            headers,
+            store=status_store,
+        )
+        raise_for_github_rate_limit(response)
+        document = github_content_document(response)
+        if document:
+            return document
+
+        branches = await github_readme_branches(
+            client,
+            owner,
+            repo_name,
+            headers,
+            store=status_store,
+        )
+        candidates = (path,) if path else README_CANDIDATES
+        for branch in branches:
+            for candidate in candidates:
+                raw_url = (
+                    "https://raw.githubusercontent.com/"
+                    f"{owner}/{repo_name}/{quote(branch, safe='')}/{quote(candidate, safe='/')}"
+                )
+                raw_response = await client.get(
+                    raw_url,
+                    headers={"accept": "text/plain", "user-agent": "astrbot-community-plugins"},
+                )
+                if raw_response.status_code != 200:
+                    continue
+                content = github_response_text(raw_response)
+                if content:
+                    return build_plugin_readme_document(content, raw_url)
+    return None
+
+
+def github_content_document(response: Any) -> dict[str, Any] | None:
+    if int(getattr(response, "status_code", 0) or 0) != 200:
+        return None
+    data = response.json()
+    if not isinstance(data, dict) or data.get("type") not in {None, "file"}:
+        return None
+    content = str(data.get("content") or "")
+    if content and str(data.get("encoding") or "base64").lower() == "base64":
+        try:
+            decoded = base64.b64decode(re.sub(r"\s+", "", content)).decode(
+                "utf-8",
+                errors="replace",
+            )
+        except (ValueError, TypeError):
+            decoded = ""
+        if decoded and len(decoded.encode("utf-8")) <= README_MAX_CONTENT_BYTES:
+            source_url = str(data.get("download_url") or data.get("html_url") or "")
+            return build_plugin_readme_document(decoded, source_url)
+    return None
+
+
+async def github_readme_branches(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo_name: str,
+    headers: dict[str, str],
+    *,
+    store: Any | None,
+) -> list[str]:
+    response = await github_get(
+        client,
+        f"https://api.github.com/repos/{owner}/{repo_name}",
+        headers,
+        store=store,
+    )
+    raise_for_github_rate_limit(response)
+    default_branch = ""
+    if response.status_code == 200:
+        data = response.json()
+        if isinstance(data, dict):
+            default_branch = str(data.get("default_branch") or "").strip()
+    return list(dict.fromkeys(branch for branch in (default_branch, "main", "master") if branch))
+
+
+def github_response_text(response: Any) -> str:
+    content = bytes(getattr(response, "content", b"") or b"")
+    if not content or len(content) > README_MAX_CONTENT_BYTES:
+        return ""
+    return content.decode("utf-8", errors="replace")
+
+
+def build_plugin_readme_document(content: str, source_url: str) -> dict[str, Any]:
+    return {
+        "content": content,
+        "source_url": source_url,
+        "fetched_at": isoformat_utc(datetime.now(UTC)),
+        "cached": False,
+    }
 
 
 async def fetch_plugin_submission_metadata_preview(
@@ -2876,10 +3273,77 @@ async def record_github_api_token_response(store: Any, token: str, response: Any
     token_pool = runtime_config.get("GITHUB_API_TOKEN", "")
     if token not in parse_github_api_tokens(token_pool):
         return
-    statuses = clean_github_api_token_statuses(
+    await save_github_api_token_status(
+        store,
         token_pool,
-        runtime_config.get("GITHUB_API_TOKEN_STATUS", ""),
+        token,
+        status,
+        status_value=runtime_config.get("GITHUB_API_TOKEN_STATUS", ""),
     )
+
+
+async def verify_github_api_token(store: Any, token_value: str, token: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            response = await client.get(
+                "https://api.github.com/rate_limit",
+                headers=github_api_headers(token=token),
+            )
+        status = github_api_token_verification_status(response)
+    except httpx.HTTPError as exc:
+        status = {
+            "disabled": False,
+            "status": "error",
+            "error_code": 0,
+            "error_message": str(exc)[:200] or "GitHub API verification failed",
+            "retry_after_seconds": 0,
+            "reset_at": "",
+            "checked_at": isoformat_utc(datetime.now(UTC)),
+        }
+    await save_github_api_token_status(store, token_value, token, status)
+
+
+def github_api_token_verification_status(response: Any) -> dict[str, Any]:
+    mapped = github_api_token_status_from_response(response)
+    if mapped:
+        return mapped
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    checked_at = isoformat_utc(datetime.now(UTC))
+    if 200 <= status_code < 400:
+        return {
+            "disabled": False,
+            "status": "active",
+            "error_code": 0,
+            "error_message": "",
+            "retry_after_seconds": 0,
+            "reset_at": "",
+            "checked_at": checked_at,
+        }
+    return {
+        "disabled": False,
+        "status": "error",
+        "error_code": status_code,
+        "error_message": github_response_message(response) or "GitHub API verification failed",
+        "retry_after_seconds": 0,
+        "reset_at": "",
+        "checked_at": checked_at,
+    }
+
+
+async def save_github_api_token_status(
+    store: Any,
+    token_value: str,
+    token: str,
+    status: dict[str, Any],
+    *,
+    status_value: str | None = None,
+) -> None:
+    if token not in parse_github_api_tokens(token_value):
+        return
+    if status_value is None:
+        runtime_config = await load_system_options(store)
+        status_value = runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
+    statuses = clean_github_api_token_statuses(token_value, status_value)
     statuses[github_api_token_hash(token)] = status
     await save_system_options_to_store(
         store,
@@ -3267,6 +3731,8 @@ async def activate_setup_store(app: FastAPI, new_store: Any) -> None:
 
     old_store = app.state.store
     app.state.store = new_store
+    app.state.artifact_runtime.update_settings(app.state.settings)
+    await app.state.artifact_runtime.start(new_store)
     if old_store is new_store:
         return
     close = getattr(old_store, "close", None)
@@ -4563,7 +5029,68 @@ def build_astrbot_plugin_source(plugins: list[dict[str, Any]]) -> dict[str, dict
     return dict(sorted(feed.items()))
 
 
+async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str, Any]]:
+    plugins = await call_store(request, "list_public_plugins")
+    runtime = request.app.state.artifact_runtime
+    if not runtime.config.enabled:
+        return plugins
+    publications: dict[str, dict[str, Any]] = {}
+    if runtime.repository is not None:
+        publications = await runtime.repository.list_current_publications(
+            [str(plugin.get("id") or "") for plugin in plugins]
+        )
+    enriched: list[dict[str, Any]] = []
+    for plugin in plugins:
+        publication = publications.get(str(plugin.get("id") or ""), {})
+        feed_version = str(
+            plugin.get("repo_version")
+            or plugin.get("version")
+            or publication.get("version")
+            or "1.0.0"
+        )
+        published_version = str(publication.get("version") or "")
+        published = publication.get("publication_status") == "published"
+        gated_download_url = (
+            str(publication.get("download_url") or "")
+            if published and versions_match(feed_version, published_version)
+            else ""
+        )
+        enriched.append(
+            {
+                **plugin,
+                "_artifact_publication_checked": True,
+                "download_url": gated_download_url,
+                "published_version": published_version,
+                "artifact_download_url": gated_download_url,
+                "artifact_publication_status": publication.get("publication_status") or "",
+            }
+        )
+    return enriched
+
+
+def public_market_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in plugin.items()
+        if not key.startswith("_artifact_") and key != "artifact_download_url"
+    }
+
+
 def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
+    feed_version = str(
+        plugin.get("repo_version")
+        or plugin.get("version")
+        or plugin.get("published_version")
+        or "1.0.0"
+    )
+    download_url = str(plugin.get("download_url") or "")
+    if plugin.get("_artifact_publication_checked"):
+        published_version = str(plugin.get("published_version") or "")
+        matches = versions_match(feed_version, published_version)
+        published = plugin.get("artifact_publication_status") == "published"
+        download_url = (
+            str(plugin.get("artifact_download_url") or "") if matches and published else ""
+        )
     return {
         "name": name,
         "display_name": plugin.get("display_name") or name,
@@ -4575,10 +5102,10 @@ def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
         "tags": plugin.get("tags") if isinstance(plugin.get("tags"), list) else [],
         "stars": int(plugin.get("stars") or 0),
         "updated_at": plugin.get("updated_at") or "",
-        "version": plugin.get("version") or "1.0.0",
+        "version": feed_version,
         "logo": plugin.get("logo") or "",
         "pinned": bool(plugin.get("pinned")),
-        "download_url": plugin.get("download_url") or "",
+        "download_url": download_url,
         "i18n": plugin.get("i18n") if isinstance(plugin.get("i18n"), dict) else {},
         "astrbot_version": plugin.get("astrbot_version") or "",
         "category": plugin.get("category") or "",
@@ -4586,6 +5113,17 @@ def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
         if isinstance(plugin.get("support_platforms"), list)
         else [],
     }
+
+
+def versions_match(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    try:
+        from .artifacts.archive import normalize_version
+
+        return normalize_version(left) == normalize_version(right)
+    except ValueError:
+        return left.strip().lower().removeprefix("v") == right.strip().lower().removeprefix("v")
 
 
 def digest_plugin_source(feed: dict[str, dict[str, Any]]) -> str:

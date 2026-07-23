@@ -37,6 +37,10 @@ def test_openapi_public_excludes_admin_and_core():
     assert "/v1/admin/users" not in paths
     assert "/v1/core/users" not in paths
     assert "/v1/admin/settings" not in paths
+    assert "/v1/admin/review-policies/active" not in paths
+    assert "/v1/core-admin/review-policies" not in paths
+    assert "/v1/artifacts/{artifact_id}/files" not in paths
+    assert "/v1/artifacts/{artifact_id}/files/{file_id}/content" not in paths
     # public routes MUST appear
     assert "/v1/plugins" in paths
     assert "/v1/site" in paths
@@ -64,8 +68,106 @@ def test_openapi_admin_includes_admin_routes():
     paths = resp.json().get("paths", {})
     assert "/v1/admin/users" in paths
     assert "/v1/admin/plugins" in paths
+    assert "/v1/admin/review-policies/active" in paths
     # core-admin still hidden
     assert "/v1/core/users" not in paths
+    assert "/v1/core-admin/review-policies" not in paths
+    assert "/v1/core-admin/review-tools/health" not in paths
+
+
+def test_artifact_report_openapi_is_typed_and_role_filtered():
+    client, _ = _client_with_store()
+    _login(client, "regularuser", "userpass123")
+    user_schema = client.get("/openapi.json").json()
+    assert "/v1/artifacts/{artifact_id}" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/files" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/files/{file_id}/content" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/diff" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/diff/{diff_id}" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/comments" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/history" in user_schema["paths"]
+    assert "/v1/artifacts/{artifact_id}/comments/{thread_id}/replies" in user_schema["paths"]
+    assert (
+        "/v1/artifacts/{artifact_id}/comments/{thread_id}/author-addressed" in user_schema["paths"]
+    )
+    assert "/v1/admin/artifacts/{artifact_id}/comments" not in user_schema["paths"]
+    assert "/v1/admin/artifacts/{artifact_id}/request-changes" not in user_schema["paths"]
+    assert (
+        "/v1/admin/artifacts/{artifact_id}/findings/{finding_id}/stable-risk"
+        not in user_schema["paths"]
+    )
+    detail_response = user_schema["paths"]["/v1/artifacts/{artifact_id}"]["get"]["responses"][
+        "200"
+    ]["content"]["application/json"]["schema"]
+    assert detail_response["$ref"].endswith("/ArtifactDetailResponse")
+    history_response = user_schema["paths"]["/v1/artifacts/{artifact_id}/history"]["get"][
+        "responses"
+    ]["200"]["content"]["application/json"]["schema"]
+    assert history_response["$ref"].endswith("/ReviewHistoryResponse")
+
+    _login(client, "adminuser", "adminpass123")
+    admin_schema = client.get("/openapi.json").json()
+    request_changes = admin_schema["paths"]["/v1/admin/artifacts/{artifact_id}/request-changes"][
+        "post"
+    ]
+    response_schema = request_changes["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response_schema["$ref"].endswith("/ArtifactEnvelope")
+    assert "/v1/admin/artifacts/{artifact_id}/comments" in admin_schema["paths"]
+    stable_risk = admin_schema["paths"][
+        "/v1/admin/artifacts/{artifact_id}/findings/{finding_id}/stable-risk"
+    ]["post"]
+    stable_response = stable_risk["responses"]["200"]["content"]["application/json"]["schema"]
+    assert stable_response["$ref"].endswith("/StableRiskResponse")
+    for action in ("edit", "resolve", "reopen"):
+        assert (
+            f"/v1/admin/artifacts/{{artifact_id}}/comments/{{thread_id}}/{action}"
+            in admin_schema["paths"]
+        )
+
+    schemas = admin_schema["components"]["schemas"]
+    run_fields = set(schemas["PublicReviewRun"]["properties"])
+    finding_fields = set(schemas["PublicReviewFinding"]["properties"])
+    decision_fields = set(schemas["PublicReviewDecision"]["properties"])
+    assert {"coverage", "tool_name", "tool_version", "model", "advisory", "label"} <= run_fields
+    assert {"source", "deterministic", "advisory", "label"} <= finding_fields
+    assert {"policy_version_id", "input_run_ids", "coverage_sha256"} <= decision_fields
+    assert {"raw_result", "raw_result_key", "worker_id"}.isdisjoint(run_fields)
+    assert "metadata" not in finding_fields
+    assert "idempotency_key" not in decision_fields
+
+    file_fields = set(schemas["PublicArtifactFile"]["properties"])
+    diff_fields = set(schemas["PublicArtifactDiff"]["properties"])
+    diff_stats_fields = set(schemas["PublicArtifactDiffStats"]["properties"])
+    assert {"id", "path", "sha256", "is_text", "graph_status"} <= file_fields
+    assert {"id", "path", "change_type", "has_hunks", "stats"} <= diff_fields
+    assert {"content_key", "hunks_key", "quarantine_key"}.isdisjoint(file_fields)
+    assert {"content_key", "hunks_key", "quarantine_key"}.isdisjoint(diff_fields)
+    assert {"hunks_sha256", "hunks_size_bytes", "hunks_key"}.isdisjoint(diff_stats_fields)
+
+    comment_fields = set(schemas["PublicReviewComment"]["properties"])
+    comment_event_fields = set(schemas["PublicReviewCommentEvent"]["properties"])
+    assert {
+        "file_id",
+        "file_path",
+        "file_sha256",
+        "side",
+        "line_start",
+        "line_end",
+        "events",
+        "version",
+    } <= comment_fields
+    assert {"actor_nickname", "actor_role", "expected_version"} <= comment_event_fields
+    assert {"reviewer_user_id", "idempotency_key", "content_key"}.isdisjoint(comment_fields)
+    assert {"actor_user_id", "idempotency_key", "metadata"}.isdisjoint(comment_event_fields)
+    github_fields = set(schemas["GithubArtifactSubmission"]["properties"])
+    assert "supersedes_artifact_id" in github_fields
+    history_fields = set(schemas["PublicReviewHistoryEvent"]["properties"])
+    stable_fields = set(schemas["StableRiskEvidenceResponse"]["properties"])
+    assert {"occurred_at", "source", "actor_role", "idempotency_key", "payload"} <= history_fields
+    assert {"kind", "deterministic", "stable_artifact_id", "finding_id"} <= stable_fields
+    assert {"raw_result", "raw_result_key", "content_key", "published_key"}.isdisjoint(
+        history_fields
+    )
 
 
 def test_openapi_core_admin_sees_all():
@@ -76,6 +178,52 @@ def test_openapi_core_admin_sees_all():
     assert "/v1/admin/settings" in paths
     assert "/v1/core/users" in paths
     assert "/v1/setup" in paths
+    assert "/v1/admin/review-policies/active" in paths
+    assert "/v1/core-admin/review-policies" in paths
+    assert "/v1/core-admin/review-policies/{policy_id}/validate" in paths
+    assert "/v1/core-admin/review-policies/{policy_id}/activate" in paths
+    assert "/v1/core-admin/review-policies/{policy_id}/retire" in paths
+    assert "/v1/core-admin/review-policies/{policy_id}/rollback" in paths
+    assert "/v1/core-admin/review-tools/health" in paths
+    schemas = resp.json()["components"]["schemas"]
+    policy_fields = set(schemas["PublicReviewPolicy"]["properties"])
+    worker_fields = set(schemas["ReviewWorkerHealth"]["properties"])
+    tool_fields = set(schemas["ReviewToolHealth"]["properties"])
+    metrics_fields = set(schemas["ReviewOperationsMetrics"]["properties"])
+    assert {"policy", "policy_sha256", "validation_summary", "status"} <= policy_fields
+    assert {"created_by_user_id", "events", "request_id"}.isdisjoint(policy_fields)
+    assert {"kind", "live_instances", "stale_instances", "capacity"} <= worker_fields
+    assert {"worker_id", "endpoint", "host"}.isdisjoint(worker_fields)
+    assert {"name", "ready", "freshness", "version"} <= tool_fields
+    assert {"endpoint", "token", "path", "object_key"}.isdisjoint(tool_fields)
+    assert metrics_fields == {
+        "available",
+        "window_started_at",
+        "collected_at",
+        "queue",
+        "stages",
+        "manual_wait",
+        "routing",
+        "revoke",
+    }
+
+
+def test_openapi_filter_removes_disallowed_methods_on_shared_path():
+    from app.openapi_filter import filter_openapi_by_role
+
+    schema = {
+        "paths": {
+            "/mixed": {
+                "get": {"tags": ["admin"]},
+                "post": {"tags": ["core-admin"]},
+            }
+        },
+        "tags": [],
+    }
+
+    filtered = filter_openapi_by_role(schema, "admin")
+
+    assert set(filtered["paths"]["/mixed"]) == {"get"}
 
 
 def test_openapi_tags_present_on_operations():
@@ -130,3 +278,4 @@ def test_llms_txt_admin_includes_admin_section():
     content = resp.text
     assert "GET /v1/admin/plugins" in content
     assert "/v1/core/" not in content
+    assert "/v1/core-admin/" not in content

@@ -3,10 +3,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: api
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
+        VITE_BASE_URL: ${SITE_URL:-https://plugins.eloina.cn}
     image: astrbot-community-plugins:local
+    user: "${API_UID_GID:-10001:10001}"
+    init: true
     restart: unless-stopped
     depends_on:
       postgres:
@@ -24,7 +28,120 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       ENABLE_DEV_AUTH: ${ENABLE_DEV_AUTH:-false}
     volumes:
-      - ./apps/api/.env:/app/apps/api/.env
+      - ${API_ENV_FILE:-./apps/api/.env}:/app/apps/api/.env:rw
+      - artifact-data:/var/lib/astrbot-market/artifacts
+
+  artifact-worker:
+    profiles: ["artifacts"]
+    image: astrbot-community-plugins:local
+    user: "${ARTIFACT_WORKER_UID_GID:-10001:10001}"
+    init: true
+    restart: unless-stopped
+    command: ["python", "-m", "app.artifacts.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV_FILE: /app/apps/api/.env
+      ARTIFACT_RUNTIME_RESULT_ROOT: /var/lib/astrbot-runtime-results
+    volumes:
+      - ${ARTIFACT_WORKER_ENV_FILE:-./deploy/compose/artifact-worker.env.example}:/app/apps/api/.env:ro
+      - artifact-data:/var/lib/astrbot-market/artifacts
+      - runtime-results:/var/lib/astrbot-runtime-results:ro
+
+  runtime-probe-image:
+    profiles: ["runtime-runner"]
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime-probe
+      args:
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
+    image: astrbot-runtime-probe:local
+    command: ["/usr/local/bin/python", "-c", "raise SystemExit(0)"]
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges=true
+      - seccomp=builtin
+
+  runtime-package-proxy:
+    profiles: ["runtime-runner"]
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime-proxy
+    image: astrbot-runtime-package-proxy:local
+    container_name: astrbot-runtime-package-proxy
+    restart: unless-stopped
+    user: "13:13"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges=true
+      - seccomp=builtin
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /run/squid:rw,noexec,nosuid,nodev,size=8m,mode=0777
+    labels:
+      astrbot.runtime.package-proxy: "true"
+      astrbot.runtime.package-index-sha256: 5a06749b2297be54ac5699f6f2761716adc5001a2d5f8b915ab2172922dd5706
+    networks:
+      runtime-install:
+        aliases: ["astrbot-runtime-package-proxy"]
+      runtime-proxy-egress: {}
+    healthcheck:
+      test: ["CMD", "squidclient", "-h", "127.0.0.1", "-p", "3128", "mgr:info"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  runtime-runner:
+    profiles: ["runtime-runner"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime-runner
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
+    image: astrbot-community-plugins-runtime-runner:local
+    user: "${RUNTIME_RUNNER_UID_GID:-10001:10001}"
+    init: true
+    restart: unless-stopped
+    command: ["python", "-m", "app.runtime_runner"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      runtime-probe-image:
+        condition: service_completed_successfully
+      runtime-package-proxy:
+        condition: service_healthy
+    environment:
+      RUNTIME_RUNNER_DATABASE_URL: ${RUNTIME_RUNNER_DATABASE_URL:-postgresql://market:market@postgres:5432/market}
+      RUNTIME_RUNNER_EXECUTOR_BACKEND: rootless-docker
+      RUNTIME_RUNNER_RESULT_ROOT: /var/lib/astrbot-runtime-results
+      RUNTIME_RUNNER_DOCKER_HOST: unix:///var/run/docker.sock
+      RUNTIME_RUNNER_DOCKER_IMAGE_REPOSITORY: local-image-id
+      RUNTIME_RUNNER_ARTIFACT_ROOT: /var/lib/astrbot-market/artifacts
+      RUNTIME_RUNNER_INSTALL_NETWORK: astrbot-runtime-install
+      RUNTIME_RUNNER_PACKAGE_INDEX_URL: https://pypi.org/simple
+      RUNTIME_RUNNER_INSTALL_PROXY_URL: http://astrbot-runtime-package-proxy:3128
+      RUNTIME_RUNNER_INSTALL_PROXY_CONTAINER: astrbot-runtime-package-proxy
+      RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT: ${RUNTIME_RUNNER_ALLOW_ROOTFUL_DEVELOPMENT:-false}
+      HOME: /tmp/runtime-runner
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges=true
+      - seccomp=builtin
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777
+    volumes:
+      - ${RUNTIME_RUNNER_DOCKER_SOCKET:-/run/user/10001/docker.sock}:/var/run/docker.sock
+      - artifact-data:/var/lib/astrbot-market/artifacts:ro
+      - runtime-results:/var/lib/astrbot-runtime-results
 
   postgres:
     image: postgres:16-alpine
@@ -56,3 +173,24 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  artifact-data:
+  runtime-results:
+
+networks:
+  runtime-install:
+    name: astrbot-runtime-install
+    internal: true
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    labels:
+      astrbot.runtime.policy: install-proxy-v1
+      astrbot.runtime.profile: pypi-only-v1
+      astrbot.runtime.package-index-sha256: 5a06749b2297be54ac5699f6f2761716adc5001a2d5f8b915ab2172922dd5706
+      astrbot.runtime.package-proxy-only: "true"
+      astrbot.runtime.private-network-blocked: "true"
+      astrbot.runtime.metadata-endpoint-blocked: "true"
+      astrbot.runtime.host-gateway-blocked: "true"
+      astrbot.runtime.site-services-blocked: "true"
+  runtime-proxy-egress:
+    internal: false

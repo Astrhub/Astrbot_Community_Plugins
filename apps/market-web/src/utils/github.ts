@@ -66,7 +66,7 @@ export function resolvePluginLogoUrl(plugin: PluginLogoSource): string {
   return buildGithubRawUrl(githubRepo.owner, githubRepo.repo, "master", "logo.png");
 }
 
-function parseGithubRepoUrl(value: string): { owner: string; repo: string } | null {
+export function parseGithubRepoUrl(value: string): { owner: string; repo: string } | null {
   if (!value) return null;
 
   try {

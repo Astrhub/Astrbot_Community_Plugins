@@ -1,0 +1,32 @@
+{
+  "schema_version": "1",
+  "database_version": "fixture-db-2026-07-16",
+  "source": "local-test-fixture",
+  "generated_at": "2026-07-16T00:00:00Z",
+  "advisories": [
+    {
+      "id": "GHSA-demo-1234",
+      "package": "demo-lib",
+      "affected": ">=1,<2",
+      "fixed_versions": ["2.0.0"],
+      "severity": "high",
+      "withdrawn": false
+    },
+    {
+      "id": "GHSA-withdrawn-1",
+      "package": "demo-lib",
+      "affected": "==1.2.3",
+      "fixed_versions": [],
+      "severity": "critical",
+      "withdrawn": true
+    }
+  ],
+  "packages": [
+    {
+      "name": "demo-lib",
+      "version": "1.2.3",
+      "license": "GPL-3.0-only",
+      "withdrawn": true
+    }
+  ]
+}

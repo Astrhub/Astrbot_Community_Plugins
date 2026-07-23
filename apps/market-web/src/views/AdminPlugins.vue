@@ -14,6 +14,9 @@
           </div>
         </div>
         <div class="header-actions">
+          <n-button type="primary" secondary @click="router.push('/plugin-workbench')">
+            版本工作台
+          </n-button>
           <n-button tertiary @click="goHome">首页</n-button>
           <n-button tertiary :loading="loading" @click="loadItems">刷新</n-button>
         </div>

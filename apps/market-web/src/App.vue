@@ -18,6 +18,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
+import { useHead } from "@unhead/vue";
 import { useRoute, useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
@@ -27,16 +28,22 @@ import IrisMask from "./components/IrisMask.vue";
 import BackToTop from "./components/BackToTop.vue";
 
 import { darkThemeOverrides, lightThemeOverrides } from "./config/darkTheme";
+import { usePageZoom } from "./composables/usePageZoom";
 import { usePluginStore } from "./stores/plugins";
 
 const store = usePluginStore();
 const { irisMaskActive, irisMaskPosition, isDarkMode } = storeToRefs(store);
+usePageZoom();
 
 const route = useRoute();
 const router = useRouter();
 const isFormPage = computed(() =>
-  ["/submit", "/settings", "/admin", "/admin/settings"].includes(route.path),
+  ["/submit", "/settings", "/admin", "/admin/settings", "/plugin-workbench"].includes(route.path),
 );
+
+useHead(() => ({
+  meta: route.meta.noindex ? [{ name: "robots", content: "noindex,nofollow" }] : [],
+}));
 
 onMounted(async () => {
   store.initTheme();

@@ -13,6 +13,7 @@ import type {
   Plugin,
   PluginCategory,
   PluginDetail,
+  PluginReadmeDocument,
   PluginSortBy,
   PluginSubmissionMetadataPreview,
   RawPlugin,
@@ -123,7 +124,7 @@ export const getPluginCategoryLabel = (value: unknown): string => {
 };
 
 const DEFAULT_SITE_CONFIG: SiteConfig = Object.freeze({
-  name: "AstrBot Community Plugins",
+  name: "Astrhub 插件市场",
   icon_url: "/logo.webp",
   web_url: BASE_URL,
   subtitle: "全新社区插件市场",
@@ -319,37 +320,9 @@ export const usePluginStore = defineStore("plugins", () => {
     };
   }
 
-  function setMetaContent(
-    name: string,
-    content: string,
-    attribute: "name" | "property" = "name",
-  ): void {
-    if (typeof document === "undefined") return;
-    const element = document.querySelector(`meta[${attribute}="${name}"]`);
-    if (element) element.setAttribute("content", content);
-  }
-
-  function updateLink(rel: string, href: string): void {
-    if (typeof document === "undefined") return;
-    const element = document.querySelector(`link[rel="${rel}"]`);
-    if (element) element.setAttribute("href", href);
-  }
-
-  function applySiteMetadata(config: SiteConfig): void {
-    if (typeof document === "undefined") return;
-    document.title = config.name;
-    setMetaContent("application-name", config.name);
-    setMetaContent("og:title", config.name, "property");
-    setMetaContent("og:image", config.icon_url, "property");
-    updateLink("icon", config.icon_url);
-    updateLink("shortcut icon", config.icon_url);
-    updateLink("preload", config.icon_url);
-  }
-
   function applySiteConfig(value: Partial<SiteConfig>): SiteConfig {
     const config = normalizeSiteConfig(value);
     siteConfig.value = config;
-    applySiteMetadata(config);
     return config;
   }
 
@@ -868,6 +841,26 @@ export const usePluginStore = defineStore("plugins", () => {
     return data;
   }
 
+  async function loadPluginReadme(
+    pluginId: number | string,
+    path = "",
+    options: { refresh?: boolean } = {},
+  ): Promise<Omit<PluginReadmeDocument, "context">> {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const suffix = options.refresh ? "/refresh" : "";
+    const response = await fetch(
+      `${apiBaseUrl}/v1/plugins/${encodeURIComponent(String(pluginId))}/readme${suffix}${query}`,
+      {
+        method: options.refresh ? "POST" : "GET",
+        credentials: "include",
+        cache: "no-store",
+      },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "加载 README 失败"));
+    return data as Omit<PluginReadmeDocument, "context">;
+  }
+
   async function likePlugin(pluginId: number | string): Promise<Record<string, unknown>> {
     const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/like`, {
       method: "POST",
@@ -1112,6 +1105,18 @@ export const usePluginStore = defineStore("plugins", () => {
       });
     }
     return data;
+  }
+
+  async function verifySystemGithubToken(index: number): Promise<SetupConfig["market"]> {
+    const response = await fetch(`${apiBaseUrl}/v1/admin/settings/github-tokens/verify`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ index }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "验证 GitHub Token 失败"));
+    return data as SetupConfig["market"];
   }
 
   async function sendTestEmail(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -1359,6 +1364,7 @@ export const usePluginStore = defineStore("plugins", () => {
     requestPluginListing,
     unlistOwnPlugin,
     loadPluginDetail,
+    loadPluginReadme,
     likePlugin,
     unlikePlugin,
     addPluginComment,
@@ -1375,6 +1381,7 @@ export const usePluginStore = defineStore("plugins", () => {
     deleteNotifications,
     clearNotifications,
     saveSystemSettings,
+    verifySystemGithubToken,
     sendTestEmail,
     publishAnnouncement,
     submitPlugin,

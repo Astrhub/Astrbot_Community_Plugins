@@ -206,6 +206,7 @@
 import { computed, reactive, ref, shallowRef } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
+import { useSeo } from "../composables/useSeo";
 import {
   NButton,
   NCard,
@@ -228,6 +229,11 @@ import ThemeModeButton from "@/components/ThemeModeButton.vue";
 import type { PluginSubmissionMetadataPreview } from "@/types";
 
 const router = useRouter();
+useSeo({
+  title: "提交插件",
+  description: "向 Astrhub 插件市场提交 AstrBot 社区插件。",
+  path: "/submit",
+});
 const message = useMessage();
 const store = usePluginStore();
 const { currentUser, siteConfig } = storeToRefs(store);

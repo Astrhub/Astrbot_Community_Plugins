@@ -9,6 +9,7 @@
     "build": "npm run build:web",
     "dev:api": "uv run --project apps/api --directory apps/api uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload",
     "start:api": "uv run --project apps/api --directory apps/api uvicorn app.main:app --host 0.0.0.0 --port 8787",
+    "start:runtime-runner": "uv run --project apps/api --directory apps/api python -m app.runtime_runner",
     "test": "uv run --project apps/api --directory apps/api pytest",
     "test:api": "uv run --project apps/api --directory apps/api pytest"
   }

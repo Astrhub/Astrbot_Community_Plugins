@@ -18,9 +18,10 @@
   --success-color: #16a34a;
   --border-base: #dbe7f6;
   --border-hover: #93c5fd;
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06), 0 1px 3px rgba(15, 23, 42, 0.08);
-  --shadow-md: 0 8px 24px rgba(37, 99, 235, 0.1);
-  --shadow-lg: 0 20px 45px rgba(37, 99, 235, 0.16);
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 12px 32px rgba(37, 99, 235, 0.12), 0 4px 8px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 24px 56px rgba(37, 99, 235, 0.18), 0 8px 16px rgba(15, 23, 42, 0.06);
+  --shadow-card-hover: 0 20px 48px rgba(37, 99, 235, 0.14), 0 8px 16px rgba(15, 23, 42, 0.08);
   --header-gradient: linear-gradient(135deg, #eff6ff 0%, #ffffff 48%, #dbeafe 100%);
   --header-overlay: radial-gradient(circle at 80% 0%, rgba(37, 99, 235, 0.18), transparent 35%);
   --header-text-color: #0f172a;
@@ -45,6 +46,43 @@
   --scrollbar-thumb: rgba(37, 99, 235, 0.28);
   --scrollbar-thumb-hover: rgba(37, 99, 235, 0.5);
   --scrollbar-width: 6px;
+
+  /* 辅助色系统 - 用于标签、类别、状态 */
+  --accent-indigo: #4f46e5;
+  --accent-teal: #0d9488;
+  --accent-amber: #d97706;
+  --accent-rose: #e11d48;
+  --accent-slate: #475569;
+
+  /* 类别色条颜色 */
+  --cat-tool: #2563eb;
+  --cat-entertainment: #7c3aed;
+  --cat-utility: #0d9488;
+  --cat-social: #d97706;
+  --cat-other: #475569;
+
+  /* 标签中性色系 */
+  --tag-bg: rgba(100, 116, 139, 0.08);
+  --tag-bg-hover: rgba(100, 116, 139, 0.14);
+  --tag-text: #475569;
+  --tag-border: rgba(100, 116, 139, 0.15);
+
+  /* 版本标签 */
+  --version-bg: #1e293b;
+  --version-text: #f8fafc;
+
+  /* 统计数字 */
+  --metric-color: #475569;
+  --metric-icon: #94a3b8;
+  --metric-star: #ca8a04;
+  --metric-like: #db2777;
+  --metric-comment: #2563eb;
+
+  /* 卡片增强 */
+  --card-radius: 14px;
+  --card-inner-radius: 10px;
+  --logo-bg: rgba(37, 99, 235, 0.06);
+  --logo-border: rgba(37, 99, 235, 0.12);
 }
 
 .dark {
@@ -67,9 +105,10 @@
   --success-color: #4ade80;
   --border-base: #1e3a5f;
   --border-hover: #60a5fa;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24), 0 1px 3px rgba(0, 0, 0, 0.32);
-  --shadow-md: 0 10px 28px rgba(0, 0, 0, 0.28);
-  --shadow-lg: 0 22px 50px rgba(0, 0, 0, 0.38);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.32), 0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.32), 0 4px 8px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 24px 56px rgba(0, 0, 0, 0.42), 0 8px 16px rgba(0, 0, 0, 0.24);
+  --shadow-card-hover: 0 20px 48px rgba(0, 0, 0, 0.38), 0 8px 16px rgba(0, 0, 0, 0.28);
   --header-gradient: linear-gradient(135deg, #0b1220 0%, #111827 52%, #1e3a8a 100%);
   --header-overlay: radial-gradient(circle at 80% 0%, rgba(96, 165, 250, 0.22), transparent 35%);
   --header-text-color: #f8fafc;
@@ -92,6 +131,41 @@
   --pagination-item-bg: rgba(96, 165, 250, 0.12);
   --scrollbar-thumb: rgba(96, 165, 250, 0.32);
   --scrollbar-thumb-hover: rgba(96, 165, 250, 0.58);
+
+  /* 辅助色系统 - dark */
+  --accent-indigo: #818cf8;
+  --accent-teal: #2dd4bf;
+  --accent-amber: #fbbf24;
+  --accent-rose: #fb7185;
+  --accent-slate: #94a3b8;
+
+  /* 类别色条颜色 */
+  --cat-tool: #60a5fa;
+  --cat-entertainment: #a78bfa;
+  --cat-utility: #2dd4bf;
+  --cat-social: #fbbf24;
+  --cat-other: #94a3b8;
+
+  /* 标签中性色系 dark */
+  --tag-bg: rgba(148, 163, 184, 0.1);
+  --tag-bg-hover: rgba(148, 163, 184, 0.18);
+  --tag-text: #cbd5e1;
+  --tag-border: rgba(148, 163, 184, 0.2);
+
+  /* 版本标签 dark */
+  --version-bg: #f1f5f9;
+  --version-text: #0f172a;
+
+  /* 统计数字 dark */
+  --metric-color: #94a3b8;
+  --metric-icon: #64748b;
+  --metric-star: #facc15;
+  --metric-like: #f472b6;
+  --metric-comment: #60a5fa;
+
+  /* 卡片增强 dark */
+  --logo-bg: rgba(96, 165, 250, 0.1);
+  --logo-border: rgba(96, 165, 250, 0.18);
 }
 
 * {

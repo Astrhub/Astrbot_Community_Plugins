@@ -8,14 +8,16 @@ import externalSitemaps from "./sitemaps.config";
 type VitePlusConfig = Parameters<typeof defineConfig>[0];
 
 const baseUrl = process.env.VITE_BASE_URL;
+const apiBaseUrl = process.env.VITE_API_BASE_URL || baseUrl;
 const communityRepoUrl = process.env.VITE_COMMUNITY_REPO_URL || readGitRemoteUrl();
 const plugins = [vue()];
+const dynamicRoutes = baseUrl ? await loadDynamicRoutes(apiBaseUrl) : [];
 
 if (baseUrl) {
   plugins.push(
     sitemap({
       hostname: baseUrl,
-      dynamicRoutes: ["/submit"],
+      dynamicRoutes,
       externalSitemaps,
       generateRobotsTxt: true,
       readable: true,
@@ -76,4 +78,23 @@ function normalizeGitRemoteUrl(value: string): string {
   const sshMatch = remoteUrl.match(/^git@github\.com:(.+)$/);
   if (sshMatch) return `https://github.com/${sshMatch[1]}`;
   return remoteUrl || "https://github.com/Astrhub/Astrbot_Community_Plugins";
+}
+
+async function loadDynamicRoutes(origin?: string): Promise<string[]> {
+  const fallback = ["/submit", "/docs/rest"];
+  if (!origin) return fallback;
+  try {
+    const response = await fetch(`${origin.replace(/\/$/, "")}/v1/plugins`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = (await response.json()) as { items?: { id?: string; status?: string }[] };
+    const pluginRoutes = (payload.items || [])
+      .filter((plugin) => !plugin.status || plugin.status === "listed")
+      .map((plugin) => String(plugin.id || "").trim())
+      .filter(Boolean)
+      .map((name) => `/plugin/${encodeURIComponent(name)}`);
+    return [...fallback, ...pluginRoutes];
+  } catch (error) {
+    console.warn(`[sitemap] Failed to load plugin routes from ${origin}:`, error);
+    return fallback;
+  }
 }

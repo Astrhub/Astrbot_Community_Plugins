@@ -111,6 +111,7 @@ import AppPagination from "../components/AppPagination.vue";
 import AppFooter from "../components/AppFooter.vue";
 import SearchToolbar from "../components/SearchToolbar.vue";
 import { normalizePluginCategory, usePluginStore } from "../stores/plugins";
+import { useSeo } from "../composables/useSeo";
 
 const store = usePluginStore();
 const route = useRoute();
@@ -134,6 +135,24 @@ const {
 } = storeToRefs(store);
 
 const visibleAnnouncements = computed(() => announcements.value.slice(0, 2));
+
+useSeo({
+  title: "AstrBot 社区插件",
+  description: "发现、搜索、评价和提交 AstrBot 社区插件。",
+  path: "/",
+  jsonLdId: "website-jsonld",
+  jsonLd: {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "Astrhub 插件市场",
+    url: "https://plugins.eloina.cn/",
+    potentialAction: {
+      "@type": "SearchAction",
+      target: "https://plugins.eloina.cn/?q={search_term_string}",
+      "query-input": "required name=search_term_string",
+    },
+  },
+});
 
 const { refreshRandomOrder } = store;
 const FILTER_QUERY_KEYS = ["q", "tag", "category", "page", "sort", "direction", "fuzzy"];
@@ -341,10 +360,10 @@ function normalizeQuery(query) {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
   max-width: 1400px;
-  gap: 24px;
-  padding: 20px;
+  gap: 28px;
+  padding: 24px 20px;
   margin: 0 auto;
-  animation: gridAppear 0.3s ease-out;
+  animation: gridAppear 0.4s ease-out;
   animation-delay: 0.7s;
   animation-fill-mode: backwards;
   align-content: start;
@@ -364,8 +383,8 @@ function normalizeQuery(query) {
 @media (max-width: 1024px) and (min-width: 769px) {
   .plugins-grid {
     grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-    gap: 20px;
-    padding: 18px;
+    gap: 22px;
+    padding: 20px;
   }
 }
 

@@ -17,8 +17,15 @@
 import { NButton, NIcon, NResult } from "naive-ui";
 import { HomeOutline } from "@vicons/ionicons5";
 import { useRouter } from "vue-router";
+import { useSeo } from "../composables/useSeo";
 
 const router = useRouter();
+useSeo({
+  title: "页面不存在",
+  description: "请求的页面不存在。",
+  path: "/404",
+  robots: "noindex,nofollow",
+});
 
 function goHome() {
   router.push("/");

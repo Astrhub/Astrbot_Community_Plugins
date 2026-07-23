@@ -1,6 +1,8 @@
 # 架构
 
-AstrBot Community Plugins 是一个服务端驱动的插件市场，生产环境按**单一服务器端服务**部署：FastAPI 后端同时提供市场 API、托管前端 SPA 构建产物，并输出 AstrBot 自定义插件源。插件记录的权威来源是市场服务器及其 PostgreSQL 数据库，而非 GitHub——GitHub 仅作为身份来源与仓库元数据抓取目标。
+AstrBot Community Plugins 是一个服务端驱动的插件市场。FastAPI 负责可信控制面（市场 API、SPA 与插件
+源），独立 `artifact-worker` 负责预检、静态/恶意软件/依赖/LLM 审查、不可变对象发布和通知 outbox；
+独立 `runtime-runner` 只负责调度一次性隔离容器。任何插件代码都不得进入 API 或 artifact worker 进程。
 
 ## 系统全景
 
@@ -11,18 +13,27 @@ flowchart LR
         Bot["AstrBot / WebUI 插件"]
     end
 
-    subgraph Server["FastAPI 单服务 :8787"]
+    subgraph Server["可信控制面"]
         Router["路由层 /v1/* + 静态回退"]
         Auth["auth.py<br/>角色 / 会话 / API Key"]
         Store["store.py<br/>InMemory | PgRedis"]
-        Worker["GitHub 元数据<br/>同步 worker"]
+        Sync["GitHub 元数据<br/>同步 worker"]
         Email["邮件发送<br/>SMTP | Cloudflare"]
+    end
+
+    subgraph Artifact["独立 artifact-worker"]
+        Precheck["ZIP / metadata 预检"]
+        Static["Python AST / requirements 扫描"]
+        Publish["条件创建发布对象"]
+        Outbox["状态通知 outbox"]
     end
 
     subgraph Infra["基础设施"]
         PG[("PostgreSQL<br/>业务数据 10 表")]
         Redis[("Redis<br/>会话 token")]
         GH["GitHub API<br/>OAuth + 元数据"]
+        Private[("私有隔离存储")]
+        CDN[("发布桶 / CDN")]
     end
 
     Web -->|HTTP + cookie session| Router
@@ -30,9 +41,16 @@ flowchart LR
     Router --> Auth --> Store
     Store --> PG
     Auth --> Redis
-    Worker --> GH
-    Worker --> Store
+    Sync --> GH
+    Sync --> Store
     Email --> Store
+    Router --> Private
+    Precheck --> Private
+    Precheck --> Static --> Publish --> CDN
+    Precheck --> PG
+    Publish --> PG
+    Outbox --> PG
+    Outbox --> Email
 ```
 
 仓库组织为两个应用：
@@ -54,6 +72,8 @@ flowchart LR
 | `auth.py` | `Role` 枚举、权限函数（`can_edit_plugin` / `can_manage_plugin_submission`）、密码哈希、API Key 校验 |
 | `store.py` | `InMemoryMarketStore` + `PgRedisMarketStore` + `SCHEMA_SQL` |
 | `env_file.py` | `.env` 文件读写工具（setup 写入基础设施连接） |
+| `schema_migrations.py` / `migrations/` | 带 checksum、advisory lock 的版本化 SQL migration |
+| `artifacts/` | artifact 状态机、Repository、隔离存储、预检、静态扫描、发布、通知与独立 Worker |
 
 ### 启动流程
 
@@ -64,6 +84,7 @@ create_app(settings, store)
   ├── app = FastAPI(lifespan=lifespan)
   ├── app.state.settings = settings or load_settings()
   ├── app.state.store = store or create_store(settings)   ← 按 DATABASE_URL/REDIS_URL 选择存储
+  ├── app.state.artifact_runtime = build_artifact_runtime(...)
   ├── 注册 CORS 中间件（来源 = settings.cors_origins）
   ├── 注册 HTTPException 处理器
   ├── register_routes(app)              ← 挂载全部 API 路由
@@ -72,8 +93,9 @@ create_app(settings, store)
 
 `lifespan` 管理启动/关闭事件：
 
-- **启动**：`store.connect()`（PgRedis 建立 PG 连接池 + Redis）→ `bootstrap_internal_core_admin()`（若配置了核心管理员凭证则创建）→ 启动后台 `github_metadata_sync_worker`（每周期同步一次仓库元数据）。
-- **关闭**：取消同步 worker → `store.close()`。
+- **API 启动**：`store.connect()`（同时执行版本化 migration）→ 构造 artifact 控制面组件但不启动任务循环 → 创建核心管理员 → 启动 GitHub metadata 同步。
+- **独立 Worker**：`python -m app.artifacts.worker` 通过 PostgreSQL lease + `FOR UPDATE SKIP LOCKED` 领取任务；任务超时后可由其他实例接管。
+- **关闭**：API 取消 metadata worker 并关闭存储；artifact-worker 停止领取任务并释放连接。
 
 ### 存储抽象与切换
 
@@ -86,7 +108,7 @@ create_app(settings, store)
 
 ## 数据模型
 
-### PostgreSQL（`SCHEMA_SQL`，共 10 张表）
+### PostgreSQL
 
 | 表 | 主键 | 核心字段与约束 |
 |---|---|---|
@@ -97,11 +119,13 @@ create_app(settings, store)
 | `market_plugin_likes` | (plugin_id, user_id) | 联合主键保证每用户对每插件唯一点赞 |
 | `market_comment_likes` | (comment_id, user_id) | 联合主键保证评论点赞唯一 |
 | `market_announcements` | `id` | `title`、`body`、`author_user_id`（FK） |
-| `market_notifications` | `id` | `user_id`（FK）、`type`、`title`、`body`、`metadata`（jsonb）、`read` |
+| `market_notifications` | `id` | `user_id`（FK）、`type`、`title`、`body`、`metadata`（jsonb）、`dedupe_key`（artifact 通知可选唯一键）、`read` |
 | `market_api_keys` | `id` | `name`、`user_id`（FK）、`scopes`（jsonb）、`key`（UNIQUE） |
 | `market_options` | `option_key` | `option_value`；存储运行时站点/OAuth/市场/邮件系统设置 |
 
-约束保护：核心关系使用主键、唯一约束、外键；`tags` 建 GIN 索引；可变扩展字段用 `jsonb`；`role` / `status` 用 CHECK 约束。schema 在首次配置保存前与服务启动时都会自动创建/补齐（无 Alembic 迁移工具）。
+artifact migration 另建 `plugin_artifacts`、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`artifact_jobs`、`outbox_events` 和 `market_schema_migrations`。`market_plugins.repo_version` 随仓库 metadata 更新，`current_artifact_id` 只由发布事务修改。历史 migration 的 checksum 变化会阻止启动，避免静默篡改。
+
+核心约束：`(plugin_id, archive_sha256)` 幂等、已发布 `(plugin_id, normalized_version)` 唯一、隔离/发布 key 唯一、人工决策与任务 idempotency key 唯一。发布事务再次锁定插件与 artifact 并校验仓库版本。
 
 ### Redis
 
@@ -240,13 +264,21 @@ create_app(settings, store)
 
 ### GitHub 元数据同步
 
-- 后台 worker（lifespan 启动）周期性抓取仓库 stars、README、版本等，写入 `market_plugins.metadata`。间隔由 `GITHUB_METADATA_SYNC_INTERVAL_SECONDS` 控制（5 分钟 ~ 24 小时）。
+- API lifespan 的 metadata worker 周期性抓取仓库 stars、README、版本等；版本写入 `market_plugins.repo_version`，仓库中的 `download_url` 不参与同步。
 - `GITHUB_API_TOKEN` 支持多 token（`,` / `;` / 换行分隔），通过 `app.state.github_api_token_index` 轮转，应对速率限制；刷新遇 rate limit 会向上游报告。
 - 所有者可带临时 token 手动刷新（`/v1/plugins/{id}/refresh-github`），管理员触发异步刷新（`/v1/admin/plugins/{id}/refresh-github`）。
 
 ### 通知系统
 
-评论回复、插件点赞、评论点赞三类动作产生站内通知（`market_notifications`）。通知触发受用户偏好约束（`notify_replies` / `notify_likes`），同一接收者去重。前端通过 `/v1/me/notifications/unread-count` 显示未读徽标，支持分页、标记已读、批量/单条/清空删除。
+评论回复、插件点赞和评论点赞沿用站内通知。artifact 状态与 policy activate/retire/rollback 先写
+`outbox_events`，再由独立 Worker 以 lease 领取，发送站内信和可选邮件；policy lifecycle event 与 outbox 在
+同一数据库事务提交。站内信使用 outbox event dedupe key 条件写入，worker 重试不会重复建站内记录。
+邮件正文完全由 event type 白名单生成，只含插件/策略名称、版本、固定状态、固定短原因和工作台链接；
+自由文本 reason/code、源码、diff、evidence、日志、requirements、comment、对象 key 和凭据不参与邮件渲染。
+
+站内通知以 PostgreSQL 唯一键实现 exactly-once 可见记录；外部 SMTP/Cloudflare 邮件是 at-least-once 提醒，进程在发送成功但确认 outbox 前崩溃时可能产生重复邮件。系统不以邮件投递结果作为审查或发布状态依据。
+
+管理员下架当前版本时，decision、`revoking` 状态、插件移出 feed 和 revoke job 在同一事务完成。公开对象删除失败会保留当前指针并进入 `revoke_failed`，插件仍保持不可见，管理员可重试下架。
 
 ### API Key
 
@@ -275,7 +307,7 @@ create_app(settings, store)
 | 语言 | TypeScript（strict），类型定义见 `src/types/index.ts` |
 | UI 库 | Naive UI 2.43（`NConfigProvider` / `NLayout` / `NForm` / `NDialog` 等） |
 | 路由 | Vue Router 4，`createWebHistory` |
-| 状态管理 | Pinia 3，单一 `stores/plugins.ts`（composition API 风格） |
+| 状态管理 | Pinia 3；市场域使用 `stores/plugins.ts`，artifact 工作台使用独立 `stores/artifacts.ts` |
 | HTTP | 原生 `fetch`，统一 `credentials: 'include'` |
 | Markdown | `marked` + `DOMPurify` + `highlight.js` |
 | 评论 | `@giscus/vue` |
@@ -293,12 +325,13 @@ create_app(settings, store)
 | `/admin/plugins` | `AdminPlugins.vue` | 插件审核（admin） |
 | `/settings/personal` | `PersonalSettings.vue` | 个人设置 |
 | `/notifications` | `Notifications.vue` | 通知中心 |
+| `/plugin-workbench` | `PluginWorkbench.vue` | 作者版本历史 / 管理员审查队列（需登录） |
 | `/docs/rest` | `RestDocs.vue` | REST API 文档（Vue + Naive UI） |
 
-**权限控制不在路由层**——没有 `beforeEach` 或 `meta` 守卫。`App.vue` 的 `onMounted` 检查 `setupStatus.required`，需要初始化时跳转 `/setup`。页面级权限在各组件内用 `computed` 判定角色（如 `Settings.vue` 校验 `core_admin`、`AdminPlugins.vue` 校验 `core_admin`/`admin`），后端端点本身强制角色。
+`/plugin-workbench` 使用 `meta.requiresAuth` 与异步 `beforeEach` 守卫；最终权限仍由后端逐端点强制。`App.vue` 继续负责首次 setup 跳转，管理员能力由服务端角色校验。
 
 
-所有 API 调用内嵌在单一 `stores/plugins.ts`（无独立 `api/` 目录）。Base URL 解析优先级：`VITE_API_BASE_URL` > `VITE_BASE_URL`（非回环地址时）> `window.location.origin`；`VITE_BASE_URL` 为回环地址且前端也在本地时会被忽略，避免开发环境指向错误。
+Base URL 仍由 `stores/plugins.ts` 统一解析；artifact store 复用该公开值，不复制环境解析逻辑。
 
 store 管理的状态与 action 按域分组：插件 CRUD、评论、点赞、管理员操作、个人 Key、通知、认证、系统配置、公告、主题、搜索过滤。
 
@@ -323,11 +356,13 @@ store 管理的状态与 action 按域分组：插件 CRUD、评论、点赞、�
 
 可用部署方式：
 
-- **Docker Compose** — `Dockerfile`（多阶段：node:24 构建前端 → python:3.11 + uv 运行后端）+ `docker-compose.yml`（app + postgres:16 + redis:7）。
-- **systemd** — `deploy/systemd/` 提供 service（含安全加固）与 env 模板，裸机 `npm run build:web` 后启动 uvicorn。
+- **Docker Compose** — 默认 app + PostgreSQL + Redis；`artifacts` 增加独立 worker，`runtime-runner` 增加
+  rootless runner 和受限 package proxy。API/worker 不挂 Docker socket，runner 只读 artifact、只写 result。
+- **systemd** — API、artifact worker、runtime runner 使用不同用户、env 文件和文件系统授权；runner unit 不
+  携带 Redis、LLM、站点邮件或对象存储凭据。
 
-尚未提供：Kubernetes/Helm、Nginx/Caddy 反向代理模板、Terraform、Alembic 迁移。CI（`.github/workflows/ci.yml`）仅 lint + 测试 + 前端构建，不含部署。
+尚未提供：Kubernetes/Helm、Nginx/Caddy 反向代理模板和 Terraform。CI 仅 lint + 测试 + 前端构建，不含部署。
 
 ## AstrBot 集成
 
-AstrBot 可将本市场作为自定义插件源（`https://your-market-domain/plugins.json`）。feed 以插件名为键，包含 `name`、`display_name`、`desc`、`author`、`repo`、`tags`、`version`、`logo`、`stars`、`updated_at`、`download_url`、`astrbot_version`、`category`、`support_platforms`。`/plugins-md5.json` 供客户端缓存校验。未来的 AstrBot WebUI 插件通过 API Key 消费本 API，不在本地重复存储市场状态。
+AstrBot 仍消费 `repo + download_url`。`repo` 永久保留；feed 的 `version` 优先使用仓库 `repo_version`。只有当前 published artifact 版本与之规范化相等时才输出 CDN `download_url`，否则为空且不覆盖/删除旧稳定对象。
