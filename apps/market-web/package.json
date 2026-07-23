@@ -14,7 +14,7 @@
     "@giscus/vue": "3.1.1",
     "@unhead/vue": "^3.1.8",
     "@vicons/ionicons5": "0.13.0",
-    "axios": "1.16.0",
+    "axios": "1.18.0",
     "dompurify": "^3.4.11",
     "highlight.js": "11.11.1",
     "marked": "17.0.0",
