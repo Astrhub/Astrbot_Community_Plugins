@@ -13,7 +13,7 @@ from app.schema_migrations import (
     apply_schema_migrations,
     discover_schema_migrations,
 )
-from app.store import SCHEMA_SQL
+from app.store import PgRedisMarketStore, SCHEMA_COMPATIBILITY_SQL, SCHEMA_SQL
 
 
 class FakeTransaction(AbstractAsyncContextManager[None]):
@@ -28,6 +28,12 @@ class FakeConnection:
     def __init__(self) -> None:
         self.applied: dict[str, str] = {}
         self.executed: list[tuple[str, tuple[object, ...]]] = []
+
+    async def __aenter__(self) -> FakeConnection:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
 
     async def execute(self, sql: str, *args: object) -> str:
         normalized = " ".join(sql.split())
@@ -44,6 +50,31 @@ class FakeConnection:
 
     def transaction(self) -> FakeTransaction:
         return FakeTransaction()
+
+
+class LegacyNotificationConnection(FakeConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.has_notification_dedupe_key = False
+
+    async def execute(self, sql: str, *args: object) -> str:
+        normalized = " ".join(sql.split())
+        if normalized == " ".join(SCHEMA_COMPATIBILITY_SQL.split()):
+            self.has_notification_dedupe_key = True
+        if "market_notifications_dedupe_idx" in normalized:
+            assert self.has_notification_dedupe_key
+        return await super().execute(sql, *args)
+
+    async def fetchval(self, *_: object) -> str:
+        return "done"
+
+
+class FakePool:
+    def __init__(self, connection: FakeConnection) -> None:
+        self.connection = connection
+
+    def acquire(self) -> FakeConnection:
+        return self.connection
 
 
 def migration(version: str, sql: str) -> SqlMigration:
@@ -68,6 +99,18 @@ def test_schema_migrations_apply_in_version_order_and_are_idempotent() -> None:
     }
     migration_sql = [sql for sql, _ in connection.executed if sql.startswith("SELECT '")]
     assert migration_sql == ["SELECT 'first'", "SELECT 'second'"]
+
+
+def test_store_bootstrap_adds_legacy_notification_column_before_schema_indexes() -> None:
+    connection = LegacyNotificationConnection()
+    store = PgRedisMarketStore("postgresql://unused", "redis://unused", 60)
+    store.pool = FakePool(connection)  # type: ignore[assignment]
+
+    asyncio.run(store._ensure_schema())
+
+    assert connection.has_notification_dedupe_key is True
+    assert connection.executed[0][0] == " ".join(SCHEMA_COMPATIBILITY_SQL.split())
+    assert connection.executed[1][0] == " ".join(SCHEMA_SQL.split())
 
 
 def test_schema_migrations_reject_changed_checksum() -> None:

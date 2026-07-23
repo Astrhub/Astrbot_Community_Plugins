@@ -1030,6 +1030,12 @@ def submission_payload_from_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+SCHEMA_COMPATIBILITY_SQL = """
+ALTER TABLE IF EXISTS market_notifications
+    ADD COLUMN IF NOT EXISTS dedupe_key text;
+"""
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS market_users (
     id text PRIMARY KEY,
@@ -1218,6 +1224,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
 
     async def _ensure_schema(self) -> None:
         async with self._pool().acquire() as connection:
+            # Existing installations need the column before SCHEMA_SQL recreates its index.
+            await connection.execute(SCHEMA_COMPATIBILITY_SQL)
             await connection.execute(SCHEMA_SQL)
             await connection.execute(
                 "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS internal_username text "
