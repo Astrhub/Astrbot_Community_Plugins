@@ -1,0 +1,12 @@
+{
+  "id": "review-and-deploy-jp",
+  "title": "审查当前改动并部署到 ssh jp 实例",
+  "status": "completed",
+  "complexity": "M",
+  "risk": "medium",
+  "domain": "fullstack",
+  "currentPhase": "completed",
+  "nextAction": "归档任务",
+  "createdAt": "2026-07-23T22:05:16Z",
+  "branch": "main"
+}
