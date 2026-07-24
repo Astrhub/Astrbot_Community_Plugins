@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import puppeteer from "puppeteer-core";
+import { markPrerenderPath } from "./prerender-route.mjs";
 
 const baseUrl = String(process.env.VITE_BASE_URL || "").replace(/\/$/, "");
 if (!baseUrl) {
@@ -49,7 +50,7 @@ try {
         await page.waitForSelector(".plugin-card, .empty-state", { timeout: 20_000 });
       if (route.startsWith("/plugin/"))
         await page.waitForSelector(".plugin-layout", { timeout: 20_000 });
-      const html = await page.content();
+      const html = markPrerenderPath(await page.content(), route);
       if (route === "/") {
         rootHtml = html;
         console.log("[prerender] / captured; writing after route snapshots");
@@ -66,7 +67,11 @@ try {
     for (const { route, title } of privateRouteShells) {
       const output = `dist${route}/index.html`;
       await mkdir(path.dirname(output), { recursive: true });
-      await writeFile(output, privateRouteHtml(spaShell, route, title), "utf8");
+      await writeFile(
+        output,
+        privateRouteHtml(markPrerenderPath(spaShell, route), route, title),
+        "utf8",
+      );
       console.log(`[prerender] private shell ${route} -> ${output}`);
     }
   } finally {

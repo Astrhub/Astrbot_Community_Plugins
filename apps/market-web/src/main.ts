@@ -18,4 +18,15 @@ app.use(naive);
 app.use(createPinia());
 app.use(router);
 
-app.mount("#app");
+async function bootstrap(): Promise<void> {
+  try {
+    await router.isReady();
+  } catch (error) {
+    console.error("Initial route resolution failed", error);
+  }
+
+  app.mount("#app");
+  document.documentElement.classList.remove("route-snapshot-mismatch");
+}
+
+void bootstrap();

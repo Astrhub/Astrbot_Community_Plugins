@@ -44,9 +44,19 @@
       .auth-session-loading #app .auth-session-control {
         visibility: hidden;
       }
+
+      .route-snapshot-mismatch #app {
+        visibility: hidden;
+      }
     </style>
     <script>
       (() => {
+        const normalizePath = (value) => String(value || "/").replace(/\/+$/, "") || "/";
+        const snapshotPath = document.documentElement.dataset.prerenderPath;
+        if (snapshotPath && normalizePath(snapshotPath) !== normalizePath(location.pathname)) {
+          document.documentElement.classList.add("route-snapshot-mismatch");
+        }
+
         const readCache = (key, maxAge) => {
           try {
             const raw = localStorage.getItem(key);
