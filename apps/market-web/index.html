@@ -49,7 +49,7 @@
         visibility: hidden;
       }
     </style>
-    <script>
+    <script data-cfasync="false">
       (() => {
         const normalizePath = (value) => String(value || "/").replace(/\/+$/, "") || "/";
         const snapshotPath = document.documentElement.dataset.prerenderPath;
