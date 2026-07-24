@@ -26,9 +26,7 @@ const agreementAccepted = shallowRef(false);
 const siteName = computed(() => siteConfig.value.name || "Astrhub Plugins Market");
 const siteIconUrl = computed(() => {
   const configuredUrl = String(siteConfig.value.icon_url || "").trim();
-  return !configuredUrl || configuredUrl === "/logo.webp"
-    ? "/logo.webp?v=20260725"
-    : configuredUrl;
+  return !configuredUrl || configuredUrl === "/logo.webp" ? "/logo.webp?v=20260725" : configuredUrl;
 });
 const isCoreAdmin = computed(() => currentUser.value?.role === "core_admin");
 const isAdminUser = computed(() =>
