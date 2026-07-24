@@ -19,6 +19,8 @@ describe("plugin workbench route guard", () => {
   });
 
   it("redirects anonymous users and preserves the requested workbench URL", async () => {
+    expect(router.resolve("/plugin-workbench").meta.noindex).toBe(true);
+
     await router.push("/plugin-workbench?status=pending_review");
 
     expect(router.currentRoute.value.name).toBe("Home");

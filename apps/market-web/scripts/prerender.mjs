@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import puppeteer from "puppeteer-core";
 
@@ -19,7 +19,11 @@ const pluginRoutes = (payload.items || [])
   .filter(Boolean)
   .map((name) => `/plugin/${encodeURIComponent(name)}`);
 const routes = ["/", "/submit", "/docs/rest", ...pluginRoutes];
+const privateRouteShells = [
+  { route: "/plugin-workbench", title: "插件审查工作台 - Astrhub 插件市场" },
+];
 const port = 4174;
+const spaShell = await readFile("dist/index.html", "utf8");
 const server = spawn(
   process.execPath,
   [path.resolve("node_modules/sirv-cli/bin.js"), "dist", "--single", "--port", String(port)],
@@ -59,6 +63,12 @@ try {
     if (!rootHtml) throw new Error("[prerender] Homepage snapshot was not captured");
     await writeFile("dist/index.html", rootHtml, "utf8");
     console.log("[prerender] / -> dist/index.html");
+    for (const { route, title } of privateRouteShells) {
+      const output = `dist${route}/index.html`;
+      await mkdir(path.dirname(output), { recursive: true });
+      await writeFile(output, privateRouteHtml(spaShell, route, title), "utf8");
+      console.log(`[prerender] private shell ${route} -> ${output}`);
+    }
   } finally {
     await browser.close();
   }
@@ -102,4 +112,17 @@ function resolveChromiumPath() {
     throw new Error("[prerender] Chromium executable was not found");
   }
   return executablePath;
+}
+
+function privateRouteHtml(html, route, title) {
+  const canonicalUrl = `${baseUrl}${route}`;
+  return html
+    .replace(/<title>[\s\S]*?<\/title>/, `<title>${title}</title>`)
+    .replace(/<meta name="robots"[^>]*>/g, "")
+    .replace(/<link rel="canonical"[^>]*>/, `<link rel="canonical" href="${canonicalUrl}" />`)
+    .replace(
+      /<meta property="og:url"[^>]*>/,
+      `<meta property="og:url" content="${canonicalUrl}" />`,
+    )
+    .replace("</head>", '    <meta name="robots" content="noindex,nofollow" />\n  </head>');
 }

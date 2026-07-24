@@ -58,7 +58,7 @@ const routes: RouteRecordRaw[] = [
     path: "/plugin-workbench",
     name: "PluginWorkbench",
     component: PluginWorkbench,
-    meta: { requiresAuth: true },
+    meta: { requiresAuth: true, noindex: true },
   },
   {
     path: "/admin",
