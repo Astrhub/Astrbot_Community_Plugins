@@ -25,6 +25,13 @@ import type {
   ThemeMode,
   User,
 } from "@/types";
+import {
+  clearCachedUserPreview,
+  readCachedSiteConfig,
+  readCachedUserPreview,
+  writeCachedSiteConfig,
+  writeCachedUserPreview,
+} from "@/utils/bootstrapCache";
 
 const normalizeBaseUrl = (value: string | undefined): string =>
   String(value ?? "")
@@ -148,6 +155,22 @@ const DEFAULT_SITE_CONFIG: SiteConfig = Object.freeze({
   },
 });
 
+function normalizeSiteConfig(value: Partial<SiteConfig> = {}): SiteConfig {
+  return {
+    name: String(value.name || DEFAULT_SITE_CONFIG.name).trim() || DEFAULT_SITE_CONFIG.name,
+    icon_url:
+      String(value.icon_url || DEFAULT_SITE_CONFIG.icon_url).trim() || DEFAULT_SITE_CONFIG.icon_url,
+    web_url:
+      String(value.web_url || DEFAULT_SITE_CONFIG.web_url).trim() || DEFAULT_SITE_CONFIG.web_url,
+    subtitle: String(value.subtitle ?? DEFAULT_SITE_CONFIG.subtitle).trim(),
+    description: String(value.description ?? DEFAULT_SITE_CONFIG.description).trim(),
+    contact_email: String(value.contact_email || "").trim(),
+    docs_url: String(value.docs_url ?? DEFAULT_SITE_CONFIG.docs_url).trim(),
+    auth: { ...DEFAULT_SITE_CONFIG.auth, ...value.auth },
+    market: { ...DEFAULT_SITE_CONFIG.market, ...value.market } as MarketConfig,
+  };
+}
+
 const createDefaultSetupConfig = (): SetupConfig => ({
   site: {
     name: DEFAULT_SITE_CONFIG.name,
@@ -229,6 +252,7 @@ export const usePluginStore = defineStore("plugins", () => {
   const plugins = ref<Plugin[]>([]);
   const announcements = ref<Announcement[]>([]);
   const currentUser = ref<User | null>(null);
+  const currentUserPreview = shallowRef(readCachedUserPreview());
   const unreadNotificationCount = shallowRef(0);
   const setupStatus = ref<SetupStatus>({
     required: false,
@@ -238,7 +262,7 @@ export const usePluginStore = defineStore("plugins", () => {
     saved_setup: createDefaultSetupConfig(),
     restart_required: false,
   });
-  const siteConfig = ref<SiteConfig>({ ...DEFAULT_SITE_CONFIG });
+  const siteConfig = ref<SiteConfig>(normalizeSiteConfig(readCachedSiteConfig() || {}));
   const searchQuery = shallowRef("");
   const selectedTag = shallowRef<string | null>(null);
   const selectedCategory = shallowRef("all");
@@ -301,23 +325,6 @@ export const usePluginStore = defineStore("plugins", () => {
       return;
     }
     isDarkMode.value = themeMode.value === "dark";
-  }
-
-  function normalizeSiteConfig(value: Partial<SiteConfig> = {}): SiteConfig {
-    return {
-      name: String(value.name || DEFAULT_SITE_CONFIG.name).trim() || DEFAULT_SITE_CONFIG.name,
-      icon_url:
-        String(value.icon_url || DEFAULT_SITE_CONFIG.icon_url).trim() ||
-        DEFAULT_SITE_CONFIG.icon_url,
-      web_url:
-        String(value.web_url || DEFAULT_SITE_CONFIG.web_url).trim() || DEFAULT_SITE_CONFIG.web_url,
-      subtitle: String(value.subtitle ?? DEFAULT_SITE_CONFIG.subtitle).trim(),
-      description: String(value.description ?? DEFAULT_SITE_CONFIG.description).trim(),
-      contact_email: String(value.contact_email || "").trim(),
-      docs_url: String(value.docs_url ?? DEFAULT_SITE_CONFIG.docs_url).trim(),
-      auth: { ...DEFAULT_SITE_CONFIG.auth, ...value.auth },
-      market: { ...DEFAULT_SITE_CONFIG.market, ...value.market } as MarketConfig,
-    };
   }
 
   function applySiteConfig(value: Partial<SiteConfig>): SiteConfig {
@@ -584,7 +591,10 @@ export const usePluginStore = defineStore("plugins", () => {
     try {
       const response = await fetch(`${apiBaseUrl}/v1/site`, { cache: "no-store" });
       const data = await response.json().catch(() => ({}));
-      return applySiteConfig(response.ok ? data : siteConfig.value);
+      if (!response.ok) return applySiteConfig(siteConfig.value);
+      const config = applySiteConfig(data);
+      writeCachedSiteConfig(config);
+      return config;
     } catch {
       return applySiteConfig(siteConfig.value);
     }
@@ -1154,11 +1164,15 @@ export const usePluginStore = defineStore("plugins", () => {
         const response = await fetch(`${apiBaseUrl}/v1/me`, { credentials: "include" });
         if (!response.ok) {
           currentUser.value = null;
+          currentUserPreview.value = null;
+          clearCachedUserPreview();
           unreadNotificationCount.value = 0;
           currentUserLoaded = true;
           return;
         }
-        currentUser.value = await response.json();
+        const user = (await response.json()) as User;
+        currentUser.value = user;
+        currentUserPreview.value = writeCachedUserPreview(user);
         currentUserLoaded = true;
         await loadUnreadNotificationCount().catch(() => {
           unreadNotificationCount.value = 0;
@@ -1190,6 +1204,7 @@ export const usePluginStore = defineStore("plugins", () => {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "登录失败");
     currentUser.value = data.user;
+    currentUserPreview.value = writeCachedUserPreview(data.user);
     currentUserLoaded = true;
     await loadUnreadNotificationCount().catch(() => {
       unreadNotificationCount.value = 0;
@@ -1198,13 +1213,18 @@ export const usePluginStore = defineStore("plugins", () => {
   }
 
   async function logout(): Promise<void> {
-    await fetch(`${apiBaseUrl}/v1/auth/logout`, {
-      method: "POST",
-      credentials: "include",
-    });
-    currentUser.value = null;
-    currentUserLoaded = true;
-    unreadNotificationCount.value = 0;
+    try {
+      await fetch(`${apiBaseUrl}/v1/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } finally {
+      currentUser.value = null;
+      currentUserPreview.value = null;
+      clearCachedUserPreview();
+      currentUserLoaded = true;
+      unreadNotificationCount.value = 0;
+    }
   }
 
   async function updateProfile(payload: Partial<User> & Record<string, unknown>): Promise<User> {
@@ -1217,6 +1237,7 @@ export const usePluginStore = defineStore("plugins", () => {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || data.error || "更新失败");
     currentUser.value = data;
+    currentUserPreview.value = writeCachedUserPreview(data);
     currentUserLoaded = true;
     return data;
   }
@@ -1311,6 +1332,7 @@ export const usePluginStore = defineStore("plugins", () => {
     plugins,
     announcements,
     currentUser,
+    currentUserPreview,
     unreadNotificationCount,
     setupStatus,
     siteConfig,

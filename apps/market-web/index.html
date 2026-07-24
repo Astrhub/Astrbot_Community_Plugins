@@ -46,7 +46,27 @@
       }
     </style>
     <script>
-      document.documentElement.classList.add("site-config-loading", "auth-session-loading");
+      (() => {
+        const readCache = (key, maxAge) => {
+          try {
+            const raw = localStorage.getItem(key);
+            if (!raw) return false;
+            const cached = JSON.parse(raw);
+            if (cached?.version !== 1 || !cached.value || !Number.isFinite(cached.savedAt)) {
+              return false;
+            }
+            return !maxAge || Date.now() - cached.savedAt <= maxAge;
+          } catch {
+            return false;
+          }
+        };
+        if (!readCache("astrhub_site_config_v1")) {
+          document.documentElement.classList.add("site-config-loading");
+        }
+        if (!readCache("astrhub_user_preview_v1", 7 * 24 * 60 * 60 * 1000)) {
+          document.documentElement.classList.add("auth-session-loading");
+        }
+      })();
     </script>
     <script id="website-jsonld" type="application/ld+json">
       {

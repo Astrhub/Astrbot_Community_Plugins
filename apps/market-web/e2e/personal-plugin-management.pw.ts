@@ -38,6 +38,28 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   const currentUserGate = new Promise<void>((resolve) => {
     releaseCurrentUser = resolve;
   });
+  await page.addInitScript(() => {
+    const savedAt = Date.now();
+    localStorage.setItem(
+      "astrhub_site_config_v1",
+      JSON.stringify({
+        version: 1,
+        savedAt,
+        value: { name: "缓存插件市场", icon_url: "/logo.webp" },
+      }),
+    );
+    localStorage.setItem(
+      "astrhub_user_preview_v1",
+      JSON.stringify({
+        version: 1,
+        savedAt,
+        value: {
+          github_login: "reviewer",
+          avatar_url: "https://raw.githubusercontent.com/demo/profile/main/avatar.png",
+        },
+      }),
+    );
+  });
 
   await page.route("**/demo/astrbot_plugin_owned*/logo.png", (route) => {
     synthesizedLogoRequests += 1;
@@ -74,7 +96,7 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
         role: "admin",
         github_login: "reviewer",
         internal_username: "reviewer",
-        avatar_url: "/plugin_default.png?v=20260725",
+        avatar_url: "https://raw.githubusercontent.com/demo/profile/main/avatar.png",
       });
     }
     if (pathname === "/v1/me/notifications/unread-count") return json(route, { count: 0 });
@@ -96,19 +118,34 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   await page.goto("/", { waitUntil: "commit" });
   const brandName = page.locator(".brand-name");
   await brandName.waitFor({ state: "attached" });
-  await expect(brandName).toBeHidden();
+  await expect(brandName).toHaveText("缓存插件市场");
+  await expect(brandName).toBeVisible();
+  const accountTrigger = page.getByRole("button", { name: "账户：reviewer" });
+  await expect(accountTrigger).toBeVisible();
+  await expect(accountTrigger).toHaveAttribute("aria-busy", "true");
   releaseSiteConfig();
   await page.waitForLoadState("domcontentloaded");
   await expect(brandName).toHaveText("自定义插件市场");
   await expect(brandName).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = localStorage.getItem("astrhub_site_config_v1");
+        return raw ? JSON.parse(raw).value?.name : "";
+      }),
+    )
+    .toBe("自定义插件市场");
   const loginTrigger = page.locator(".login-trigger");
-  await loginTrigger.waitFor({ state: "attached" });
-  await expect(loginTrigger).toBeHidden();
+  await expect(loginTrigger).toHaveCount(0);
   releaseCurrentUser();
-  await expect(page.getByRole("button", { name: "账户：reviewer" })).toBeVisible();
+  await expect(accountTrigger).toHaveAttribute("aria-busy", "false");
   await expect(loginTrigger).toHaveCount(0);
 
   await page.goto("/settings/personal", { waitUntil: "domcontentloaded" });
+  await expect(page.locator(".profile-avatar__image")).toHaveAttribute(
+    "src",
+    "https://cdn.jsdelivr.net/gh/demo/profile@main/avatar.png",
+  );
   await page.locator(".n-tabs-tab__label").getByText("我的插件", { exact: true }).click();
 
   await expect(page.getByText("我的测试插件", { exact: true })).toBeVisible();
@@ -141,10 +178,66 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   await expect(page.getByText("审查台", { exact: true })).toHaveCount(0);
   await expect(page.locator(".user-avatar__image")).toHaveAttribute(
     "src",
-    "/plugin_default.png?v=20260725",
+    "https://cdn.jsdelivr.net/gh/demo/profile@main/avatar.png",
   );
   await page.getByRole("button", { name: "账户：reviewer" }).click();
   await expect(page.getByText("审查工作台", { exact: true })).toHaveCount(1);
+});
+
+test("cached identity is removed when the session is unauthorized", async ({ page }) => {
+  let releaseCurrentUser: () => void = () => undefined;
+  const currentUserGate = new Promise<void>((resolve) => {
+    releaseCurrentUser = resolve;
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      "astrhub_user_preview_v1",
+      JSON.stringify({
+        version: 1,
+        savedAt: Date.now(),
+        value: { github_login: "stale-user", avatar_url: "/plugin_default.png" },
+      }),
+    );
+  });
+  await page.route("**/v1/**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === "/v1/site") {
+      return json(route, {
+        name: "Astrhub 插件市场",
+        icon_url: "/logo.webp",
+        auth: { github_login_enabled: true },
+        market: { max_plugin_tags: 8, comments_enabled: true, likes_enabled: true },
+      });
+    }
+    if (pathname === "/v1/setup/status") {
+      return json(route, {
+        required: false,
+        missing: [],
+        database_configured: true,
+        redis_configured: true,
+        saved_setup: {},
+        restart_required: false,
+      });
+    }
+    if (pathname === "/v1/me") {
+      await currentUserGate;
+      return json(route, { error: "Unauthorized" }, 401);
+    }
+    if (pathname === "/v1/plugins") return json(route, { items: [] });
+    return json(route, { error: "Not found" }, 404);
+  });
+
+  await page.goto("/", { waitUntil: "commit" });
+  const cachedAccount = page.getByRole("button", { name: "账户：stale-user" });
+  await expect(cachedAccount).toBeVisible();
+  await expect(cachedAccount).toHaveAttribute("aria-busy", "true");
+
+  releaseCurrentUser();
+  await expect(page.getByRole("button", { name: "登录" })).toBeVisible();
+  await expect(cachedAccount).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("astrhub_user_preview_v1")))
+    .toBeNull();
 });
 
 test("machine-readable notice stays collapsed and can be restored", async ({ page }) => {

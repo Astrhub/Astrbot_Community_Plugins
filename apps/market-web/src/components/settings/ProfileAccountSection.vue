@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, shallowRef, watch } from "vue";
 import { NButton, NForm, NFormItem, NIcon, NInput, NInputNumber, NTag } from "naive-ui";
 import { KeyOutline, LogoGithub, PersonCircleOutline, SaveOutline } from "@vicons/ionicons5";
+import { githubRawUrl } from "@/utils/github";
 
 const githubName = defineModel("githubName", { type: String, default: "" });
 const githubToken = defineModel("githubToken", { type: String, default: "" });
@@ -22,6 +23,17 @@ const emit = defineEmits(["save"]);
 
 const githubLogin = computed(() => props.currentUser?.github_login || "");
 const hasGithubToken = computed(() => Boolean(props.currentUser?.has_github_token));
+const avatarLoadFailed = shallowRef(false);
+const profileAvatarUrl = computed(() =>
+  githubRawUrl(String(props.currentUser?.avatar_url || props.currentUser?.avatar || "").trim()),
+);
+const showProfileAvatar = computed(
+  () => Boolean(profileAvatarUrl.value) && !avatarLoadFailed.value,
+);
+
+watch(profileAvatarUrl, () => {
+  avatarLoadFailed.value = false;
+});
 </script>
 
 <template>
@@ -38,10 +50,21 @@ const hasGithubToken = computed(() => Boolean(props.currentUser?.has_github_toke
 
     <div class="github-summary">
       <div class="github-main">
-        <NIcon class="github-icon"><LogoGithub /></NIcon>
+        <span class="profile-avatar">
+          <img
+            v-if="showProfileAvatar"
+            :src="profileAvatarUrl"
+            :alt="`${githubLogin || '当前用户'}的头像`"
+            class="profile-avatar__image"
+            @error="avatarLoadFailed = true"
+          />
+          <NIcon v-else><PersonCircleOutline /></NIcon>
+        </span>
         <div class="github-copy">
           <span class="summary-label">GitHub 登录账号</span>
-          <strong>{{ githubLogin || "未连接" }}</strong>
+          <strong
+            ><NIcon class="github-icon"><LogoGithub /></NIcon>{{ githubLogin || "未连接" }}</strong
+          >
         </div>
       </div>
       <NTag :type="githubLogin ? 'success' : 'warning'" size="small" round>
@@ -158,9 +181,30 @@ const hasGithubToken = computed(() => Boolean(props.currentUser?.has_github_toke
 }
 
 .github-icon {
-  flex: none;
   color: var(--text-color-2);
-  font-size: 20px;
+  font-size: 14px;
+  vertical-align: -2px;
+}
+
+.profile-avatar {
+  width: 44px;
+  height: 44px;
+  display: inline-grid;
+  flex: none;
+  overflow: hidden;
+  place-items: center;
+  color: var(--text-color-3);
+  background: var(--card-color);
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+  font-size: 25px;
+}
+
+.profile-avatar__image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
 }
 
 .github-copy {
@@ -170,6 +214,9 @@ const hasGithubToken = computed(() => Boolean(props.currentUser?.has_github_toke
 }
 
 .github-copy strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   overflow-wrap: anywhere;
 }
 
