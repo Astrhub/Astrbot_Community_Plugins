@@ -57,18 +57,11 @@ export interface PluginLogoSource {
 
 export function resolvePluginLogoUrl(plugin: PluginLogoSource): string {
   const logo = typeof plugin.logo === "string" ? plugin.logo.trim() : "";
-  if (logo) {
-    if (/^(?:https?:\/\/[^/]+)?\/plugin_default\.png(?:\?.*)?$/.test(logo)) {
-      return DEFAULT_PLUGIN_LOGO_URL;
-    }
-    return githubRawUrl(logo);
+  if (!logo) return DEFAULT_PLUGIN_LOGO_URL;
+  if (/^(?:https?:\/\/[^/]+)?\/plugin_default\.png(?:\?.*)?$/.test(logo)) {
+    return DEFAULT_PLUGIN_LOGO_URL;
   }
-
-  const repo = typeof plugin.repo === "string" ? plugin.repo.trim() : "";
-  const githubRepo = parseGithubRepoUrl(repo);
-  if (!githubRepo) return DEFAULT_PLUGIN_LOGO_URL;
-
-  return buildGithubRawUrl(githubRepo.owner, githubRepo.repo, "master", "logo.png");
+  return githubRawUrl(logo);
 }
 
 export function setDefaultPluginLogo(event: Event): void {

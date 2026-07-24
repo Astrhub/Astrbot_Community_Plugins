@@ -29,8 +29,12 @@ async function json(route: Route, body: unknown, status = 200): Promise<void> {
 test("authors keep plugin editing while admins have one review entry", async ({ page }) => {
   let unlistRequested = false;
   let savedPayload: Record<string, unknown> | null = null;
+  let synthesizedLogoRequests = 0;
 
-  await page.route("**/demo/astrbot_plugin_owned*/logo.png", (route) => route.abort());
+  await page.route("**/demo/astrbot_plugin_owned*/logo.png", (route) => {
+    synthesizedLogoRequests += 1;
+    return route.abort();
+  });
 
   await page.route("**/v1/**", async (route) => {
     const request = route.request();
@@ -85,6 +89,7 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   await expect(page.getByText("astrbot_plugin_owned", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "仓库 ↗" })).toBeVisible();
   await expect(page.locator(".pm-logo")).toHaveAttribute("src", "/plugin_default.png?v=20260725");
+  expect(synthesizedLogoRequests).toBe(0);
 
   await page.getByRole("button", { name: "编辑" }).click();
   await expect(page.getByText("展示名称", { exact: true })).toBeVisible();
