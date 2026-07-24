@@ -226,7 +226,7 @@ import PluginComment from "./PluginComment.vue";
 import FieldHint from "./FieldHint.vue";
 import { githubRawUrl } from "../utils/github";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
-import { usePluginReadme } from "../composables/usePluginReadme";
+import { buildReadmeBrowserUrl, usePluginReadme } from "../composables/usePluginReadme";
 import type { Plugin, PluginDetail } from "../types";
 import {
   ArrowBackOutline,
@@ -414,7 +414,7 @@ async function fetchReadme(options: { refresh?: boolean } = {}) {
       view: {
         kind: "readme",
         path: readmeContext.path,
-        browserUrl: `https://github.com/${owner}/${repo}/blob/${readmeContext.branch}/${readmeContext.path}`,
+        browserUrl: buildReadmeBrowserUrl(readmeContext),
       },
     });
     rootReadmeView.value = currentReadmeSnapshot();
@@ -784,6 +784,15 @@ function renderReadmeHtml(markdown, context) {
     USE_PROFILES: { html: true },
   });
   const basePath = context.path.split("/").slice(0, -1).join("/");
+
+  container.querySelectorAll("h1").forEach((heading) => {
+    const replacement = document.createElement("h2");
+    Array.from(heading.attributes).forEach((attribute) => {
+      replacement.setAttribute(attribute.name, attribute.value);
+    });
+    replacement.innerHTML = heading.innerHTML;
+    heading.replaceWith(replacement);
+  });
 
   container.querySelectorAll("img[src]").forEach((image) => {
     image.src = resolveReadmeUrl(image.getAttribute("src"), context, basePath, true);

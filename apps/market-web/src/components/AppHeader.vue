@@ -1,205 +1,9 @@
-<template>
-  <header ref="fullHeader" class="app-header">
-    <nav class="top-nav" aria-label="主导航">
-      <div class="brand">
-        <img :src="siteIconUrl" :alt="siteName" class="brand-logo" width="40" height="40" />
-        <span class="brand-name">{{ siteName }}</span>
-      </div>
-      <div class="nav-actions">
-        <theme-mode-button class="theme-button" />
-        <n-button v-if="currentUser" secondary @click="goNotifications">
-          <template #icon>
-            <span class="notification-icon-wrapper">
-              <n-icon><notifications-outline /></n-icon>
-              <span
-                v-if="hasUnreadNotifications"
-                class="notification-dot"
-                aria-hidden="true"
-              ></span>
-            </span>
-          </template>
-          消息
-        </n-button>
-        <n-dropdown
-          v-if="currentUser"
-          :options="userMenuOptions"
-          trigger="click"
-          @select="handleUserMenuSelect"
-        >
-          <n-button secondary type="primary">
-            {{ displayUserName }}
-          </n-button>
-        </n-dropdown>
-        <n-button v-if="isAdminUser" secondary @click="goAdminPlugins">插件审核</n-button>
-        <n-button v-if="!currentUser" secondary type="primary" @click="openLoginModal">
-          <template #icon>
-            <n-icon><log-in-outline /></n-icon>
-          </template>
-          登录
-        </n-button>
-      </div>
-    </nav>
-
-    <section class="hero">
-      <div class="hero-copy">
-        <h1 class="eyebrow">{{ siteSubtitle || "AstrBot 社区插件发现与分享" }}</h1>
-        <p class="hero-subtitle">{{ siteDescription }}</p>
-      </div>
-      <div class="hero-toolbar">
-        <n-button type="primary" size="large" class="source-copy-button" @click="copyPluginSource">
-          <template #icon>
-            <n-icon><link-outline /></n-icon>
-          </template>
-          复制 AstrBot 插件源
-        </n-button>
-        <search-toolbar
-          class="hero-search-toolbar"
-          :search-query="searchQuery"
-          :current-page="currentPage"
-          :sort-by="sortBy"
-          :sort-direction="sortDirection"
-          :fuzzy-search-enabled="fuzzySearchEnabled"
-          :selected-category="selectedCategory"
-          :category-options="categoryOptions"
-          :selected-tag="selectedTag"
-          :tag-options="tagOptions"
-          :on-header="true"
-          @update:searchQuery="handleSearchQueryChange"
-          @update:currentPage="handleCurrentPageChange"
-          @update:sortBy="handleSortByChange"
-          @update:sortDirection="handleSortDirectionChange"
-          @update:fuzzySearchEnabled="handleFuzzySearchEnabledChange"
-          @update:selectedCategory="handleSelectedCategoryChange"
-          @update:selectedTag="handleSelectedTagChange"
-        />
-      </div>
-    </section>
-  </header>
-
-  <header class="sticky-header" :class="{ 'sticky-header--visible': showStickyHeader }">
-    <div class="sticky-header-content">
-      <div class="sticky-header-left">
-        <img :src="siteIconUrl" :alt="siteName" class="sticky-logo" width="32" height="32" />
-        <h2 class="sticky-title">{{ siteName }}</h2>
-      </div>
-      <div class="sticky-header-center">
-        <search-toolbar
-          class="sticky-desktop-toolbar"
-          :search-query="searchQuery"
-          :current-page="currentPage"
-          :sort-by="sortBy"
-          :sort-direction="sortDirection"
-          :fuzzy-search-enabled="fuzzySearchEnabled"
-          :selected-category="selectedCategory"
-          :category-options="categoryOptions"
-          :selected-tag="selectedTag"
-          :tag-options="tagOptions"
-          :compact="true"
-          @update:searchQuery="handleSearchQueryChange"
-          @update:currentPage="handleCurrentPageChange"
-          @update:sortBy="handleSortByChange"
-          @update:sortDirection="handleSortDirectionChange"
-          @update:fuzzySearchEnabled="handleFuzzySearchEnabledChange"
-          @update:selectedCategory="handleSelectedCategoryChange"
-          @update:selectedTag="handleSelectedTagChange"
-        />
-      </div>
-      <div class="sticky-actions">
-        <n-button
-          quaternary
-          circle
-          class="hide-on-mobile-search"
-          @click="copyPluginSource"
-          aria-label="复制 AstrBot 插件源"
-        >
-          <n-icon><link-outline /></n-icon>
-        </n-button>
-        <n-button
-          v-if="currentUser"
-          quaternary
-          circle
-          class="hide-on-mobile-search"
-          @click="goNotifications"
-          :aria-label="notificationButtonLabel"
-        >
-          <span class="notification-icon-wrapper">
-            <n-icon><notifications-outline /></n-icon>
-            <span v-if="hasUnreadNotifications" class="notification-dot" aria-hidden="true"></span>
-          </span>
-        </n-button>
-        <n-button
-          v-if="isAdminUser"
-          quaternary
-          circle
-          class="hide-on-mobile-search"
-          @click="goAdminPlugins"
-          aria-label="插件审核"
-        >
-          <n-icon><shield-checkmark-outline /></n-icon>
-        </n-button>
-        <n-dropdown
-          v-if="currentUser"
-          :options="userMenuOptions"
-          trigger="click"
-          @select="handleUserMenuSelect"
-        >
-          <n-button
-            quaternary
-            circle
-            class="hide-on-mobile-search"
-            :aria-label="`当前用户：${displayUserName}`"
-          >
-            <n-icon><person-outline /></n-icon>
-          </n-button>
-        </n-dropdown>
-        <n-button
-          v-else
-          quaternary
-          circle
-          class="hide-on-mobile-search"
-          @click="openLoginModal"
-          aria-label="登录"
-        >
-          <n-icon><log-in-outline /></n-icon>
-        </n-button>
-        <theme-mode-button circle class="hide-on-mobile-search" />
-      </div>
-    </div>
-  </header>
-  <div class="sticky-header-spacer" aria-hidden="true"></div>
-
-  <n-modal v-model:show="isLoginModalOpen" preset="card" title="登录 / 注册" class="login-modal">
-    <div class="login-methods">
-      <n-button
-        v-if="siteConfig.auth.github_login_enabled"
-        type="primary"
-        block
-        :disabled="!canSubmitLogin"
-        @click="loginWithGithub"
-      >
-        <template #icon>
-          <n-icon><logo-github /></n-icon>
-        </template>
-        GitHub 登录 / 注册
-      </n-button>
-      <n-alert v-else type="warning" :bordered="false">
-        GitHub OAuth 未开启，普通用户暂时无法登录或注册。
-      </n-alert>
-      <n-alert v-if="agreementText" type="info" :bordered="false" class="agreement-box">
-        <div class="agreement-text">{{ agreementText }}</div>
-        <n-checkbox v-model:checked="agreementAccepted">我已阅读并同意以上条款</n-checkbox>
-      </n-alert>
-    </div>
-  </n-modal>
-</template>
-
 <script setup lang="ts">
-import { computed, h, onMounted, ref, onUnmounted } from "vue";
+import { computed, h, shallowRef } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
-import { NAlert, NCheckbox, NDropdown, NIcon, NButton, NModal, useMessage } from "naive-ui";
+import { NAlert, NButton, NCheckbox, NDropdown, NIcon, NModal, useMessage } from "naive-ui";
 import {
-  LinkOutline,
   LogInOutline,
   LogOutOutline,
   LogoGithub,
@@ -208,32 +12,8 @@ import {
   SettingsOutline,
   ShieldCheckmarkOutline,
 } from "@vicons/ionicons5";
-import SearchToolbar from "./SearchToolbar.vue";
 import ThemeModeButton from "./ThemeModeButton.vue";
 import { usePluginStore } from "../stores/plugins";
-
-defineProps({
-  searchQuery: String,
-  currentPage: Number,
-  totalPages: Number,
-  sortBy: String,
-  sortDirection: String,
-  fuzzySearchEnabled: Boolean,
-  selectedCategory: String,
-  categoryOptions: Array,
-  selectedTag: String,
-  tagOptions: Array,
-});
-
-const emit = defineEmits([
-  "update:searchQuery",
-  "update:currentPage",
-  "update:sortBy",
-  "update:sortDirection",
-  "update:fuzzySearchEnabled",
-  "update:selectedCategory",
-  "update:selectedTag",
-]);
 
 const router = useRouter();
 const message = useMessage();
@@ -241,21 +21,15 @@ const store = usePluginStore();
 const { currentUser, siteConfig, unreadNotificationCount } = storeToRefs(store);
 const { loginWithGithub, logout } = store;
 
-const fullHeader = ref(null);
-const showStickyHeader = ref(false);
-const isLoginModalOpen = ref(false);
-const agreementAccepted = ref(false);
-const pluginSourceUrl = computed(() => store.pluginSourceUrl);
-const siteName = computed(() => siteConfig.value.name);
-const siteIconUrl = computed(() => siteConfig.value.icon_url);
-const siteSubtitle = computed(() => siteConfig.value.subtitle);
-const siteDescription = computed(() => siteConfig.value.description);
+const isLoginModalOpen = shallowRef(false);
+const agreementAccepted = shallowRef(false);
+const siteName = computed(() => siteConfig.value.name || "Astrhub Plugins Market");
+const siteIconUrl = computed(() => siteConfig.value.icon_url || "/logo.webp");
 const isCoreAdmin = computed(() => currentUser.value?.role === "core_admin");
-const isAdminUser = computed(() => ["core_admin", "admin"].includes(currentUser.value?.role));
-const hasUnreadNotifications = computed(() => unreadNotificationCount.value > 0);
-const notificationButtonLabel = computed(() =>
-  hasUnreadNotifications.value ? `消息，${unreadNotificationCount.value} 条未读` : "消息",
+const isAdminUser = computed(() =>
+  ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
 );
+const hasUnreadNotifications = computed(() => unreadNotificationCount.value > 0);
 const displayUserName = computed(
   () =>
     currentUser.value?.github_login ||
@@ -263,12 +37,33 @@ const displayUserName = computed(
     currentUser.value?.login ||
     "已登录",
 );
+const agreementText = computed(() => {
+  const auth = siteConfig.value.auth || {};
+  const parts: string[] = [];
+  if (auth.login_agreement_enabled && auth.login_agreement_text) {
+    parts.push(auth.login_agreement_text);
+  }
+  if (auth.service_terms_enabled && auth.service_terms_text) {
+    parts.push(auth.service_terms_text);
+  }
+  return parts.join("\n\n");
+});
+const canSubmitLogin = computed(() => !agreementText.value || agreementAccepted.value);
 const userMenuOptions = computed(() => [
   {
     key: "profile",
     label: "个人设置",
     icon: renderIcon(PersonOutline),
   },
+  ...(isAdminUser.value
+    ? [
+        {
+          key: "workbench",
+          label: "插件工作台",
+          icon: renderIcon(ShieldCheckmarkOutline),
+        },
+      ]
+    : []),
   {
     key: "settings",
     label: "系统设置",
@@ -285,355 +80,223 @@ const userMenuOptions = computed(() => [
     icon: renderIcon(LogOutOutline),
   },
 ]);
-const agreementText = computed(() => {
-  const auth = siteConfig.value.auth || {};
-  const parts = [];
-  if (auth.login_agreement_enabled && auth.login_agreement_text) {
-    parts.push(auth.login_agreement_text);
-  }
-  if (auth.service_terms_enabled && auth.service_terms_text) {
-    parts.push(auth.service_terms_text);
-  }
-  return parts.join("\n\n");
-});
-const canSubmitLogin = computed(() => !agreementText.value || agreementAccepted.value);
 
-const handleSearchQueryChange = (value) => {
-  emit("update:searchQuery", value);
-};
-
-const handleCurrentPageChange = (value) => {
-  emit("update:currentPage", value);
-};
-
-const handleSortByChange = (value) => {
-  emit("update:sortBy", value);
-};
-
-const handleSortDirectionChange = (value) => {
-  emit("update:sortDirection", value);
-};
-
-const handleFuzzySearchEnabledChange = (value) => {
-  emit("update:fuzzySearchEnabled", value);
-};
-
-const handleSelectedCategoryChange = (value) => {
-  emit("update:selectedCategory", value);
-};
-
-const handleSelectedTagChange = (value) => {
-  emit("update:selectedTag", value);
-};
-
-const goSettings = () => {
-  router.push("/admin/settings");
-};
-
-const goAdminPlugins = () => {
-  router.push("/admin/plugins");
-};
-
-const goNotifications = () => {
-  router.push("/notifications");
-};
-
-function renderIcon(icon) {
-  return () => h(NIcon, null, { default: () => h(icon) });
+function renderIcon(icon: unknown) {
+  return () => h(NIcon, null, { default: () => h(icon as never) });
 }
 
-async function handleUserMenuSelect(key) {
+function openLoginModal(): void {
+  agreementAccepted.value = false;
+  isLoginModalOpen.value = true;
+}
+
+async function handleUserMenuSelect(key: string): Promise<void> {
   if (key === "profile") {
-    router.push("/settings/personal");
+    await router.push("/settings/personal");
+    return;
+  }
+  if (key === "workbench") {
+    await router.push("/plugin-workbench");
     return;
   }
   if (key === "settings") {
-    goSettings();
+    await router.push("/admin/settings");
     return;
   }
-  if (key === "logout") {
-    try {
-      await logout();
-      message.success("已退出登录");
-      router.push("/");
-    } catch (error) {
-      message.error(error.message || "退出失败");
-    }
+  if (key !== "logout") return;
+
+  try {
+    await logout();
+    message.success("已退出登录");
+    await router.push("/");
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "退出失败");
   }
 }
-
-const openLoginModal = () => {
-  isLoginModalOpen.value = true;
-};
-
-const copyPluginSource = async () => {
-  try {
-    await writeClipboard(pluginSourceUrl.value);
-    message.success("插件源已复制");
-  } catch {
-    message.error(`复制失败，请手动复制：${pluginSourceUrl.value}`);
-  }
-};
-
-const writeClipboard = async (value) => {
-  if (navigator.clipboard?.writeText && window.isSecureContext) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.top = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  document.body.removeChild(textarea);
-  if (!copied) throw new Error("copy failed");
-};
-
-const handleScroll = () => {
-  if (window.matchMedia("(max-width: 768px)").matches) {
-    showStickyHeader.value = true;
-    return;
-  }
-  if (!fullHeader.value) return;
-  showStickyHeader.value = fullHeader.value.getBoundingClientRect().bottom <= 0;
-};
-
-onMounted(() => {
-  window.addEventListener("scroll", handleScroll, { passive: true });
-  handleScroll();
-});
-
-onUnmounted(() => {
-  window.removeEventListener("scroll", handleScroll);
-});
 </script>
+
+<template>
+  <header class="app-header">
+    <nav class="top-nav" aria-label="主导航">
+      <router-link class="brand" to="/" aria-label="返回插件墙">
+        <img
+          :src="siteIconUrl"
+          :alt="`${siteName} 标志`"
+          class="brand-logo"
+          width="22"
+          height="22"
+        />
+        <span class="brand-name">{{ siteName }}</span>
+      </router-link>
+
+      <div class="nav-actions">
+        <router-link class="nav-link nav-link--optional" to="/">插件墙</router-link>
+        <router-link class="nav-link nav-link--optional" to="/docs/rest">文档</router-link>
+        <router-link v-if="isAdminUser" class="nav-link nav-link--review" to="/plugin-workbench">
+          审查台
+        </router-link>
+
+        <router-link
+          v-if="currentUser"
+          class="nav-icon-link"
+          to="/notifications"
+          :aria-label="hasUnreadNotifications ? `消息，${unreadNotificationCount} 条未读` : '消息'"
+        >
+          <n-icon><notifications-outline /></n-icon>
+          <span v-if="hasUnreadNotifications" class="notification-dot" aria-hidden="true"></span>
+        </router-link>
+
+        <n-dropdown
+          v-if="currentUser"
+          :options="userMenuOptions"
+          trigger="click"
+          @select="handleUserMenuSelect"
+        >
+          <button type="button" class="nav-link user-trigger">{{ displayUserName }}</button>
+        </n-dropdown>
+
+        <button v-else type="button" class="nav-link login-trigger" @click="openLoginModal">
+          登录
+        </button>
+        <theme-mode-button circle class="theme-button" />
+      </div>
+    </nav>
+  </header>
+
+  <n-modal v-model:show="isLoginModalOpen" preset="card" title="登录 / 注册" class="login-modal">
+    <div class="login-methods">
+      <n-button
+        v-if="siteConfig.auth.github_login_enabled"
+        type="primary"
+        block
+        :disabled="!canSubmitLogin"
+        @click="loginWithGithub"
+      >
+        <template #icon
+          ><n-icon><logo-github /></n-icon
+        ></template>
+        GitHub 登录 / 注册
+      </n-button>
+      <n-alert v-else type="warning" :bordered="false">
+        GitHub OAuth 未开启，普通用户暂时无法登录或注册。
+      </n-alert>
+      <n-alert v-if="agreementText" type="info" :bordered="false" class="agreement-box">
+        <div class="agreement-text">{{ agreementText }}</div>
+        <n-checkbox v-model:checked="agreementAccepted">我已阅读并同意以上条款</n-checkbox>
+      </n-alert>
+    </div>
+  </n-modal>
+</template>
 
 <style scoped>
 .app-header {
-  padding: 20px;
-  margin-bottom: 32px;
-  background: var(--header-gradient);
+  position: sticky;
+  top: 0;
+  z-index: 900;
+  width: 100%;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--bg-card) 94%, transparent);
   border-bottom: 1px solid var(--border-base);
-  position: relative;
-  overflow: hidden;
-}
-
-.app-header::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: var(--header-overlay);
-  pointer-events: none;
-}
-
-.top-nav,
-.hero {
-  position: relative;
-  z-index: 1;
-  max-width: 1180px;
-  margin: 0 auto;
+  backdrop-filter: blur(14px);
 }
 
 .top-nav {
-  height: 48px;
+  width: min(1824px, calc(100% - 96px));
+  min-height: 60px;
+  margin: 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 24px;
 }
 
 .brand {
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  min-width: 0;
-  max-width: min(420px, 45vw);
+  color: var(--text-primary);
+  text-decoration: none;
 }
 
-.brand-logo,
-.sticky-logo {
+.brand-logo {
+  flex: 0 0 auto;
   object-fit: contain;
-  border-radius: 8px;
 }
 
 .brand-name {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text-primary);
-  white-space: nowrap;
+  min-width: 0;
   overflow: hidden;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 750;
+  line-height: 1.2;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-actions {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  justify-content: flex-end;
+  gap: 18px;
 }
 
-.theme-button {
-  color: var(--text-secondary);
-}
-
-.notification-icon-wrapper {
+.nav-link,
+.nav-icon-link {
   position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
   line-height: 1;
+  text-decoration: none;
+}
+
+.nav-link {
+  padding: 4px 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.nav-link:hover,
+.nav-link:focus-visible,
+.nav-icon-link:hover,
+.nav-icon-link:focus-visible,
+.router-link-active.nav-link {
+  color: var(--primary-color);
+  outline: none;
+}
+
+.nav-link--review {
+  color: var(--primary-color);
+  font-weight: 650;
+}
+
+.nav-icon-link {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  font-size: 17px;
 }
 
 .notification-dot {
   position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 8px;
-  height: 8px;
-  border: 2px solid var(--bg-card);
-  border-radius: 999px;
+  top: 3px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
   background: #ef4444;
+  border: 1px solid var(--bg-card);
+  border-radius: 50%;
 }
 
-.hero {
-  display: grid;
-  gap: 22px;
-  padding: 36px 0 28px;
-}
-
-.hero-copy {
-  max-width: 860px;
-}
-
-.eyebrow {
-  color: var(--primary-color);
-  font-weight: 800;
-  margin: 0 0 10px;
-  font-size: clamp(1.5rem, 2.5vw, 2rem);
-  letter-spacing: -0.5px;
-  line-height: 1.15;
-  font-family:
-    "Lexend",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
-}
-
-.hero-subtitle {
-  max-width: 760px;
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: clamp(1rem, 1.2vw, 1.15rem);
-  line-height: 1.6;
-  opacity: 0.92;
-}
-
-.hero-toolbar {
-  display: grid;
-  grid-template-columns: auto minmax(360px, 1fr);
-  align-items: center;
-  gap: 12px;
-}
-
-.source-copy-button {
-  min-height: 48px;
-  white-space: nowrap;
-  border-radius: 12px !important;
-  font-weight: 700 !important;
-  font-size: 0.95em !important;
-  padding: 0 20px !important;
-  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.2) !important;
-  transition:
-    transform 0.2s ease,
-    box-shadow 0.2s ease !important;
-}
-
-.source-copy-button:hover {
-  transform: translateY(-2px) !important;
-  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.3) !important;
-}
-
-.hero-search-toolbar {
-  min-width: 0;
-}
-
-.hero-search-toolbar :deep(.search-container) {
-  max-width: none;
-  margin: 0;
-}
-
-.sticky-header {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 1000;
-  transform: translateY(-100%);
-  opacity: 0;
-  transition:
-    transform 0.22s ease,
-    opacity 0.22s ease;
-  pointer-events: none;
-  backdrop-filter: blur(22px) saturate(140%);
-  background: var(--sticky-bg);
-  border-bottom: 1px solid var(--border-base);
-  box-shadow: var(--shadow-sm);
-}
-
-.sticky-header--visible {
-  transform: translateY(0);
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.sticky-header-spacer {
-  height: 0;
-}
-
-.sticky-header-content {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 10px 20px;
-  display: grid;
-  grid-template-columns: auto minmax(240px, 640px) auto;
-  align-items: center;
-  gap: 18px;
-}
-
-.sticky-header-left {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.sticky-title {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 16px;
-  font-weight: 800;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sticky-header-center {
-  min-width: 0;
-}
-
-.sticky-actions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.mobile-inline-search {
-  display: none;
+.theme-button {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
 }
 
 :global(.login-modal) {
@@ -641,80 +304,47 @@ onUnmounted(() => {
   border-radius: 8px;
 }
 
-.agreement-box {
-  margin-bottom: 18px;
-}
-
-.agreement-text {
-  max-height: 160px;
-  overflow: auto;
-  margin-bottom: 12px;
-  white-space: pre-wrap;
-}
-
 .login-methods {
   display: grid;
   gap: 12px;
 }
 
-.login-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
+.agreement-box {
+  margin-bottom: 4px;
 }
 
-@media (max-width: 900px) {
-  .hero-toolbar {
-    grid-template-columns: 1fr;
-  }
-
-  .source-copy-button {
-    justify-self: start;
-  }
+.agreement-text {
+  max-height: 160px;
+  margin-bottom: 12px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
-@media (max-width: 768px) {
-  .app-header {
-    display: none;
+@media (max-width: 720px) {
+  .top-nav {
+    width: min(100% - 28px, 1824px);
+    min-height: 56px;
   }
 
-  .sticky-header {
-    transform: translateY(0);
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .sticky-header-spacer {
-    height: 66px;
-  }
-
-  .sticky-header-content {
-    grid-template-columns: auto 1fr auto;
-    padding: 10px 14px;
-    gap: 10px;
-  }
-
-  .sticky-logo {
-    width: 34px;
-    height: 34px;
-  }
-
-  .sticky-title {
-    font-size: 15px;
-  }
-
-  .sticky-desktop-toolbar {
-    display: none;
+  .brand-name {
+    max-width: 48vw;
+    font-size: 14px;
   }
 
   .nav-actions {
+    gap: 10px;
+  }
+
+  .nav-link--optional,
+  .nav-link--review {
     display: none;
   }
-}
 
-@media (max-width: 480px) {
-  .sticky-title {
-    font-size: 14px;
+  .user-trigger {
+    max-width: 92px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 </style>

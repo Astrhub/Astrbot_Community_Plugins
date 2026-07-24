@@ -8,7 +8,6 @@ const Setup = () => import("../views/Setup.vue");
 const Settings = () => import("../views/Settings.vue");
 const PersonalSettings = () => import("../views/PersonalSettings.vue");
 const Notifications = () => import("../views/Notifications.vue");
-const AdminPlugins = () => import("../views/AdminPlugins.vue");
 const AdminLogin = () => import("../views/AdminLogin.vue");
 const RestDocs = () => import("../views/RestDocs.vue");
 const PluginDetailsPage = () => import("../views/PluginDetailsPage.vue");
@@ -76,7 +75,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: "/admin/plugins",
     name: "AdminPlugins",
-    component: AdminPlugins,
+    redirect: { name: "PluginWorkbench" },
     meta: { noindex: true },
   },
   {

@@ -27,4 +27,12 @@ describe("plugin workbench route guard", () => {
       "/plugin-workbench?status=pending_review",
     );
   });
+
+  it("routes the legacy admin review URL through the new workbench", async () => {
+    await router.push("/admin/plugins");
+
+    expect(router.currentRoute.value.name).toBe("Home");
+    expect(router.currentRoute.value.query.login).toBe("required");
+    expect(router.currentRoute.value.query.redirect).toBe("/plugin-workbench");
+  });
 });

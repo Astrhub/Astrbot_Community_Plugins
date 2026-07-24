@@ -1,45 +1,28 @@
-<template>
-  <n-config-provider
-    :theme="isDarkMode ? darkTheme : null"
-    :theme-overrides="isDarkMode ? darkThemeOverrides : lightThemeOverrides"
-    :hljs="highlightConfig.hljs"
-  >
-    <n-message-provider>
-      <n-dialog-provider>
-        <div class="app-container" :class="{ dark: isDarkMode }">
-          <back-to-top v-if="!isFormPage" />
-          <router-view />
-        </div>
-      </n-dialog-provider>
-    </n-message-provider>
-  </n-config-provider>
-  <iris-mask :is-active="irisMaskActive" :position="irisMaskPosition" />
-</template>
-
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
 import { useHead } from "@unhead/vue";
 import { useRoute, useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
-import { highlightConfig } from "./plugins/highlight";
-
-import IrisMask from "./components/IrisMask.vue";
 import BackToTop from "./components/BackToTop.vue";
-
+import IrisMask from "./components/IrisMask.vue";
 import { darkThemeOverrides, lightThemeOverrides } from "./config/darkTheme";
-import { usePageZoom } from "./composables/usePageZoom";
+import { highlightConfig } from "./plugins/highlight";
 import { usePluginStore } from "./stores/plugins";
 
 const store = usePluginStore();
 const { irisMaskActive, irisMaskPosition, isDarkMode } = storeToRefs(store);
-usePageZoom();
-
 const route = useRoute();
 const router = useRouter();
-const isFormPage = computed(() =>
-  ["/submit", "/settings", "/admin", "/admin/settings", "/plugin-workbench"].includes(route.path),
-);
+const backToTopHiddenRoutes = new Set([
+  "/submit",
+  "/settings",
+  "/admin",
+  "/admin/settings",
+  "/admin/plugins",
+  "/plugin-workbench",
+]);
+const showBackToTop = computed(() => !backToTopHiddenRoutes.has(route.path));
 
 useHead(() => ({
   meta: route.meta.noindex ? [{ name: "robots", content: "noindex,nofollow" }] : [],
@@ -57,6 +40,24 @@ onMounted(async () => {
 });
 </script>
 
+<template>
+  <n-config-provider
+    :theme="isDarkMode ? darkTheme : null"
+    :theme-overrides="isDarkMode ? darkThemeOverrides : lightThemeOverrides"
+    :hljs="highlightConfig.hljs"
+  >
+    <n-message-provider>
+      <n-dialog-provider>
+        <div class="app-container" :class="{ dark: isDarkMode }">
+          <back-to-top v-if="showBackToTop" />
+          <router-view />
+        </div>
+      </n-dialog-provider>
+    </n-message-provider>
+  </n-config-provider>
+  <iris-mask :is-active="irisMaskActive" :position="irisMaskPosition" />
+</template>
+
 <style>
 body {
   margin: 0;
@@ -64,49 +65,11 @@ body {
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
-.app-container {
-  min-height: 100vh;
-  background: var(--body-color, #f5f5f5);
-  display: flex;
-  flex-direction: column;
-}
-
+.app-container,
 .main-layout {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-}
-
-@keyframes gridAppear {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-.plugins-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 28px;
-  padding: 20px;
-  max-width: 100%;
-  margin: 0 auto;
-  animation: gridAppear 0.3s ease-out;
-  animation-delay: 0.7s;
-  animation-fill-mode: backwards;
-}
-
-@media (max-width: 768px) {
-  .app-container {
-    padding: 0;
-  }
-
-  .plugins-grid {
-    grid-template-columns: 1fr;
-    gap: 16px;
-    padding: 16px;
-  }
+  background: var(--bg-base);
 }
 </style>
