@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
-import { markPrerenderPath, normalizePrerenderPath } from "./prerender-route.mjs";
+import {
+  markPrerenderPath,
+  normalizePrerenderPath,
+  rewritePrerenderOrigin,
+} from "./prerender-route.mjs";
 
 describe("prerender route markers", () => {
   it("normalizes root and trailing slashes", () => {
@@ -23,5 +27,16 @@ describe("prerender route markers", () => {
 
   it("rejects invalid documents", () => {
     expect(() => markPrerenderPath("<head></head>", "/")).toThrow(/html element/);
+  });
+
+  it("rewrites build-server assets without changing production URLs", () => {
+    const html =
+      '<link href="http://127.0.0.1:4174/assets/page.css">' +
+      '<link rel="canonical" href="https://plugins.eloina.cn/plugin/example">';
+
+    expect(rewritePrerenderOrigin(html, "http://127.0.0.1:4174/")).toBe(
+      '<link href="/assets/page.css">' +
+        '<link rel="canonical" href="https://plugins.eloina.cn/plugin/example">',
+    );
   });
 });

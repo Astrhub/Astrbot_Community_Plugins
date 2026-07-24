@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import puppeteer from "puppeteer-core";
-import { markPrerenderPath } from "./prerender-route.mjs";
+import { markPrerenderPath, rewritePrerenderOrigin } from "./prerender-route.mjs";
 
 const baseUrl = String(process.env.VITE_BASE_URL || "").replace(/\/$/, "");
 if (!baseUrl) {
@@ -24,6 +24,7 @@ const privateRouteShells = [
   { route: "/plugin-workbench", title: "插件审查工作台 - Astrhub 插件市场" },
 ];
 const port = 4174;
+const prerenderOrigin = `http://127.0.0.1:${port}`;
 const spaShell = await readFile("dist/index.html", "utf8");
 const server = spawn(
   process.execPath,
@@ -32,7 +33,7 @@ const server = spawn(
 );
 
 try {
-  await waitForServer(`http://127.0.0.1:${port}/`);
+  await waitForServer(`${prerenderOrigin}/`);
   const executablePath = resolveChromiumPath();
   const browser = await puppeteer.launch({
     executablePath,
@@ -44,13 +45,16 @@ try {
     await page.setViewport({ width: 1440, height: 1000 });
     let rootHtml = "";
     for (const route of routes) {
-      await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "domcontentloaded" });
+      await page.goto(`${prerenderOrigin}${route}`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector("#app > *", { timeout: 20_000 });
       if (route === "/")
         await page.waitForSelector(".plugin-card, .empty-state", { timeout: 20_000 });
       if (route.startsWith("/plugin/"))
         await page.waitForSelector(".plugin-layout", { timeout: 20_000 });
-      const html = markPrerenderPath(await page.content(), route);
+      const html = markPrerenderPath(
+        rewritePrerenderOrigin(await page.content(), prerenderOrigin),
+        route,
+      );
       if (route === "/") {
         rootHtml = html;
         console.log("[prerender] / captured; writing after route snapshots");
