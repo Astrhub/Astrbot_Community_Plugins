@@ -4,7 +4,6 @@ import { useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import {
   NButton,
-  NCard,
   NIcon,
   NLayoutHeader,
   NSpin,
@@ -16,23 +15,38 @@ import {
 import { ArrowBack } from "@vicons/ionicons5";
 import AccessKeyManager from "@/components/settings/AccessKeyManager.vue";
 import NotificationPreferencesSection from "@/components/settings/NotificationPreferencesSection.vue";
+import PersonalPluginManager from "@/components/settings/PersonalPluginManager.vue";
 import ProfileAccountSection from "@/components/settings/ProfileAccountSection.vue";
 import { usePluginStore } from "@/stores/plugins";
+import type { Plugin } from "@/types";
 
 const router = useRouter();
 const message = useMessage();
 const dialog = useDialog();
 const store = usePluginStore();
-const { currentUser } = storeToRefs(store);
-const { createMyApiKey, deleteMyApiKey, loadCurrentUser, loadMyApiKeys, updateProfile } = store;
+const { currentUser, siteConfig } = storeToRefs(store);
+const {
+  createMyApiKey,
+  deleteMyApiKey,
+  loadCurrentUser,
+  loadMyApiKeys,
+  loadMyPlugins,
+  requestPluginListing,
+  unlistOwnPlugin,
+  updatePluginMetadata,
+  updateProfile,
+} = store;
 
 const loading = shallowRef(true);
 const savingProfile = shallowRef(false);
 const savingNotifications = shallowRef(false);
+const loadingPlugins = shallowRef(false);
 const loadingAccessKeys = shallowRef(false);
 const creatingAccessKey = shallowRef(false);
+const myPlugins = shallowRef([]);
 const accessKeys = shallowRef([]);
 const newAccessKey = shallowRef("");
+const pluginBusyIds = reactive({});
 const accessKeyBusyIds = reactive({});
 const formData = reactive({
   github_name: "",
@@ -52,6 +66,7 @@ const formData = reactive({
   email_notify_unlist: true,
 });
 
+const maxPluginTags = computed(() => Number(siteConfig.value.market?.max_plugin_tags || 8));
 const isAdminUser = computed(() =>
   ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
 );
@@ -121,6 +136,17 @@ async function saveNotificationPreferences() {
   }
 }
 
+async function refreshMyPlugins() {
+  loadingPlugins.value = true;
+  try {
+    myPlugins.value = await loadMyPlugins();
+  } catch (error) {
+    message.error(error.message || "插件加载失败");
+  } finally {
+    loadingPlugins.value = false;
+  }
+}
+
 async function refreshAccessKeys() {
   loadingAccessKeys.value = true;
   try {
@@ -177,12 +203,68 @@ async function copyAccessKey(key) {
   }
 }
 
-function goBack() {
-  router.back();
+function replacePlugin(updatedPlugin) {
+  myPlugins.value = myPlugins.value.map((plugin) =>
+    plugin.id === updatedPlugin.id ? { ...plugin, ...updatedPlugin } : plugin,
+  );
 }
 
-function openPluginWorkbench() {
-  router.push("/plugin-workbench");
+async function withPluginBusy(plugin, action, task) {
+  pluginBusyIds[plugin.id] = action;
+  try {
+    const updated = await task();
+    replacePlugin(updated);
+    return updated;
+  } finally {
+    delete pluginBusyIds[plugin.id];
+  }
+}
+
+async function savePluginMetadata({
+  plugin,
+  changes,
+}: {
+  plugin: Plugin;
+  changes: Partial<Plugin> & Record<string, unknown>;
+}) {
+  try {
+    await withPluginBusy(plugin, "save", () => updatePluginMetadata(plugin.id, changes));
+    message.success("插件信息已保存");
+  } catch (error) {
+    message.error(error.message || "保存插件信息失败");
+  }
+}
+
+function unlistPlugin(plugin) {
+  dialog.warning({
+    title: "下架插件",
+    content: `${plugin.display_name || plugin.name} 下架后将从公开市场隐藏。`,
+    positiveText: "下架",
+    negativeText: "取消",
+    onPositiveClick: async () => {
+      try {
+        await withPluginBusy(plugin, "unlist", () =>
+          unlistOwnPlugin(plugin.id, { reason: "作者主动下架" }),
+        );
+        message.success("插件已下架");
+      } catch (error) {
+        message.error(error.message || "下架失败");
+      }
+    },
+  });
+}
+
+async function requestListPlugin(plugin) {
+  try {
+    await withPluginBusy(plugin, "request", () => requestPluginListing(plugin.id));
+    message.success("已提交上架申请");
+  } catch (error) {
+    message.error(error.message || "申请上架失败");
+  }
+}
+
+function goBack() {
+  router.back();
 }
 
 onMounted(async () => {
@@ -193,7 +275,7 @@ onMounted(async () => {
     return;
   }
   applyCurrentUser();
-  await refreshAccessKeys();
+  await Promise.all([refreshMyPlugins(), refreshAccessKeys()]);
   loading.value = false;
 });
 </script>
@@ -255,12 +337,18 @@ onMounted(async () => {
             </div>
           </NTabPane>
 
-          <NTabPane name="plugins" tab="插件管理" display-directive="show">
+          <NTabPane name="plugins" tab="我的插件" display-directive="show">
             <div class="profile-tab-content">
-              <NCard class="workbench-entry" title="插件工作台" size="small">
-                <p>集中管理插件、查看自动审查结果、提交更新并跟踪 CDN 发布状态。</p>
-                <NButton type="primary" @click="openPluginWorkbench">进入插件工作台</NButton>
-              </NCard>
+              <PersonalPluginManager
+                :plugins="myPlugins"
+                :loading="loadingPlugins"
+                :busy-ids="pluginBusyIds"
+                :max-tags="maxPluginTags"
+                @refresh="refreshMyPlugins"
+                @save-plugin="savePluginMetadata"
+                @request-list="requestListPlugin"
+                @unlist="unlistPlugin"
+              />
             </div>
           </NTabPane>
 

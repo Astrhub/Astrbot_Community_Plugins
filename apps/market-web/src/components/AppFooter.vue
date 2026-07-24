@@ -1,252 +1,130 @@
-<template>
-  <footer class="app-footer">
-    <div class="footer-content">
-      <div class="footer-links">
-        <div class="links-group">
-          <h4>相关链接</h4>
-          <a href="https://docs.astrbot.app/" target="_blank" class="footer-link">
-            <n-icon><star-outline /></n-icon>
-            AstrBot 文档
-          </a>
-          <a href="https://github.com/AstrBotDevs/AstrBot" target="_blank" class="footer-link">
-            <n-icon><logo-github /></n-icon>
-            AstrBot 本体
-          </a>
-        </div>
-        <div class="links-group">
-          <h4>开发相关</h4>
-          <a
-            href="https://docs.astrbot.app/dev/star/plugin-new.html"
-            target="_blank"
-            class="footer-link"
-          >
-            <n-icon><document-text /></n-icon>
-            插件开发文档
-          </a>
-          <a :href="communityRepoUrl" target="_blank" class="footer-link">
-            <n-icon><code-slash /></n-icon>
-            市场仓库
-          </a>
-        </div>
-      </div>
-    </div>
-    <div class="footer-bottom">
-      <p class="copyright">
-        © {{ currentYear }} {{ siteName }}
-        <span class="made-with">
-          Built for AstrBot <n-icon class="heart-icon"><heart /></n-icon>
-        </span>
-      </p>
-    </div>
-  </footer>
-</template>
-
 <script setup lang="ts">
 import { computed } from "vue";
-import { NIcon } from "naive-ui";
 import { storeToRefs } from "pinia";
-import { LogoGithub, DocumentText, CodeSlash, Heart, StarOutline } from "@vicons/ionicons5";
 import { usePluginStore } from "../stores/plugins";
 
 const store = usePluginStore();
 const { siteConfig } = storeToRefs(store);
-const currentYear = computed(() => new Date().getFullYear());
-const siteName = computed(() => siteConfig.value.name);
+const currentYear = new Date().getFullYear();
+const siteName = computed(() => siteConfig.value.name || "Astrhub Plugins Market");
 const communityRepoUrl = computed(() => store.communityRepoUrl);
 </script>
 
+<template>
+  <footer class="app-footer">
+    <div class="footer-content">
+      <section class="footer-brand" aria-label="市场说明">
+        <strong>&gt; 把你的 astrbot_plugin_idea 挂到这面墙上</strong>
+        <p>{{ siteName }} · Community Plugin Market</p>
+        <p>© {{ currentYear }} · API /v1</p>
+      </section>
+
+      <nav class="footer-group" aria-label="相关链接">
+        <h2>相关链接</h2>
+        <a href="https://docs.astrbot.app/" target="_blank" rel="noopener noreferrer"
+          >AstrBot 文档 ↗</a
+        >
+        <a href="https://github.com/AstrBotDevs/AstrBot" target="_blank" rel="noopener noreferrer">
+          AstrBot 本体 ↗
+        </a>
+      </nav>
+
+      <nav class="footer-group" aria-label="开发相关">
+        <h2>开发相关</h2>
+        <router-link to="/docs/rest">REST 接口文档</router-link>
+        <a :href="communityRepoUrl" target="_blank" rel="noopener noreferrer">市场仓库 ↗</a>
+      </nav>
+    </div>
+  </footer>
+</template>
+
 <style scoped>
 .app-footer {
-  background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-base) 100%);
+  width: min(1824px, calc(100% - 96px));
+  margin: 56px auto 0;
+  padding: 42px 28px 34px;
+  color: var(--text-secondary);
+  background: transparent;
   border-top: 1px solid var(--border-base);
-  padding: 48px 0 24px;
-  margin-top: 60px;
+  box-sizing: border-box;
 }
 
 .footer-content {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 24px;
-}
-
-.footer-links {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 32px;
-  max-width: 620px;
-  margin: 0 auto;
+  grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr) minmax(180px, 1fr);
+  gap: 48px;
 }
 
-.links-group h4 {
-  color: var(--primary-color);
-  margin: 0 0 16px;
-  font-size: 1em;
-  font-weight: 700;
+.footer-brand strong {
+  display: block;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 15px;
+  overflow-wrap: anywhere;
 }
 
-.footer-link {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-secondary);
-  text-decoration: none;
-  margin-bottom: 12px;
-  transition: all 0.3s ease;
-  padding: 4px 8px;
-  border-radius: 4px;
-}
-
-.footer-link:hover {
-  color: #ffffff;
-  background-color: var(--primary-color);
-  transform: translateX(4px);
-  box-shadow: 0 0 10px rgba(37, 99, 235, 0.22);
-}
-
-.footer-link .n-icon {
-  font-size: 18px;
-}
-
-.footer-bottom {
-  border-top: 1px solid var(--border-base);
-  margin-top: 40px;
-  padding-top: 24px;
-  text-align: center;
-}
-
-.copyright {
+.footer-brand p {
+  margin: 14px 0 0;
   color: var(--text-tertiary);
-  font-size: 0.9em;
-  margin: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  text-transform: uppercase;
 }
 
-.made-with {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.footer-brand p + p {
+  margin-top: 5px;
 }
 
-.heart-icon {
+.footer-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.footer-group h2 {
+  margin: 0 0 8px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.footer-group a {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.footer-group a:hover,
+.footer-group a:focus-visible {
   color: var(--primary-color);
-  font-size: 16px;
-  animation: heartbeat 1.5s ease-in-out infinite alternate;
+  outline: 0;
 }
 
-@keyframes heartbeat {
-  from {
-    transform: scale(1);
+@media (max-width: 820px) {
+  .app-footer {
+    width: min(100% - 32px, 1824px);
+    margin-top: 36px;
+    padding: 30px 0;
   }
-  to {
-    transform: scale(1.2);
-  }
-}
 
-/* 平板端适配 */
-@media (max-width: 1024px) {
   .footer-content {
-    padding: 0 20px;
-    gap: 36px;
-  }
-
-  .footer-links {
+    grid-template-columns: 1fr 1fr;
     gap: 28px;
   }
+
+  .footer-brand {
+    grid-column: 1 / -1;
+  }
 }
 
-/* 移动端适配 */
-@media (max-width: 768px) {
-  .app-footer {
-    padding: 18px 0 14px;
-    margin-top: 24px;
-  }
-
+@media (max-width: 520px) {
   .footer-content {
     grid-template-columns: 1fr;
-    gap: 12px;
-    padding: 0 16px;
   }
 
-  .footer-links {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 8px 10px;
-  }
-
-  .links-group {
-    display: contents;
-  }
-
-  .links-group h4 {
-    display: none;
-  }
-
-  .footer-link {
-    justify-content: center;
-    margin-bottom: 0;
-    padding: 6px 8px;
-    font-size: 0.85em;
-    line-height: 1.2;
-  }
-
-  .footer-link:hover {
-    transform: none;
-    color: var(--primary-color);
-  }
-
-  .footer-bottom {
-    margin-top: 12px;
-    padding-top: 12px;
-  }
-
-  .copyright {
-    font-size: 0.78em;
-    line-height: 1.4;
-    flex-wrap: wrap;
-    gap: 4px 8px;
-  }
-
-  .made-with {
-    display: none;
-  }
-}
-
-/* 小屏手机适配 */
-@media (max-width: 480px) {
-  .app-footer {
-    padding: 14px 0 12px;
-    margin-top: 18px;
-  }
-
-  .footer-content {
-    padding: 0 10px;
-    gap: 10px;
-  }
-
-  .footer-links {
-    gap: 6px;
-  }
-
-  .footer-link {
-    font-size: 0.82em;
-    padding: 5px 7px;
-  }
-
-  .footer-link .n-icon {
-    font-size: 16px;
-  }
-
-  .footer-bottom {
-    margin-top: 10px;
-    padding-top: 10px;
-  }
-
-  .copyright {
-    font-size: 0.76em;
+  .footer-brand {
+    grid-column: auto;
   }
 }
 </style>

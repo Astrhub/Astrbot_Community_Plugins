@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import puppeteer from "puppeteer-core";
 
@@ -19,10 +19,14 @@ const pluginRoutes = (payload.items || [])
   .filter(Boolean)
   .map((name) => `/plugin/${encodeURIComponent(name)}`);
 const routes = ["/", "/submit", "/docs/rest", ...pluginRoutes];
+const privateRouteShells = [
+  { route: "/plugin-workbench", title: "插件审查工作台 - Astrhub 插件市场" },
+];
 const port = 4174;
+const spaShell = await readFile("dist/index.html", "utf8");
 const server = spawn(
-  path.resolve("node_modules/.bin/sirv"),
-  ["dist", "--single", "--port", String(port)],
+  process.execPath,
+  [path.resolve("node_modules/sirv-cli/bin.js"), "dist", "--single", "--port", String(port)],
   { stdio: "inherit" },
 );
 
@@ -39,11 +43,12 @@ try {
     await page.setViewport({ width: 1440, height: 1000 });
     let rootHtml = "";
     for (const route of routes) {
-      await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "networkidle0" });
+      await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector("#app > *", { timeout: 20_000 });
-      if (route.startsWith("/plugin/")) {
-        await page.waitForSelector(".plugin-profile", { timeout: 20_000 });
-      }
+      if (route === "/")
+        await page.waitForSelector(".plugin-card, .empty-state", { timeout: 20_000 });
+      if (route.startsWith("/plugin/"))
+        await page.waitForSelector(".plugin-layout", { timeout: 20_000 });
       const html = await page.content();
       if (route === "/") {
         rootHtml = html;
@@ -58,6 +63,12 @@ try {
     if (!rootHtml) throw new Error("[prerender] Homepage snapshot was not captured");
     await writeFile("dist/index.html", rootHtml, "utf8");
     console.log("[prerender] / -> dist/index.html");
+    for (const { route, title } of privateRouteShells) {
+      const output = `dist${route}/index.html`;
+      await mkdir(path.dirname(output), { recursive: true });
+      await writeFile(output, privateRouteHtml(spaShell, route, title), "utf8");
+      console.log(`[prerender] private shell ${route} -> ${output}`);
+    }
   } finally {
     await browser.close();
   }
@@ -77,8 +88,19 @@ async function waitForServer(url) {
 }
 
 function resolveChromiumPath() {
+  const windowsCandidates =
+    process.platform === "win32"
+      ? [
+          [process.env.PROGRAMFILES, "Google/Chrome/Application/chrome.exe"],
+          [process.env["PROGRAMFILES(X86)"], "Microsoft/Edge/Application/msedge.exe"],
+          [process.env.LOCALAPPDATA, "Microsoft/Edge/Application/msedge.exe"],
+        ]
+          .filter(([base]) => Boolean(base))
+          .map(([base, relative]) => path.join(base, relative))
+      : [];
   const candidates = [
     process.env.PUPPETEER_EXECUTABLE_PATH,
+    ...windowsCandidates,
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
     "/snap/bin/chromium",
@@ -90,4 +112,17 @@ function resolveChromiumPath() {
     throw new Error("[prerender] Chromium executable was not found");
   }
   return executablePath;
+}
+
+function privateRouteHtml(html, route, title) {
+  const canonicalUrl = `${baseUrl}${route}`;
+  return html
+    .replace(/<title>[\s\S]*?<\/title>/, `<title>${title}</title>`)
+    .replace(/<meta name="robots"[^>]*>/g, "")
+    .replace(/<link rel="canonical"[^>]*>/, `<link rel="canonical" href="${canonicalUrl}" />`)
+    .replace(
+      /<meta property="og:url"[^>]*>/,
+      `<meta property="og:url" content="${canonicalUrl}" />`,
+    )
+    .replace("</head>", '    <meta name="robots" content="noindex,nofollow" />\n  </head>');
 }

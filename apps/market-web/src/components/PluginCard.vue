@@ -1,212 +1,227 @@
+<script setup lang="ts">
+import { computed, shallowRef } from "vue";
+import { storeToRefs } from "pinia";
+import { NButton, NIcon, NInput, NModal, NTooltip, useDialog, useMessage } from "naive-ui";
+import {
+  ChatbubbleEllipsesOutline,
+  CheckmarkOutline,
+  CloudOfflineOutline,
+  HeartOutline,
+  LinkOutline,
+  PersonOutline,
+  StarSharp,
+} from "@vicons/ionicons5";
+import type { Plugin } from "@/types";
+import { usePluginStore } from "@/stores/plugins";
+import { resolvePluginLogoUrl, setDefaultPluginLogo } from "@/utils/github";
+import { isNewPlugin } from "@/utils/pluginFreshness";
+
+const props = withDefaults(
+  defineProps<{
+    plugin: Plugin;
+    index?: number;
+    seed?: number | string;
+  }>(),
+  {
+    index: 0,
+    seed: 0,
+  },
+);
+
+const store = usePluginStore();
+const { currentUser } = storeToRefs(store);
+const { loadPlugins, setCurrentPage, setSearchQuery, updatePluginListing } = store;
+const message = useMessage();
+const dialog = useDialog();
+
+const isCopied = shallowRef(false);
+const isUnlisting = shallowRef(false);
+const showUnlistModal = shallowRef(false);
+const unlistReason = shallowRef("");
+const displayName = computed(() => props.plugin.display_name || props.plugin.name);
+const formattedVersion = computed(() => {
+  const version = String(props.plugin.version || "1.0.0");
+  return version.startsWith("v") ? version : `v${version}`;
+});
+const logoUrl = computed(() => resolvePluginLogoUrl(props.plugin));
+const isNew = computed(() => isNewPlugin(props.plugin.created_at));
+const isAdminUser = computed(() =>
+  ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
+);
+const animationStyle = computed(() => ({
+  "--card-index": String(props.index),
+  "--card-seed": String(props.seed),
+}));
+
+function searchAuthor(event: MouseEvent): void {
+  event.stopPropagation();
+  const author = String(props.plugin.author || "").trim();
+  if (!author) return;
+  setSearchQuery(author);
+  setCurrentPage(1);
+}
+
+async function copyRepoUrl(event: MouseEvent): Promise<void> {
+  event.stopPropagation();
+  const repo = String(props.plugin.repo || "");
+  if (!repo) return;
+  try {
+    await navigator.clipboard.writeText(repo);
+    isCopied.value = true;
+    window.setTimeout(() => (isCopied.value = false), 1600);
+  } catch {
+    message.error("复制失败，请手动复制");
+  }
+}
+
+function openExternal(url: string | undefined, event: MouseEvent): void {
+  event.stopPropagation();
+  if (!url) return;
+  dialog.info({
+    title: "即将打开外链",
+    content: `将跳转到：${url}`,
+    positiveText: "继续打开",
+    negativeText: "取消",
+    onPositiveClick: () => window.open(url, "_blank", "noopener,noreferrer"),
+  });
+}
+
+function openUnlistModal(): void {
+  unlistReason.value = "";
+  showUnlistModal.value = true;
+}
+
+async function unlistPlugin(): Promise<void> {
+  const reason = unlistReason.value.trim();
+  if (!reason) {
+    message.warning("请填写下架原因");
+    return;
+  }
+
+  isUnlisting.value = true;
+  try {
+    await updatePluginListing(props.plugin.id, "unlist", { reason });
+    await loadPlugins({ force: true });
+    showUnlistModal.value = false;
+    message.success("插件已下架");
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "下架失败");
+  } finally {
+    isUnlisting.value = false;
+  }
+}
+</script>
+
 <template>
-  <n-card
-    class="plugin-card"
-    :bordered="false"
-    :style="{ borderRadius: `var(--card-radius)`, '--card-index': String(index) }"
-    :content-style="{ padding: '8px 16px' }"
-    role="article"
-    :aria-label="`插件: ${displayName}`"
-    aria-roledescription="插件卡片"
-    ref="cardRef"
-  >
+  <article class="plugin-card" :style="animationStyle" :aria-label="`插件：${displayName}`">
     <router-link
       class="plugin-card__detail-link"
       :to="{ name: 'PluginDetails', params: { name: plugin.id } }"
       :aria-label="`查看 ${displayName} 插件详情`"
     />
-    <template #header>
-      <div class="card-header" role="banner" :aria-labelledby="headerId">
-        <div class="plugin-title-group">
-          <div
-            :id="headerId"
-            class="plugin-name-container"
-            ref="nameContainer"
-            role="heading"
-            aria-level="2"
-            aria-label="插件卡片标题区域"
-          >
-            <h3
-              class="plugin-name"
-              :class="{ marquee: isTextOverflow }"
-              ref="pluginNameEl"
-              role="heading"
-              aria-level="3"
-              :aria-label="displayName"
-              :aria-description="`插件：${displayName}，版本 ${pluginVersion}`"
-            >
-              <span class="plugin-name-text" ref="nameTextEl" :aria-hidden="isTextOverflow">{{
-                displayName
-              }}</span>
-            </h3>
-          </div>
+
+    <div class="plugin-card__top">
+      <img
+        :src="logoUrl"
+        :alt="`${displayName} 插件图标`"
+        class="plugin-logo"
+        width="48"
+        height="48"
+        loading="lazy"
+        @error="setDefaultPluginLogo"
+      />
+      <div class="plugin-identity">
+        <div class="plugin-title-row">
+          <h2 class="plugin-name">{{ displayName }}</h2>
           <span v-if="isNew" class="new-badge" aria-label="新发布插件">NEW</span>
         </div>
-        <n-tag
-          type="success"
-          size="small"
-          :bordered="false"
-          class="version-tag"
-          role="text"
-          :aria-label="`版本号：${formattedVersion}`"
-        >
-          {{ formattedVersion }}
-        </n-tag>
-      </div>
-    </template>
-
-    <div class="card-content-wrapper">
-      <!-- Logo 显示区域 -->
-      <div class="plugin-logo-container">
-        <img
-          :src="getLogoUrl()"
-          :alt="`${displayName} logo`"
-          class="plugin-logo"
-          width="60"
-          height="60"
-          loading="lazy"
-          @error="handleLogoError"
-        />
-      </div>
-
-      <div class="card-main-content">
-        <n-space vertical class="card-content">
-          <p class="description" role="contentinfo" aria-label="插件描述">{{ plugin.desc }}</p>
-          <div class="tags-container" role="region" aria-label="插件标签区域">
-            <n-space class="tags-space" role="list" aria-label="标签列表">
-              <n-tag
-                v-for="tag in plugin.tags"
-                :key="tag"
-                size="small"
-                :bordered="false"
-                type="info"
-                class="plugin-tag"
-                role="listitem"
-                :aria-label="`标签：${tag}`"
-              >
-                {{ tag }}
-              </n-tag>
-            </n-space>
-          </div>
-          <div class="plugin-meta" role="group" aria-label="插件元数据">
-            <button
-              type="button"
-              class="author"
-              :aria-label="`搜索作者：${plugin.author}`"
-              @click="searchAuthor"
-            >
-              作者: {{ plugin.author }}
-            </button>
-            <div class="metric-list" role="group" aria-label="插件互动数据">
-              <span
-                class="metric-item metric-item--star"
-                role="text"
-                :aria-label="`星标数：${plugin.stars || 0}`"
-              >
-                <n-icon aria-hidden="true"><star-sharp /></n-icon>
-                {{ plugin.stars || 0 }}
-              </span>
-              <span
-                class="metric-item metric-item--like"
-                role="text"
-                :aria-label="`点赞数：${plugin.likes || 0}`"
-              >
-                <n-icon aria-hidden="true"><heart-outline /></n-icon>
-                {{ plugin.likes || 0 }}
-              </span>
-              <span
-                class="metric-item metric-item--comment"
-                role="text"
-                :aria-label="`评论数：${plugin.comments_count || 0}`"
-              >
-                <n-icon aria-hidden="true"><chatbubble-ellipses-outline /></n-icon>
-                {{ plugin.comments_count || 0 }}
-              </span>
-            </div>
-          </div>
-          <!-- 优化后的按钮区域 -->
-          <div class="plugin-links" role="toolbar" aria-label="插件操作区">
-            <div class="button-group" role="group" aria-label="插件链接操作">
-              <n-button
-                type="primary"
-                secondary
-                size="small"
-                @click="(e) => openUrl(plugin.repo, e)"
-                class="main-button"
-                role="link"
-                :aria-label="`查看 ${displayName} 的仓库`"
-                aria-haspopup="true"
-                aria-expanded="false"
-              >
-                查看仓库
-              </n-button>
-              <div class="icon-buttons" role="group" aria-label="快捷操作按钮组">
-                <n-tooltip placement="top" trigger="hover">
-                  <template #trigger>
-                    <n-button
-                      secondary
-                      size="small"
-                      circle
-                      @click="copyRepoUrl"
-                      :aria-label="`复制 ${displayName} 的仓库链接`"
-                      :aria-pressed="isCopied"
-                      aria-live="polite"
-                    >
-                      <n-icon size="18" aria-hidden="true">
-                        <template v-if="isCopied">
-                          <checkmark-outline />
-                        </template>
-                        <template v-else>
-                          <link-outline />
-                        </template>
-                      </n-icon>
-                    </n-button>
-                  </template>
-                  <span role="tooltip">{{ isCopied ? "已复制链接！" : "复制仓库链接" }}</span>
-                </n-tooltip>
-                <n-tooltip v-if="plugin.social_link" placement="top" trigger="hover">
-                  <template #trigger>
-                    <n-button
-                      secondary
-                      size="small"
-                      circle
-                      @click="(e) => openUrl(plugin.social_link, e)"
-                      role="link"
-                      :aria-label="`访问${plugin.author}的主页`"
-                      aria-haspopup="true"
-                      aria-expanded="false"
-                    >
-                      <n-icon size="18" aria-hidden="true">
-                        <person-outline />
-                      </n-icon>
-                    </n-button>
-                  </template>
-                  <span role="tooltip">访问作者主页</span>
-                </n-tooltip>
-                <n-tooltip v-if="isAdminUser" placement="top" trigger="hover">
-                  <template #trigger>
-                    <n-button
-                      secondary
-                      size="small"
-                      circle
-                      type="warning"
-                      :loading="isUnlisting"
-                      @click.stop="openUnlistModal"
-                      :aria-label="`下架 ${displayName}`"
-                    >
-                      <n-icon size="18" aria-hidden="true">
-                        <cloud-offline-outline />
-                      </n-icon>
-                    </n-button>
-                  </template>
-                  <span role="tooltip">下架插件</span>
-                </n-tooltip>
-              </div>
-            </div>
-          </div>
-        </n-space>
+        <p class="version-author">
+          <span>{{ formattedVersion }}</span>
+          <span aria-hidden="true">·</span>
+          <button type="button" class="author-button" @click="searchAuthor">
+            @{{ plugin.author || "community" }}
+          </button>
+        </p>
       </div>
     </div>
-  </n-card>
+
+    <p class="description">{{ plugin.desc }}</p>
+
+    <div class="tags-container" aria-label="插件标签">
+      <span v-for="tag in plugin.tags" :key="tag" class="plugin-tag">{{ tag }}</span>
+    </div>
+
+    <footer class="plugin-footer">
+      <div class="metric-list" aria-label="插件互动数据">
+        <span class="metric-item metric-item--star" :aria-label="`星标数：${plugin.stars || 0}`">
+          <n-icon><star-sharp /></n-icon>{{ plugin.stars || 0 }}
+        </span>
+        <span class="metric-item metric-item--like" :aria-label="`点赞数：${plugin.likes || 0}`">
+          <n-icon><heart-outline /></n-icon>{{ plugin.likes || 0 }}
+        </span>
+        <span
+          class="metric-item metric-item--comment"
+          :aria-label="`评论数：${plugin.comments_count || 0}`"
+        >
+          <n-icon><chatbubble-ellipses-outline /></n-icon>{{ plugin.comments_count || 0 }}
+        </span>
+      </div>
+
+      <div class="plugin-actions" aria-label="插件快捷操作">
+        <n-tooltip trigger="hover" placement="top">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="tiny"
+              :aria-label="isCopied ? '已复制仓库链接' : '复制仓库链接'"
+              @click="copyRepoUrl"
+            >
+              <template #icon>
+                <n-icon><checkmark-outline v-if="isCopied" /><link-outline v-else /></n-icon>
+              </template>
+            </n-button>
+          </template>
+          {{ isCopied ? "已复制" : "复制仓库链接" }}
+        </n-tooltip>
+        <n-tooltip v-if="plugin.social_link" trigger="hover" placement="top">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="tiny"
+              :aria-label="`打开 ${plugin.author} 的主页`"
+              @click="openExternal(plugin.social_link, $event)"
+            >
+              <template #icon
+                ><n-icon><person-outline /></n-icon
+              ></template>
+            </n-button>
+          </template>
+          作者主页
+        </n-tooltip>
+        <n-tooltip v-if="isAdminUser" trigger="hover" placement="top">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              size="tiny"
+              type="warning"
+              :loading="isUnlisting"
+              :aria-label="`下架 ${displayName}`"
+              @click.stop="openUnlistModal"
+            >
+              <template #icon
+                ><n-icon><cloud-offline-outline /></n-icon
+              ></template>
+            </n-button>
+          </template>
+          下架插件
+        </n-tooltip>
+        <span class="detail-pill" aria-hidden="true">详情 ↗</span>
+      </div>
+    </footer>
+  </article>
 
   <n-modal
     v-model:show="showUnlistModal"
@@ -217,7 +232,7 @@
     <n-input
       v-model:value="unlistReason"
       type="textarea"
-      placeholder="请说明下架原因，作者会在个人消息中看到。"
+      placeholder="例如：仓库失效或违反社区规范"
       :autosize="{ minRows: 3, maxRows: 6 }"
       maxlength="500"
       show-count
@@ -225,772 +240,258 @@
     <template #footer>
       <div class="unlist-modal-actions">
         <n-button tertiary @click="showUnlistModal = false">取消</n-button>
-        <n-button type="warning" :loading="isUnlisting" @click="unlistPlugin"> 确认下架 </n-button>
+        <n-button type="warning" :loading="isUnlisting" @click="unlistPlugin">确认下架</n-button>
       </div>
     </template>
   </n-modal>
 </template>
 
-<script setup lang="ts">
-import { computed, ref, onMounted, nextTick, onUnmounted, watch } from "vue";
-import { DEFAULT_PLUGIN_LOGO_URL, resolvePluginLogoUrl } from "../utils/github";
-import {
-  NCard,
-  NSpace,
-  NTag,
-  NButton,
-  NIcon,
-  NInput,
-  NModal,
-  useDialog,
-  useMessage,
-  NTooltip,
-} from "naive-ui";
-import {
-  CloudOfflineOutline,
-  StarSharp,
-  HeartOutline,
-  ChatbubbleEllipsesOutline,
-  LinkOutline,
-  PersonOutline,
-  CheckmarkOutline,
-} from "@vicons/ionicons5";
-import { storeToRefs } from "pinia";
-import { usePluginStore } from "@/stores/plugins";
-import { isNewPlugin } from "@/utils/pluginFreshness";
-const props = defineProps({
-  plugin: {
-    type: Object,
-    required: true,
-  },
-  index: {
-    type: Number,
-    default: 0,
-  },
-  seed: {
-    type: [Number, String],
-    default: 0,
-  },
-});
-
-const isTextOverflow = ref(false);
-const nameContainer = ref(null);
-const nameTextEl = ref(null);
-const pluginNameEl = ref(null);
-const cardRef = ref(null);
-const resizeObserver = ref(null);
-const isUnlisting = ref(false);
-const showUnlistModal = ref(false);
-const unlistReason = ref("");
-const store = usePluginStore();
-const { currentUser } = storeToRefs(store);
-const { loadPlugins, setCurrentPage, setSearchQuery, updatePluginListing } = store;
-const isAdminUser = computed(() => ["core_admin", "admin"].includes(currentUser.value?.role));
-const pluginVersion = computed(() => String(props.plugin.version || "1.0.0"));
-const formattedVersion = computed(() => {
-  return pluginVersion.value.startsWith("v") ? pluginVersion.value : `v${pluginVersion.value}`;
-});
-const displayName = computed(() => props.plugin.display_name || props.plugin.name);
-const isNew = computed(() => isNewPlugin(props.plugin.created_at));
-const headerId = computed(() => {
-  const rawId = String(props.plugin.id || props.plugin.name || `plugin-${props.index}`);
-  const safeId = rawId.replace(/[^a-zA-Z0-9_-]/g, "-");
-  return `plugin-header-${safeId}`;
-});
-
-const checkTextOverflow = () => {
-  nextTick(() => {
-    if (nameContainer.value && nameTextEl.value) {
-      const containerWidth = nameContainer.value.clientWidth;
-      const textWidth = nameTextEl.value.scrollWidth;
-      const wasOverflow = isTextOverflow.value;
-
-      isTextOverflow.value = textWidth > containerWidth;
-
-      if (isTextOverflow.value && wasOverflow !== isTextOverflow.value) {
-        updateMarqueeAnimation(containerWidth, textWidth);
-      }
-    }
-  });
-};
-
-const updateMarqueeAnimation = (containerWidth, textWidth) => {
-  if (pluginNameEl.value) {
-    const translateDistance = textWidth - containerWidth + 20;
-    pluginNameEl.value.style.setProperty("--translate-distance", `-${translateDistance}px`);
-  }
-};
-
-function replayCardAppearAnimation() {
-  const el = cardRef.value && (cardRef.value.$el || cardRef.value);
-  if (!el) return;
-  el.style.animation = "none";
-  void el.offsetWidth;
-  el.style.animation = "";
-}
-
-onMounted(() => {
-  checkTextOverflow();
-  if (nameContainer.value && window.ResizeObserver) {
-    resizeObserver.value = new ResizeObserver(() => {
-      checkTextOverflow();
-    });
-    resizeObserver.value.observe(nameContainer.value);
-  } else {
-    window.addEventListener("resize", checkTextOverflow);
-  }
-});
-
-watch(
-  [() => props.index, () => props.seed],
-  () => {
-    replayCardAppearAnimation();
-  },
-  { immediate: true },
-);
-
-onUnmounted(() => {
-  if (resizeObserver.value) {
-    resizeObserver.value.disconnect();
-  } else {
-    window.removeEventListener("resize", checkTextOverflow);
-  }
-});
-
-const message = useMessage();
-const dialog = useDialog();
-const isCopied = ref(false);
-
-const copyRepoUrl = async (e) => {
-  e.stopPropagation();
-  if (props.plugin.repo) {
-    try {
-      await navigator.clipboard.writeText(props.plugin.repo);
-      isCopied.value = true;
-      setTimeout(() => {
-        isCopied.value = false;
-      }, 2000);
-    } catch (err) {
-      message.error("复制失败，请手动复制");
-    }
-  }
-};
-
-const openUrl = (url, e) => {
-  e?.stopPropagation();
-  if (url) {
-    dialog.info({
-      title: "即将打开外链",
-      content: `将跳转到：${url}`,
-      positiveText: "继续打开",
-      negativeText: "取消",
-      onPositiveClick: () => {
-        window.open(url, "_blank", "noopener,noreferrer");
-      },
-    });
-  }
-};
-
-function searchAuthor(event) {
-  event.stopPropagation();
-  const author = String(props.plugin.author || "").trim();
-  if (!author) return;
-  setSearchQuery(author);
-  setCurrentPage(1);
-}
-
-function openUnlistModal() {
-  unlistReason.value = "";
-  showUnlistModal.value = true;
-}
-
-async function unlistPlugin() {
-  const reason = unlistReason.value.trim();
-  if (!reason) {
-    message.warning("请填写下架原因");
-    return;
-  }
-  isUnlisting.value = true;
-  try {
-    await updatePluginListing(props.plugin.id, "unlist", { reason });
-    await loadPlugins({ force: true });
-    showUnlistModal.value = false;
-    message.success("插件已下架");
-  } catch (error) {
-    message.error(error.message || "下架失败");
-  } finally {
-    isUnlisting.value = false;
-  }
-}
-
-// 获取logo URL的逻辑
-const getLogoUrl = () => {
-  return resolvePluginLogoUrl(props.plugin);
-};
-
-// 处理logo加载错误
-const handleLogoError = (event) => {
-  // 如果logo加载失败，使用默认logo
-  event.target.src = DEFAULT_PLUGIN_LOGO_URL;
-};
-</script>
-
 <style scoped>
-@keyframes cardAppear {
-  0% {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 .plugin-card {
   position: relative;
-  overflow: visible;
-  contain: content;
-  transition:
-    transform 0.35s cubic-bezier(0.22, 1, 0.36, 1),
-    border-color 0.35s ease,
-    box-shadow 0.35s ease;
-  border: 1.5px solid var(--border-base);
-  box-shadow: var(--shadow-sm);
-  background-color: var(--bg-card);
-  min-height: 180px;
-  max-height: max-content;
+  min-width: 0;
+  min-height: 208px;
   display: flex;
   flex-direction: column;
-  min-width: 100%;
-  animation: cardAppear 0.5s cubic-bezier(0.23, 1, 0.32, 1) backwards;
-  animation-delay: calc(0.4s + (var(--card-index, 0) * 0.08s));
-  border-radius: var(--card-radius);
+  padding: 22px 26px 18px;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border-right: 1px solid var(--border-base);
+  border-bottom: 1px solid var(--border-base);
+  transition: background-color 160ms ease;
+}
+
+.plugin-card:hover,
+.plugin-card:focus-within {
+  background: color-mix(in srgb, var(--bg-hover) 56%, var(--bg-card));
+}
+
+.plugin-card:nth-of-type(3n) {
+  border-right: 0;
 }
 
 .plugin-card__detail-link {
   position: absolute;
   inset: 0;
   z-index: 1;
-  border-radius: inherit;
 }
 
 .plugin-card__detail-link:focus-visible {
-  outline: 3px solid var(--primary-color);
-  outline-offset: 3px;
+  outline: 2px solid var(--primary-color);
+  outline-offset: -3px;
 }
 
-.plugin-card :deep(button),
-.plugin-card .author,
-.plugin-card a:not(.plugin-card__detail-link) {
-  position: relative;
-  z-index: 2;
-}
-
-.new-badge {
-  flex: 0 0 auto;
-  padding: 1px 6px;
-  color: var(--primary-color);
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 16px;
-}
-
-.plugin-card:hover {
-  transform: translateY(-5px) scale(1.005);
-  border-color: var(--primary-color);
-  box-shadow: var(--shadow-card-hover);
-}
-
-.unlist-modal-actions {
+.plugin-card__top {
+  min-width: 0;
   display: flex;
-  justify-content: flex-end;
-  gap: 12px;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--border-base);
-  background: linear-gradient(
-    135deg,
-    var(--bg-card) 0%,
-    rgba(37, 99, 235, 0.04) 50%,
-    rgba(37, 99, 235, 0.08) 100%
-  );
-  border-radius: var(--card-radius) var(--card-radius) 0 0;
-  min-height: 46px;
+  gap: 14px;
 }
 
-:deep(.n-card__header) {
-  margin-bottom: 0 !important;
-  padding-bottom: 6px !important;
+.plugin-logo {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  object-fit: cover;
+  background: var(--logo-bg);
+  border: 1px solid var(--logo-border);
+  border-radius: 10px;
 }
 
-:deep(.n-card-header) {
-  margin-bottom: 0 !important;
-  padding-bottom: 6px !important;
+.plugin-identity {
+  min-width: 0;
 }
 
-.plugin-title-group {
-  max-width: 75%;
+.plugin-title-row {
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.plugin-name-container {
+.plugin-name {
   min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  position: relative;
-}
-
-.plugin-name-container:has(.plugin-name.marquee) {
-  mask: linear-gradient(
-    to right,
-    transparent 0%,
-    black 10px,
-    black calc(100% - 10px),
-    transparent 100%
-  );
-  -webkit-mask: linear-gradient(
-    to right,
-    transparent 0%,
-    black 10px,
-    black calc(100% - 10px),
-    transparent 100%
-  );
-}
-
-.card-header h3 {
   margin: 0;
-  font-size: 1.25em;
-  font-weight: 700;
-  color: var(--primary-color);
-  letter-spacing: -0.3px;
-  font-family:
-    "Lexend",
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 15.5px;
+  font-weight: 750;
+  line-height: 1.3;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  --translate-distance: 0px;
 }
 
-.plugin-name-text {
-  display: inline-block;
-  transition: transform 0.3s ease;
-}
-
-.plugin-name.marquee .plugin-name-text {
-  animation: marqueeSlide 6s ease-in-out infinite;
-}
-
-.plugin-name.marquee:hover .plugin-name-text {
-  animation-play-state: paused;
-}
-
-@keyframes marqueeSlide {
-  0% {
-    transform: translateX(0);
-  }
-  20% {
-    transform: translateX(0);
-  }
-  50% {
-    transform: translateX(var(--translate-distance));
-  }
-  70% {
-    transform: translateX(var(--translate-distance));
-  }
-  100% {
-    transform: translateX(0);
-  }
-}
-
-@media (max-width: 768px) {
-  .plugin-title-group {
-    max-width: 70%;
-  }
-
-  @keyframes marqueeSlide {
-    0% {
-      transform: translateX(0);
-    }
-    25% {
-      transform: translateX(0);
-    }
-    50% {
-      transform: translateX(var(--translate-distance));
-    }
-    75% {
-      transform: translateX(var(--translate-distance));
-    }
-    100% {
-      transform: translateX(0);
-    }
-  }
-}
-
-@media (max-width: 480px) {
-  .plugin-title-group {
-    max-width: 65%;
-  }
-
-  .card-header h3 {
-    font-size: 1.1em;
-  }
-}
-
-.version-tag {
-  background-color: var(--version-bg) !important;
-  color: var(--version-text) !important;
-  border: none !important;
-  padding: 3px 10px !important;
-  font-weight: 700;
-  flex-shrink: 0;
+.new-badge {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  color: var(--metric-like);
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1.3;
+  border: 1px solid currentColor;
   border-radius: 999px;
-  font-size: 0.78em;
-  letter-spacing: 0.3px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
-.card-content-wrapper {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
-}
-
-.plugin-logo-container {
-  flex-shrink: 0;
-  width: 68px;
-  height: 68px;
+.version-author {
+  min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
-  border-radius: var(--card-inner-radius);
-  background: var(--logo-bg);
-  border: 1.5px solid var(--logo-border);
+  gap: 7px;
+  margin: 5px 0 0;
   overflow: hidden;
-  transition:
-    transform 0.3s cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 0.3s ease;
+  color: var(--text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.plugin-card:hover .plugin-logo-container {
-  transform: scale(1.04);
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.1);
-}
-
-.plugin-logo {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: calc(var(--card-inner-radius) - 2px);
-}
-
-.card-main-content {
-  flex: 1;
+.author-button {
+  position: relative;
+  z-index: 2;
   min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  color: inherit;
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
 }
 
-.card-content {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 120px;
+.author-button:hover,
+.author-button:focus-visible {
+  color: var(--primary-color);
+  outline: 0;
 }
 
 .description {
-  margin: 6px 0;
-  line-height: 1.55;
-  font-size: 0.9em;
-  height: 3em;
-  overflow: hidden;
+  min-height: 40px;
+  margin: 15px 0 0;
   display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-  line-clamp: 2;
-  text-overflow: ellipsis;
-  color: var(--text-secondary);
 }
 
 .tags-container {
-  margin: 2px 0;
-  min-height: 24px;
+  min-height: 26px;
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px;
+  margin-top: 10px;
   overflow: hidden;
-  position: relative;
-}
-
-.tags-container::after {
-  content: "";
-  position: absolute;
-  right: 0;
-  top: 0;
-  width: 28px;
-  height: 100%;
-  background: linear-gradient(to right, rgba(0, 0, 0, 0), var(--bg-card));
-  pointer-events: none;
-}
-
-.tags-space {
-  width: 100%;
-  flex-wrap: nowrap;
-  overflow: hidden;
-  white-space: nowrap;
 }
 
 .plugin-tag {
-  transition:
-    background-color 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease,
-    transform 0.2s ease;
-  margin-bottom: 2px;
-  background-color: var(--tag-bg) !important;
-  color: var(--tag-text) !important;
-  border: 1px solid var(--tag-border) !important;
-  padding: 3px 10px !important;
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  font-weight: 500;
-  font-size: 0.82em;
-}
-
-.plugin-tag:hover {
-  transform: translateY(-1px);
-  background-color: var(--tag-bg-hover) !important;
-  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.06);
-}
-
-.plugin-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.85em;
-  padding: 6px 0;
-  margin: 2px 0;
-  border-top: 1px dashed var(--border-base);
-  color: var(--text-secondary);
-  min-height: 28px;
-}
-
-.author {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  appearance: none;
-  border: 0;
+  max-width: 126px;
+  padding: 3px 9px;
+  overflow: hidden;
+  color: var(--tag-text);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   background: transparent;
-  border-radius: 6px;
-  cursor: pointer;
-  font: inherit;
-  padding: 3px 8px;
-  text-align: left;
-  font-size: 0.9em;
-  transition:
-    background-color 0.2s ease,
-    color 0.2s ease;
+  border: 1px solid var(--tag-border);
+  border-radius: 999px;
 }
 
-.author:hover,
-.author:focus-visible {
-  background: var(--tag-bg);
-  color: var(--primary-color);
-  outline: none;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+.plugin-footer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-base);
+}
+
+.metric-list,
+.plugin-actions {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
 }
 
 .metric-list {
-  color: var(--metric-color);
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 10px;
+  gap: 12px;
 }
 
 .metric-item {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  white-space: nowrap;
-  font-size: 0.92em;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
 }
 
-.metric-item :deep(.n-icon) {
-  font-size: 14px;
-}
-
-.metric-item--star,
-.metric-item--star :deep(.n-icon) {
+.metric-item--star {
   color: var(--metric-star);
 }
 
-.metric-item--like,
-.metric-item--like :deep(.n-icon) {
+.metric-item--like {
   color: var(--metric-like);
 }
 
-.metric-item--comment,
-.metric-item--comment :deep(.n-icon) {
+.metric-item--comment {
   color: var(--metric-comment);
 }
 
-.plugin-links {
-  margin-top: 2px;
-  min-height: 28px;
-  display: flex;
+.plugin-actions {
+  gap: 2px;
 }
 
-.button-group {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.icon-buttons {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.button-group :deep(.main-button) {
-  border-radius: 8px;
-  height: 30px;
-  padding: 0 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(
-    135deg,
-    var(--primary-color) 0%,
-    var(--primary-hover) 100%
-  ) !important;
-  border: none !important;
-  color: #ffffff !important;
+.detail-pill {
+  margin-left: 4px;
+  padding: 4px 10px;
+  color: var(--primary-color);
+  font-size: 11px;
   font-weight: 700;
-  font-size: 0.88em;
-  transition:
-    transform 0.2s ease,
-    box-shadow 0.2s ease;
+  border: 1px solid var(--border-base);
+  border-radius: 999px;
 }
 
-.button-group :deep(.main-button:hover) {
-  background: linear-gradient(
-    135deg,
-    var(--primary-hover) 0%,
-    var(--primary-active) 100%
-  ) !important;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
-}
-
-.icon-buttons :deep(.n-button) {
-  width: 30px;
-  height: 30px;
-  padding: 0;
+.unlist-modal-actions {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary);
-  background-color: var(--tag-bg);
-  border: 1px solid var(--tag-border);
-  transition:
-    background-color 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease,
-    color 0.2s ease,
-    transform 0.2s ease;
-  border-radius: 8px;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
-.icon-buttons :deep(.n-button:hover) {
-  color: #ffffff;
-  border-color: var(--primary-color);
-  background-color: var(--primary-color);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
-}
-
-@media (max-width: 480px) {
-  .button-group :deep(.n-button) {
-    font-size: 0.9em;
-    height: 28px;
+@media (max-width: 1024px) and (min-width: 769px) {
+  .plugin-card:nth-of-type(3n) {
+    border-right: 1px solid var(--border-base);
   }
 
-  .button-group :deep(.main-button) {
-    padding: 0 12px;
-  }
-
-  .icon-buttons :deep(.n-button) {
-    width: 28px;
-    height: 28px;
-  }
-
-  .icon-buttons :deep(.n-button .n-icon) {
-    font-size: 16px;
-  }
-
-  .plugin-logo-container {
-    width: 56px;
-    height: 56px;
+  .plugin-card:nth-of-type(2n) {
+    border-right: 0;
   }
 }
 
-:deep(.n-card) {
-  height: 100%;
+@media (max-width: 768px) {
+  .plugin-card {
+    min-height: 196px;
+    padding: 18px 16px 16px;
+    border-right: 0;
+  }
 }
 
-:deep(.n-card__content) {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-}
-
-.tags-container:empty::before {
-  content: "";
-  display: block;
-  height: 28px;
-}
-
-.plugin-name-text {
-  will-change: transform;
-}
-
-.plugin-name.marquee .plugin-name-text {
-  backface-visibility: hidden;
-  perspective: 1000px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .plugin-card,
-  .plugin-name.marquee .plugin-name-text,
-  .plugin-tag,
-  .icon-buttons :deep(.n-button) {
-    animation: none !important;
-    transition: none !important;
+@media (max-width: 420px) {
+  .detail-pill {
+    display: none;
   }
 
-  .plugin-card:hover,
-  .plugin-tag:hover,
-  .icon-buttons :deep(.n-button:hover) {
-    transform: none;
+  .plugin-actions {
+    gap: 0;
   }
 }
 </style>

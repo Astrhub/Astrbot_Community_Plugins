@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="-2 -2 22 22" role="img" aria-label="Astrhub Plugins Market">
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Astrhub Plugins Market">
   <path
-    d="M9 0l1.8 6.2L17 4.5l-4.9 4.5L17 13.5l-6.2-1.7L9 18 7.2 11.8 1 13.5l4.9-4.5L1 4.5l6.2 1.7z"
+    d="M256 24 297 157 420 92 355 215 488 256 355 297 420 420 297 355 256 488 215 355 92 420 157 297 24 256 157 215 92 92 215 157Z"
     fill="#60a5fa"
   />
 </svg>

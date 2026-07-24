@@ -11,6 +11,7 @@ import {
   NSkeleton,
   NSpin,
   NTag,
+  NTooltip,
   useMessage,
 } from "naive-ui";
 import {
@@ -57,6 +58,7 @@ const store = usePluginStore();
 const { siteConfig } = storeToRefs(store);
 
 const API_KEY_STORAGE_KEY = "astrbot_docs_apikey";
+const ENDPOINT_ALERT_STORAGE_KEY = "astrbot_docs_endpoint_alert_collapsed";
 const DANGEROUS_METHODS = new Set(["post", "put", "patch", "delete"]);
 const endpointAlertText = computed(() => {
   const base = String(store.apiBaseUrl || "")
@@ -90,7 +92,10 @@ const endpointAlertText = computed(() => {
 const apiKey = ref(
   typeof sessionStorage !== "undefined" ? sessionStorage.getItem(API_KEY_STORAGE_KEY) || "" : "",
 );
-const endpointAlertVisible = ref(true);
+const endpointAlertVisible = shallowRef(
+  typeof localStorage === "undefined" ||
+    localStorage.getItem(ENDPOINT_ALERT_STORAGE_KEY) !== "collapsed",
+);
 
 const authConfig = computed(() => ({
   type: apiKey.value ? "bearer" : "none",
@@ -102,6 +107,20 @@ watch(apiKey, (value) => {
   if (value) sessionStorage.setItem(API_KEY_STORAGE_KEY, value);
   else sessionStorage.removeItem(API_KEY_STORAGE_KEY);
 });
+
+function collapseEndpointAlert(): void {
+  endpointAlertVisible.value = false;
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(ENDPOINT_ALERT_STORAGE_KEY, "collapsed");
+  }
+}
+
+function expandEndpointAlert(): void {
+  endpointAlertVisible.value = true;
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem(ENDPOINT_ALERT_STORAGE_KEY);
+  }
+}
 
 const spec = shallowRef(null);
 const loading = shallowRef(true);
@@ -359,8 +378,18 @@ async function copyEndpointGuide() {
       </div>
     </header>
 
-    <section v-if="endpointAlertVisible" class="endpoint-alert" aria-label="机器可读入口">
-      <n-alert type="info" :bordered="false" closable @close="endpointAlertVisible = false">
+    <section
+      class="endpoint-alert"
+      :class="{ 'endpoint-alert--collapsed': !endpointAlertVisible }"
+      aria-label="机器可读入口"
+    >
+      <n-alert
+        v-if="endpointAlertVisible"
+        type="info"
+        :bordered="false"
+        closable
+        @close="collapseEndpointAlert"
+      >
         <template #header>
           <strong>机器可读入口</strong>
         </template>
@@ -395,6 +424,22 @@ async function copyEndpointGuide() {
           </n-button>
         </div>
       </n-alert>
+      <n-tooltip v-else trigger="hover">
+        <template #trigger>
+          <n-button
+            circle
+            secondary
+            class="endpoint-alert-restore"
+            aria-label="展开机器可读入口"
+            @click="expandEndpointAlert"
+          >
+            <template #icon>
+              <n-icon><code-slash-outline /></n-icon>
+            </template>
+          </n-button>
+        </template>
+        展开机器可读入口
+      </n-tooltip>
     </section>
 
     <section class="docs-toolbar" aria-label="文档筛选">
@@ -1097,6 +1142,16 @@ async function copyEndpointGuide() {
 }
 .endpoint-alert {
   padding: 12px clamp(14px, 3vw, 36px) 0;
+}
+
+.endpoint-alert--collapsed {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.endpoint-alert-restore {
+  width: 34px;
+  height: 34px;
 }
 
 .endpoint-alert-body {

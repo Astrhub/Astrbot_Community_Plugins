@@ -37,6 +37,10 @@ def test_market_web_files_routes_and_real_404(tmp_path: Path, monkeypatch) -> No
     assert fallback.status_code == 200
     assert fallback.headers["cache-control"] == "public, max-age=0, must-revalidate"
 
+    workbench = client.get("/plugin-workbench")
+    assert workbench.status_code == 200
+    assert workbench.headers["cache-control"] == "public, max-age=0, must-revalidate"
+
     plugin_root = client.get("/plugin")
     assert plugin_root.status_code == 200
     assert plugin_root.headers["cache-control"] == "public, max-age=0, must-revalidate"

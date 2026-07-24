@@ -19,6 +19,8 @@ describe("plugin workbench route guard", () => {
   });
 
   it("redirects anonymous users and preserves the requested workbench URL", async () => {
+    expect(router.resolve("/plugin-workbench").meta.noindex).toBe(true);
+
     await router.push("/plugin-workbench?status=pending_review");
 
     expect(router.currentRoute.value.name).toBe("Home");
@@ -26,5 +28,13 @@ describe("plugin workbench route guard", () => {
     expect(router.currentRoute.value.query.redirect).toBe(
       "/plugin-workbench?status=pending_review",
     );
+  });
+
+  it("routes the legacy admin review URL through the new workbench", async () => {
+    await router.push("/admin/plugins");
+
+    expect(router.currentRoute.value.name).toBe("Home");
+    expect(router.currentRoute.value.query.login).toBe("required");
+    expect(router.currentRoute.value.query.redirect).toBe("/plugin-workbench");
   });
 });

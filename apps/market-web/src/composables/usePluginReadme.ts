@@ -11,6 +11,10 @@ interface LoadPluginReadmeOptions {
 
 const README_CANDIDATES = ["README.md", "Readme.md", "readme.md", "README.MD", "README"];
 
+export function buildReadmeBrowserUrl(context: PluginReadmeContext): string {
+  return `https://github.com/${context.owner}/${context.repo}/blob/${context.branch}/${context.path}`;
+}
+
 export function usePluginReadme(pluginInput: MaybeRefOrGetter<Plugin | null | undefined>) {
   const store = usePluginStore();
   const loading = shallowRef(false);

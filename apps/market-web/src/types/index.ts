@@ -38,6 +38,7 @@ export interface Plugin {
   short_desc?: string;
   author?: string;
   repo?: string;
+  social_link?: string;
   tags: string[];
   category: PluginCategory;
   stars: number;

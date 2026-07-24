@@ -125,6 +125,7 @@ FRONTEND_EXACT_ROUTES = {
     "settings",
     "notifications",
     "admin",
+    "plugin-workbench",
     "docs/rest",
     "plugin",
 }

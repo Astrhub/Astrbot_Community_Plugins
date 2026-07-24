@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { usePluginStore } from "@/stores/plugins";
 import type { Plugin } from "@/types";
-import { usePluginReadme } from "./usePluginReadme";
+import { buildReadmeBrowserUrl, usePluginReadme } from "./usePluginReadme";
 
 const plugin: Plugin = {
   id: "astrbot_plugin_readme",
@@ -27,6 +27,17 @@ afterEach(() => {
 });
 
 describe("usePluginReadme", () => {
+  it("builds the README browser URL entirely from the normalized context", () => {
+    expect(
+      buildReadmeBrowserUrl({
+        owner: "alice",
+        repo: "astrbot_plugin_demo",
+        branch: "main",
+        path: "docs/README.md",
+      }),
+    ).toBe("https://github.com/alice/astrbot_plugin_demo/blob/main/docs/README.md");
+  });
+
   it("prefers the server cache endpoint and derives repository context", async () => {
     setActivePinia(createPinia());
     const store = usePluginStore();
