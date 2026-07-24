@@ -40,9 +40,13 @@
       .site-config-loading #app .brand-name {
         visibility: hidden;
       }
+
+      .auth-session-loading #app .auth-session-control {
+        visibility: hidden;
+      }
     </style>
     <script>
-      document.documentElement.classList.add("site-config-loading");
+      document.documentElement.classList.add("site-config-loading", "auth-session-loading");
     </script>
     <script id="website-jsonld" type="application/ld+json">
       {

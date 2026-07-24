@@ -37,10 +37,17 @@ onMounted(async () => {
   }
   const status = await store.loadSetupStatus();
   if (status.required) {
+    document.documentElement.classList.remove("auth-session-loading");
     if (route.path !== "/setup") await router.replace("/setup");
     return;
   }
-  await Promise.all([store.loadPlugins(), store.loadCurrentUser()]);
+  const pluginsPromise = store.loadPlugins();
+  try {
+    await store.loadCurrentUser();
+  } finally {
+    document.documentElement.classList.remove("auth-session-loading");
+  }
+  await pluginsPromise;
 });
 </script>
 

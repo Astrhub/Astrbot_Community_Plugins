@@ -31,8 +31,12 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   let savedPayload: Record<string, unknown> | null = null;
   let synthesizedLogoRequests = 0;
   let releaseSiteConfig: () => void = () => undefined;
+  let releaseCurrentUser: () => void = () => undefined;
   const siteConfigGate = new Promise<void>((resolve) => {
     releaseSiteConfig = resolve;
+  });
+  const currentUserGate = new Promise<void>((resolve) => {
+    releaseCurrentUser = resolve;
   });
 
   await page.route("**/demo/astrbot_plugin_owned*/logo.png", (route) => {
@@ -64,6 +68,7 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
       });
     }
     if (pathname === "/v1/me") {
+      await currentUserGate;
       return json(route, {
         id: "admin-1",
         role: "admin",
@@ -96,6 +101,12 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   await page.waitForLoadState("domcontentloaded");
   await expect(brandName).toHaveText("自定义插件市场");
   await expect(brandName).toBeVisible();
+  const loginTrigger = page.locator(".login-trigger");
+  await loginTrigger.waitFor({ state: "attached" });
+  await expect(loginTrigger).toBeHidden();
+  releaseCurrentUser();
+  await expect(page.getByRole("button", { name: "账户：reviewer" })).toBeVisible();
+  await expect(loginTrigger).toHaveCount(0);
 
   await page.goto("/settings/personal", { waitUntil: "domcontentloaded" });
   await page.locator(".n-tabs-tab__label").getByText("我的插件", { exact: true }).click();
@@ -134,4 +145,53 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   );
   await page.getByRole("button", { name: "账户：reviewer" }).click();
   await expect(page.getByText("审查工作台", { exact: true })).toHaveCount(1);
+});
+
+test("machine-readable notice stays collapsed and can be restored", async ({ page }) => {
+  await page.addInitScript(() => {
+    const initializedKey = "astrbot_docs_endpoint_alert_test_initialized";
+    if (sessionStorage.getItem(initializedKey)) return;
+    localStorage.removeItem("astrbot_docs_endpoint_alert_collapsed");
+    sessionStorage.setItem(initializedKey, "true");
+  });
+  await page.route("**/v1/**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === "/v1/site") {
+      return json(route, {
+        name: "Astrhub 插件市场",
+        icon_url: "/logo.webp",
+        auth: { github_login_enabled: true },
+        market: { max_plugin_tags: 8, comments_enabled: true, likes_enabled: true },
+      });
+    }
+    if (pathname === "/v1/setup/status") {
+      return json(route, {
+        required: false,
+        missing: [],
+        database_configured: true,
+        redis_configured: true,
+        saved_setup: {},
+        restart_required: false,
+      });
+    }
+    if (pathname === "/v1/me") return json(route, { error: "Unauthorized" }, 401);
+    if (pathname === "/v1/plugins") return json(route, { items: [] });
+    return json(route, { error: "Not found" }, 404);
+  });
+  await page.route("**/openapi.json", (route) =>
+    json(route, { openapi: "3.1.0", info: { title: "Test API", version: "1.0.0" }, paths: {} }),
+  );
+
+  await page.goto("/docs/rest", { waitUntil: "domcontentloaded" });
+  await expect(page.getByText("机器可读入口", { exact: true })).toBeVisible();
+  await page.locator(".endpoint-alert .n-base-close").click();
+  await expect(page.getByRole("button", { name: "展开机器可读入口" })).toBeVisible();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("button", { name: "展开机器可读入口" })).toBeVisible();
+  await page.getByRole("button", { name: "展开机器可读入口" }).click();
+  await expect(page.getByText("机器可读入口", { exact: true })).toBeVisible();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByText("机器可读入口", { exact: true })).toBeVisible();
 });

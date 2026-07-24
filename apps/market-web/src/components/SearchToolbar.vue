@@ -254,6 +254,7 @@ function handleDirectionAction(): void {
 }
 
 .search-field input {
+  appearance: none;
   min-width: 0;
   width: 100%;
   height: 100%;
@@ -264,6 +265,11 @@ function handleDirectionAction(): void {
   background: transparent;
   border: 0;
   outline: 0;
+}
+
+.search-field input::-webkit-search-cancel-button {
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .search-field input::placeholder {

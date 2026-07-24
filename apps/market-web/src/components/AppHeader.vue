@@ -165,7 +165,7 @@ async function handleUserMenuSelect(key: string): Promise<void> {
         >
           <button
             type="button"
-            class="nav-link user-trigger"
+            class="nav-link user-trigger auth-session-control"
             :aria-label="`账户：${displayUserName}`"
           >
             <span class="user-avatar" aria-hidden="true">
@@ -182,7 +182,12 @@ async function handleUserMenuSelect(key: string): Promise<void> {
           </button>
         </n-dropdown>
 
-        <button v-else type="button" class="nav-link login-trigger" @click="openLoginModal">
+        <button
+          v-else
+          type="button"
+          class="nav-link login-trigger auth-session-control"
+          @click="openLoginModal"
+        >
           登录
         </button>
         <theme-mode-button circle class="theme-button" />
