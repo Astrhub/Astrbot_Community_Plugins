@@ -24,7 +24,12 @@ const { loginWithGithub, logout } = store;
 const isLoginModalOpen = shallowRef(false);
 const agreementAccepted = shallowRef(false);
 const siteName = computed(() => siteConfig.value.name || "Astrhub Plugins Market");
-const siteIconUrl = computed(() => siteConfig.value.icon_url || "/logo.webp");
+const siteIconUrl = computed(() => {
+  const configuredUrl = String(siteConfig.value.icon_url || "").trim();
+  return !configuredUrl || configuredUrl === "/logo.webp"
+    ? "/logo.webp?v=20260725"
+    : configuredUrl;
+});
 const isCoreAdmin = computed(() => currentUser.value?.role === "core_admin");
 const isAdminUser = computed(() =>
   ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
@@ -59,7 +64,7 @@ const userMenuOptions = computed(() => [
     ? [
         {
           key: "workbench",
-          label: "插件工作台",
+          label: "审查工作台",
           icon: renderIcon(ShieldCheckmarkOutline),
         },
       ]
@@ -132,9 +137,6 @@ async function handleUserMenuSelect(key: string): Promise<void> {
       <div class="nav-actions">
         <router-link class="nav-link nav-link--optional" to="/">插件墙</router-link>
         <router-link class="nav-link nav-link--optional" to="/docs/rest">文档</router-link>
-        <router-link v-if="isAdminUser" class="nav-link nav-link--review" to="/plugin-workbench">
-          审查台
-        </router-link>
 
         <router-link
           v-if="currentUser"
@@ -268,11 +270,6 @@ async function handleUserMenuSelect(key: string): Promise<void> {
   outline: none;
 }
 
-.nav-link--review {
-  color: var(--primary-color);
-  font-weight: 650;
-}
-
 .nav-icon-link {
   display: inline-grid;
   width: 28px;
@@ -335,8 +332,7 @@ async function handleUserMenuSelect(key: string): Promise<void> {
     gap: 10px;
   }
 
-  .nav-link--optional,
-  .nav-link--review {
+  .nav-link--optional {
     display: none;
   }
 
