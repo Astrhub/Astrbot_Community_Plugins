@@ -25,7 +25,7 @@ const { loginWithGithub, logout } = store;
 const isLoginModalOpen = shallowRef(false);
 const agreementAccepted = shallowRef(false);
 const avatarLoadFailed = shallowRef(false);
-const siteName = computed(() => siteConfig.value.name || "Astrhub Plugins Market");
+const siteName = computed(() => siteConfig.value.name || "Astrhub 插件市场");
 const siteIconUrl = computed(() => {
   const configuredUrl = String(siteConfig.value.icon_url || "").trim();
   return !configuredUrl || configuredUrl === "/logo.webp" ? "/logo.webp?v=20260725" : configuredUrl;

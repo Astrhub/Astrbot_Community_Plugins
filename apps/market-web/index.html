@@ -36,6 +36,14 @@
       type="font/woff2"
       crossorigin
     />
+    <style id="site-config-boot-style">
+      .site-config-loading #app .brand-name {
+        visibility: hidden;
+      }
+    </style>
+    <script>
+      document.documentElement.classList.add("site-config-loading");
+    </script>
     <script id="website-jsonld" type="application/ld+json">
       {
         "@context": "https://schema.org",

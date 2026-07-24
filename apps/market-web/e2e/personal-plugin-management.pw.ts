@@ -30,6 +30,10 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   let unlistRequested = false;
   let savedPayload: Record<string, unknown> | null = null;
   let synthesizedLogoRequests = 0;
+  let releaseSiteConfig: () => void = () => undefined;
+  const siteConfigGate = new Promise<void>((resolve) => {
+    releaseSiteConfig = resolve;
+  });
 
   await page.route("**/demo/astrbot_plugin_owned*/logo.png", (route) => {
     synthesizedLogoRequests += 1;
@@ -41,8 +45,9 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
     const pathname = new URL(request.url()).pathname;
 
     if (pathname === "/v1/site") {
+      await siteConfigGate;
       return json(route, {
-        name: "Astrhub Plugins Market",
+        name: "自定义插件市场",
         icon_url: "/logo.webp",
         auth: { github_login_enabled: true },
         market: { max_plugin_tags: 8, comments_enabled: true, likes_enabled: true },
@@ -82,6 +87,15 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
 
     return json(route, { error: `Unhandled test route: ${request.method()} ${pathname}` }, 404);
   });
+
+  await page.goto("/", { waitUntil: "commit" });
+  const brandName = page.locator(".brand-name");
+  await brandName.waitFor({ state: "attached" });
+  await expect(brandName).toBeHidden();
+  releaseSiteConfig();
+  await page.waitForLoadState("domcontentloaded");
+  await expect(brandName).toHaveText("自定义插件市场");
+  await expect(brandName).toBeVisible();
 
   await page.goto("/settings/personal", { waitUntil: "domcontentloaded" });
   await page.locator(".n-tabs-tab__label").getByText("我的插件", { exact: true }).click();

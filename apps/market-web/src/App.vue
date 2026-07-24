@@ -30,7 +30,11 @@ useHead(() => ({
 
 onMounted(async () => {
   store.initTheme();
-  await store.loadSiteConfig();
+  try {
+    await store.loadSiteConfig();
+  } finally {
+    document.documentElement.classList.remove("site-config-loading");
+  }
   const status = await store.loadSetupStatus();
   if (status.required) {
     if (route.path !== "/setup") await router.replace("/setup");
