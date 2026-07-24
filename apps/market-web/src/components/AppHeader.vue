@@ -19,12 +19,13 @@ import { githubRawUrl } from "../utils/github";
 const router = useRouter();
 const message = useMessage();
 const store = usePluginStore();
-const { currentUser, siteConfig, unreadNotificationCount } = storeToRefs(store);
+const { currentUser, currentUserPreview, siteConfig, unreadNotificationCount } = storeToRefs(store);
 const { loginWithGithub, logout } = store;
 
 const isLoginModalOpen = shallowRef(false);
 const agreementAccepted = shallowRef(false);
 const avatarLoadFailed = shallowRef(false);
+const headerUser = computed(() => currentUser.value || currentUserPreview.value);
 const siteName = computed(() => siteConfig.value.name || "Astrhub 插件市场");
 const siteIconUrl = computed(() => {
   const configuredUrl = String(siteConfig.value.icon_url || "").trim();
@@ -37,13 +38,14 @@ const isAdminUser = computed(() =>
 const hasUnreadNotifications = computed(() => unreadNotificationCount.value > 0);
 const displayUserName = computed(
   () =>
-    currentUser.value?.github_login ||
-    currentUser.value?.internal_username ||
-    currentUser.value?.login ||
+    headerUser.value?.github_login ||
+    headerUser.value?.internal_username ||
+    headerUser.value?.username ||
+    headerUser.value?.login ||
     "已登录",
 );
 const userAvatarUrl = computed(() =>
-  githubRawUrl(String(currentUser.value?.avatar_url || currentUser.value?.avatar || "").trim()),
+  githubRawUrl(String(headerUser.value?.avatar_url || headerUser.value?.avatar || "").trim()),
 );
 const showUserAvatar = computed(() => Boolean(userAvatarUrl.value) && !avatarLoadFailed.value);
 const agreementText = computed(() => {
@@ -158,7 +160,7 @@ async function handleUserMenuSelect(key: string): Promise<void> {
         </router-link>
 
         <n-dropdown
-          v-if="currentUser"
+          v-if="headerUser"
           :options="userMenuOptions"
           trigger="click"
           @select="handleUserMenuSelect"
@@ -167,6 +169,9 @@ async function handleUserMenuSelect(key: string): Promise<void> {
             type="button"
             class="nav-link user-trigger auth-session-control"
             :aria-label="`账户：${displayUserName}`"
+            :aria-busy="!currentUser"
+            :disabled="!currentUser"
+            :title="currentUser ? undefined : '正在验证登录状态'"
           >
             <span class="user-avatar" aria-hidden="true">
               <img
@@ -295,6 +300,12 @@ async function handleUserMenuSelect(key: string): Promise<void> {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+}
+
+.user-trigger:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+  opacity: 1;
 }
 
 .user-avatar {
