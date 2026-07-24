@@ -28,6 +28,9 @@ async function json(route: Route, body: unknown, status = 200): Promise<void> {
 
 test("authors keep plugin editing while admins have one review entry", async ({ page }) => {
   let unlistRequested = false;
+  let savedPayload: Record<string, unknown> | null = null;
+
+  await page.route("**/demo/astrbot_plugin_owned*/logo.png", (route) => route.abort());
 
   await page.route("**/v1/**", async (route) => {
     const request = route.request();
@@ -63,6 +66,10 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
     if (pathname === "/v1/me/plugins") return json(route, { items: [plugin] });
     if (pathname === "/v1/me/api-keys") return json(route, { items: [] });
     if (pathname === "/v1/plugins") return json(route, { items: [] });
+    if (pathname === `/v1/plugins/${plugin.id}` && request.method() === "PATCH") {
+      savedPayload = request.postDataJSON() as Record<string, unknown>;
+      return json(route, { ...plugin, ...savedPayload });
+    }
     if (pathname === `/v1/plugins/${plugin.id}/unlist` && request.method() === "POST") {
       unlistRequested = true;
       return json(route, { ...plugin, status: "unlisted" });
@@ -74,9 +81,24 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
   await page.goto("/settings/personal", { waitUntil: "domcontentloaded" });
   await page.locator(".n-tabs-tab__label").getByText("我的插件", { exact: true }).click();
 
-  await expect(page.getByRole("heading", { name: "插件管理" })).toBeVisible();
   await expect(page.getByText("我的测试插件", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "保存标签" })).toBeVisible();
+  await expect(page.getByText("astrbot_plugin_owned", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "仓库 ↗" })).toBeVisible();
+  await expect(page.locator(".pm-logo")).toHaveAttribute("src", "/plugin_default.png?v=20260725");
+
+  await page.getByRole("button", { name: "编辑" }).click();
+  await expect(page.getByText("展示名称", { exact: true })).toBeVisible();
+  const editor = page.locator(".pm-editor");
+  await editor.getByRole("textbox").first().fill("预览版插件名称");
+  await editor.getByRole("button", { name: "保存修改" }).click();
+  await expect(page.getByText("预览版插件名称", { exact: true })).toBeVisible();
+  expect(savedPayload).toMatchObject({
+    display_name: "预览版插件名称",
+    desc: plugin.desc,
+    tags: plugin.tags,
+    category: plugin.category,
+    social_link: "",
+  });
 
   await page.getByRole("button", { name: "下架" }).click();
   await page.locator(".n-dialog").getByRole("button", { name: "下架" }).click();

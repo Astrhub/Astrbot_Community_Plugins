@@ -18,6 +18,7 @@ import NotificationPreferencesSection from "@/components/settings/NotificationPr
 import PersonalPluginManager from "@/components/settings/PersonalPluginManager.vue";
 import ProfileAccountSection from "@/components/settings/ProfileAccountSection.vue";
 import { usePluginStore } from "@/stores/plugins";
+import type { Plugin } from "@/types";
 
 const router = useRouter();
 const message = useMessage();
@@ -31,7 +32,6 @@ const {
   loadMyApiKeys,
   loadMyPlugins,
   requestPluginListing,
-  setSearchQuery,
   unlistOwnPlugin,
   updatePluginMetadata,
   updateProfile,
@@ -220,12 +220,18 @@ async function withPluginBusy(plugin, action, task) {
   }
 }
 
-async function savePluginTags({ plugin, tags }) {
+async function savePluginMetadata({
+  plugin,
+  changes,
+}: {
+  plugin: Plugin;
+  changes: Partial<Plugin> & Record<string, unknown>;
+}) {
   try {
-    await withPluginBusy(plugin, "tags", () => updatePluginMetadata(plugin.id, { tags }));
-    message.success("标签已保存");
+    await withPluginBusy(plugin, "save", () => updatePluginMetadata(plugin.id, changes));
+    message.success("插件信息已保存");
   } catch (error) {
-    message.error(error.message || "保存标签失败");
+    message.error(error.message || "保存插件信息失败");
   }
 }
 
@@ -255,11 +261,6 @@ async function requestListPlugin(plugin) {
   } catch (error) {
     message.error(error.message || "申请上架失败");
   }
-}
-
-function openPlugin(plugin) {
-  setSearchQuery(plugin.name || plugin.id);
-  router.push("/");
 }
 
 function goBack() {
@@ -344,10 +345,9 @@ onMounted(async () => {
                 :busy-ids="pluginBusyIds"
                 :max-tags="maxPluginTags"
                 @refresh="refreshMyPlugins"
-                @save-tags="savePluginTags"
+                @save-plugin="savePluginMetadata"
                 @request-list="requestListPlugin"
                 @unlist="unlistPlugin"
-                @open-plugin="openPlugin"
               />
             </div>
           </NTabPane>

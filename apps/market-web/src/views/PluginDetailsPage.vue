@@ -13,7 +13,7 @@ import {
 } from "@vicons/ionicons5";
 import { PLUGIN_CATEGORY_LABELS, usePluginStore } from "../stores/plugins";
 import type { PluginDetail } from "../types";
-import { resolvePluginLogoUrl } from "../utils/github";
+import { resolvePluginLogoUrl, setDefaultPluginLogo } from "../utils/github";
 import { DEFAULT_OG_IMAGE, useSeo } from "../composables/useSeo";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
 import AppFooter from "../components/AppFooter.vue";
@@ -173,6 +173,7 @@ function updatePlugin(updated: PluginDetail): void {
                 :alt="`${displayName} 插件图标`"
                 width="88"
                 height="88"
+                @error="setDefaultPluginLogo"
               />
               <div class="plugin-intro__copy">
                 <p class="plugin-kicker">AstrBot 社区插件</p>

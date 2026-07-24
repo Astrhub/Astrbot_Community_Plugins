@@ -48,7 +48,7 @@ export function buildGithubRawUrl(
   return githubRawUrl(raw);
 }
 
-export const DEFAULT_PLUGIN_LOGO_URL = "/plugin_default.png";
+export const DEFAULT_PLUGIN_LOGO_URL = "/plugin_default.png?v=20260725";
 
 export interface PluginLogoSource {
   logo?: unknown;
@@ -57,13 +57,25 @@ export interface PluginLogoSource {
 
 export function resolvePluginLogoUrl(plugin: PluginLogoSource): string {
   const logo = typeof plugin.logo === "string" ? plugin.logo.trim() : "";
-  if (logo) return githubRawUrl(logo);
+  if (logo) {
+    if (/^(?:https?:\/\/[^/]+)?\/plugin_default\.png(?:\?.*)?$/.test(logo)) {
+      return DEFAULT_PLUGIN_LOGO_URL;
+    }
+    return githubRawUrl(logo);
+  }
 
   const repo = typeof plugin.repo === "string" ? plugin.repo.trim() : "";
   const githubRepo = parseGithubRepoUrl(repo);
   if (!githubRepo) return DEFAULT_PLUGIN_LOGO_URL;
 
   return buildGithubRawUrl(githubRepo.owner, githubRepo.repo, "master", "logo.png");
+}
+
+export function setDefaultPluginLogo(event: Event): void {
+  const image = (event.currentTarget || event.target) as HTMLImageElement | null;
+  if (!image || image.getAttribute("src") === DEFAULT_PLUGIN_LOGO_URL) return;
+  image.onerror = null;
+  image.src = DEFAULT_PLUGIN_LOGO_URL;
 }
 
 export function parseGithubRepoUrl(value: string): { owner: string; repo: string } | null {

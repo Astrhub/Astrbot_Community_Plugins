@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { DEFAULT_PLUGIN_LOGO_URL, resolvePluginLogoUrl } from "./github";
+import { DEFAULT_PLUGIN_LOGO_URL, resolvePluginLogoUrl, setDefaultPluginLogo } from "./github";
 
 describe("resolvePluginLogoUrl", () => {
   it("uses an explicit plugin logo when one is provided", () => {
@@ -36,5 +36,23 @@ describe("resolvePluginLogoUrl", () => {
     expect(resolvePluginLogoUrl({ repo: "https://gitlab.com/owner/repo" })).toBe(
       DEFAULT_PLUGIN_LOGO_URL,
     );
+  });
+
+  it("upgrades legacy default-logo paths to the cache-busted brand asset", () => {
+    expect(resolvePluginLogoUrl({ logo: "/plugin_default.png" })).toBe(
+      "/plugin_default.png?v=20260725",
+    );
+  });
+
+  it("replaces a failed remote logo with the market default", () => {
+    const image = {
+      getAttribute: () => "https://example.com/missing.png",
+      onerror: () => undefined,
+      src: "https://example.com/missing.png",
+    } as unknown as HTMLImageElement;
+
+    setDefaultPluginLogo({ currentTarget: image } as unknown as Event);
+
+    expect(image.src).toBe(DEFAULT_PLUGIN_LOGO_URL);
   });
 });

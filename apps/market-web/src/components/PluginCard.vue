@@ -13,7 +13,7 @@ import {
 } from "@vicons/ionicons5";
 import type { Plugin } from "@/types";
 import { usePluginStore } from "@/stores/plugins";
-import { DEFAULT_PLUGIN_LOGO_URL, resolvePluginLogoUrl } from "@/utils/github";
+import { resolvePluginLogoUrl, setDefaultPluginLogo } from "@/utils/github";
 import { isNewPlugin } from "@/utils/pluginFreshness";
 
 const props = withDefaults(
@@ -110,12 +110,6 @@ async function unlistPlugin(): Promise<void> {
     isUnlisting.value = false;
   }
 }
-
-function handleLogoError(event: Event): void {
-  const image = event.target as HTMLImageElement;
-  if (image.src.endsWith(DEFAULT_PLUGIN_LOGO_URL)) return;
-  image.src = DEFAULT_PLUGIN_LOGO_URL;
-}
 </script>
 
 <template>
@@ -134,7 +128,7 @@ function handleLogoError(event: Event): void {
         width="48"
         height="48"
         loading="lazy"
-        @error="handleLogoError"
+        @error="setDefaultPluginLogo"
       />
       <div class="plugin-identity">
         <div class="plugin-title-row">
