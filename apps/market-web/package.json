@@ -35,13 +35,13 @@
     "jsdom": "^29.1.1",
     "puppeteer-core": "^25.3.0",
     "sirv-cli": "^3.0.1",
-    "vite": "npm:@voidzero-dev/vite-plus-core@latest",
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.2.6",
     "vite-plugin-sitemap": "0.8.2",
-    "vite-plus": "latest"
+    "vite-plus": "0.2.6"
   },
   "overrides": {
-    "vite": "npm:@voidzero-dev/vite-plus-core@latest",
-    "vitest": "4.1.9"
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.2.6",
+    "vitest": "4.1.10"
   },
   "devEngines": {
     "packageManager": {
