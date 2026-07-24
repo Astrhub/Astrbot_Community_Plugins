@@ -21,8 +21,8 @@ const pluginRoutes = (payload.items || [])
 const routes = ["/", "/submit", "/docs/rest", ...pluginRoutes];
 const port = 4174;
 const server = spawn(
-  path.resolve("node_modules/.bin/sirv"),
-  ["dist", "--single", "--port", String(port)],
+  process.execPath,
+  [path.resolve("node_modules/sirv-cli/bin.js"), "dist", "--single", "--port", String(port)],
   { stdio: "inherit" },
 );
 
@@ -39,11 +39,12 @@ try {
     await page.setViewport({ width: 1440, height: 1000 });
     let rootHtml = "";
     for (const route of routes) {
-      await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "networkidle0" });
+      await page.goto(`http://127.0.0.1:${port}${route}`, { waitUntil: "domcontentloaded" });
       await page.waitForSelector("#app > *", { timeout: 20_000 });
-      if (route.startsWith("/plugin/")) {
-        await page.waitForSelector(".plugin-profile", { timeout: 20_000 });
-      }
+      if (route === "/")
+        await page.waitForSelector(".plugin-card, .empty-state", { timeout: 20_000 });
+      if (route.startsWith("/plugin/"))
+        await page.waitForSelector(".plugin-layout", { timeout: 20_000 });
       const html = await page.content();
       if (route === "/") {
         rootHtml = html;
@@ -77,8 +78,19 @@ async function waitForServer(url) {
 }
 
 function resolveChromiumPath() {
+  const windowsCandidates =
+    process.platform === "win32"
+      ? [
+          [process.env.PROGRAMFILES, "Google/Chrome/Application/chrome.exe"],
+          [process.env["PROGRAMFILES(X86)"], "Microsoft/Edge/Application/msedge.exe"],
+          [process.env.LOCALAPPDATA, "Microsoft/Edge/Application/msedge.exe"],
+        ]
+          .filter(([base]) => Boolean(base))
+          .map(([base, relative]) => path.join(base, relative))
+      : [];
   const candidates = [
     process.env.PUPPETEER_EXECUTABLE_PATH,
+    ...windowsCandidates,
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
     "/snap/bin/chromium",
