@@ -2,8 +2,8 @@
 import { computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
-import { NButton, NIcon, useMessage } from "naive-ui";
-import { CopyOutline, MegaphoneOutline, SearchOutline, SyncOutline } from "@vicons/ionicons5";
+import { NIcon, useMessage } from "naive-ui";
+import { CopyOutline, MegaphoneOutline, SearchOutline } from "@vicons/ionicons5";
 import AppFooter from "../components/AppFooter.vue";
 import AppHeader from "../components/AppHeader.vue";
 import AppPagination from "../components/AppPagination.vue";
@@ -251,6 +251,7 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
         :tag-options="tagOptions"
         :category-options="categoryOptions"
         :on-header="true"
+        @refresh-random="refreshRandomOrder"
       />
       <div class="toolbar-actions">
         <button type="button" class="toolbar-action" @click="copyPluginSource">
@@ -263,16 +264,6 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
         </router-link>
       </div>
     </section>
-
-    <div v-if="sortBy === 'random'" class="grid-toolbar">
-      <span>随机推荐</span>
-      <n-button size="small" tertiary @click="refreshRandomOrder">
-        <template #icon
-          ><n-icon><sync-outline /></n-icon
-        ></template>
-        换一换
-      </n-button>
-    </div>
 
     <main class="plugins-grid">
       <div v-if="isLoading" class="loading-container">
@@ -315,8 +306,7 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
 .announcements,
 .market-summary,
 .market-toolbar,
-.plugins-grid,
-.grid-toolbar {
+.plugins-grid {
   width: min(1824px, calc(100% - 96px));
   margin-right: auto;
   margin-left: auto;
@@ -484,16 +474,6 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
   background: var(--primary-hover);
 }
 
-.grid-toolbar {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  color: var(--text-tertiary);
-  font-size: 12px;
-}
-
 .plugins-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -566,8 +546,7 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
   .announcements,
   .market-summary,
   .market-toolbar,
-  .plugins-grid,
-  .grid-toolbar {
+  .plugins-grid {
     width: min(100% - 48px, 1824px);
   }
 
@@ -576,8 +555,12 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
   }
 
   .toolbar-actions {
-    justify-content: flex-end;
+    justify-content: flex-start;
     border-top: 1px solid var(--border-base);
+  }
+
+  .toolbar-actions .toolbar-action:first-child {
+    border-left: 0;
   }
 }
 
@@ -595,8 +578,7 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
   .announcements,
   .market-summary,
   .market-toolbar,
-  .plugins-grid,
-  .grid-toolbar {
+  .plugins-grid {
     width: 100%;
   }
 

@@ -6,8 +6,8 @@ import {
   ArrowDownOutline,
   ArrowUpOutline,
   CloseCircle,
-  GitCompareOutline,
   SearchOutline,
+  SyncOutline,
 } from "@vicons/ionicons5";
 
 const props = withDefaults(
@@ -51,12 +51,14 @@ const emit = defineEmits<{
   "update:fuzzySearchEnabled": [value: boolean];
   "update:selectedCategory": [value: string];
   "update:selectedTag": [value: string | null];
+  refreshRandom: [];
 }>();
 
 const hasCategoryFilters = computed(() =>
   props.categoryOptions.some((option) => option.value !== "all" && option.value !== "other"),
 );
 const searchPlaceholder = computed(() => (props.mobile ? "搜索插件" : "搜索插件、作者、描述..."));
+const isRandomSort = computed(() => props.sortBy === "random");
 const sortOptions: SelectOption[] = [
   { label: "默认排序", value: "default" },
   { label: "随机推荐", value: "random" },
@@ -95,12 +97,17 @@ function updateSort(value: string): void {
   resetPage();
 }
 
-function toggleSearchMode(): void {
-  emit("update:fuzzySearchEnabled", !props.fuzzySearchEnabled);
+function updateSearchMode(value: boolean): void {
+  if (value === props.fuzzySearchEnabled) return;
+  emit("update:fuzzySearchEnabled", value);
   resetPage();
 }
 
-function toggleSortDirection(): void {
+function handleDirectionAction(): void {
+  if (isRandomSort.value) {
+    emit("refreshRandom");
+    return;
+  }
   emit("update:sortDirection", props.sortDirection === "asc" ? "desc" : "asc");
   resetPage();
 }
@@ -115,28 +122,51 @@ function toggleSortDirection(): void {
       'search-toolbar--mobile': mobile,
     }"
   >
-    <label class="search-field">
-      <n-icon class="search-icon"><search-outline /></n-icon>
-      <input
-        :value="searchQuery"
-        type="search"
-        name="plugin-search"
-        :placeholder="searchPlaceholder"
-        aria-label="搜索插件"
-        autocomplete="off"
-        spellcheck="false"
-        @input="updateSearch"
-      />
-      <button
-        v-if="searchQuery"
-        type="button"
-        class="clear-button"
-        aria-label="清除搜索"
-        @click="clearSearch"
-      >
-        <n-icon><close-circle /></n-icon>
-      </button>
-    </label>
+    <div class="search-cluster">
+      <label class="search-field">
+        <n-icon class="search-icon"><search-outline /></n-icon>
+        <input
+          :value="searchQuery"
+          type="search"
+          name="plugin-search"
+          :placeholder="searchPlaceholder"
+          aria-label="搜索插件"
+          autocomplete="off"
+          spellcheck="false"
+          @input="updateSearch"
+        />
+        <button
+          v-if="searchQuery"
+          type="button"
+          class="clear-button"
+          aria-label="清除搜索"
+          @click="clearSearch"
+        >
+          <n-icon><close-circle /></n-icon>
+        </button>
+      </label>
+
+      <div class="search-mode" role="group" aria-label="搜索匹配方式">
+        <button
+          type="button"
+          :class="{ active: !fuzzySearchEnabled }"
+          :aria-pressed="!fuzzySearchEnabled"
+          aria-label="使用精确搜索"
+          @click="updateSearchMode(false)"
+        >
+          精确
+        </button>
+        <button
+          type="button"
+          :class="{ active: fuzzySearchEnabled }"
+          :aria-pressed="fuzzySearchEnabled"
+          aria-label="使用模糊搜索"
+          @click="updateSearchMode(true)"
+        >
+          模糊
+        </button>
+      </div>
+    </div>
 
     <n-select
       v-if="showCategoryFilter && hasCategoryFilters"
@@ -157,19 +187,6 @@ function toggleSortDirection(): void {
       @update:value="updateTag"
     />
 
-    <n-button
-      quaternary
-      class="mode-button"
-      :title="fuzzySearchEnabled ? '当前为模糊搜索' : '当前为精确搜索'"
-      :aria-label="fuzzySearchEnabled ? '切换为精确搜索' : '切换为模糊搜索'"
-      @click="toggleSearchMode"
-    >
-      <template #icon
-        ><n-icon><git-compare-outline /></n-icon
-      ></template>
-      <span class="mode-label">{{ fuzzySearchEnabled ? "模糊" : "精确" }}</span>
-    </n-button>
-
     <n-select
       :value="sortBy"
       :options="sortOptions"
@@ -180,13 +197,18 @@ function toggleSortDirection(): void {
     <n-button
       quaternary
       class="direction-button"
-      :title="sortDirection === 'asc' ? '当前正序' : '当前倒序'"
-      :aria-label="sortDirection === 'asc' ? '切换为倒序' : '切换为正序'"
-      @click="toggleSortDirection"
+      :title="
+        isRandomSort ? '换一批随机推荐' : sortDirection === 'asc' ? '切换为倒序' : '切换为正序'
+      "
+      :aria-label="
+        isRandomSort ? '换一批随机推荐' : sortDirection === 'asc' ? '切换为倒序' : '切换为正序'
+      "
+      @click="handleDirectionAction"
     >
       <template #icon>
         <n-icon>
-          <arrow-up-outline v-if="sortDirection === 'asc'" />
+          <sync-outline v-if="isRandomSort" />
+          <arrow-up-outline v-else-if="sortDirection === 'asc'" />
           <arrow-down-outline v-else />
         </n-icon>
       </template>
@@ -198,9 +220,16 @@ function toggleSortDirection(): void {
 .search-toolbar {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) 148px 148px 86px 142px 52px;
+  grid-template-columns: minmax(360px, 1fr) 148px 148px 142px 52px;
   align-items: stretch;
   background: var(--bg-card);
+}
+
+.search-cluster {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
 }
 
 .search-field {
@@ -261,8 +290,45 @@ function toggleSortDirection(): void {
   outline: 0;
 }
 
+.search-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 10px;
+  padding: 3px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-base);
+  border-radius: 6px;
+}
+
+.search-mode button {
+  min-width: 46px;
+  height: 28px;
+  padding: 0 8px;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.search-mode button:hover,
+.search-mode button:focus-visible {
+  color: var(--text-primary);
+  outline: 2px solid color-mix(in srgb, var(--primary-color) 48%, transparent);
+  outline-offset: -2px;
+}
+
+.search-mode button.active {
+  color: var(--primary-color);
+  background: var(--bg-card);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 38%, var(--border-base));
+}
+
 .toolbar-select,
-.mode-button,
 .direction-button {
   min-width: 0;
   height: 50px;
@@ -270,7 +336,6 @@ function toggleSortDirection(): void {
   border-radius: 0 !important;
 }
 
-.mode-button,
 .direction-button {
   color: var(--text-secondary);
 }
@@ -302,28 +367,23 @@ function toggleSortDirection(): void {
 }
 
 :deep(.toolbar-select:hover),
-.mode-button:hover,
 .direction-button:hover {
   background: var(--bg-hover) !important;
 }
 
 @media (max-width: 1180px) {
   .search-toolbar {
-    grid-template-columns: minmax(240px, 1fr) 132px 132px 50px 124px 48px;
-  }
-
-  .mode-label {
-    display: none;
+    grid-template-columns: minmax(320px, 1fr) 132px 132px 124px 48px;
   }
 }
 
 @media (max-width: 820px) {
   .search-toolbar {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px 46px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px;
     border: 1px solid var(--border-base);
   }
 
-  .search-field {
+  .search-cluster {
     grid-column: 1 / -1;
     border-bottom: 1px solid var(--border-base);
   }
@@ -343,20 +403,15 @@ function toggleSortDirection(): void {
     border-left: 0;
   }
 
-  .mode-button {
-    grid-column: 3;
-    grid-row: 2 / 4;
-  }
-
   .direction-button {
-    grid-column: 4;
+    grid-column: 3;
     grid-row: 2 / 4;
   }
 }
 
 @media (max-width: 520px) {
   .search-toolbar {
-    grid-template-columns: minmax(0, 1fr) 44px 44px;
+    grid-template-columns: minmax(0, 1fr) 44px;
   }
 
   .category-select,
@@ -375,14 +430,23 @@ function toggleSortDirection(): void {
     grid-row: 4;
   }
 
-  .mode-button {
+  .direction-button {
     grid-column: 2;
     grid-row: 2 / 5;
   }
 
-  .direction-button {
-    grid-column: 3;
-    grid-row: 2 / 5;
+  .search-field {
+    padding-right: 10px;
+    padding-left: 12px;
+  }
+
+  .search-mode {
+    margin-right: 8px;
+  }
+
+  .search-mode button {
+    min-width: 40px;
+    padding: 0 6px;
   }
 }
 </style>

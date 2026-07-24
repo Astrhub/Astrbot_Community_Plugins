@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, shallowRef } from "vue";
+import { computed, h, shallowRef, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
 import { NAlert, NButton, NCheckbox, NDropdown, NIcon, NModal, useMessage } from "naive-ui";
@@ -14,6 +14,7 @@ import {
 } from "@vicons/ionicons5";
 import ThemeModeButton from "./ThemeModeButton.vue";
 import { usePluginStore } from "../stores/plugins";
+import { githubRawUrl } from "../utils/github";
 
 const router = useRouter();
 const message = useMessage();
@@ -23,6 +24,7 @@ const { loginWithGithub, logout } = store;
 
 const isLoginModalOpen = shallowRef(false);
 const agreementAccepted = shallowRef(false);
+const avatarLoadFailed = shallowRef(false);
 const siteName = computed(() => siteConfig.value.name || "Astrhub Plugins Market");
 const siteIconUrl = computed(() => {
   const configuredUrl = String(siteConfig.value.icon_url || "").trim();
@@ -40,6 +42,10 @@ const displayUserName = computed(
     currentUser.value?.login ||
     "已登录",
 );
+const userAvatarUrl = computed(() =>
+  githubRawUrl(String(currentUser.value?.avatar_url || currentUser.value?.avatar || "").trim()),
+);
+const showUserAvatar = computed(() => Boolean(userAvatarUrl.value) && !avatarLoadFailed.value);
 const agreementText = computed(() => {
   const auth = siteConfig.value.auth || {};
   const parts: string[] = [];
@@ -52,6 +58,11 @@ const agreementText = computed(() => {
   return parts.join("\n\n");
 });
 const canSubmitLogin = computed(() => !agreementText.value || agreementAccepted.value);
+
+watch(userAvatarUrl, () => {
+  avatarLoadFailed.value = false;
+});
+
 const userMenuOptions = computed(() => [
   {
     key: "profile",
@@ -152,7 +163,23 @@ async function handleUserMenuSelect(key: string): Promise<void> {
           trigger="click"
           @select="handleUserMenuSelect"
         >
-          <button type="button" class="nav-link user-trigger">{{ displayUserName }}</button>
+          <button
+            type="button"
+            class="nav-link user-trigger"
+            :aria-label="`账户：${displayUserName}`"
+          >
+            <span class="user-avatar" aria-hidden="true">
+              <img
+                v-if="showUserAvatar"
+                :src="userAvatarUrl"
+                alt=""
+                class="user-avatar__image"
+                @error="avatarLoadFailed = true"
+              />
+              <n-icon v-else><person-outline /></n-icon>
+            </span>
+            <span class="user-name">{{ displayUserName }}</span>
+          </button>
         </n-dropdown>
 
         <button v-else type="button" class="nav-link login-trigger" @click="openLoginModal">
@@ -259,6 +286,36 @@ async function handleUserMenuSelect(key: string): Promise<void> {
   cursor: pointer;
 }
 
+.user-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.user-avatar {
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  flex: 0 0 auto;
+  overflow: hidden;
+  place-items: center;
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-base);
+  border-radius: 50%;
+}
+
+.user-avatar__image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.user-name {
+  min-width: 0;
+}
+
 .nav-link:hover,
 .nav-link:focus-visible,
 .nav-icon-link:hover,
@@ -335,7 +392,12 @@ async function handleUserMenuSelect(key: string): Promise<void> {
   }
 
   .user-trigger {
-    max-width: 92px;
+    gap: 6px;
+  }
+
+  .user-name {
+    max-width: 72px;
+    display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

@@ -64,6 +64,7 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
         role: "admin",
         github_login: "reviewer",
         internal_username: "reviewer",
+        avatar_url: "/plugin_default.png?v=20260725",
       });
     }
     if (pathname === "/v1/me/notifications/unread-count") return json(route, { count: 0 });
@@ -113,6 +114,10 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
 
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.getByText("审查台", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "reviewer" }).click();
+  await expect(page.locator(".user-avatar__image")).toHaveAttribute(
+    "src",
+    "/plugin_default.png?v=20260725",
+  );
+  await page.getByRole("button", { name: "账户：reviewer" }).click();
   await expect(page.getByText("审查工作台", { exact: true })).toHaveCount(1);
 });
