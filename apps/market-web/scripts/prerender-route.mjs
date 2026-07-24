@@ -2,6 +2,11 @@ export function normalizePrerenderPath(route) {
   return String(route || "/").replace(/\/+$/, "") || "/";
 }
 
+export function rewritePrerenderOrigin(html, origin) {
+  const normalizedOrigin = String(origin || "").replace(/\/+$/, "");
+  return normalizedOrigin ? html.split(`${normalizedOrigin}/`).join("/") : html;
+}
+
 export function markPrerenderPath(html, route) {
   if (!/<html\b[^>]*>/i.test(html)) {
     throw new Error("Prerendered document is missing an html element");
