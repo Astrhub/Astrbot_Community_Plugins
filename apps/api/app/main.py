@@ -2758,9 +2758,17 @@ class GithubMetadataError(Exception):
 
 
 async def github_metadata_sync_worker(app: FastAPI) -> None:
+    logger = logging.getLogger("astrbot_market.github_sync")
     while True:
         await asyncio.sleep(GITHUB_METADATA_SYNC_WORKER_SLEEP_SECONDS)
-        await sync_due_github_plugin_metadata_once(app, GITHUB_METADATA_SYNC_BATCH_SIZE)
+        try:
+            synced = await sync_due_github_plugin_metadata_once(
+                app, GITHUB_METADATA_SYNC_BATCH_SIZE
+            )
+            if synced:
+                logger.info("github sync worker refreshed %d plugins", synced)
+        except Exception:
+            logger.exception("github sync worker crashed, will retry next cycle")
 
 
 async def sync_due_github_plugin_metadata_once(app: FastAPI, limit: int) -> int:
@@ -3512,7 +3520,7 @@ def normalize_plugin_metadata_field(field: str, value: Any) -> Any:
         return ""
     if field == "category":
         category = normalize_plugin_category(value)
-        return category if category in OFFICIAL_PLUGIN_CATEGORIES else ""
+        return category if category in OFFICIAL_PLUGIN_CATEGORIES else "other"
     if field in {"tags", "support_platforms"}:
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
