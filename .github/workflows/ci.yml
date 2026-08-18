@@ -32,10 +32,10 @@ jobs:
         run: uv sync --project apps/api --locked
 
       - name: Lint API
-        run: uv run --project apps/api --directory apps/api ruff check .
+        run: uv run --project apps/api ruff check .
 
       - name: Test API
-        run: uv run --project apps/api --directory apps/api pytest
+        run: uv run --project apps/api pytest
 
   web:
     name: Vue market
