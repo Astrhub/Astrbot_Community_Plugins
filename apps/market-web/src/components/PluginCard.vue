@@ -145,7 +145,7 @@ async function unlistPlugin(): Promise<void> {
       </div>
     </div>
 
-    <p class="description">{{ plugin.desc }}</p>
+    <p class="description">{{ plugin.short_desc || plugin.desc || "" }}</p>
 
     <div class="tags-container" aria-label="插件标签">
       <span v-for="tag in plugin.tags" :key="tag" class="plugin-tag">{{ tag }}</span>

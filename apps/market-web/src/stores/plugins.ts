@@ -485,12 +485,11 @@ export const usePluginStore = defineStore("plugins", () => {
     const id = plugin.id || plugin.name || `plugin-${index}`;
     const name = normalizePluginText(plugin.name) || String(id);
     const displayName = normalizePluginText(plugin.display_name);
-    const desc = normalizePluginText(plugin.desc);
     return {
       ...plugin,
       id,
       name,
-      display_name: displayName && displayName !== desc ? displayName : name,
+      display_name: displayName,
       version: plugin.version || "1.0.0",
       logo: plugin.logo || "",
       tags: normalizePluginTags(plugin.tags),

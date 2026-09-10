@@ -2193,7 +2193,7 @@ def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
         "name": "astrbot_plugin_demo",
         "display_name": "Demo",
         "desc": "Demo plugin",
-        "short_desc": "Demo plugin",
+        "short_desc": "",
         "author": "Alice",
         "repo": "https://github.com/alice/astrbot_plugin_demo",
         "social_link": "https://github.com/alice",

@@ -9,6 +9,7 @@ class PluginSubmission(BaseModel):
     name: str
     display_name: str | None = None
     desc: str
+    short_desc: str = ""
     author: str
     repo: str
     social_link: str = ""
@@ -19,6 +20,7 @@ class PluginSubmission(BaseModel):
         "name",
         "display_name",
         "desc",
+        "short_desc",
         "author",
         "repo",
         "social_link",

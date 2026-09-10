@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { defineComponent } from "vue";
+import { defineComponent, nextTick, ref } from "vue";
 import { mount } from "@vue/test-utils";
 import { createPinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
@@ -38,6 +38,7 @@ describe("PluginCard", () => {
     await router.push("/");
     await router.isReady();
 
+    const cardPlugin = ref({ ...plugin, short_desc: "卡片短描述" });
     const Host = defineComponent({
       components: {
         NConfigProvider,
@@ -45,7 +46,7 @@ describe("PluginCard", () => {
         NMessageProvider,
         PluginCard,
       },
-      setup: () => ({ plugin }),
+      setup: () => ({ plugin: cardPlugin }),
       template: `
         <n-config-provider>
           <n-message-provider>
@@ -62,5 +63,13 @@ describe("PluginCard", () => {
     expect(wrapper.find(".metric-item--like").text()).toContain("7");
     expect(wrapper.find(".metric-item--comment").text()).toContain("3");
     expect(wrapper.find(".new-badge").text()).toBe("NEW");
+    expect(wrapper.get(".description").text()).toBe("卡片短描述");
+    cardPlugin.value.short_desc = "";
+    await nextTick();
+    expect(wrapper.get(".description").text()).toBe(plugin.desc);
+    cardPlugin.value.desc = "";
+    await nextTick();
+    expect(wrapper.get(".description").text()).toBe("");
+    wrapper.unmount();
   });
 });

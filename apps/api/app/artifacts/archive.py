@@ -205,7 +205,7 @@ class ArchivePrechecker:
                 )
             if "main.py" not in seen:
                 raise PrecheckError("entrypoint_missing", "插件包根目录缺少 main.py")
-            metadata = _parse_metadata(content_by_path.get(metadata_paths[0], b""))
+            metadata = parse_plugin_metadata_bytes(content_by_path.get(metadata_paths[0], b""))
             version, normalized_version = _validate_metadata(metadata, expected_repo=expected_repo)
             tree_sha256 = _tree_digest(members)
             return PrecheckResult(
@@ -295,7 +295,7 @@ def _text_details(path: str, content: bytes) -> tuple[bool, int | None]:
     return True, len(text.splitlines())
 
 
-def _parse_metadata(content: bytes) -> dict[str, Any]:
+def parse_plugin_metadata_bytes(content: bytes) -> dict[str, Any]:
     if len(content) > MAX_METADATA_BYTES:
         raise PrecheckError("metadata_too_large", "metadata.yaml 超过大小限制")
     try:
@@ -309,7 +309,11 @@ def _parse_metadata(content: bytes) -> dict[str, Any]:
         raise PrecheckError("metadata_invalid", "metadata.yaml 无法安全解析") from exc
     if not isinstance(payload, dict):
         raise PrecheckError("metadata_invalid", "metadata.yaml 顶层必须是对象")
-    return {str(key): value for key, value in payload.items()}
+    metadata = {str(key): value for key, value in payload.items()}
+    # Match AstrBot: an explicitly empty desc must not be replaced by its legacy alias.
+    if "desc" not in metadata and "description" in metadata:
+        metadata["desc"] = metadata["description"]
+    return metadata
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -336,8 +340,12 @@ class _UniqueKeyLoader(yaml.SafeLoader):
 
 
 def _validate_metadata(metadata: dict[str, Any], *, expected_repo: str) -> tuple[str, str]:
-    required = ("name", "display_name", "desc", "version", "author", "repo")
-    missing = [key for key in required if not str(metadata.get(key) or "").strip()]
+    required = ("name", "desc", "version", "author", "repo")
+    missing = [
+        key
+        for key in required
+        if not isinstance(metadata.get(key), str) or not metadata[key].strip()
+    ]
     if missing:
         raise PrecheckError(
             "metadata_required_field_missing",

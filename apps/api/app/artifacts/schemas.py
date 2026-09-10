@@ -525,7 +525,7 @@ class StableRiskPayload(BaseModel):
 
 class PluginRegistrationPayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    display_name: str = Field(min_length=1, max_length=120)
+    display_name: str = Field(default="", max_length=120)
     desc: str = Field(min_length=1, max_length=500)
     author: str = Field(min_length=1, max_length=120)
     repo: str = Field(min_length=1, max_length=500)

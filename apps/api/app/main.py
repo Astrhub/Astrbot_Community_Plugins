@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from redis.exceptions import RedisError
 
 from .artifacts import build_artifact_runtime
+from .artifacts.archive import PrecheckError, parse_plugin_metadata_bytes
 from .artifacts.routes import build_artifact_router
 from .auth import (
     Role,
@@ -84,9 +85,6 @@ GITHUB_REPO_PATTERN = re.compile(
 )
 PLUGIN_NAME_PATTERN = re.compile(r"^astrbot_plugin_[a-z0-9_-]+$", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-METADATA_FIELD_PATTERN = re.compile(
-    r"^(\s*)(name|display_name|desc|short_desc|author|social_link|tags|version|astrbot_version|category|download_url|support_platforms)\s*:\s*(.*)$"
-)
 MASKED_SECRET = "********"
 CLOUDFLARE_EMAIL_SEND_ENDPOINT = (
     "https://api.cloudflare.com/client/v4/accounts/{account_id}/email/sending/send"
@@ -3090,30 +3088,14 @@ async def fetch_plugin_submission_metadata_preview(
     status_store = store if uses_system_token else None
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            repository = await fetch_github_repository(
-                client,
-                owner,
-                repo_name,
-                headers,
-                store=status_store,
-            )
-            metadata = (
-                await fetch_github_plugin_metadata_files(
-                    client,
-                    owner,
-                    repo_name,
-                    headers,
-                    store=status_store,
-                )
-                if repository
-                else {}
+            metadata = await fetch_github_plugin_metadata_files(
+                client, owner, repo_name, headers, store=status_store
             )
     except httpx.HTTPError as exc:
         raise GithubMetadataError("GitHub metadata fetch failed", 502) from exc
     return build_plugin_submission_metadata_preview(
         owner,
         repo_name,
-        repository=repository,
         metadata=metadata,
         settings=settings,
     )
@@ -3385,9 +3367,7 @@ async def fetch_github_plugin_metadata_files(
             text = base64.b64decode(content).decode("utf-8", errors="replace")
         except (ValueError, TypeError):
             continue
-        metadata = parse_plugin_metadata_yaml(text)
-        if metadata:
-            return metadata
+        return parse_plugin_metadata_yaml(text)
     return {}
 
 
@@ -3415,62 +3395,30 @@ def build_plugin_submission_metadata_preview(
     owner: str,
     repo_name: str,
     *,
-    repository: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    repository = repository or {}
     metadata = metadata or {}
-    repo_owner = repository_owner_login(repository) or owner
-    repository_name = metadata_text(repository.get("name")) or repo_name
-    payload: dict[str, Any] = {
-        "repo": f"https://github.com/{owner}/{repo_name}",
-        "display_name": repository_name,
-        "author": repo_owner,
-        "social_link": f"https://github.com/{repo_owner}",
-    }
-    if PLUGIN_NAME_PATTERN.match(repository_name):
-        payload["name"] = repository_name
-
-    description = metadata_text(repository.get("description"))
-    if description:
-        payload["desc"] = truncate_plugin_description(description)
-
-    homepage = metadata_text(repository.get("homepage"))
-    if homepage:
-        payload["social_link"] = homepage
-
-    topics = normalize_plugin_metadata_field("tags", repository.get("topics"))
-    if has_metadata_value(topics):
-        payload["tags"] = limit_plugin_tags(topics, settings)
-
-    for field in ("name", "display_name", "author", "social_link", "category"):
-        value = normalize_plugin_metadata_field(field, metadata.get(field))
-        if has_metadata_value(value):
-            payload[field] = value
-
-    desc = normalize_plugin_metadata_field("desc", metadata.get("desc"))
-    if not has_metadata_value(desc):
-        desc = normalize_plugin_metadata_field("short_desc", metadata.get("short_desc"))
-    if has_metadata_value(desc):
-        payload["desc"] = truncate_plugin_description(str(desc))
-
+    # Repository identity comes from OAuth selection; editable metadata comes only from the file.
+    payload: dict[str, Any] = {"repo": f"https://github.com/{owner}/{repo_name}"}
+    for field in (
+        "name",
+        "display_name",
+        "desc",
+        "short_desc",
+        "author",
+        "social_link",
+        "category",
+    ):
+        value = metadata.get(field)
+        if isinstance(value, str) and value.strip():
+            payload[field] = (
+                normalize_plugin_category(value) if field == "category" else value.strip()
+            )
     tags = normalize_plugin_metadata_field("tags", metadata.get("tags"))
     if has_metadata_value(tags):
         payload["tags"] = limit_plugin_tags(tags, settings)
-
-    return drop_empty_submission_preview_fields(payload)
-
-
-def repository_owner_login(repository: dict[str, Any]) -> str:
-    owner = repository.get("owner")
-    if isinstance(owner, dict):
-        return metadata_text(owner.get("login"))
-    return ""
-
-
-def truncate_plugin_description(value: str, limit: int = 120) -> str:
-    return str(value or "").strip()[:limit]
+    return payload
 
 
 def limit_plugin_tags(value: Any, settings: Settings | None = None) -> list[str]:
@@ -3482,14 +3430,6 @@ def limit_plugin_tags(value: Any, settings: Settings | None = None) -> list[str]
     else:
         tags = []
     return list(dict.fromkeys(tags))[:max_tags]
-
-
-def drop_empty_submission_preview_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in payload.items():
-        if has_metadata_value(value):
-            result[key] = value
-    return result
 
 
 def raise_for_github_rate_limit(response: Any) -> None:
@@ -3516,20 +3456,18 @@ def github_response_message(response: Any) -> str:
 
 
 def normalize_plugin_metadata_field(field: str, value: Any) -> Any:
+    if field not in {"tags", "support_platforms"} and not isinstance(value, str):
+        return ""
     if field == "name" and value and not PLUGIN_NAME_PATTERN.match(str(value)):
         return ""
     if field == "category":
         category = normalize_plugin_category(value)
-        return category if category in OFFICIAL_PLUGIN_CATEGORIES else "other"
+        return category if category in OFFICIAL_PLUGIN_CATEGORIES else ""
     if field in {"tags", "support_platforms"}:
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
         return []
     return value
-
-
-def metadata_text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def github_sync_success_metadata(
@@ -3590,82 +3528,12 @@ def isoformat_utc(value: datetime) -> str:
 
 
 def parse_plugin_metadata_yaml(text: str) -> dict[str, Any]:
-    metadata: dict[str, Any] = {}
-    lines = text.splitlines()
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        match = METADATA_FIELD_PATTERN.match(line)
-        if not match:
-            index += 1
-            continue
-        indent, key, raw_value = match.groups()
-        value = parse_metadata_scalar(raw_value)
-        if value == "" and key in {"support_platforms", "tags"}:
-            value, index = parse_metadata_list(lines, index, len(indent))
-        if has_metadata_value(value):
-            metadata[key] = value
-        index += 1
-    return metadata
-
-
-def parse_metadata_list(
-    lines: list[str],
-    start_index: int,
-    parent_indent: int,
-) -> tuple[list[str] | str, int]:
-    items: list[str] = []
-    index = start_index + 1
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
-        indent = len(line) - len(line.lstrip(" "))
-        if indent <= parent_indent:
-            return items or "", index - 1
-        stripped = line.strip()
-        if not stripped.startswith("- "):
-            return items or "", index - 1
-        item = parse_metadata_scalar(stripped[2:])
-        if item:
-            items.append(str(item))
-        index += 1
-    return items or "", index - 1
-
-
-def parse_metadata_scalar(value: str) -> Any:
-    value = strip_yaml_comment(value).strip()
-    if not value:
-        return ""
-    if (value.startswith('"') and value.endswith('"')) or (
-        value.startswith("'") and value.endswith("'")
-    ):
-        return value[1:-1]
-    if value.startswith("[") and value.endswith("]"):
-        items = [parse_metadata_scalar(item) for item in value[1:-1].split(",")]
-        return [item for item in items if item]
-    return value
-
-
-def strip_yaml_comment(value: str) -> str:
-    in_single = False
-    in_double = False
-    escaped = False
-    for index, char in enumerate(value):
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\" and in_double:
-            escaped = True
-            continue
-        if char == "'" and not in_double:
-            in_single = not in_single
-        elif char == '"' and not in_single:
-            in_double = not in_double
-        elif char == "#" and not in_single and not in_double:
-            return value[:index].rstrip()
-    return value.strip()
+    if not text.strip():
+        return {}
+    try:
+        return parse_plugin_metadata_bytes(text.encode("utf-8"))
+    except PrecheckError as exc:
+        raise GithubMetadataError(str(exc), 400) from exc
 
 
 def has_metadata_value(value: Any) -> bool:
@@ -5102,9 +4970,9 @@ def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
         )
     return {
         "name": name,
-        "display_name": plugin.get("display_name") or name,
+        "display_name": plugin.get("display_name") or "",
         "desc": plugin.get("desc") or "",
-        "short_desc": plugin.get("short_desc") or plugin.get("desc") or "",
+        "short_desc": plugin.get("short_desc") or "",
         "author": plugin.get("author") or plugin.get("owner_github_login") or "",
         "repo": plugin.get("repo") or "",
         "social_link": plugin.get("social_link") or "",

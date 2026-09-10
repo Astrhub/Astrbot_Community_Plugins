@@ -191,6 +191,7 @@ export interface PluginSubmissionMetadataPreview {
   name?: string;
   display_name?: string;
   desc?: string;
+  short_desc?: string;
   author?: string;
   social_link?: string;
   category?: PluginCategory | "";
