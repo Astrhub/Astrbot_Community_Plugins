@@ -346,6 +346,7 @@ class ArtifactRuntime:
             policy_model=policy_model if not reasons else None,
             tool_health=tool_health,
             config=self.config,
+            remote_tools=not self.worker_execution_enabled,
         )
 
     async def review_policy_readiness_issues(
@@ -371,6 +372,7 @@ class ArtifactRuntime:
             policy_model=policy,
             tool_health=tool_health,
             config=self.config,
+            remote_tools=not self.worker_execution_enabled,
         )
         issues: list[dict[str, str]] = []
         for name, component in dict(status.get("components") or {}).items():
@@ -600,6 +602,7 @@ def _finalize_review_status(
     policy_model: ReviewPolicyV1 | None,
     tool_health: dict[str, dict[str, object]],
     config: ArtifactSettings,
+    remote_tools: bool = False,
 ) -> dict[str, object]:
     components = dict(review.get("components") or {})
     components["policy"] = policy
@@ -612,6 +615,16 @@ def _finalize_review_status(
             "dependency": policy_model.dependency.enabled,
         }
         configured = config.review.component_configuration()
+        if remote_tools:
+            # The API holds feature flags and public config references, while the worker
+            # owns scanner endpoints, rules and provider credentials. A live worker's
+            # health remains mandatory; copying those private settings into the API is not.
+            for name in ("llm", "clamav", "yara", "dependency"):
+                configured[name] = {
+                    "enabled": configured[name]["enabled"],
+                    "configured": configured[name]["enabled"],
+                    "reasons": [],
+                }
         reference_errors = {
             "llm": [
                 code

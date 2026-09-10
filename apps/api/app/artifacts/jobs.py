@@ -330,6 +330,7 @@ class ArtifactJobRunner:
                         "" if getattr(self.clamav_scanner, "ready", False) else "clamav_unavailable"
                     )
                 ),
+                data_updated_at=getattr(self.clamav_scanner, "database_time", ""),
             ),
             "yara": _heartbeat_component(
                 ready=bool(getattr(self.yara_scanner, "ready", False)),
@@ -361,6 +362,9 @@ class ArtifactJobRunner:
         if publish is None:
             return
         try:
+            refresh = getattr(self.clamav_scanner, "refresh_health", None)
+            if refresh is not None:
+                await refresh()
             await publish(
                 worker_kind="artifact_worker",
                 worker_id=self.worker_id,
