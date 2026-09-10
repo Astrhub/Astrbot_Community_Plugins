@@ -177,6 +177,9 @@ def test_local_result_writer_is_bounded_immutable_and_path_safe(tmp_path: Path) 
     first, second = asyncio.run(scenario())
     assert first == second
     assert (tmp_path / "runtime/results/a.json").read_bytes() == b"{}"
+    assert (tmp_path / "runtime").stat().st_mode & 0o777 == 0o750
+    assert (tmp_path / "runtime/results").stat().st_mode & 0o777 == 0o750
+    assert (tmp_path / "runtime/results/a.json").stat().st_mode & 0o777 == 0o640
 
 
 def test_worker_uploads_result_before_completing_dispatch(tmp_path: Path) -> None:

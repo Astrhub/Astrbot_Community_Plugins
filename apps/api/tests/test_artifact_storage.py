@@ -154,6 +154,7 @@ def test_local_storage_is_idempotent_and_never_overwrites(tmp_path: Path) -> Non
         )
         second = await storage.put_quarantine(byte_stream(content), quarantine_key, 1024, digest)
         assert first.sha256 == second.sha256 == digest
+        assert (storage.quarantine_root / quarantine_key).stat().st_mode & 0o777 == 0o640
 
         published = await storage.publish_if_absent(quarantine_key, published_key, digest)
         repeated = await storage.publish_if_absent(quarantine_key, published_key, digest)
@@ -186,6 +187,7 @@ def test_private_content_range_validates_size_sha_and_bounds(tmp_path: Path) -> 
 
     async def scenario() -> None:
         await storage.put_text_content(key, content)
+        assert (storage.content_root / key).stat().st_mode & 0o777 == 0o640
         stat = await storage.stat_text_content(key)
         assert stat is not None
         assert stat.size_bytes == len(content)

@@ -184,6 +184,8 @@ class DockerContainerExecutor(ContainerExecutor):
             await self._stage_artifact(state, work, artifact_path)
             version = await self._probe_python_version(state, work)
         except Exception:
+            for name in sorted(state.container_names):
+                await self._remove_container(name)
             await self._remove_volume(resource_id)
             self._states.pop(resource_id, None)
             raise
@@ -512,6 +514,9 @@ class DockerContainerExecutor(ContainerExecutor):
             user="0:0",
         )
         argv[0] = "create"
+        # Rootless docker cp may preserve a mapped source UID. Only this trusted,
+        # offline staging probe needs to chmod that ZIP; plugin phases retain no caps.
+        argv.extend(("--cap-add", "FOWNER"))
         argv.extend(
             (
                 "--workdir",

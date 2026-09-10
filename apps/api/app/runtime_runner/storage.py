@@ -144,7 +144,12 @@ class LocalRuntimeResultWriter:
                 "Runtime result exceeds its configured byte limit",
             )
         destination = self._destination(key)
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # The separate artifact worker reads results through the shared service group.
+        # Create each level without group write access, including intermediate parents.
+        parent = self.root
+        for part in destination.relative_to(self.root).parts[:-1]:
+            parent = parent / part
+            parent.mkdir(exist_ok=True, mode=0o750)
         if not _is_within(destination.parent.resolve(), self.root):
             raise RuntimeResultStorageError(
                 "runtime_result_key_invalid",
@@ -164,7 +169,7 @@ class LocalRuntimeResultWriter:
             return RuntimeStoredResult(key=key, size_bytes=len(existing), sha256=digest)
 
         temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
-        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o640)
         try:
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(content)

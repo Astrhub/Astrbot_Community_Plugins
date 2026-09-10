@@ -120,6 +120,34 @@ class FakeDockerClient:
         self.closed = True
 
 
+def test_prepare_failure_removes_staging_container_before_volume(tmp_path: Path) -> None:
+    class FailedStageClient(FakeDockerClient):
+        async def execute(self, argv: Sequence[str], **kwargs) -> DockerCommandResult:
+            result = await super().execute(argv, **kwargs)
+            if tuple(argv[:2]) == ("container", "start"):
+                return DockerCommandResult(returncode=2, stdout="", stderr="", duration_ms=1)
+            return result
+
+    client = FailedStageClient()
+    executor = DockerContainerExecutor(
+        client,
+        DockerExecutorConfiguration(
+            image_repository="local-image-id",
+            artifact_root=str(tmp_path),
+            install_network="astrbot-runtime-install",
+            package_index_url="https://pypi.org/simple",
+            install_proxy_url="http://astrbot-runtime-package-proxy:3128",
+            install_proxy_container="astrbot-runtime-package-proxy",
+            allow_rootful_development=True,
+        ),
+    )
+    with pytest.raises(RuntimeExecutionError):
+        asyncio.run(executor.prepare(_work_with_artifact(tmp_path)))
+    removals = [call for call, _ in client.calls if len(call) > 1 and call[1] == "rm"]
+    assert [call[0] for call in removals] == ["container", "volume"]
+    assert removals[0][-1].endswith("-stage")
+
+
 def test_docker_executor_uses_structured_hardened_phase_commands(tmp_path: Path) -> None:
     work = _work_with_artifact(tmp_path)
     client = FakeDockerClient()
@@ -162,6 +190,9 @@ def test_docker_executor_uses_structured_hardened_phase_commands(tmp_path: Path)
     copied = next(call for call in commands if call[:2] == ("container", "cp"))
     assert copied[2] == str(tmp_path / "artifacts/artifact_01/source.zip")
     assert copied[3].endswith(":/runtime/input/artifact.zip")
+    stage = next(call for call in commands if call[0] == "create" and call[-1] == "stage")
+    assert stage[stage.index("--cap-add") + 1] == "FOWNER"
+    assert stage[stage.index("--network") + 1] == "none"
     install_run = next(
         call
         for call in commands
@@ -174,6 +205,7 @@ def test_docker_executor_uses_structured_hardened_phase_commands(tmp_path: Path)
         assert "--interactive" in command
         assert command[command.index("--user") + 1] == "65532:65532"
         assert command[command.index("--cap-drop") + 1] == "ALL"
+        assert "--cap-add" not in command
         assert "--read-only" in command
         assert "no-new-privileges=true" in command
         assert "seccomp=builtin" in command

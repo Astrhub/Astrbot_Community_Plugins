@@ -536,6 +536,9 @@ def _public_url(base_url: str, key: str) -> str:
 
 
 def _install_file_if_absent(temporary: Path, target: Path, expected_sha256: str) -> None:
+    # mkstemp uses 0600; the separate API, worker and runner share these local
+    # objects through their service group, while other users must have no access.
+    temporary.chmod(0o640)
     try:
         os.link(temporary, target)
     except FileExistsError:
