@@ -10,6 +10,7 @@ from app.config import load_settings
 from app.main import create_app
 from app.store import InMemoryMarketStore
 from test_artifact_pipeline import plugin_zip
+from tests.github_access_helpers import install_github_access_double
 
 
 def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> None:
@@ -27,6 +28,7 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
     )
     store = InMemoryMarketStore()
     app = create_app(settings=settings, store=store)
+    install_github_access_double(app)
     registration = {
         "name": "astrbot_plugin_demo",
         "display_name": "Demo",
@@ -54,12 +56,13 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         )
         assert repeated.status_code == 200
         assert repeated.json()["plugin"]["display_name"] == "Demo"
-        ownership_conflict = client.post(
+        same_name = client.post(
             "/v1/plugins/registrations",
             headers={"x-dev-github-login": "mallory"},
             json={**registration, "repo": "https://github.com/mallory/astrbot_plugin_demo"},
         )
-        assert ownership_conflict.status_code == 403
+        assert same_name.status_code == 200
+        assert same_name.json()["plugin"]["id"] != plugin["id"]
         store.update_plugin_metadata(plugin["id"], {"repo_version": "v1.0.0"})
 
         forbidden = client.post(
@@ -257,6 +260,7 @@ def test_admin_can_idempotently_request_artifact_changes(tmp_path: Path) -> None
     store = InMemoryMarketStore()
     app = create_app(settings=settings, store=store)
     owner_headers = {"x-dev-github-login": "alice"}
+    install_github_access_double(app)
 
     with TestClient(app) as client:
         plugin = client.post(

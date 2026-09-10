@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -315,6 +315,8 @@ class Settings:
     session_max_age_seconds: int
     api_keys: tuple[ApiKey, ...]
     artifacts: ArtifactSettings
+    artifact_authorization_url: str = ""
+    artifact_authorization_token: str = field(default="", repr=False)
 
     def is_setup_required(self) -> bool:
         return not self.database_url or not self.redis_url
@@ -337,6 +339,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     file_values = _normalize_env(read_env_file(env_file_path))
     merged = {**file_values, **source}
     return Settings(
+        artifact_authorization_url=merged.get("ARTIFACT_AUTHORIZATION_URL", ""),
+        artifact_authorization_token=merged.get("ARTIFACT_AUTHORIZATION_TOKEN", ""),
         host=merged.get("HOST", "127.0.0.1"),
         port=_int(merged.get("PORT"), 8787),
         cors_origins=_list(

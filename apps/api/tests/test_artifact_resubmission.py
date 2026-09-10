@@ -11,6 +11,7 @@ from app.config import load_settings
 from app.main import create_app
 from app.store import InMemoryMarketStore
 from test_artifact_pipeline import plugin_zip
+from tests.github_access_helpers import install_github_access_double
 
 
 def test_upload_and_github_resubmission_create_new_artifacts_and_full_precheck(
@@ -30,6 +31,7 @@ def test_upload_and_github_resubmission_create_new_artifacts_and_full_precheck(
     )
     store = InMemoryMarketStore()
     app = create_app(settings=settings, store=store)
+    install_github_access_double(app)
     owner_headers = {"x-dev-github-login": "alice"}
 
     with TestClient(app) as client:

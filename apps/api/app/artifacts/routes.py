@@ -11,6 +11,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Respon
 from pydantic import ValidationError
 
 from ..auth import can_edit_plugin, is_admin, is_core_admin
+from ..github_authorization import require_repository_access
 from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
 from .comments import ReviewCommentError
 from .content import ArtifactContentError
@@ -92,11 +93,8 @@ def build_artifact_router() -> APIRouter:
             raise _http_error(400, exc.code, str(exc)) from exc
         if not PLUGIN_NAME_PATTERN.fullmatch(data["name"]):
             raise _http_error(400, "plugin_name_invalid", "插件名必须使用 astrbot_plugin_ 小写命名")
-        owner = canonical_repo.removeprefix("https://github.com/").split("/", 1)[0]
-        if not is_admin(user) and owner.lower() != str(user.get("github_login") or "").lower():
-            raise _http_error(403, "repo_owner_mismatch", "GitHub 账号必须拥有该仓库")
-        data["repo"] = canonical_repo
-        data["id"] = data["name"]
+        proof = await require_repository_access(request, user, canonical_repo, admin_override=True)
+        data["repo"] = proof["repo"]
         try:
             plugin = await _call_store(request, "register_plugin", user, data)
         except PermissionError as exc:
@@ -1003,6 +1001,7 @@ async def _owned_plugin(
         raise _http_error(404, "plugin_not_found", "插件不存在")
     if not can_edit_plugin(user, plugin):
         raise _http_error(403, "plugin_owner_required", "只能提交自己名下的插件")
+    await require_repository_access(request, user, plugin["repo"], admin_override=True)
     return plugin
 
 

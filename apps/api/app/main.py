@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 import aiosmtplib
 import httpx
 import asyncpg
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -55,6 +55,12 @@ from .config import (
     normalize_smtp_encryption,
 )
 from .env_file import write_env_file
+from .github_authorization import (
+    access_for_request,
+    require_repository_access,
+    save_authorization,
+    verify_publication_access,
+)
 from .llms_txt import build_llms_txt
 from .openapi_filter import filter_openapi_by_role, role_for_openapi
 from .plugin_identity import PluginIdentityConflict, plugin_canonical_path
@@ -839,7 +845,7 @@ def register_routes(app: FastAPI) -> None:
             501: {"description": "GitHub OAuth 未配置"},
         },
     )
-    async def github_login(request: Request) -> Response:
+    async def github_login(request: Request, next: str = "") -> Response:
         settings = await runtime_settings_for_app(request.app)
         if not settings.github_login_enabled:
             return JSONResponse(status_code=403, content={"error": "GitHub login is disabled"})
@@ -863,6 +869,10 @@ def register_routes(app: FastAPI) -> None:
         )
         response = RedirectResponse(f"https://github.com/login/oauth/authorize?{params}")
         set_cookie(response, settings.oauth_state_cookie_name, state, settings, max_age=600)
+        destination = (
+            next if next in {"/submit", "/settings/personal", "/plugin-workbench"} else "/"
+        )
+        set_cookie(response, "github_oauth_return_to", destination, settings, max_age=600)
         return response
 
     @app.get(
@@ -893,10 +903,40 @@ def register_routes(app: FastAPI) -> None:
             user = await call_store(request, "upsert_github_user", profile_payload)
         await promote_org_admin_if_needed(request, user, access_token)
         session = await call_store(request, "create_session", user["id"])
-        response = RedirectResponse(settings.web_url.rstrip("/"))
+        if settings.github_client_secret:
+            await save_authorization(
+                request.app.state.store,
+                settings,
+                session["token"],
+                user["id"],
+                str(profile["id"]),
+                profile["login"],
+                access_token,
+            )
+        destination = request.cookies.get("github_oauth_return_to", "/")
+        if destination not in {"/submit", "/settings/personal", "/plugin-workbench"}:
+            destination = ""
+        response = RedirectResponse(settings.web_url.rstrip("/") + destination)
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         response.delete_cookie(settings.oauth_state_cookie_name, path="/")
+        response.delete_cookie("github_oauth_return_to", path="/")
         return response
+
+    @app.get("/v1/me/github/repositories", tags=["user"], summary="选择可管理的 GitHub 插件仓库")
+    async def github_plugin_repositories(
+        request: Request, page: int = Query(1, ge=1, le=10000)
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        await enforce_user_rpm_limit(request, "github_repositories", user, 60)
+        return await access_for_request(request, user).list_repositories(page)
+
+    @app.post("/v1/internal/artifacts/{artifact_id}/authorize-publication", include_in_schema=False)
+    async def authorize_artifact_publication(request: Request, artifact_id: str) -> dict[str, str]:
+        expected = request.app.state.settings.artifact_authorization_token
+        supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
+        if not expected or not secrets.compare_digest(supplied, expected):
+            raise error(403, "Forbidden")
+        return await verify_publication_access(request, artifact_id)
 
     @app.post(
         "/v1/auth/logout",
@@ -1067,10 +1107,12 @@ def register_routes(app: FastAPI) -> None:
         settings = await runtime_settings_for_app(request.app)
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
-        validate_repo_owner(payload.repo, user)
+        proof = await require_repository_access(
+            request, user, payload.repo, expected_repository_id=payload.repository_id
+        )
         try:
             return await fetch_plugin_submission_metadata_preview(
-                payload.repo,
+                proof["repo"],
                 settings,
                 user,
                 store=request.app.state.store,
@@ -1102,7 +1144,18 @@ def register_routes(app: FastAPI) -> None:
         data = payload.model_dump()
         data["category_explicit"] = "category" in payload.model_fields_set
         validate_plugin_submission(data, settings)
-        validate_repo_owner(data["repo"], user)
+        proof = await require_repository_access(
+            request, user, data["repo"], expected_repository_id=data.pop("repository_id", "")
+        )
+        data["repo"] = proof["repo"]
+        existing = await call_store(request, "get_owned_plugin_by_name", user["id"], data["name"])
+        if existing:
+            if not can_edit_plugin(user, existing):
+                raise error(403, "Plugin is already owned by another user")
+            current_proof = await require_repository_access(request, user, existing["repo"])
+            if current_proof.get("id") != proof.get("id"):
+                raise error(409, "插件已关联其他仓库，请先在个人设置中更新仓库")
+            user["_repository_authorization"] = proof
         data.update(
             await safe_fetch_plugin_github_metadata(
                 data["repo"],
@@ -1224,11 +1277,15 @@ def register_routes(app: FastAPI) -> None:
         if not can_edit_plugin(user, plugin):
             raise error(403, "Forbidden")
         patch = payload.model_dump(exclude_unset=True)
+        await require_repository_access(request, user, plugin["repo"], admin_override=True)
         if "name" in patch:
             validate_plugin_name(patch["name"])
         if "repo" in patch:
             validate_github_repo(patch["repo"])
-            validate_repo_owner(patch["repo"], user)
+            proof = await require_repository_access(
+                request, user, patch["repo"], admin_override=True
+            )
+            patch["repo"] = proof["repo"]
             patch.update(
                 await safe_fetch_plugin_github_metadata(
                     patch["repo"],
@@ -1274,6 +1331,7 @@ def register_routes(app: FastAPI) -> None:
         plugin = await get_plugin_or_404(request, plugin_id)
         if not can_edit_plugin(user, plugin):
             raise error(403, "Forbidden")
+        await require_repository_access(request, user, plugin["repo"], admin_override=True)
         if plugin.get("status") == "listed":
             return plugin
         updated = await call_store(request, "request_plugin_listing", plugin_id, user["id"])
@@ -1302,6 +1360,7 @@ def register_routes(app: FastAPI) -> None:
         plugin = await get_plugin_or_404(request, plugin_id)
         if not can_edit_plugin(user, plugin):
             raise error(403, "Forbidden")
+        await require_repository_access(request, user, plugin["repo"], admin_override=True)
         reason = (payload.reason if payload else "").strip() or "作者主动下架"
         updated = await call_store(request, "unlist_plugin", plugin_id, user["id"], reason)
         if not updated:
@@ -1328,6 +1387,7 @@ def register_routes(app: FastAPI) -> None:
         plugin = await get_plugin_or_404(request, plugin_id)
         if not can_edit_plugin(user, plugin):
             raise error(403, "Forbidden")
+        await require_repository_access(request, user, plugin["repo"], admin_override=True)
         refresh_payload = payload or PluginGithubRefreshPayload()
         updated = await refresh_plugin_github_metadata(
             request,
@@ -5063,15 +5123,6 @@ def versions_match(left: str, right: str) -> bool:
 def digest_plugin_source(feed: dict[str, dict[str, Any]]) -> str:
     payload = json.dumps(feed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
-
-
-def validate_repo_owner(repo: str, user: dict[str, Any]) -> None:
-    owner = validate_github_repo(repo).group("owner")
-    if not user.get("github_login"):
-        raise error(403, "GitHub login is required to prove repository ownership")
-    if owner.lower() == user["github_login"].lower():
-        return
-    raise error(403, "GitHub account must own the repository")
 
 
 def set_cookie(

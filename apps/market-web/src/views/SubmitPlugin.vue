@@ -18,7 +18,7 @@
           <n-button
             v-if="!currentUser && siteConfig.auth.github_login_enabled"
             type="primary"
-            @click="loginWithGithub"
+            @click="connectGithub"
           >
             <template #icon>
               <n-icon><logo-github /></n-icon>
@@ -41,7 +41,9 @@
             <li>仓库必须是公开 GitHub 仓库。</li>
             <li>插件名必须使用 `astrbot_plugin_` 前缀。</li>
           </ul>
-          <p class="rule-tip">填写仓库地址后，可点击“拉取信息”自动填充，请确保仓库地址无误。</p>
+          <p class="rule-tip">
+            连接 GitHub 后选择你可管理的插件仓库，信息会自动填充，确认后即可提交。
+          </p>
         </n-card>
       </section>
 
@@ -66,33 +68,69 @@
           <n-form ref="formRef" :model="formData" :rules="rules" label-placement="top">
             <n-grid :x-gap="16" :y-gap="10" :cols="2" responsive="screen">
               <n-grid-item span="2">
-                <n-form-item label="GitHub 仓库地址" path="repo">
-                  <n-input-group>
-                    <n-input
-                      v-model:value="formData.repo"
-                      type="url"
-                      placeholder="例如：https://github.com/owner/repository…"
-                      :input-props="{
-                        name: 'plugin-repo',
-                        autocomplete: 'off',
-                        inputmode: 'url',
-                        spellcheck: 'false',
-                      }"
-                      @update:value="handleRepoInput"
-                    />
-                    <n-button
-                      type="primary"
-                      ghost
-                      :loading="metadataLoading"
-                      :disabled="!canFetchMetadata"
-                      @click="fetchMetadataFromRepo"
+                <n-form-item label="选择 GitHub 插件仓库" path="repo">
+                  <div class="repository-section">
+                    <div class="repository-picker">
+                      <n-select
+                        :value="selectedRepositoryId"
+                        :options="repositoryOptions"
+                        :loading="repositoriesLoading"
+                        :disabled="!currentUser || needsGithubConnection || submitting"
+                        filterable
+                        placeholder="搜索或选择 astrbot_plugin_ 开头的仓库"
+                        aria-label="选择 GitHub 插件仓库"
+                        @update:value="selectRepository"
+                        @update:show="refreshRepositoriesOnOpen"
+                      />
+                    </div>
+                    <n-alert v-if="needsGithubConnection" type="info" :bordered="false">
+                      连接 GitHub 后即可选择个人或组织仓库，无需填写访问令牌。
+                      <n-button class="connect-github" type="primary" @click="connectGithub"
+                        >连接 GitHub</n-button
+                      >
+                    </n-alert>
+                    <p
+                      v-else-if="repositoriesError"
+                      class="metadata-feedback is-error"
+                      role="alert"
                     >
-                      拉取信息
-                    </n-button>
-                  </n-input-group>
-                  <p v-if="metadataStatus.text" :class="metadataFeedbackClass">
-                    {{ metadataStatus.text }}
-                  </p>
+                      {{ repositoriesError }}
+                    </p>
+                    <p
+                      v-else-if="currentUser && !repositoriesLoading && !repositories.length"
+                      class="repository-hint"
+                    >
+                      没有找到可管理的公开插件仓库。仓库名需以 astrbot_plugin_
+                      开头；组织仓库还需要允许此 GitHub 登录应用访问。
+                    </p>
+                    <n-button
+                      v-if="nextRepositoryPage"
+                      size="small"
+                      :loading="repositoriesLoading"
+                      @click="loadRepositories(true)"
+                      >继续加载仓库</n-button
+                    >
+                    <a
+                      v-if="formData.repo"
+                      :href="formData.repo"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="repository-url"
+                      >{{ formData.repo }}</a
+                    >
+                    <p v-if="metadataLoading" class="repository-hint" role="status">
+                      正在读取插件信息…
+                    </p>
+                    <p v-if="metadataStatus.text" :class="metadataFeedbackClass">
+                      {{ metadataStatus.text }}
+                    </p>
+                    <n-button
+                      v-if="metadataStatus.type === 'error'"
+                      size="small"
+                      @click="fetchMetadataFromRepo"
+                      >重试读取信息</n-button
+                    >
+                  </div>
                 </n-form-item>
               </n-grid-item>
               <n-grid-item span="2 m:1">
@@ -109,7 +147,7 @@
                 </n-form-item>
               </n-grid-item>
               <n-grid-item span="2 m:1">
-                <n-form-item label="展示名称" path="display_name">
+                <n-form-item label="展示名称（可选）" path="display_name">
                   <n-input
                     v-model:value="formData.display_name"
                     placeholder="给用户看的名称…"
@@ -125,15 +163,23 @@
                   <n-input
                     v-model:value="formData.desc"
                     type="textarea"
-                    placeholder="一句话说明插件能做什么…"
+                    placeholder="填写插件描述…"
                     :input-props="{
                       name: 'plugin-description',
                       autocomplete: 'off',
                     }"
-                    :maxlength="120"
                     :show-count="true"
                     :rows="4"
                     :resizable="false"
+                  />
+                </n-form-item>
+              </n-grid-item>
+              <n-grid-item span="2">
+                <n-form-item label="卡片短描述（可选）" path="short_desc">
+                  <n-input
+                    v-model:value="formData.short_desc"
+                    placeholder="可选，一句话介绍插件…"
+                    :input-props="{ name: 'plugin-short-description', autocomplete: 'off' }"
                   />
                 </n-form-item>
               </n-grid-item>
@@ -189,7 +235,14 @@
               <n-button
                 type="primary"
                 :loading="submitting"
-                :disabled="!currentUser || !siteConfig.market.submissions_enabled"
+                :disabled="
+                  !currentUser ||
+                  !selectedRepositoryId ||
+                  metadataLoading ||
+                  repositoriesLoading ||
+                  needsGithubConnection ||
+                  !siteConfig.market.submissions_enabled
+                "
                 @click="handleSubmit"
               >
                 提交审核
@@ -203,12 +256,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, shallowRef } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
 import { useSeo } from "../composables/useSeo";
 import {
   NButton,
+  NAlert,
   NCard,
   NDynamicTags,
   NForm,
@@ -217,7 +271,6 @@ import {
   NGridItem,
   NIcon,
   NInput,
-  NInputGroup,
   NLayoutHeader,
   NSelect,
   NTag,
@@ -226,7 +279,7 @@ import {
 import { ArrowBack, LogoGithub } from "@vicons/ionicons5";
 import { PLUGIN_CATEGORY_OPTIONS, usePluginStore } from "@/stores/plugins";
 import ThemeModeButton from "@/components/ThemeModeButton.vue";
-import type { PluginSubmissionMetadataPreview } from "@/types";
+import type { GithubPluginRepository, PluginSubmissionMetadataPreview } from "@/types";
 
 const router = useRouter();
 useSeo({
@@ -237,7 +290,7 @@ useSeo({
 const message = useMessage();
 const store = usePluginStore();
 const { currentUser, siteConfig } = storeToRefs(store);
-const { loginWithGithub } = store;
+const connectGithub = () => store.loginWithGithub("/submit");
 const formRef = ref(null);
 const submitting = shallowRef(false);
 const metadataLoading = shallowRef(false);
@@ -247,9 +300,11 @@ const pluginCategoryOptions = PLUGIN_CATEGORY_OPTIONS;
 const githubRepoPattern = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(?:\.git)?\/?$/;
 
 type SubmissionFormData = {
+  repository_id: string;
   name: string;
   display_name: string;
   desc: string;
+  short_desc: string;
   author: string;
   repo: string;
   category: string;
@@ -257,7 +312,7 @@ type SubmissionFormData = {
   social_link: string;
 };
 
-type TextAutofillField = Exclude<keyof SubmissionFormData, "repo" | "tags">;
+type TextAutofillField = Exclude<keyof SubmissionFormData, "repo" | "repository_id" | "tags">;
 
 const metadataStatus = reactive({
   type: "" as "" | "success" | "warning" | "error",
@@ -265,9 +320,11 @@ const metadataStatus = reactive({
 });
 
 const formData = reactive<SubmissionFormData>({
+  repository_id: "",
   name: "",
   display_name: "",
   desc: "",
+  short_desc: "",
   author: "",
   repo: "",
   category: "",
@@ -278,14 +335,156 @@ const formData = reactive<SubmissionFormData>({
 const autoFilledTextValues = reactive<Partial<Record<TextAutofillField, string>>>({});
 const autoFilledTags = shallowRef<string[]>([]);
 
-const canFetchMetadata = computed(() => {
-  return (
-    Boolean(currentUser.value) &&
-    Boolean(siteConfig.value.market?.submissions_enabled) &&
-    githubRepoPattern.test(formData.repo.trim()) &&
-    !metadataLoading.value
-  );
+const repositories = shallowRef<GithubPluginRepository[]>([]);
+const repositoriesLoading = shallowRef(false);
+const repositoriesRefreshing = shallowRef(false);
+const repositoryMenuOpen = shallowRef(false);
+const repositoriesError = shallowRef("");
+const needsGithubConnection = shallowRef(false);
+const nextRepositoryPage = shallowRef<number | null>(null);
+const selectedRepositoryId = shallowRef<string | null>(null);
+const repositoryOptions = computed(() =>
+  repositories.value.map((repo) => ({
+    label: `${repo.full_name}${repo.owner_type === "Organization" ? " · 组织" : ""}`,
+    value: repo.id,
+  })),
+);
+let repositoryRequestId = 0;
+let lastRepositoryRefreshAt = 0;
+let repositoryRefreshTimer: number | undefined;
+onMounted(() => {
+  void store.loadCurrentUser();
+  window.addEventListener("focus", refreshRepositoriesAutomatically);
+  window.addEventListener("online", refreshRepositoriesAutomatically);
+  document.addEventListener("visibilitychange", refreshRepositoriesAutomatically);
+  repositoryRefreshTimer = window.setInterval(refreshRepositoriesAutomatically, 60_000);
 });
+onUnmounted(() => {
+  repositoryRequestId++;
+  metadataRequestId++;
+  window.removeEventListener("focus", refreshRepositoriesAutomatically);
+  window.removeEventListener("online", refreshRepositoriesAutomatically);
+  document.removeEventListener("visibilitychange", refreshRepositoriesAutomatically);
+  window.clearInterval(repositoryRefreshTimer);
+});
+
+function refreshRepositoriesAutomatically(): void {
+  if (
+    document.visibilityState === "hidden" ||
+    !currentUser.value ||
+    needsGithubConnection.value ||
+    repositoriesLoading.value ||
+    repositoriesRefreshing.value ||
+    repositoryMenuOpen.value ||
+    metadataLoading.value ||
+    submitting.value ||
+    Date.now() - lastRepositoryRefreshAt < 45_000
+  )
+    return;
+  void loadRepositories(false, true);
+}
+
+function refreshRepositoriesOnOpen(show: boolean): void {
+  repositoryMenuOpen.value = show;
+  if (!show) refreshRepositoriesAutomatically();
+}
+watch(
+  () => currentUser.value?.id,
+  () => {
+    void loadRepositories(false);
+  },
+  { immediate: true },
+);
+
+async function loadRepositories(append: boolean, silent = false): Promise<void> {
+  const requestId = ++repositoryRequestId;
+  if (!currentUser.value) {
+    repositories.value = [];
+    repositoriesLoading.value = false;
+    repositoriesRefreshing.value = false;
+    return;
+  }
+  repositoriesLoading.value = !silent;
+  repositoriesRefreshing.value = silent;
+  lastRepositoryRefreshAt = Date.now();
+  if (!silent) {
+    repositoriesError.value = "";
+    needsGithubConnection.value = false;
+  }
+  let page = append ? nextRepositoryPage.value : 1;
+  const found = new Map((append ? repositories.value : []).map((repo) => [repo.id, repo]));
+  try {
+    // Keep each interaction bounded while retaining an explicit continuation for large accounts.
+    for (let count = 0; page && count < 10; count++) {
+      const result = await store.loadGithubRepositories(page);
+      if (requestId !== repositoryRequestId) return;
+      result.items.forEach((repo) => found.set(repo.id, repo));
+      page = result.next_page;
+    }
+    // Passive updates and partial pages must not replace the current selection or draft.
+    // Submission and publication still verify current access on the server.
+    if ((silent || page) && selectedRepositoryId.value && !found.has(selectedRepositoryId.value)) {
+      const selected = repositories.value.find((repo) => repo.id === selectedRepositoryId.value);
+      if (selected) found.set(selected.id, selected);
+    }
+    repositories.value = Array.from(found.values());
+    repositoriesError.value = "";
+    nextRepositoryPage.value = page;
+    if (!page && selectedRepositoryId.value && !found.has(selectedRepositoryId.value)) {
+      selectedRepositoryId.value = null;
+      formData.repo = "";
+      formData.repository_id = "";
+      metadataRequestId++;
+      metadataLoading.value = false;
+      clearMetadataStatus();
+    }
+  } catch (error) {
+    if (requestId !== repositoryRequestId) return;
+    const code = (error as { code?: string }).code;
+    needsGithubConnection.value =
+      code === "github_authorization_required" || code === "github_authorization_denied";
+    if (!silent || needsGithubConnection.value)
+      repositoriesError.value = errorMessage(error, "仓库列表加载失败");
+  } finally {
+    if (requestId === repositoryRequestId) {
+      repositoriesLoading.value = false;
+      repositoriesRefreshing.value = false;
+    }
+  }
+}
+
+async function selectRepository(id: string): Promise<void> {
+  const repo = repositories.value.find((item) => item.id === id);
+  if (!repo) return;
+  metadataRequestId++;
+  selectedRepositoryId.value = id;
+  Object.assign(formData, {
+    repository_id: id,
+    repo: repo.repo,
+    name: "",
+    display_name: "",
+    desc: "",
+    short_desc: "",
+    author: "",
+    social_link: "",
+    category: "",
+    tags: [],
+  });
+  Object.keys(autoFilledTextValues).forEach(
+    (key) => delete autoFilledTextValues[key as TextAutofillField],
+  );
+  for (const key of [
+    "name",
+    "display_name",
+    "desc",
+    "short_desc",
+    "author",
+    "social_link",
+  ] as const)
+    autoFilledTextValues[key] = formData[key];
+  autoFilledTags.value = [];
+  await fetchMetadataFromRepo();
+}
 
 const metadataFeedbackClass = computed(() => ({
   "metadata-feedback": true,
@@ -303,11 +502,6 @@ const rules = {
       trigger: "blur",
     },
   ],
-  display_name: {
-    required: true,
-    message: "请输入展示名称",
-    trigger: "blur",
-  },
   desc: [
     { required: true, message: "请输入插件简介", trigger: "blur" },
     {
@@ -349,17 +543,6 @@ function clearMetadataStatus() {
   metadataStatus.text = "";
 }
 
-function handleRepoInput(value: string) {
-  if (!cleanText(value)) {
-    lastPreviewRepo.value = "";
-    clearMetadataStatus();
-    return;
-  }
-  if (cleanText(value) !== lastPreviewRepo.value) {
-    clearMetadataStatus();
-  }
-}
-
 function cleanTags(tags: unknown): string[] {
   const rawTags = Array.isArray(tags) ? tags : [];
   return Array.from(new Set(rawTags.map((tag) => cleanText(tag)).filter(Boolean))).slice(
@@ -377,7 +560,7 @@ function applyTextField(field: TextAutofillField, value: unknown): boolean {
   if (field === "category" && !pluginCategoryOptions.some((option) => option.value === nextValue)) {
     return false;
   }
-  formData[field] = field === "desc" ? nextValue.slice(0, 120) : nextValue;
+  formData[field] = nextValue;
   autoFilledTextValues[field] = formData[field];
   return currentValue !== formData[field];
 }
@@ -400,6 +583,7 @@ function applyMetadataPreview(preview: PluginSubmissionMetadataPreview): number 
     "name",
     "display_name",
     "desc",
+    "short_desc",
     "author",
     "social_link",
     "category",
@@ -451,17 +635,19 @@ async function fetchMetadataFromRepo() {
   metadataStatus.type = "";
   metadataStatus.text = "";
   try {
-    const preview = await store.fetchPluginSubmissionMetadata(repo);
+    const preview = await store.fetchPluginSubmissionMetadata(repo, formData.repository_id);
     if (requestId !== metadataRequestId || repo !== formData.repo.trim()) return;
     const applied = applyMetadataPreview(preview);
     lastPreviewRepo.value = repo;
     metadataStatus.type = applied > 0 ? "success" : "warning";
     metadataStatus.text =
       applied > 0
-        ? `已自动填充 ${applied} 项，可继续手动调整`
-        : "仓库信息已拉取，没有可填充的新字段";
+        ? `已从元数据填充 ${applied} 项，缺失字段留空，可手动调整`
+        : "元数据中没有可填充的新字段，缺失字段保持为空";
   } catch (error) {
     if (requestId !== metadataRequestId) return;
+    if ((error as { code?: string }).code === "github_authorization_required")
+      needsGithubConnection.value = true;
     metadataStatus.type = "error";
     metadataStatus.text = metadataErrorMessage(error);
     message.error(metadataStatus.text);
@@ -469,10 +655,6 @@ async function fetchMetadataFromRepo() {
     if (requestId === metadataRequestId) metadataLoading.value = false;
   }
 }
-
-const goBack = () => {
-  router.back();
-};
 
 const handleSubmit = () => {
   if (!siteConfig.value.market?.submissions_enabled) {
@@ -491,6 +673,8 @@ const handleSubmit = () => {
       message.success("已提交审核");
       router.push("/");
     } catch (error) {
+      if ((error as { code?: string }).code === "github_authorization_required")
+        needsGithubConnection.value = true;
       message.error(errorMessage(error, "提交失败"));
     } finally {
       submitting.value = false;
@@ -500,6 +684,29 @@ const handleSubmit = () => {
 </script>
 
 <style scoped>
+.repository-section {
+  width: 100%;
+  min-width: 0;
+}
+
+.repository-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.repository-hint,
+.repository-url {
+  display: block;
+  margin: 10px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.connect-github {
+  margin-top: 8px;
+}
+
 .submit-plugin-page {
   min-height: 100vh;
   background: var(--bg-base);

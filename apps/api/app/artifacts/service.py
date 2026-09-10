@@ -490,6 +490,12 @@ class ArtifactService:
                     "quarantine_key": quarantine_key,
                     "submitted_by": user.get("id"),
                     "submitted_by_snapshot": {
+                        "repository_authorization": {
+                            **dict(user.get("_repository_authorization") or {}),
+                            "plugin_owner_user_id": str(plugin.get("owner_user_id") or ""),
+                        }
+                        if user.get("_repository_authorization")
+                        else None,
                         "github_login": user.get("github_login") or "",
                         "nickname": user.get("nickname")
                         or user.get("name")
@@ -732,6 +738,12 @@ _ADVISORY_RUN_TYPES = {"category", "llm_package", "llm_file", "llm_summary"}
 
 def public_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
     result = _pick_fields(artifact, _PUBLIC_ARTIFACT_FIELDS)
+    if isinstance(result.get("submitted_by_snapshot"), dict):
+        result["submitted_by_snapshot"] = {
+            key: value
+            for key, value in result["submitted_by_snapshot"].items()
+            if key != "repository_authorization"
+        }
     if (
         result.get("review_status") != ReviewStatus.APPROVED.value
         or result.get("publication_status") != PublicationStatus.PUBLISHED.value

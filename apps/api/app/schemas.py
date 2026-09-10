@@ -6,6 +6,7 @@ from .config import DEFAULT_EMAIL_FROM_NAME, normalize_smtp_auth_method, normali
 
 
 class PluginSubmission(BaseModel):
+    repository_id: str = ""
     name: str
     display_name: str | None = None
     desc: str
@@ -39,6 +40,7 @@ class PluginSubmission(BaseModel):
 
 class PluginSubmissionMetadataPreviewPayload(BaseModel):
     repo: str
+    repository_id: str = ""
 
     @field_validator("repo", mode="before")
     @classmethod

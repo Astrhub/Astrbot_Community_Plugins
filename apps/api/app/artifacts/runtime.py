@@ -25,6 +25,7 @@ from .archive import ArchivePrechecker
 from .category import OpenAICompatibleCategoryProvider
 from .github_source import GithubSourceClient
 from .jobs import ArtifactJobRunner, worker_id
+from .publication_authorization import PublicationAuthorizationClient
 from .malware import (
     ClamAvScanner,
     ClamdInstreamScanner,
@@ -158,6 +159,10 @@ class ArtifactRuntime:
                     runtime_image_digest=runtime_digest,
                     runtime_result_storage=runtime_result_storage,
                     dependency_provider=dependency_provider,
+                    publication_authorizer=PublicationAuthorizationClient(
+                        self.settings.artifact_authorization_url,
+                        self.settings.artifact_authorization_token,
+                    ),
                 )
                 self.attach_components(
                     repository=repository,

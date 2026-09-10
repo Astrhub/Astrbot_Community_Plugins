@@ -402,6 +402,8 @@ class ArtifactRepository(Protocol):
         expected_repo_version: str,
         published_key: str,
         download_url: str,
+        expected_repo: str | None = None,
+        expected_owner_user_id: str | None = None,
     ) -> dict[str, Any] | None: ...
 
     async def revoke_artifact(self, artifact_id: str) -> dict[str, Any] | None: ...
@@ -2049,12 +2051,14 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         expected_repo_version: str,
         published_key: str,
         download_url: str,
+        expected_repo: str | None = None,
+        expected_owner_user_id: str | None = None,
     ) -> dict[str, Any] | None:
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 row = await connection.fetchrow(
                     """
-                    SELECT a.*, p.repo_version
+                    SELECT a.*, p.repo_version, p.repo AS current_repo, p.owner_user_id
                       FROM plugin_artifacts a
                       JOIN market_plugins p ON p.id = a.plugin_id
                      WHERE a.id = $1
@@ -2066,6 +2070,11 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     return None
                 if str(row["repo_version"]) != expected_repo_version:
                     raise ValueError("repo_version_changed")
+                if (expected_repo is not None and row["current_repo"] != expected_repo) or (
+                    expected_owner_user_id is not None
+                    and str(row["owner_user_id"]) != expected_owner_user_id
+                ):
+                    raise ValueError("repository_authorization_changed")
                 validate_publication_transition(
                     str(row["publication_status"]), PublicationStatus.PUBLISHED.value
                 )
@@ -3608,6 +3617,8 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         expected_repo_version: str,
         published_key: str,
         download_url: str,
+        expected_repo: str | None = None,
+        expected_owner_user_id: str | None = None,
     ) -> dict[str, Any] | None:
         artifact = self.artifacts.get(artifact_id)
         if not artifact:
@@ -3615,6 +3626,11 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         plugin = self._plugin(artifact["plugin_id"])
         if not plugin or str(plugin.get("repo_version") or "") != expected_repo_version:
             raise ValueError("repo_version_changed")
+        if (expected_repo is not None and plugin.get("repo") != expected_repo) or (
+            expected_owner_user_id is not None
+            and str(plugin.get("owner_user_id")) != expected_owner_user_id
+        ):
+            raise ValueError("repository_authorization_changed")
         for other in self.artifacts.values():
             if (
                 other["id"] != artifact_id

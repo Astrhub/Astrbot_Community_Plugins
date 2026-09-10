@@ -117,6 +117,16 @@ export interface AppNotification {
 }
 
 /** 公告。 */
+export interface GithubPluginRepository {
+  id: string;
+  name: string;
+  full_name: string;
+  repo: string;
+  owner: string;
+  owner_type: "User" | "Organization";
+  description: string;
+}
+
 export interface Announcement {
   id: number | string;
   title: string;

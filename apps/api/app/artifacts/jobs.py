@@ -32,6 +32,7 @@ from .notifications import ArtifactNotificationDispatcher
 from .orchestration import ReviewOrchestrator, StageToolSnapshot, review_run_type_for_job
 from .policy import ReviewPolicyStage
 from .repository import ArtifactRepository
+from .publication_authorization import PublicationAuthorizationClient, PublicationAuthorizationError
 from .runtime_dispatch import RuntimeDispatchController
 from .stages import (
     CategoryStage,
@@ -103,8 +104,10 @@ class ArtifactJobRunner:
         runtime_image_digest: str = "",
         runtime_result_storage: object | None = None,
         dependency_provider: DependencyAdvisoryProvider | None = None,
+        publication_authorizer: PublicationAuthorizationClient | None = None,
     ) -> None:
         self.repository = repository
+        self.publication_authorizer = publication_authorizer
         self.storage = storage
         self.prechecker = prechecker
         self.scanner = scanner
@@ -728,6 +731,17 @@ class ArtifactJobRunner:
             await self.repository.transition_publication_status(
                 artifact["id"], PublicationStatus.PUBLISHING.value
             )
+        authorization = None
+        if (artifact.get("submitted_by_snapshot") or {}).get("repository_authorization"):
+            try:
+                if self.publication_authorizer is None:
+                    raise PublicationAuthorizationError(
+                        "github_authorization_unavailable", "发布权限检查尚未配置"
+                    )
+                authorization = await self.publication_authorizer.verify(artifact)
+            except PublicationAuthorizationError as exc:
+                await self._mark_publish_failed(artifact, exc.code)
+                raise JobExecutionError(exc.code, str(exc), retryable=exc.retryable) from exc
         try:
             published = await self.storage.publish_if_absent(
                 str(artifact["quarantine_key"]),
@@ -743,6 +757,14 @@ class ArtifactJobRunner:
                 expected_repo_version=current_repo_version,
                 published_key=published_key,
                 download_url=self.storage.public_url(published_key),
+                **(
+                    {
+                        "expected_repo": authorization["repo"],
+                        "expected_owner_user_id": authorization["owner_user_id"],
+                    }
+                    if authorization
+                    else {}
+                ),
             )
             if result is None:
                 raise JobExecutionError(

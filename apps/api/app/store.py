@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import secrets
+import hashlib
+import time
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -943,12 +945,39 @@ class InMemoryMarketStore:
         return self.get_user_by_id(session["user_id"])
 
     def revoke_session(self, token: str) -> bool:
+        self.delete_github_authorization(hashlib.sha256(token.encode()).hexdigest())
         sessions = self.state["sessions"]
         index = next((i for i, item in enumerate(sessions) if item["token"] == token), -1)
         if index == -1:
             return False
         sessions.pop(index)
         return True
+
+    def set_github_authorization(self, reference: str, ciphertext: str, ttl_seconds: int) -> None:
+        credentials = getattr(self, "_github_authorizations", {})
+        credentials[reference] = (ciphertext, time.time() + ttl_seconds)
+        self._github_authorizations = credentials
+
+    def get_github_authorization(self, reference: str) -> str | None:
+        value = getattr(self, "_github_authorizations", {}).get(reference)
+        if value and value[1] > time.time():
+            return value[0]
+        self.delete_github_authorization(reference)
+        return None
+
+    def delete_github_authorization(self, reference: str) -> None:
+        getattr(self, "_github_authorizations", {}).pop(reference, None)
+
+    def set_latest_github_authorization(
+        self, user_id: str, reference: str, ttl_seconds: int
+    ) -> None:
+        references = getattr(self, "_github_authorization_references", {})
+        references[user_id] = (reference, time.time() + ttl_seconds)
+        self._github_authorization_references = references
+
+    def get_latest_github_authorization(self, user_id: str) -> str | None:
+        value = getattr(self, "_github_authorization_references", {}).get(user_id)
+        return value[0] if value and value[1] > time.time() else None
 
     def list_comments(self, plugin_id: str) -> list[dict[str, Any]]:
         comments = []
@@ -2731,7 +2760,33 @@ class PgRedisMarketStore(InMemoryMarketStore):
         return await self.get_user_by_id(session["user_id"])
 
     async def revoke_session(self, token: str) -> bool:
+        await self.delete_github_authorization(hashlib.sha256(token.encode()).hexdigest())
         return bool(await self._redis().delete(self._session_key(token)))
+
+    async def set_github_authorization(
+        self, reference: str, ciphertext: str, ttl_seconds: int
+    ) -> None:
+        await self._redis().set(
+            f"astrbot_market:github_oauth:{reference}", ciphertext, ex=ttl_seconds
+        )
+
+    async def get_github_authorization(self, reference: str) -> str | None:
+        value = await self._redis().get(f"astrbot_market:github_oauth:{reference}")
+        return value.decode() if isinstance(value, bytes) else value
+
+    async def delete_github_authorization(self, reference: str) -> None:
+        await self._redis().delete(f"astrbot_market:github_oauth:{reference}")
+
+    async def set_latest_github_authorization(
+        self, user_id: str, reference: str, ttl_seconds: int
+    ) -> None:
+        await self._redis().set(
+            f"astrbot_market:github_oauth_user:{user_id}", reference, ex=ttl_seconds
+        )
+
+    async def get_latest_github_authorization(self, user_id: str) -> str | None:
+        value = await self._redis().get(f"astrbot_market:github_oauth_user:{user_id}")
+        return value.decode() if isinstance(value, bytes) else value
 
     async def list_comments(self, plugin_id: str) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(

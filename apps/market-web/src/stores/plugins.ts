@@ -2,6 +2,7 @@ import { ref, shallowRef, computed, watch } from "vue";
 import { defineStore } from "pinia";
 import type {
   Announcement,
+  GithubPluginRepository,
   AdminUser,
   ApiKey,
   AppNotification,
@@ -1216,8 +1217,9 @@ export const usePluginStore = defineStore("plugins", () => {
     }
   }
 
-  function loginWithGithub(): void {
-    window.location.href = `${apiBaseUrl}/v1/auth/github/login`;
+  function loginWithGithub(destination?: unknown): void {
+    const next = typeof destination === "string" ? `?next=${encodeURIComponent(destination)}` : "";
+    window.location.href = `${apiBaseUrl}/v1/auth/github/login${next}`;
   }
 
   async function loginWithPassword(payload: { username: string; password: string }): Promise<User> {
@@ -1276,22 +1278,41 @@ export const usePluginStore = defineStore("plugins", () => {
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "提交失败");
+    if (!response.ok) throw Object.assign(new Error(data.error || "提交失败"), { code: data.code });
     return data;
   }
 
   async function fetchPluginSubmissionMetadata(
     repo: string,
+    repositoryId = "",
   ): Promise<PluginSubmissionMetadataPreview> {
     const response = await fetch(`${apiBaseUrl}/v1/plugins/submissions/metadata-preview`, {
       method: "POST",
       credentials: "include",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ repo }),
+      body: JSON.stringify({ repo, repository_id: repositoryId }),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(apiErrorMessage(data, "仓库信息拉取失败"));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "仓库信息拉取失败")), {
+        code: data.code,
+      });
     return data as PluginSubmissionMetadataPreview;
+  }
+
+  async function loadGithubRepositories(
+    page = 1,
+  ): Promise<{ items: GithubPluginRepository[]; next_page: number | null }> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/github/repositories?page=${page}`, {
+      credentials: "include",
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "仓库列表加载失败")), {
+        code: data.code,
+      });
+    return data;
   }
 
   function setSearchQuery(query: string): void {
@@ -1435,6 +1456,7 @@ export const usePluginStore = defineStore("plugins", () => {
     publishAnnouncement,
     submitPlugin,
     fetchPluginSubmissionMetadata,
+    loadGithubRepositories,
     setSearchQuery,
     setSelectedTag,
     setSelectedCategory,

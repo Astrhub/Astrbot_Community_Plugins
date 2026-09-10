@@ -13,6 +13,19 @@ import app.main as main_module
 from app.auth import Role, can_edit_plugin, can_manage_admins, can_moderate_plugins
 from app.config import load_settings
 from app.store import InMemoryMarketStore, PgRedisMarketStore, SCHEMA_SQL
+from tests.github_access_helpers import install_github_access_double
+
+
+@pytest.fixture(autouse=True)
+def mock_repository_authorization_boundary(monkeypatch):
+    original = main_module.create_app
+
+    def create_app(*args, **kwargs):
+        app = original(*args, **kwargs)
+        install_github_access_double(app)
+        return app
+
+    monkeypatch.setattr(main_module, "create_app", create_app)
 
 
 def make_client(enable_dev_auth: bool = True) -> TestClient:
@@ -25,7 +38,9 @@ def make_client(enable_dev_auth: bool = True) -> TestClient:
             "REDIS_URL": "redis://127.0.0.1:6379/0",
         }
     )
-    return TestClient(main_module.create_app(settings=settings, store=InMemoryMarketStore()))
+    app = main_module.create_app(settings=settings, store=InMemoryMarketStore())
+    install_github_access_double(app)
+    return TestClient(app)
 
 
 def enable_test_email(client: TestClient) -> None:
@@ -1651,6 +1666,7 @@ def test_plugin_submission_accepts_only_official_categories() -> None:
     rejected = client.post("/v1/plugins/submissions", json=invalid_payload)
 
     legacy_payload = plugin_payload(name="astrbot_plugin_legacy")
+    legacy_payload["repo"] = "https://github.com/alice/astrbot_plugin_legacy"
     legacy = client.post("/v1/plugins/submissions", json=legacy_payload)
 
     assert accepted.status_code == 201
