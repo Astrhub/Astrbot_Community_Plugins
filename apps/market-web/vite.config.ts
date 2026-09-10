@@ -86,12 +86,25 @@ async function loadDynamicRoutes(origin?: string): Promise<string[]> {
   try {
     const response = await fetch(`${origin.replace(/\/$/, "")}/v1/plugins`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = (await response.json()) as { items?: { id?: string; status?: string }[] };
+    const payload = (await response.json()) as {
+      items?: {
+        id?: string;
+        name?: string;
+        owner_github_login?: string;
+        canonical_path?: string;
+        status?: string;
+      }[];
+    };
     const pluginRoutes = (payload.items || [])
       .filter((plugin) => !plugin.status || plugin.status === "listed")
-      .map((plugin) => String(plugin.id || "").trim())
-      .filter(Boolean)
-      .map((name) => `/plugin/${encodeURIComponent(name)}`);
+      .filter((plugin) => plugin.id)
+      .map(
+        (plugin) =>
+          plugin.canonical_path ||
+          (plugin.owner_github_login
+            ? `/plugin/${encodeURIComponent(plugin.owner_github_login)}/${encodeURIComponent(plugin.name || plugin.id!)}`
+            : `/plugin/${encodeURIComponent(plugin.id!)}`),
+      );
     return [...fallback, ...pluginRoutes];
   } catch (error) {
     console.warn(`[sitemap] Failed to load plugin routes from ${origin}:`, error);

@@ -5,6 +5,7 @@ import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import wraps
 from typing import Any
 
 import asyncpg
@@ -12,6 +13,28 @@ from redis import asyncio as redis_asyncio
 
 from .auth import Role, normalize_role
 from .schema_migrations import apply_schema_migrations
+from .plugin_identity import PluginIdentityConflict
+
+
+class GithubIdentityConflict(ValueError):
+    pass
+
+
+def plugin_identity_write(method: Any) -> Any:
+    @wraps(method)
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await method(*args, **kwargs)
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name in {
+                "market_plugins_owner_name_key",
+                "market_plugins_namespace_key",
+                "market_plugins_repo_key",
+            }:
+                raise PluginIdentityConflict("该用户名下已存在同名插件，或仓库已被登记") from exc
+            raise
+
+    return wrapped
 
 
 def utc_now() -> str:
@@ -93,9 +116,31 @@ class InMemoryMarketStore:
         if not login:
             raise ValueError("GitHub profile login is required")
 
-        existing = self.get_user_by_github_login(login)
+        github_id = str(profile.get("id") or "")
+        existing = self.get_user_by_github_id(github_id) if github_id else None
+        login_owner = self.get_user_by_github_login(login)
+        if (
+            github_id
+            and login_owner
+            and str(login_owner.get("github_id") or login_owner["id"]) != github_id
+        ):
+            raise GithubIdentityConflict("GitHub 用户名已关联其他身份，请联系管理员核对")
+        existing = existing or login_owner
         if existing:
-            existing.update(self._normalize_user({**existing, **profile, "github_login": login}))
+            existing.update(
+                self._normalize_user(
+                    {
+                        **existing,
+                        "github_id": github_id or existing.get("github_id"),
+                        "github_login": login,
+                        "github_name": profile.get("name") or login,
+                        "avatar_url": profile.get("avatar_url") or "",
+                        "github_email": profile.get("github_email")
+                        or profile.get("email")
+                        or existing.get("github_email", ""),
+                    }
+                )
+            )
             existing["updated_at"] = utc_now()
             return deepcopy(existing)
 
@@ -176,6 +221,16 @@ class InMemoryMarketStore:
     def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
         return self._find("users", "id", user_id)
 
+    def get_user_by_github_id(self, github_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                user
+                for user in self.state["users"]
+                if str(user.get("github_id") or user["id"]) == github_id
+            ),
+            None,
+        )
+
     def get_user_by_github_login(self, login: str) -> dict[str, Any] | None:
         return next(
             (
@@ -218,12 +273,10 @@ class InMemoryMarketStore:
         return deepcopy(self.state["plugins"])
 
     def list_user_plugins(self, user_id: str, github_login: str = "") -> list[dict[str, Any]]:
-        login = str(github_login or "").lower()
         return [
             deepcopy(plugin)
             for plugin in self.state["plugins"]
             if plugin.get("owner_user_id") == user_id
-            or (login and str(plugin.get("owner_github_login") or "").lower() == login)
         ]
 
     def list_submissions(self) -> list[dict[str, Any]]:
@@ -261,21 +314,79 @@ class InMemoryMarketStore:
     def get_plugin(self, plugin_id: str) -> dict[str, Any] | None:
         return self._find("plugins", "id", plugin_id)
 
+    def get_plugin_by_author(self, username: str, name: str) -> dict[str, Any] | None:
+        return next(
+            (
+                p
+                for p in self.state["plugins"]
+                if str(p.get("owner_github_login", "")).lower() == username.lower()
+                and p["name"].lower() == name.lower()
+            ),
+            None,
+        )
+
+    def get_owned_plugin_by_name(self, user_id: str, name: str) -> dict[str, Any] | None:
+        return next(
+            (
+                p
+                for p in self.state["plugins"]
+                if p.get("owner_user_id") == user_id and p["name"].lower() == name.lower()
+            ),
+            None,
+        )
+
+    def _plugin_registration_identity(
+        self, user: dict[str, Any], payload: dict[str, Any]
+    ) -> tuple[str, dict[str, Any] | None]:
+        existing = (
+            self.get_plugin(str(payload["id"]))
+            if payload.get("id")
+            else self.get_owned_plugin_by_name(user["id"], payload["name"])
+        )
+        if existing and existing.get("owner_user_id") != user["id"]:
+            raise PermissionError("plugin_owner_mismatch")
+        if existing and existing["repo"].rstrip("/").lower() != payload["repo"].rstrip("/").lower():
+            raise PluginIdentityConflict("该用户名下的插件名已关联其他仓库")
+        plugin_id = existing["id"] if existing else (payload.get("id") or payload["name"])
+        if not existing and self.get_plugin(plugin_id):
+            plugin_id = new_id("astrbot_plugin")
+        self._check_plugin_identity(
+            {
+                **payload,
+                "id": plugin_id,
+                "owner_user_id": user["id"],
+                "owner_github_login": (existing or {}).get(
+                    "owner_github_login", user.get("github_login", "")
+                ),
+            }
+        )
+        return plugin_id, existing
+
+    def _check_plugin_identity(self, candidate: dict[str, Any]) -> None:
+        for other in self.state["plugins"]:
+            if other["id"] == candidate["id"]:
+                continue
+            same_name = other["name"].lower() == candidate["name"].lower()
+            same_owner = other.get("owner_user_id") == candidate.get("owner_user_id")
+            login = str(candidate.get("owner_github_login") or "").lower()
+            same_login = bool(login) and str(other.get("owner_github_login") or "").lower() == login
+            if same_name and (same_owner or same_login):
+                raise PluginIdentityConflict("该用户名下已存在同名插件")
+            if other["repo"].rstrip("/").lower() == candidate["repo"].rstrip("/").lower():
+                raise PluginIdentityConflict("该仓库已登记为其他插件")
+
     def get_comment(self, comment_id: str) -> dict[str, Any] | None:
         return self._find("comments", "id", comment_id)
 
     def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        plugin_id = payload.get("id") or payload["name"]
-        existing = self.get_plugin(plugin_id)
-        if existing and existing.get("owner_user_id") != user.get("id"):
-            raise PermissionError("plugin_owner_mismatch")
+        plugin_id, existing = self._plugin_registration_identity(user, payload)
         plugin = self._normalize_plugin(
             {
                 **(existing or {}),
                 **plugin_metadata_from_payload(payload),
                 "id": plugin_id,
                 "name": payload["name"],
-                "display_name": payload.get("display_name") or payload["name"],
+                "display_name": payload.get("display_name") or "",
                 "desc": payload["desc"],
                 "author": payload["author"],
                 "repo": payload["repo"],
@@ -290,7 +401,9 @@ class InMemoryMarketStore:
                 "repo_version": (existing or {}).get("repo_version", ""),
                 "current_artifact_id": (existing or {}).get("current_artifact_id"),
                 "owner_user_id": user["id"],
-                "owner_github_login": user["github_login"],
+                "owner_github_login": (existing or {}).get(
+                    "owner_github_login", user["github_login"]
+                ),
                 "status": (existing or {}).get("status", "pending"),
                 "stars": int((existing or {}).get("stars") or 0),
                 "likes": int((existing or {}).get("likes") or 0),
@@ -313,8 +426,7 @@ class InMemoryMarketStore:
         return deepcopy(plugin)
 
     def register_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        plugin_id = payload.get("id") or payload["name"]
-        existing = self.get_plugin(plugin_id)
+        plugin_id, existing = self._plugin_registration_identity(user, payload)
         if existing:
             if existing.get("owner_user_id") != user.get("id"):
                 raise PermissionError("plugin_owner_mismatch")
@@ -427,7 +539,9 @@ class InMemoryMarketStore:
         plugin = self.get_plugin(plugin_id)
         if not plugin:
             return None
-        plugin.update({key: value for key, value in patch.items() if value is not None})
+        changes = {key: value for key, value in patch.items() if value is not None}
+        self._check_plugin_identity({**plugin, **changes})
+        plugin.update(changes)
         plugin["updated_at"] = utc_now()
         return deepcopy(plugin)
 
@@ -567,6 +681,9 @@ class InMemoryMarketStore:
             return None
         for plugin in self.state["plugins"]:
             if plugin.get("owner_user_id") == user_id:
+                self._check_plugin_identity({**plugin, "owner_user_id": replacement_user_id})
+        for plugin in self.state["plugins"]:
+            if plugin.get("owner_user_id") == user_id:
                 plugin["owner_user_id"] = replacement_user_id
                 plugin["updated_at"] = utc_now()
             if plugin.get("moderated_by") == user_id:
@@ -633,11 +750,12 @@ class InMemoryMarketStore:
         if not source or not target:
             return target
 
-        source_login = source.get("github_login", "")
+        for plugin in self.state["plugins"]:
+            if plugin.get("owner_user_id") == from_user_id:
+                self._check_plugin_identity({**plugin, "owner_user_id": to_user_id})
         for plugin in self.state["plugins"]:
             if plugin.get("owner_user_id") == from_user_id:
                 plugin["owner_user_id"] = to_user_id
-                plugin["owner_github_login"] = source_login
             if plugin.get("moderated_by") == from_user_id:
                 plugin["moderated_by"] = to_user_id
         for submission in self.state["submissions"]:
@@ -1075,7 +1193,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS market_users_internal_username_lower_idx
 
 CREATE TABLE IF NOT EXISTS market_plugins (
     id text PRIMARY KEY,
-    name text NOT NULL UNIQUE,
+    name text NOT NULL,
     display_name text NOT NULL,
     desc_text text NOT NULL,
     author text NOT NULL,
@@ -1361,9 +1479,23 @@ class PgRedisMarketStore(InMemoryMarketStore):
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 await connection.execute("LOCK TABLE market_users IN EXCLUSIVE MODE")
-                existing = await connection.fetchrow(
+                login_owner = await connection.fetchrow(
                     "SELECT * FROM market_users WHERE lower(github_login) = lower($1)",
                     str(login),
+                )
+                github_id = str(profile.get("id") or "")
+                if (
+                    github_id
+                    and login_owner
+                    and str(login_owner["github_id"] or login_owner["id"]) != github_id
+                ):
+                    raise GithubIdentityConflict("GitHub 用户名已关联其他身份，请联系管理员核对")
+                existing = (
+                    await connection.fetchrow(
+                        "SELECT * FROM market_users WHERE github_id = $1 OR (github_id IS NULL AND id = $1)",
+                        github_id,
+                    )
+                    or login_owner
                 )
                 if existing:
                     row = await connection.fetchrow(
@@ -1473,6 +1605,13 @@ class PgRedisMarketStore(InMemoryMarketStore):
         row = await self._pool().fetchrow("SELECT * FROM market_users WHERE id = $1", user_id)
         return self._user_from_record(row) if row else None
 
+    async def get_user_by_github_id(self, github_id: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            "SELECT * FROM market_users WHERE github_id = $1 OR (github_id IS NULL AND id = $1)",
+            github_id,
+        )
+        return self._user_from_record(row) if row else None
+
     async def get_user_by_github_login(self, login: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow(
             "SELECT * FROM market_users WHERE lower(github_login) = lower($1)",
@@ -1528,11 +1667,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
             SELECT *
               FROM market_plugins
              WHERE owner_user_id = $1
-                OR ($2 <> '' AND lower(owner_github_login) = lower($2))
           ORDER BY updated_at DESC
             """,
             user_id,
-            github_login or "",
         )
         return [self._plugin_from_record(row) for row in rows]
 
@@ -1540,15 +1677,60 @@ class PgRedisMarketStore(InMemoryMarketStore):
         row = await self._pool().fetchrow("SELECT * FROM market_plugins WHERE id = $1", plugin_id)
         return self._plugin_from_record(row) if row else None
 
+    async def get_plugin_by_author(self, username: str, name: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            "SELECT * FROM market_plugins WHERE lower(owner_github_login) = lower($1) AND lower(name) = lower($2)",
+            username,
+            name,
+        )
+        return self._plugin_from_record(row) if row else None
+
+    async def get_owned_plugin_by_name(self, user_id: str, name: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            "SELECT * FROM market_plugins WHERE owner_user_id = $1 AND lower(name) = lower($2)",
+            user_id,
+            name,
+        )
+        return self._plugin_from_record(row) if row else None
+
+    async def _plugin_registration_id(
+        self, connection: Any, user: dict[str, Any], payload: dict[str, Any]
+    ) -> str:
+        # Keep historical IDs, while serializing allocation for simultaneous same-name registrations.
+        await connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", payload["name"].lower()
+        )
+        if payload.get("id"):
+            existing = await connection.fetchrow(
+                "SELECT * FROM market_plugins WHERE id = $1", payload["id"]
+            )
+        else:
+            existing = await connection.fetchrow(
+                "SELECT * FROM market_plugins WHERE owner_user_id = $1 AND lower(name) = lower($2)",
+                user["id"],
+                payload["name"],
+            )
+        if existing:
+            if existing["owner_user_id"] != user["id"]:
+                raise PermissionError("plugin_owner_mismatch")
+            if existing["repo"].rstrip("/").lower() != payload["repo"].rstrip("/").lower():
+                raise PluginIdentityConflict("该用户名下的插件名已关联其他仓库")
+            return existing["id"]
+        plugin_id = payload.get("id") or payload["name"]
+        if await connection.fetchval("SELECT 1 FROM market_plugins WHERE id = $1", plugin_id):
+            return new_id("astrbot_plugin")
+        return plugin_id
+
     async def get_comment(self, comment_id: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow("SELECT * FROM market_comments WHERE id = $1", comment_id)
         return self._comment_from_record(row) if row else None
 
+    @plugin_identity_write
     async def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-        plugin_id = payload.get("id") or payload["name"]
         metadata = plugin_metadata_from_payload(payload)
         async with self._pool().acquire() as connection:
             async with connection.transaction():
+                plugin_id = await self._plugin_registration_id(connection, user, payload)
                 row = await connection.fetchrow(
                     """
                     INSERT INTO market_plugins (
@@ -1597,42 +1779,44 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 )
                 return self._plugin_from_record(row)
 
+    @plugin_identity_write
     async def register_plugin(
         self, user: dict[str, Any], payload: dict[str, Any]
     ) -> dict[str, Any]:
-        plugin_id = payload.get("id") or payload["name"]
         metadata = plugin_metadata_from_payload(payload)
-        row = await self._pool().fetchrow(
-            """
-            INSERT INTO market_plugins (
-                id, name, display_name, desc_text, author, repo, tags, social_link,
-                owner_user_id, owner_github_login, status, stars, likes, comments_count,
-                metadata, category, category_source, repo_version
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
-                    'pending', 0, 0, 0, $11::jsonb, $12, 'user', $13)
-            ON CONFLICT (id) DO UPDATE
-               SET id = market_plugins.id
-             WHERE market_plugins.owner_user_id = EXCLUDED.owner_user_id
-            RETURNING *
-            """,
-            plugin_id,
-            payload["name"],
-            payload.get("display_name") or "",
-            payload["desc"],
-            payload["author"],
-            payload["repo"],
-            payload.get("tags", []),
-            payload.get("social_link", ""),
-            user["id"],
-            user.get("github_login", ""),
-            metadata,
-            payload.get("category", "other"),
-            payload.get("version", ""),
-        )
-        if not row:
-            raise PermissionError("plugin_owner_mismatch")
-        return self._plugin_from_record(row)
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                plugin_id = await self._plugin_registration_id(connection, user, payload)
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO market_plugins (
+                        id, name, display_name, desc_text, author, repo, tags, social_link,
+                        owner_user_id, owner_github_login, status, stars, likes, comments_count,
+                        metadata, category, category_source, repo_version
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
+                            'pending', 0, 0, 0, $11::jsonb, $12, 'user', $13)
+                    ON CONFLICT (id) DO UPDATE SET id = market_plugins.id
+                      WHERE market_plugins.owner_user_id = EXCLUDED.owner_user_id
+                    RETURNING *
+                    """,
+                    plugin_id,
+                    payload["name"],
+                    payload.get("display_name") or "",
+                    payload["desc"],
+                    payload["author"],
+                    payload["repo"],
+                    payload.get("tags", []),
+                    payload.get("social_link", ""),
+                    user["id"],
+                    user.get("github_login", ""),
+                    metadata,
+                    payload.get("category", "other"),
+                    payload.get("version", ""),
+                )
+                if not row:
+                    raise PermissionError("plugin_owner_mismatch")
+                return self._plugin_from_record(row)
 
     async def list_submissions(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(
@@ -1775,6 +1959,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     )
         return self._plugin_from_record(row) if row else None
 
+    @plugin_identity_write
     async def update_plugin_metadata(
         self,
         plugin_id: str,
@@ -2067,6 +2252,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
         )
         return self._user_from_record(row) if row else None
 
+    @plugin_identity_write
     async def delete_user(
         self,
         user_id: str,
@@ -2163,6 +2349,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
         )
         return self._user_from_record(row) if row else None
 
+    @plugin_identity_write
     async def merge_user_into_user(
         self, from_user_id: str, to_user_id: str
     ) -> dict[str, Any] | None:
@@ -2182,12 +2369,11 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 await connection.execute(
                     """
                     UPDATE market_plugins
-                       SET owner_user_id = $2, owner_github_login = $3, updated_at = now()
+                       SET owner_user_id = $2, updated_at = now()
                      WHERE owner_user_id = $1
                     """,
                     from_user_id,
                     to_user_id,
-                    source["github_login"],
                 )
                 await connection.execute(
                     "UPDATE market_plugins SET moderated_by = $2 WHERE moderated_by = $1",

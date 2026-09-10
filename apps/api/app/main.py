@@ -57,6 +57,7 @@ from .config import (
 from .env_file import write_env_file
 from .llms_txt import build_llms_txt
 from .openapi_filter import filter_openapi_by_role, role_for_openapi
+from .plugin_identity import PluginIdentityConflict, plugin_canonical_path
 from .schemas import (
     AnnouncementCreate,
     ApiKeyCreate,
@@ -79,6 +80,7 @@ from .schemas import (
 )
 from .store import InMemoryMarketStore
 from .store import PgRedisMarketStore
+from .store import GithubIdentityConflict
 
 GITHUB_REPO_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$"
@@ -125,7 +127,6 @@ FRONTEND_EXACT_ROUTES = {
     "admin",
     "plugin-workbench",
     "docs/rest",
-    "plugin",
 }
 FRONTEND_ROUTE_PREFIXES = ("settings/", "admin/", "plugin/")
 POSTGRES_MAINTENANCE_DATABASE = "postgres"
@@ -269,10 +270,24 @@ def create_app(
         return response
 
     app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(PluginIdentityConflict, plugin_identity_conflict_handler)
+    app.add_exception_handler(GithubIdentityConflict, github_identity_conflict_handler)
     register_routes(app)
     app.include_router(build_artifact_router())
     register_market_web_routes(app)
     return app
+
+
+async def github_identity_conflict_handler(_: Request, exc: GithubIdentityConflict) -> JSONResponse:
+    return JSONResponse(
+        status_code=409, content={"error": str(exc), "code": "github_identity_conflict"}
+    )
+
+
+async def plugin_identity_conflict_handler(_: Request, exc: PluginIdentityConflict) -> JSONResponse:
+    return JSONResponse(
+        status_code=409, content={"error": str(exc), "code": "plugin_identity_conflict"}
+    )
 
 
 async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
@@ -1129,6 +1144,17 @@ def register_routes(app: FastAPI) -> None:
         return plugin
 
     @app.get(
+        "/v1/plugins/by-author/{username}/{name}",
+        tags=["plugins"],
+        summary="按用户名和插件名获取详情",
+    )
+    async def plugin_detail_by_author(request: Request, username: str, name: str) -> dict[str, Any]:
+        plugin = await call_store(request, "get_plugin_by_author", username, name)
+        if not plugin or plugin.get("status") != "listed":
+            raise error(404, "Plugin not found")
+        return await plugin_with_interaction_state(request, plugin, await current_user(request))
+
+    @app.get(
         "/v1/plugins/{plugin_id}",
         tags=["plugins"],
         summary="获取插件详情",
@@ -1881,9 +1907,26 @@ def register_market_web_routes(app: FastAPI) -> None:
         return serve_market_web_file("")
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def market_web_fallback(full_path: str) -> Response:
+    async def market_web_fallback(request: Request, full_path: str) -> Response:
         if is_reserved_api_path(full_path):
             raise error(404, "Not found")
+        if full_path.startswith("plugin/"):
+            segments = full_path.strip("/").split("/")
+            plugin = None
+            if len(segments) == 2:
+                plugin = await call_store(request, "get_plugin", segments[1])
+            elif len(segments) == 3:
+                plugin = await call_store(request, "get_plugin_by_author", segments[1], segments[2])
+            if not plugin or plugin.get("status") != "listed":
+                return FileResponse(MARKET_WEB_DIST / "index.html", status_code=404)
+            canonical = plugin_canonical_path(plugin)
+            if "/" + full_path != unquote(canonical):
+                query = f"?{request.url.query}" if request.url.query else ""
+                return RedirectResponse(
+                    canonical + query,
+                    status_code=301,
+                    headers={"Cache-Control": "public, max-age=0, must-revalidate"},
+                )
         return serve_market_web_file(full_path)
 
 
@@ -2587,6 +2630,7 @@ async def plugin_with_interaction_state(
         )
     return {
         **plugin,
+        "canonical_path": plugin_canonical_path(plugin),
         "liked": plugin_liked,
         "comments": [
             with_comment_permissions(
@@ -2930,9 +2974,15 @@ async def refresh_plugin_github_metadata_for_plugin(
         # 保留旧市场 API 的 version 字段，但发布判断只读取 repo_version。
         metadata["version"] = repo_version
     metadata.update(github_sync_success_metadata(settings, user))
-    return await resolve_optional_awaitable(
-        app.state.store.update_plugin_metadata(plugin["id"], metadata)
-    )
+    try:
+        return await resolve_optional_awaitable(
+            app.state.store.update_plugin_metadata(plugin["id"], metadata)
+        )
+    except PluginIdentityConflict as exc:
+        await update_plugin_github_sync_failure(app.state.store, plugin, settings, str(exc))
+        if raise_errors:
+            raise
+        return plugin
 
 
 async def safe_fetch_plugin_github_metadata(
@@ -4642,7 +4692,10 @@ async def link_github_profile_to_user(
     user: dict[str, Any],
     profile: dict[str, str],
 ) -> dict[str, Any]:
-    existing = await call_store(request, "get_user_by_github_login", profile["login"])
+    login_owner = await call_store(request, "get_user_by_github_login", profile["login"])
+    if login_owner and str(login_owner.get("github_id") or login_owner["id"]) != profile["id"]:
+        raise GithubIdentityConflict("GitHub 用户名已关联其他身份，请联系管理员核对")
+    existing = await call_store(request, "get_user_by_github_id", profile["id"])
     if existing and existing["id"] != user["id"]:
         if not can_merge_github_user(user, existing):
             raise error(409, "This GitHub account is already linked to another user")
@@ -4902,7 +4955,7 @@ def build_astrbot_plugin_source(plugins: list[dict[str, Any]]) -> dict[str, dict
         name = str(plugin.get("name") or plugin.get("id") or "").strip()
         if not name:
             continue
-        feed[name] = format_astrbot_plugin(plugin, name)
+        feed[str(plugin.get("id") or name)] = format_astrbot_plugin(plugin, name)
     return dict(sorted(feed.items()))
 
 
@@ -4947,9 +5000,12 @@ async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str,
 
 def public_market_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: value
-        for key, value in plugin.items()
-        if not key.startswith("_artifact_") and key != "artifact_download_url"
+        **{
+            key: value
+            for key, value in plugin.items()
+            if not key.startswith("_artifact_") and key != "artifact_download_url"
+        },
+        "canonical_path": plugin_canonical_path(plugin),
     }
 
 
@@ -4970,6 +5026,7 @@ def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
         )
     return {
         "name": name,
+        "market_plugin_id": str(plugin.get("id") or name),
         "display_name": plugin.get("display_name") or "",
         "desc": plugin.get("desc") or "",
         "short_desc": plugin.get("short_desc") or "",

@@ -16,9 +16,14 @@ if (!response.ok) throw new Error(`[prerender] Plugin list returned HTTP ${respo
 const payload = await response.json();
 const pluginRoutes = (payload.items || [])
   .filter((plugin) => !plugin.status || plugin.status === "listed")
-  .map((plugin) => String(plugin.id || "").trim())
-  .filter(Boolean)
-  .map((name) => `/plugin/${encodeURIComponent(name)}`);
+  .filter((plugin) => plugin.id)
+  .map(
+    (plugin) =>
+      plugin.canonical_path ||
+      (plugin.owner_github_login
+        ? `/plugin/${encodeURIComponent(plugin.owner_github_login)}/${encodeURIComponent(plugin.name || plugin.id)}`
+        : `/plugin/${encodeURIComponent(plugin.id)}`),
+  );
 const routes = ["/", "/submit", "/docs/rest", ...pluginRoutes];
 const privateRouteShells = [
   { route: "/plugin-workbench", title: "插件审查工作台 - Astrhub 插件市场" },
@@ -42,6 +47,10 @@ try {
   });
   try {
     const page = await browser.newPage();
+    // Visitor-specific dialogs must not leave teleported markup in static snapshots.
+    await page.evaluateOnNewDocument(() => {
+      window.__ASTRHUB_PRERENDER__ = true;
+    });
     await page.setViewport({ width: 1440, height: 1000 });
     let rootHtml = "";
     for (const route of routes) {

@@ -51,9 +51,7 @@ def can_edit_plugin(user: Mapping | None, plugin: Mapping | None) -> bool:
         return False
     if is_admin(user):
         return True
-    return plugin.get("owner_user_id") == user.get("id") or plugin.get(
-        "owner_github_login"
-    ) == user.get("github_login")
+    return plugin.get("owner_user_id") == user.get("id")
 
 
 def can_manage_plugin_submission(user: Mapping | None, plugin: Mapping | None) -> bool:

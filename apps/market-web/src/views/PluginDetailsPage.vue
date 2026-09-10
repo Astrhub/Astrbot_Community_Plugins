@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, shallowRef, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import { NButton, NCard, NIcon, NResult, NSpin, NTag, useMessage } from "naive-ui";
 import {
@@ -18,9 +18,11 @@ import { DEFAULT_OG_IMAGE, useSeo } from "../composables/useSeo";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
 import AppFooter from "../components/AppFooter.vue";
 import AppHeader from "../components/AppHeader.vue";
+import { pluginDetailPath } from "../utils/pluginRoute";
 
 const PluginDetails = defineAsyncComponent(() => import("../components/PluginDetails.vue"));
 const route = useRoute();
+const router = useRouter();
 const store = usePluginStore();
 const { currentUser, siteConfig } = storeToRefs(store);
 const message = useMessage();
@@ -32,11 +34,12 @@ const liking = shallowRef(false);
 const copied = shallowRef(false);
 
 const pluginName = computed(() => String(route.params.name || ""));
+const pluginUsername = computed(() => String(route.params.username || ""));
 const displayName = computed(() => plugin.value?.display_name || plugin.value?.name || "插件详情");
 const description = computed(
   () => plugin.value?.desc || plugin.value?.short_desc || "查看 AstrBot 社区插件详情。",
 );
-const canonicalPath = computed(() => `/plugin/${encodeURIComponent(pluginName.value)}`);
+const canonicalPath = computed(() => (plugin.value ? pluginDetailPath(plugin.value) : route.path));
 const categoryLabel = computed(() =>
   plugin.value ? PLUGIN_CATEGORY_LABELS[plugin.value.category] || "其他" : "其他",
 );
@@ -70,8 +73,16 @@ const jsonLd = computed(() => {
 });
 
 useSeo({
-  title: displayName,
-  description,
+  title: computed(() =>
+    plugin.value?.owner_github_login
+      ? `${displayName.value} · ${plugin.value.owner_github_login}`
+      : displayName.value,
+  ),
+  description: computed(() =>
+    plugin.value?.owner_github_login
+      ? `${plugin.value.owner_github_login} 发布的 ${displayName.value}。${description.value}`
+      : description.value,
+  ),
   path: canonicalPath,
   image: DEFAULT_OG_IMAGE,
   type: "article",
@@ -80,18 +91,26 @@ useSeo({
   jsonLd,
 });
 
+let detailRequest = 0;
 watch(
-  pluginName,
-  async (name) => {
+  [pluginUsername, pluginName],
+  async ([username, name]) => {
+    const request = ++detailRequest;
     loading.value = true;
     notFound.value = false;
     plugin.value = null;
     try {
-      plugin.value = await store.loadPluginDetail(name);
+      const detail = username
+        ? await store.loadPluginByAuthor(username, name)
+        : await store.loadPluginDetail(name);
+      if (request !== detailRequest) return;
+      plugin.value = detail;
+      const path = pluginDetailPath(detail);
+      if (path !== route.path) await router.replace({ path, query: route.query, hash: route.hash });
     } catch {
-      notFound.value = true;
+      if (request === detailRequest) notFound.value = true;
     } finally {
-      loading.value = false;
+      if (request === detailRequest) loading.value = false;
     }
   },
   { immediate: true },
@@ -156,12 +175,8 @@ function updatePlugin(updated: PluginDetail): void {
       </router-link>
 
       <div v-if="loading" class="plugin-state"><n-spin size="large" /></div>
-      <n-result
-        v-else-if="notFound"
-        status="404"
-        title="插件不存在"
-        description="该插件未上架、已下架或名称有误。"
-      >
+      <n-result v-else-if="notFound" status="404" description="该插件未上架、已下架或名称有误。">
+        <h1 class="not-found-heading">插件不存在</h1>
         <template #footer><router-link to="/">浏览其他插件</router-link></template>
       </n-result>
       <div v-else-if="plugin" class="plugin-layout">
@@ -178,7 +193,7 @@ function updatePlugin(updated: PluginDetail): void {
               <div class="plugin-intro__copy">
                 <p class="plugin-kicker">AstrBot 社区插件</p>
                 <h1 id="plugin-title">{{ displayName }}</h1>
-                <p class="plugin-id">{{ plugin.id }}</p>
+                <p class="plugin-id">{{ plugin.owner_github_login }} / {{ plugin.name }}</p>
               </div>
             </div>
             <p class="plugin-description">{{ description }}</p>

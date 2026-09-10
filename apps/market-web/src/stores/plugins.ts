@@ -798,12 +798,15 @@ export const usePluginStore = defineStore("plugins", () => {
     pluginId: number | string,
     payload: Partial<Plugin> & Record<string, unknown>,
   ): Promise<Plugin> {
-    const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}`, {
-      method: "PATCH",
-      credentials: "include",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const response = await fetch(
+      `${apiBaseUrl}/v1/plugins/${encodeURIComponent(String(pluginId))}`,
+      {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "保存插件信息失败");
     updatePluginInList(data);
@@ -845,6 +848,30 @@ export const usePluginStore = defineStore("plugins", () => {
       credentials: "include",
       cache: "no-store",
     });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "加载插件详情失败");
+    return data;
+  }
+
+  async function loadPluginByAuthor(username: string, name: string): Promise<PluginDetail> {
+    // A release can be prerendered against the preceding API before the atomic deployment.
+    if (window.__ASTRHUB_PRERENDER__) {
+      await loadPlugins();
+      const item = plugins.value.find(
+        (item) =>
+          item.owner_github_login?.toLowerCase() === username.toLowerCase() &&
+          item.name.toLowerCase() === name.toLowerCase(),
+      );
+      if (!item) throw new Error("插件不存在");
+      return loadPluginDetail(item.id);
+    }
+    const response = await fetch(
+      `${apiBaseUrl}/v1/plugins/by-author/${encodeURIComponent(username)}/${encodeURIComponent(name)}`,
+      {
+        credentials: "include",
+        cache: "no-store",
+      },
+    );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "加载插件详情失败");
     return data;
@@ -1385,6 +1412,7 @@ export const usePluginStore = defineStore("plugins", () => {
     requestPluginListing,
     unlistOwnPlugin,
     loadPluginDetail,
+    loadPluginByAuthor,
     loadPluginReadme,
     likePlugin,
     unlikePlugin,

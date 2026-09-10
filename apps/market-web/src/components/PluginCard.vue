@@ -15,6 +15,7 @@ import type { Plugin } from "@/types";
 import { usePluginStore } from "@/stores/plugins";
 import { resolvePluginLogoUrl, setDefaultPluginLogo } from "@/utils/github";
 import { isNewPlugin } from "@/utils/pluginFreshness";
+import { pluginDetailPath } from "@/utils/pluginRoute";
 
 const props = withDefaults(
   defineProps<{
@@ -116,7 +117,7 @@ async function unlistPlugin(): Promise<void> {
   <article class="plugin-card" :style="animationStyle" :aria-label="`插件：${displayName}`">
     <router-link
       class="plugin-card__detail-link"
-      :to="{ name: 'PluginDetails', params: { name: plugin.id } }"
+      :to="pluginDetailPath(plugin)"
       :aria-label="`查看 ${displayName} 插件详情`"
     />
 

@@ -15,3 +15,7 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+interface Window {
+  __ASTRHUB_PRERENDER__?: boolean;
+}

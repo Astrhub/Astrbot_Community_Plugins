@@ -16,10 +16,15 @@ const NotFound = () => import("../views/NotFound.vue");
 
 const routes: RouteRecordRaw[] = [
   {
-    path: "/plugin/:name",
+    path: "/plugin/:username/:name",
     name: "PluginDetails",
     component: PluginDetailsPage,
     props: true,
+  },
+  {
+    path: "/plugin/:name",
+    name: "LegacyPluginDetails",
+    component: PluginDetailsPage,
   },
   {
     path: "/",

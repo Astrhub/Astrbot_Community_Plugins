@@ -47,6 +47,7 @@ export interface Plugin {
   list_index: number;
   owner_user_id?: number | null;
   owner_github_login?: string;
+  canonical_path?: string;
   status?: PluginStatus;
   submission_id?: number | string;
   download_url?: string;

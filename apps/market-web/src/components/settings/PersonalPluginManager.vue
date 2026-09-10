@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { pluginDetailPath } from "@/utils/pluginRoute";
 import { computed, reactive, watch } from "vue";
 import { NButton, NEmpty, NIcon, NInput, NSelect, NSpin } from "naive-ui";
 import {
@@ -227,10 +228,7 @@ function savePlugin(plugin: Plugin): void {
             </div>
 
             <div class="pm-actions">
-              <router-link
-                class="pm-action-link"
-                :to="{ name: 'PluginDetails', params: { name: plugin.id } }"
-              >
+              <router-link class="pm-action-link" :to="pluginDetailPath(plugin)">
                 查看
               </router-link>
               <n-button

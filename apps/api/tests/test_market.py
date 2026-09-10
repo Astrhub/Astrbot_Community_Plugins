@@ -2191,6 +2191,7 @@ def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
     plugin_without_timestamp = {key: value for key, value in plugin.items() if key != "updated_at"}
     assert plugin_without_timestamp == {
         "name": "astrbot_plugin_demo",
+        "market_plugin_id": "astrbot_plugin_demo",
         "display_name": "Demo",
         "desc": "Demo plugin",
         "short_desc": "",
