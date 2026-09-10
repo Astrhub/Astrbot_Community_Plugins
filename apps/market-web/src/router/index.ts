@@ -99,6 +99,16 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
+  scrollBehavior(to, from, savedPosition) {
+    if (to.path === from.path && !savedPosition) return false;
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() =>
+        window.requestAnimationFrame(() => {
+          resolve(savedPosition || { left: 0, top: 0 });
+        }),
+      );
+    });
+  },
 });
 
 router.beforeEach(async (to) => {

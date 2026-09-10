@@ -12,7 +12,6 @@ function mountToolbar(props: Record<string, unknown> = {}) {
         { label: "全部分类", value: "all" },
         { label: "实用工具", value: "utilities" },
       ],
-      tagOptions: [{ label: "工具", value: "工具" }],
       ...props,
     },
     global: {

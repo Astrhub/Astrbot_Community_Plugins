@@ -13,6 +13,7 @@ import {
   ShieldCheckmarkOutline,
 } from "@vicons/ionicons5";
 import ThemeModeButton from "./ThemeModeButton.vue";
+import AnnouncementButton from "./AnnouncementButton.vue";
 import { usePluginStore } from "../stores/plugins";
 import { githubRawUrl } from "../utils/github";
 
@@ -148,6 +149,8 @@ async function handleUserMenuSelect(key: string): Promise<void> {
       <div class="nav-actions">
         <router-link class="nav-link nav-link--optional" to="/">插件墙</router-link>
         <router-link class="nav-link nav-link--optional" to="/docs/rest">文档</router-link>
+
+        <announcement-button />
 
         <router-link
           v-if="currentUser"
@@ -399,8 +402,13 @@ async function handleUserMenuSelect(key: string): Promise<void> {
     font-size: 14px;
   }
 
+  .top-nav {
+    gap: 12px;
+  }
+
   .nav-actions {
-    gap: 10px;
+    flex: 0 0 auto;
+    gap: 8px;
   }
 
   .nav-link--optional {

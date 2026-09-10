@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import { NIcon, useMessage } from "naive-ui";
-import { CopyOutline, MegaphoneOutline, SearchOutline } from "@vicons/ionicons5";
+import { CopyOutline, SearchOutline } from "@vicons/ionicons5";
 import AppFooter from "../components/AppFooter.vue";
 import AppHeader from "../components/AppHeader.vue";
 import AppPagination from "../components/AppPagination.vue";
 import PluginCard from "../components/PluginCard.vue";
+import PluginMasonry from "../components/PluginMasonry.vue";
+import TagFilter from "../components/TagFilter.vue";
 import SearchToolbar from "../components/SearchToolbar.vue";
 import { normalizePluginCategory, usePluginStore } from "../stores/plugins";
 import { useSeo } from "../composables/useSeo";
+import { usePluginLogoPreload } from "../composables/usePluginLogoPreload";
 
 const store = usePluginStore();
 const route = useRoute();
@@ -18,7 +21,7 @@ const router = useRouter();
 const message = useMessage();
 const {
   searchQuery,
-  selectedTag,
+  selectedTags,
   selectedCategory,
   currentPage,
   sortBy,
@@ -31,11 +34,10 @@ const {
   isLoading,
   filteredPlugins,
   randomSeed,
-  announcements,
   siteConfig,
+  pageSize,
 } = storeToRefs(store);
 
-const visibleAnnouncements = computed(() => announcements.value.slice(0, 1));
 const pluginCount = computed(() => filteredPlugins.value.length);
 const authorCount = computed(
   () =>
@@ -64,15 +66,105 @@ useSeo({
 });
 
 const { refreshRandomOrder } = store;
-const FILTER_QUERY_KEYS = ["q", "tag", "category", "page", "sort", "direction", "fuzzy"];
+const FILTER_QUERY_KEYS = ["q", "tag", "category", "page", "sort", "direction", "fuzzy", "view"];
 const SORT_VALUES = new Set(["default", "random", "updated", "stars", "likes", "comments"]);
 let applyingRouteQuery = false;
+const viewMode = computed(() =>
+  firstQueryValue(route.query.view) === "waterfall" ? "waterfall" : "paged",
+);
+const visiblePlugins = computed(() =>
+  viewMode.value === "waterfall"
+    ? filteredPlugins.value.slice(0, currentPage.value * pageSize.value)
+    : paginatedPlugins.value,
+);
+const hasMore = computed(() => currentPage.value < totalPages.value);
+const sentinel = ref<HTMLElement | null>(null);
+const preloadReady = shallowRef(false);
+const upcomingPlugins = computed(() =>
+  viewMode.value === "waterfall" && preloadReady.value
+    ? filteredPlugins.value.slice(
+        currentPage.value * pageSize.value,
+        (currentPage.value + 1) * pageSize.value,
+      )
+    : [],
+);
+usePluginLogoPreload(upcomingPlugins);
+let appendObserver: IntersectionObserver | undefined;
+let preloadObserver: IntersectionObserver | undefined;
+let appending = false;
+let mounted = false;
+
+function modeQuery(mode: string) {
+  return {
+    path: "/",
+    query: { ...route.query, view: mode === "waterfall" ? mode : undefined, page: undefined },
+  };
+}
+
+function setupObservers(): void {
+  appendObserver?.disconnect();
+  preloadObserver?.disconnect();
+  if (
+    !mounted ||
+    viewMode.value !== "waterfall" ||
+    !sentinel.value ||
+    typeof IntersectionObserver === "undefined"
+  )
+    return;
+  appendObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void appendNextPage();
+    },
+    { rootMargin: "350px 0px" },
+  );
+  preloadObserver = new IntersectionObserver(
+    (entries) => {
+      preloadReady.value = entries.some((entry) => entry.isIntersecting);
+    },
+    { rootMargin: "1000px 0px" },
+  );
+  appendObserver.observe(sentinel.value);
+  preloadObserver.observe(sentinel.value);
+}
+
+async function appendNextPage(): Promise<void> {
+  if (!mounted || appending || isLoading.value || !hasMore.value || viewMode.value !== "waterfall")
+    return;
+  appending = true;
+  currentPage.value++;
+  await nextTick();
+  await new Promise<void>((resolve) =>
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve())),
+  );
+  appending = false;
+  if (
+    mounted &&
+    sentinel.value &&
+    sentinel.value.getBoundingClientRect().top < window.innerHeight + 350
+  )
+    void appendNextPage();
+}
+
+function loadMore(event: MouseEvent): void {
+  if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0)
+    return;
+  event.preventDefault();
+  void appendNextPage();
+}
+
+const nextPageHref = computed(
+  () =>
+    router.resolve({
+      path: "/",
+      query: { ...route.query, view: "waterfall", page: String(currentPage.value + 1) },
+    }).href,
+);
 
 watch(() => route.query, applyQueryState, { immediate: true });
 watch(
   [
     searchQuery,
-    selectedTag,
+    selectedTags,
     selectedCategory,
     currentPage,
     sortBy,
@@ -90,23 +182,18 @@ watch(
 );
 
 onMounted(() => {
+  mounted = true;
   store.loadPlugins();
-  store.loadAnnouncements().catch((error: unknown) => {
-    console.error("Error loading announcements:", error);
-  });
+  void nextTick(setupObservers);
 });
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+watch([viewMode, sentinel, isLoading], () => {
+  void nextTick(setupObservers);
+});
+onUnmounted(() => {
+  mounted = false;
+  appendObserver?.disconnect();
+  preloadObserver?.disconnect();
+});
 
 async function copyPluginSource(): Promise<void> {
   const value = store.pluginSourceUrl;
@@ -139,7 +226,8 @@ function applyQueryState(): void {
   const categoryValue = firstQueryValue(query.category);
 
   searchQuery.value = firstQueryValue(query.q);
-  selectedTag.value = firstQueryValue(query.tag) || null;
+  const tags = queryValues(query.tag);
+  if (JSON.stringify(selectedTags.value) !== JSON.stringify(tags)) selectedTags.value = tags;
   selectedCategory.value =
     categoryValue && categoryValue !== "all" ? normalizePluginCategory(categoryValue) : "all";
   currentPage.value = parsePage(firstQueryValue(query.page));
@@ -160,7 +248,7 @@ function mergedFilterQuery(): Record<string, unknown> {
   const query: Record<string, unknown> = { ...route.query };
   FILTER_QUERY_KEYS.forEach((key) => delete query[key]);
   if (searchQuery.value.trim()) query.q = searchQuery.value.trim();
-  if (selectedTag.value) query.tag = selectedTag.value;
+  if (selectedTags.value.length) query.tag = selectedTags.value;
   if (selectedCategory.value && selectedCategory.value !== "all") {
     query.category = selectedCategory.value;
   }
@@ -168,12 +256,24 @@ function mergedFilterQuery(): Record<string, unknown> {
   if (sortBy.value !== "default") query.sort = sortBy.value;
   if (sortDirection.value !== "asc") query.direction = sortDirection.value;
   if (fuzzySearchEnabled.value) query.fuzzy = "1";
+  if (viewMode.value === "waterfall") query.view = "waterfall";
   return query;
 }
 
 function firstQueryValue(value: unknown): string {
   if (Array.isArray(value)) return String(value[0] || "");
   return String(value || "");
+}
+
+function queryValues(value: unknown): string[] {
+  return [
+    ...new Set(
+      (Array.isArray(value) ? value : [value])
+        .filter((item) => item !== null && item !== undefined)
+        .map((item) => String(item).trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function parsePage(value: string): number {
@@ -195,8 +295,8 @@ function queriesEqual(left: Record<string, unknown>, right: Record<string, unkno
 function normalizeQuery(query: Record<string, unknown>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(query)
-      .map(([key, value]) => [key, firstQueryValue(value)])
-      .filter(([, value]) => value !== ""),
+      .filter(([, value]) => queryValues(value).length)
+      .map(([key, value]) => [key, JSON.stringify(queryValues(value))]),
   );
 }
 </script>
@@ -204,21 +304,6 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
 <template>
   <div class="home-page">
     <app-header />
-
-    <section v-if="visibleAnnouncements.length" class="announcements" aria-label="站点公告">
-      <article
-        v-for="announcement in visibleAnnouncements"
-        :key="announcement.id"
-        class="announcement-item"
-      >
-        <div class="announcement-copy">
-          <n-icon><megaphone-outline /></n-icon>
-          <strong>{{ announcement.title }}</strong>
-          <span>{{ announcement.body }}</span>
-        </div>
-        <time v-if="announcement.created_at">{{ formatTime(announcement.created_at) }}</time>
-      </article>
-    </section>
 
     <section class="market-summary" aria-labelledby="market-title">
       <div class="market-heading">
@@ -242,13 +327,11 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
     <section class="market-toolbar" aria-label="插件筛选与操作">
       <search-toolbar
         v-model:search-query="searchQuery"
-        v-model:selected-tag="selectedTag"
         v-model:selected-category="selectedCategory"
         v-model:current-page="currentPage"
         v-model:sort-by="sortBy"
         v-model:sort-direction="sortDirection"
         v-model:fuzzy-search-enabled="fuzzySearchEnabled"
-        :tag-options="tagOptions"
         :category-options="categoryOptions"
         :on-header="true"
         @refresh-random="refreshRandomOrder"
@@ -265,7 +348,36 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
       </div>
     </section>
 
-    <main class="plugins-grid">
+    <tag-filter
+      class="market-tags"
+      :model-value="selectedTags"
+      :options="tagOptions"
+      @update:model-value="store.setSelectedTags"
+    />
+
+    <div class="browse-toolbar">
+      <span>{{
+        viewMode === "waterfall"
+          ? `已显示 ${visiblePlugins.length} / ${pluginCount} 个插件`
+          : `共 ${pluginCount} 个插件`
+      }}</span>
+      <nav class="view-switch" aria-label="插件浏览方式">
+        <router-link
+          :to="modeQuery('paged')"
+          :class="{ active: viewMode === 'paged' }"
+          :aria-current="viewMode === 'paged' ? 'true' : undefined"
+          >分页</router-link
+        >
+        <router-link
+          :to="modeQuery('waterfall')"
+          :class="{ active: viewMode === 'waterfall' }"
+          :aria-current="viewMode === 'waterfall' ? 'true' : undefined"
+          >瀑布流</router-link
+        >
+      </nav>
+    </div>
+
+    <main :class="viewMode === 'waterfall' ? 'plugins-waterfall' : 'plugins-grid'">
       <div v-if="isLoading" class="loading-container">
         <div class="loading-dots" aria-label="正在加载插件数据">
           <span></span><span></span><span></span>
@@ -275,12 +387,21 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
       <div v-else-if="filteredPlugins.length === 0" class="empty-state">
         <n-icon size="40"><search-outline /></n-icon>
         <h2>没有找到相关插件</h2>
-        <p>{{ searchQuery || selectedTag ? "请调整搜索或筛选条件" : "当前没有可用的插件数据" }}</p>
+        <p>
+          {{
+            searchQuery || selectedTags.length ? "请调整搜索或筛选条件" : "当前没有可用的插件数据"
+          }}
+        </p>
       </div>
 
+      <plugin-masonry
+        v-else-if="viewMode === 'waterfall'"
+        :plugins="visiblePlugins"
+        :seed="randomSeed"
+      />
       <template v-else>
         <plugin-card
-          v-for="(plugin, index) in paginatedPlugins"
+          v-for="(plugin, index) in visiblePlugins"
           :key="plugin.id"
           :plugin="plugin"
           :index="index"
@@ -289,7 +410,11 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
       </template>
     </main>
 
-    <div class="bottom-pagination-wrapper">
+    <div v-if="viewMode === 'waterfall' && !isLoading" ref="sentinel" class="waterfall-more">
+      <a v-if="hasMore" :href="nextPageHref" @click="loadMore">继续加载插件</a>
+      <span v-else>已展示全部 {{ pluginCount }} 个插件</span>
+    </div>
+    <div v-else class="bottom-pagination-wrapper">
       <app-pagination v-if="totalPages > 1" v-model="currentPage" :total-pages="totalPages" />
     </div>
     <app-footer />
@@ -303,56 +428,57 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
   background: var(--bg-base);
 }
 
-.announcements,
 .market-summary,
 .market-toolbar,
-.plugins-grid {
+.plugins-grid,
+.plugins-waterfall,
+.market-tags,
+.browse-toolbar {
   width: min(1824px, calc(100% - 96px));
   margin-right: auto;
   margin-left: auto;
   box-sizing: border-box;
 }
 
-.announcements {
-  background: color-mix(in srgb, var(--primary-light) 58%, var(--bg-card));
-  border-bottom: 1px solid var(--border-base);
-}
-
-.announcement-item {
-  min-height: 50px;
+.browse-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  padding: 0 28px;
-  color: var(--text-secondary);
+  padding: 16px 0;
+  gap: 12px;
+  color: var(--text-tertiary);
   font-size: 12px;
 }
-
-.announcement-copy {
-  min-width: 0;
+.view-switch {
   display: flex;
-  align-items: center;
-  gap: 14px;
+  padding: 3px;
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  background: var(--bg-card);
 }
-
-.announcement-copy .n-icon,
-.announcement-copy strong {
-  flex: 0 0 auto;
+.view-switch a {
+  padding: 6px 14px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-radius: 5px;
+}
+.view-switch a.active {
   color: var(--primary-color);
+  background: var(--primary-light);
 }
-
-.announcement-copy span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.announcement-item time {
-  flex: 0 0 auto;
+.waterfall-more {
+  min-height: 76px;
+  display: grid;
+  place-items: center;
   color: var(--text-tertiary);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 13px;
+}
+.waterfall-more a {
+  color: var(--primary-color);
+  text-decoration: none;
+  padding: 12px 24px;
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
 }
 
 .market-summary {
@@ -543,10 +669,12 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
 }
 
 @media (max-width: 1120px) {
-  .announcements,
   .market-summary,
   .market-toolbar,
-  .plugins-grid {
+  .plugins-grid,
+  .plugins-waterfall,
+  .market-tags,
+  .browse-toolbar {
     width: min(100% - 48px, 1824px);
   }
 
@@ -569,43 +697,37 @@ function normalizeQuery(query: Record<string, unknown>): Record<string, string> 
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .market-summary {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 12px;
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+
   .market-stats {
-    display: none;
+    flex-wrap: wrap;
+    gap: 12px;
   }
 }
 
 @media (max-width: 680px) {
-  .announcements,
   .market-summary,
   .market-toolbar,
-  .plugins-grid {
+  .plugins-grid,
+  .market-tags {
     width: 100%;
   }
 
-  .announcement-item {
-    align-items: flex-start;
-    padding: 12px 14px;
-  }
-
-  .announcement-copy {
-    align-items: flex-start;
-    flex-wrap: wrap;
-    gap: 6px 10px;
-  }
-
-  .announcement-copy span {
-    width: 100%;
-    padding-left: 26px;
-    white-space: normal;
-  }
-
-  .announcement-item time {
-    display: none;
+  .plugins-waterfall,
+  .browse-toolbar {
+    width: calc(100% - 28px);
   }
 
   .market-summary {
     min-height: 64px;
-    padding: 0 16px;
+    padding: 16px;
   }
 
   .market-heading {

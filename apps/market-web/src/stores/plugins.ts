@@ -265,7 +265,13 @@ export const usePluginStore = defineStore("plugins", () => {
   });
   const siteConfig = ref<SiteConfig>(normalizeSiteConfig(readCachedSiteConfig() || {}));
   const searchQuery = shallowRef("");
-  const selectedTag = shallowRef<string | null>(null);
+  const selectedTags = shallowRef<string[]>([]);
+  const selectedTag = computed({
+    get: () => selectedTags.value[0] || null,
+    set: (value: string | null) => {
+      selectedTags.value = value ? [value] : [];
+    },
+  });
   const selectedCategory = shallowRef("all");
   const currentPage = shallowRef(1);
   const pageSize = shallowRef(12);
@@ -430,7 +436,16 @@ export const usePluginStore = defineStore("plugins", () => {
     return Array.from(tags).sort();
   });
 
-  const tagOptions = computed(() => allTags.value.map((tag) => ({ label: tag, value: tag })));
+  const tagOptions = computed(() => {
+    const counts = new Map<string, number>();
+    for (const plugin of plugins.value) {
+      for (const tag of normalizePluginTags(plugin.tags))
+        counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+    return allTags.value
+      .map((tag) => ({ label: tag, value: tag, count: counts.get(tag) || 0 }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-CN"));
+  });
 
   const categoryOptions = computed(() => {
     const counts = plugins.value.reduce<Record<string, number>>(
@@ -461,10 +476,11 @@ export const usePluginStore = defineStore("plugins", () => {
       const matchesCategory =
         category === "all" || normalizePluginCategory(plugin.category) === category;
       if (!matchesCategory) return false;
-      if (!searchValue && !selectedTag.value) return true;
+      if (!searchValue && !selectedTags.value.length) return true;
       const matchesSearch = !searchValue || pluginMatchesSearch(plugin, searchValue);
+      const tags = normalizePluginTags(plugin.tags);
       const matchesTag =
-        !selectedTag.value || normalizePluginTags(plugin.tags).includes(selectedTag.value);
+        !selectedTags.value.length || selectedTags.value.some((tag) => tags.includes(tag));
       return matchesSearch && matchesTag;
     });
 
@@ -1323,6 +1339,11 @@ export const usePluginStore = defineStore("plugins", () => {
     selectedTag.value = tag;
   }
 
+  function setSelectedTags(tags: string[]): void {
+    selectedTags.value = normalizePluginTags(tags);
+    currentPage.value = 1;
+  }
+
   function setSelectedCategory(category: string): void {
     selectedCategory.value = category || "all";
   }
@@ -1385,8 +1406,10 @@ export const usePluginStore = defineStore("plugins", () => {
     siteConfig,
     searchQuery,
     selectedTag,
+    selectedTags,
     selectedCategory,
     currentPage,
+    pageSize,
     isDarkMode,
     themeMode,
     sortBy,
@@ -1459,6 +1482,7 @@ export const usePluginStore = defineStore("plugins", () => {
     loadGithubRepositories,
     setSearchQuery,
     setSelectedTag,
+    setSelectedTags,
     setSelectedCategory,
     setCurrentPage,
     setSortBy,

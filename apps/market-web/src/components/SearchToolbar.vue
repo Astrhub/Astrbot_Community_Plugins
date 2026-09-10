@@ -19,8 +19,6 @@ const props = withDefaults(
     fuzzySearchEnabled?: boolean;
     selectedCategory?: string;
     categoryOptions?: SelectOption[];
-    selectedTag?: string | null;
-    tagOptions?: SelectOption[];
     compact?: boolean;
     onHeader?: boolean;
     mobile?: boolean;
@@ -34,8 +32,6 @@ const props = withDefaults(
     fuzzySearchEnabled: false,
     selectedCategory: "all",
     categoryOptions: () => [],
-    selectedTag: null,
-    tagOptions: () => [],
     compact: false,
     onHeader: false,
     mobile: false,
@@ -50,7 +46,6 @@ const emit = defineEmits<{
   "update:sortDirection": [value: string];
   "update:fuzzySearchEnabled": [value: boolean];
   "update:selectedCategory": [value: string];
-  "update:selectedTag": [value: string | null];
   refreshRandom: [];
 }>();
 
@@ -87,11 +82,6 @@ function updateCategory(value: string | null): void {
   resetPage();
 }
 
-function updateTag(value: string | null): void {
-  emit("update:selectedTag", value || null);
-  resetPage();
-}
-
 function updateSort(value: string): void {
   emit("update:sortBy", value);
   resetPage();
@@ -120,6 +110,7 @@ function handleDirectionAction(): void {
       'search-toolbar--compact': compact,
       'search-toolbar--header': onHeader,
       'search-toolbar--mobile': mobile,
+      'search-toolbar--with-category': showCategoryFilter && hasCategoryFilters,
     }"
   >
     <div class="search-cluster">
@@ -177,17 +168,6 @@ function handleDirectionAction(): void {
       @update:value="updateCategory"
     />
     <n-select
-      :value="selectedTag"
-      :options="tagOptions"
-      placeholder="全部标签"
-      aria-label="插件标签"
-      filterable
-      clearable
-      class="toolbar-select tag-select"
-      @update:value="updateTag"
-    />
-
-    <n-select
       :value="sortBy"
       :options="sortOptions"
       aria-label="排序方式"
@@ -220,12 +200,31 @@ function handleDirectionAction(): void {
 .search-toolbar {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(360px, 1fr) 148px 148px 142px 52px;
+  grid-template-columns: minmax(0, 1fr) 142px 52px;
+  grid-template-areas: "search sort direction";
   align-items: stretch;
   background: var(--bg-card);
 }
 
+.search-toolbar--with-category {
+  grid-template-columns: minmax(0, 1fr) 148px 142px 52px;
+  grid-template-areas: "search category sort direction";
+}
+
+.category-select {
+  grid-area: category;
+}
+
+.sort-select {
+  grid-area: sort;
+}
+
+.direction-button {
+  grid-area: direction;
+}
+
 .search-cluster {
+  grid-area: search;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -379,39 +378,41 @@ function handleDirectionAction(): void {
 
 @media (max-width: 1180px) {
   .search-toolbar {
-    grid-template-columns: minmax(320px, 1fr) 132px 132px 124px 48px;
+    grid-template-columns: minmax(0, 1fr) 124px 48px;
+  }
+
+  .search-toolbar--with-category {
+    grid-template-columns: minmax(0, 1fr) 132px 124px 48px;
   }
 }
 
 @media (max-width: 820px) {
   .search-toolbar {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px;
+    grid-template-columns: minmax(0, 1fr) 46px;
+    grid-template-areas:
+      "search search"
+      "sort direction";
     border: 1px solid var(--border-base);
   }
 
+  .search-toolbar--with-category {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 46px;
+    grid-template-areas:
+      "search search search"
+      "category sort direction";
+  }
+
   .search-cluster {
-    grid-column: 1 / -1;
     border-bottom: 1px solid var(--border-base);
   }
 
-  .category-select {
-    grid-column: 1;
-  }
-
-  .tag-select {
-    grid-column: 2;
-  }
-
-  .sort-select {
-    grid-column: 1 / 3;
-    grid-row: 3;
-    border-top: 1px solid var(--border-base);
+  .category-select,
+  .search-toolbar:not(.search-toolbar--with-category) .sort-select {
     border-left: 0;
   }
 
-  .direction-button {
-    grid-column: 3;
-    grid-row: 2 / 4;
+  .sort-select {
+    border-top: 0;
   }
 }
 
@@ -420,25 +421,20 @@ function handleDirectionAction(): void {
     grid-template-columns: minmax(0, 1fr) 44px;
   }
 
-  .category-select,
-  .tag-select,
-  .sort-select {
-    grid-column: 1;
+  .search-toolbar--with-category {
+    grid-template-areas:
+      "search search"
+      "category direction"
+      "sort direction";
   }
 
-  .tag-select {
-    grid-row: 3;
+  .search-toolbar--with-category .sort-select {
     border-top: 1px solid var(--border-base);
     border-left: 0;
   }
 
-  .sort-select {
-    grid-row: 4;
-  }
-
-  .direction-button {
-    grid-column: 2;
-    grid-row: 2 / 5;
+  .search-toolbar--with-category .direction-button {
+    height: 100%;
   }
 
   .search-field {

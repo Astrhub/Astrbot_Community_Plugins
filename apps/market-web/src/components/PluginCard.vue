@@ -22,10 +22,12 @@ const props = withDefaults(
     plugin: Plugin;
     index?: number;
     seed?: number | string;
+    masonry?: boolean;
   }>(),
   {
     index: 0,
     seed: 0,
+    masonry: false,
   },
 );
 
@@ -114,7 +116,12 @@ async function unlistPlugin(): Promise<void> {
 </script>
 
 <template>
-  <article class="plugin-card" :style="animationStyle" :aria-label="`插件：${displayName}`">
+  <article
+    class="plugin-card"
+    :class="{ 'plugin-card--masonry': masonry }"
+    :style="animationStyle"
+    :aria-label="`插件：${displayName}`"
+  >
     <router-link
       class="plugin-card__detail-link"
       :to="pluginDetailPath(plugin)"
@@ -494,5 +501,9 @@ async function unlistPlugin(): Promise<void> {
   .plugin-actions {
     gap: 0;
   }
+}
+.plugin-card.plugin-card--masonry {
+  border: 1px solid var(--border-base);
+  border-radius: 10px;
 }
 </style>
