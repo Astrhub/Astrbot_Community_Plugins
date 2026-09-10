@@ -103,7 +103,13 @@ const visibleItems = computed(() =>
       (!selection.value.risk || item.risk_level === selection.value.risk),
   ),
 );
-const commandBusy = computed(() => deciding.value || mutating.value);
+const commandBusy = computed(
+  () =>
+    deciding.value ||
+    mutating.value ||
+    loadingDetail.value ||
+    detail.value?.artifact.id !== selectedId.value,
+);
 const supersedesArtifact = computed(() => {
   const artifact = detail.value?.artifact;
   return !isAdmin.value && artifact?.review_status === "changes_requested" ? artifact : null;
@@ -469,7 +475,7 @@ async function refreshAfterDecision(artifactId: string): Promise<void> {
 
 async function approve(reason: string): Promise<void> {
   const artifactId = selectedId.value;
-  if (!artifactId) return;
+  if (!artifactId || commandBusy.value) return;
   try {
     await artifactStore.approve(artifactId, reason);
     message.success("版本已批准，正在排队发布 CDN 包");
@@ -481,7 +487,7 @@ async function approve(reason: string): Promise<void> {
 
 async function reject(reason: string): Promise<void> {
   const artifactId = selectedId.value;
-  if (!artifactId) return;
+  if (!artifactId || commandBusy.value) return;
   try {
     await artifactStore.reject(artifactId, reason);
     message.success("版本已拒绝，不会提供 CDN 下载链接");
@@ -493,7 +499,7 @@ async function reject(reason: string): Promise<void> {
 
 async function requestChanges(reason: string): Promise<void> {
   const artifactId = selectedId.value;
-  if (!artifactId) return;
+  if (!artifactId || commandBusy.value) return;
   try {
     await artifactStore.requestChanges(artifactId, reason);
     message.success("已要求作者修改，该版本不会发布 CDN 包");

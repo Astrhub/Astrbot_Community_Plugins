@@ -13,6 +13,31 @@ describe("useArtifactStore", () => {
     vi.unstubAllGlobals();
   });
 
+  it("clears the previous artifact while loading a different selection, including on failure", async () => {
+    let rejectLoad: (error: Error) => void = () => {};
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ artifact: { id: "artifact-a" } }), { status: 200 }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectLoad = reject;
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const store = useArtifactStore();
+    await store.loadDetail("artifact-a");
+    const next = store.loadDetail("artifact-b");
+    expect(store.loadingDetail).toBe(true);
+    expect(store.detail).toBeNull();
+    rejectLoad(new Error("network failed"));
+    await expect(next).rejects.toThrow("network failed");
+    expect(store.detail).toBeNull();
+    expect(store.loadingDetail).toBe(false);
+  });
+
   it("loads the current author's artifact list and clears loading state", async () => {
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>

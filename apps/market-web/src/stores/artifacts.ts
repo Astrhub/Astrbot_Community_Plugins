@@ -82,6 +82,7 @@ export const useArtifactStore = defineStore("artifacts", () => {
   async function loadDetail(artifactId: string): Promise<ArtifactDetail> {
     const requestId = ++detailRequest;
     detailTargetId = artifactId;
+    if (detail.value?.artifact.id !== artifactId) detail.value = null;
     loadingDetail.value = true;
     try {
       const payload = await request<ArtifactDetail>(
