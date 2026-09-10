@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, shallowRef, watch } from "vue";
-import { useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
@@ -52,7 +51,6 @@ const METHOD_TAG_TYPES = {
   delete: "error",
 };
 
-const router = useRouter();
 const message = useMessage();
 const store = usePluginStore();
 const { siteConfig } = storeToRefs(store);
@@ -305,10 +303,6 @@ function resetFilters() {
   selectedTag.value = "all";
 }
 
-function goBack() {
-  router.push("/");
-}
-
 async function loadSpec() {
   loading.value = true;
   errorMessage.value = "";
@@ -351,7 +345,7 @@ async function copyEndpointGuide() {
   <main class="docs-page">
     <header class="docs-topbar">
       <div class="docs-nav-left">
-        <n-button quaternary circle aria-label="返回首页" @click="goBack">
+        <n-button tag="a" href="/" quaternary circle aria-label="返回首页">
           <template #icon>
             <n-icon><arrow-back-outline /></n-icon>
           </template>
@@ -359,7 +353,7 @@ async function copyEndpointGuide() {
         <div class="docs-brand">
           <img :src="siteConfig.icon_url" :alt="siteConfig.name" class="docs-logo" />
           <div class="docs-brand-copy">
-            <strong>REST API 文档</strong>
+            <h1>REST API 文档</h1>
             <span
               >{{ apiTitle }} · v{{ apiVersion }} · OpenAPI {{ openapiVersion }} ·
               {{ operations.length }} 个端点</span
@@ -825,7 +819,7 @@ async function copyEndpointGuide() {
   gap: 2px;
 }
 
-.docs-brand-copy strong,
+.docs-brand-copy h1,
 .docs-brand-copy span,
 .endpoint-path,
 .endpoint-summary {
@@ -834,7 +828,8 @@ async function copyEndpointGuide() {
   white-space: nowrap;
 }
 
-.docs-brand-copy strong {
+.docs-brand-copy h1 {
+  margin: 0;
   max-width: 180px;
   color: var(--text-primary);
   font-size: 14px;
@@ -1119,7 +1114,7 @@ async function copyEndpointGuide() {
     flex: 0 0 auto;
   }
 
-  .docs-brand-copy strong {
+  .docs-brand-copy h1 {
     max-width: 120px;
   }
 

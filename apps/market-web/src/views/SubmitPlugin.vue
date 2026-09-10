@@ -3,7 +3,7 @@
     <n-layout-header class="page-header">
       <div class="header-content">
         <div class="header-left">
-          <n-button quaternary circle @click="goBack" aria-label="返回">
+          <n-button tag="a" href="/" quaternary circle aria-label="返回插件市场">
             <template #icon>
               <n-icon><arrow-back /></n-icon>
             </template>
