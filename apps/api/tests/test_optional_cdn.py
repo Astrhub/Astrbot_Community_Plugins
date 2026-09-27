@@ -10,8 +10,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import main
-from app.artifacts.github_source import ResolvedGithubSource
+from app.artifacts.archive import PrecheckError
+from app.artifacts.github_source import GithubSourceError, ResolvedGithubSource
 from app.artifacts.jobs import JobExecutionError
+from app.artifacts.service import ArtifactServiceError
+from app.artifacts.storage import ArtifactStorageError
 from app.cdn import CdnPublicationError, CdnSubscriptions, process_cdn_reviews
 from app.config import load_settings
 from app.github_authorization import verify_publication_access
@@ -166,7 +169,48 @@ def test_cdn_toggle_checks_owner_but_disabling_does_not_require_oauth(market):
     assert result.json()["code"] == "cdn_disabled"
 
 
-async def process(app, store):
+def test_cdn_preference_allows_owner_or_core_admin_not_other_admins(market):
+    client, _, store, _ = market
+    plugin = submit(client, cdn_enabled=True).json()
+    url = f"/v1/plugins/{plugin['id']}/cdn"
+    subscriptions = CdnSubscriptions(store)
+    before = asyncio.run(subscriptions.get(plugin["id"]))
+
+    admin = store.upsert_github_user({"login": "bob"})
+    store.update_user_role(admin["id"], "admin")
+    for enabled in (True, False):
+        response = client.patch(
+            url, json={"enabled": enabled}, headers={"x-dev-github-login": "bob"}
+        )
+        assert response.status_code == 403
+    assert asyncio.run(subscriptions.get(plugin["id"])) == before
+    with pytest.raises(HTTPException) as denied:
+        asyncio.run(subscriptions.configure(plugin["id"], enabled=False, actor=admin))
+    assert denied.value.status_code == 403
+    assert asyncio.run(subscriptions.get(plugin["id"])) == before
+
+    core_admin = store.upsert_github_user({"login": "core"})
+    store.update_user_role(core_admin["id"], "core_admin")
+    disabled = client.patch(url, json={"enabled": False}, headers={"x-dev-github-login": "core"})
+    assert disabled.status_code == 200
+    assert disabled.json()["cdn_enabled"] is False
+    assert asyncio.run(subscriptions.get(plugin["id"]))["state"] == "disabled"
+    assert (
+        client.patch(
+            url, json={"enabled": True}, headers={"x-dev-github-login": "core"}
+        ).status_code
+        == 403
+    )
+    store.update_user_role(plugin["owner_user_id"], "admin")
+    assert (
+        client.patch(
+            url, json={"enabled": True}, headers={"x-dev-github-login": "alice"}
+        ).status_code
+        == 200
+    )
+
+
+async def process(app, store, *, source_error=None):
     plugin = store.get_plugin("astrbot_plugin_demo")
     subscription = await CdnSubscriptions(store).get(plugin["id"])
     proof = subscription["authorization"]
@@ -181,7 +225,11 @@ async def process(app, store):
         }
     )
     source = ResolvedGithubSource(plugin["repo"], "alice", "astrbot_plugin_demo", "main", "a" * 40)
-    source_loader = AsyncMock(return_value=source)
+    source_loader = (
+        AsyncMock(side_effect=source_error)
+        if source_error is not None
+        else AsyncMock(return_value=source)
+    )
     app.state.artifact_runtime.service.github.stream_archive = lambda _: byte_stream(plugin_zip())
     count = await process_cdn_reviews(app, repository_loader=loader, source_loader=source_loader)
     return count, loader, source_loader
@@ -245,6 +293,78 @@ def test_fetch_failure_is_durable_and_expired_leases_recover_without_stale_compl
         )
         await subscriptions.finish(second)
         assert (await subscriptions.get(plugin["id"]))["state"] == "disabled"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("failure", "state", "code"),
+    [
+        (ArtifactStorageError("archive_too_large", "too large"), "blocked", "archive_too_large"),
+        (
+            ArtifactStorageError("quarantine_object_missing", "missing"),
+            "error",
+            "quarantine_object_missing",
+        ),
+        (
+            GithubSourceError("github_source_not_found", "missing"),
+            "blocked",
+            "github_source_not_found",
+        ),
+        (
+            GithubSourceError("github_api_timeout", "timeout", retryable=True),
+            "error",
+            "github_api_timeout",
+        ),
+        (PrecheckError("repo_invalid", "invalid repo"), "blocked", "repo_invalid"),
+        (
+            ArtifactServiceError("cdn_disabled", "disabled", status_code=409),
+            "blocked",
+            "cdn_disabled",
+        ),
+        (HTTPException(413, {"code": "archive_too_large"}), "blocked", "archive_too_large"),
+        (RuntimeError("temporary failure"), "error", "cdn_review_unavailable"),
+    ],
+)
+def test_cdn_review_classifies_permanent_and_transient_failures(market, failure, state, code):
+    client, app, store, _ = market
+    plugin = submit(client, cdn_enabled=True).json()
+
+    async def run():
+        if isinstance(failure, GithubSourceError):
+            count, _, source_loader = await process(app, store, source_error=failure)
+            source_loader.assert_awaited_once()
+        else:
+            service = app.state.artifact_runtime.service
+            service.submit_github = AsyncMock(side_effect=failure)
+            count, _, _ = await process(app, store)
+            service.submit_github.assert_awaited_once()
+        assert count == 1
+        subscriptions = CdnSubscriptions(store)
+        row = await subscriptions.get(plugin["id"])
+        assert row["state"] == state and row["last_error_code"] == code
+        subscriptions.rows[plugin["id"]]["available_at"] = datetime.now(UTC) - timedelta(seconds=1)
+        assert bool(await subscriptions.claim(1)) is (state == "error")
+
+    asyncio.run(run())
+
+
+def test_new_version_requeues_blocked_cdn_review(market):
+    client, app, store, _ = market
+    plugin = submit(client, cdn_enabled=True).json()
+    app.state.artifact_runtime.service.submit_github = AsyncMock(
+        side_effect=ArtifactStorageError("archive_too_large", "too large")
+    )
+
+    async def run():
+        subscriptions = CdnSubscriptions(store)
+        assert (await process(app, store))[0] == 1
+        assert (await subscriptions.get(plugin["id"]))["state"] == "blocked"
+        updated = store.update_plugin_metadata(plugin["id"], {"repo_version": "v2.0.0"})
+        await subscriptions.queue_version(updated)
+        row = await subscriptions.get(plugin["id"])
+        assert row["state"] == "queued" and row["requested_version"] == "2.0.0"
+        assert len(await subscriptions.claim(1)) == 1
 
     asyncio.run(run())
 

@@ -54,6 +54,12 @@ def can_edit_plugin(user: Mapping | None, plugin: Mapping | None) -> bool:
     return plugin.get("owner_user_id") == user.get("id")
 
 
+def can_configure_plugin_cdn(user: Mapping | None, plugin: Mapping | None) -> bool:
+    if not user or not plugin or not user.get("id"):
+        return False
+    return is_core_admin(user) or plugin.get("owner_user_id") == user["id"]
+
+
 def can_manage_plugin_submission(user: Mapping | None, plugin: Mapping | None) -> bool:
     if not user or not plugin:
         return False

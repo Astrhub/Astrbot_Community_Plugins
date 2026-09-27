@@ -35,6 +35,7 @@ from .cdn import CdnSubscriptions, cdn_enabled, process_cdn_reviews
 from .artifacts.github_source import ResolvedGithubSource, COMMIT_PATTERN
 from .auth import (
     Role,
+    can_configure_plugin_cdn,
     can_edit_plugin,
     can_manage_admins,
     can_manage_plugin_submission,
@@ -1216,7 +1217,7 @@ def register_routes(app: FastAPI) -> None:
     ) -> dict[str, Any]:
         user = await require_user(request)
         plugin = await get_plugin_or_404(request, plugin_id)
-        if not can_edit_plugin(user, plugin):
+        if not can_configure_plugin_cdn(user, plugin):
             raise error(403, "Forbidden")
         subscriptions = CdnSubscriptions(request.app.state.store)
         if cdn_enabled(plugin) == payload.enabled and await subscriptions.get(plugin_id):

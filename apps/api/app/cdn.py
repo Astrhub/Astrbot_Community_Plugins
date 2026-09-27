@@ -13,7 +13,11 @@ from typing import Any
 from fastapi import HTTPException
 
 from .artifacts.archive import PrecheckError, normalize_github_repo, normalize_version
-from .auth import can_edit_plugin, is_admin
+from .artifacts.github_source import GithubSourceError
+from .artifacts.storage import ArtifactStorageError
+from .auth import can_configure_plugin_cdn, is_admin
+
+PERMANENT_CDN_HTTP_STATUSES = {400, 403, 404, 409, 413, 422}
 
 
 def cdn_enabled(plugin: Mapping[str, Any]) -> bool:
@@ -163,7 +167,7 @@ class CdnSubscriptions:
     def _check_actor(plugin: Mapping[str, Any] | None, actor: Mapping[str, Any]) -> None:
         if not plugin:
             raise cdn_error("plugin_not_found", "插件不存在", 404)
-        if not can_edit_plugin(actor, plugin):
+        if not can_configure_plugin_cdn(actor, plugin):
             raise cdn_error("plugin_owner_changed", "无权管理此插件的 CDN", 403)
 
     @staticmethod
@@ -366,6 +370,8 @@ async def process_cdn_reviews(
     source_loader: Callable[[Mapping[str, Any]], Awaitable[Any]],
     limit: int = 2,
 ) -> int:
+    from .artifacts.service import ArtifactServiceError  # Avoid the repository/CDN import cycle.
+
     runtime = app.state.artifact_runtime
     if not runtime.available or runtime.service is None:
         return 0
@@ -430,11 +436,22 @@ async def process_cdn_reviews(
                 exc.detail.get("code") if isinstance(exc.detail, dict) else None
             ) or "cdn_review_unavailable"
             await subscriptions.finish(
-                claim, error_code=code, blocked=exc.status_code in {400, 403, 404, 409}
+                claim, error_code=code, blocked=exc.status_code in PERMANENT_CDN_HTTP_STATUSES
             )
         except Exception as exc:
+            blocked = (
+                (isinstance(exc, GithubSourceError) and not exc.retryable)
+                or isinstance(exc, PrecheckError)
+                or (isinstance(exc, ArtifactStorageError) and exc.code == "archive_too_large")
+                or (
+                    isinstance(exc, ArtifactServiceError)
+                    and exc.status_code in PERMANENT_CDN_HTTP_STATUSES
+                )
+            )
             await subscriptions.finish(
-                claim, error_code=str(getattr(exc, "code", "cdn_review_unavailable"))
+                claim,
+                error_code=str(getattr(exc, "code", "cdn_review_unavailable")),
+                blocked=blocked,
             )
 
     await asyncio.gather(*(process_claim(claim) for claim in claims))
