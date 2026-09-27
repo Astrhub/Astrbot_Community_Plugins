@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { pluginDetailPath } from "@/utils/pluginRoute";
 import { computed, reactive, watch } from "vue";
-import { NButton, NEmpty, NIcon, NInput, NSelect, NSpin } from "naive-ui";
+import { NButton, NEmpty, NIcon, NInput, NSelect, NSpin, NSwitch } from "naive-ui";
 import {
   ArchiveOutline,
   CloudUploadOutline,
@@ -52,6 +52,7 @@ const emit = defineEmits<{
   savePlugin: [payload: SavePluginPayload];
   requestList: [plugin: Plugin];
   unlist: [plugin: Plugin];
+  toggleCdn: [payload: { plugin: Plugin; enabled: boolean }];
 }>();
 
 const { confirmExternalOpen } = useExternalOpenConfirm();
@@ -274,6 +275,21 @@ function savePlugin(plugin: Plugin): void {
                 申请上架
               </n-button>
             </div>
+          </div>
+
+          <div class="pm-cdn">
+            <span :id="`cdn-label-${pluginKey(plugin)}`">社区源 CDN</span>
+            <n-switch
+              :value="plugin.cdn_enabled === true"
+              :aria-labelledby="`cdn-label-${pluginKey(plugin)}`"
+              :disabled="isBusy(plugin)"
+              :loading="busyAction(plugin) === 'cdn'"
+              @update:value="(enabled: boolean) => emit('toggleCdn', { plugin, enabled })"
+            />
+            <p>
+              开启后每次新版本都会自动送审，通过前不提供该版本的 CDN 链接；关闭后仍可通过 GitHub
+              安装，不影响插件上架。
+            </p>
           </div>
 
           <form
@@ -530,6 +546,22 @@ function savePlugin(plugin: Plugin): void {
   color: var(--primary-color);
   border-color: var(--border-hover);
   outline: 0;
+}
+
+.pm-cdn {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.pm-cdn p {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-tertiary);
+  line-height: 1.6;
 }
 
 .pm-editor {

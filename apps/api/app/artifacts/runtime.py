@@ -540,6 +540,7 @@ def _malware_scanners(
                 host=review.clamav_host,
                 port=review.clamav_port,
                 config_ref=review.clamav_config_ref,
+                timezone=review.clamav_timezone,
             )
         except ValueError:
             clamav = UnavailableClamAvScanner("clamav_configuration_invalid")

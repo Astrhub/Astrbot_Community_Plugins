@@ -75,6 +75,9 @@ function submitGithub(): void {
       请先登记插件或在原提交页完成插件身份登记。
     </NAlert>
     <template v-else>
+      <NAlert class="submission-panel__notice" type="info" :bordered="false">
+        包审查用于社区源 CDN。请先在个人界面开启 CDN；每个新版本通过审查后才提供对应资源链接。
+      </NAlert>
       <NSelect
         v-model:value="pluginId"
         class="submission-panel__plugin"

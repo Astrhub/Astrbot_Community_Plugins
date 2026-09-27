@@ -45,12 +45,12 @@ GitHub OAuth 使用 `uuid4()` 生成 state，存入独立 cookie（`astrbot_mark
 
 | 角色 | 能力范围 |
 |---|---|
-| 核心管理员（core_admin） | 系统设置、邮件、管理员队伍、内部用户、公告（`/v1/core/*`、`/v1/admin/settings`） |
+| 核心管理员（core_admin） | 系统设置、邮件、管理员队伍、内部用户、公告（`/v1/core/*`、`/v1/admin/settings`）；可管理任意插件 CDN |
 | 普通管理员（admin） | 审核上架/下架、删除评论、禁言用户、刷新任意插件、颁发全局 Key（`/v1/admin/*`） |
-| 插件所有者 | 经仓库所有权验证后编辑自有插件元数据、申请/自主下架、手动刷新 |
+| 插件所有者 | 经仓库所有权验证后编辑自有插件元数据、申请/自主下架、手动刷新；可关闭自有 CDN，重新开启需验证仓库权限 |
 | 普通用户（user） | 浏览、提交、评论、点赞、管理个人 Key 与通知偏好 |
 
-权限函数位于 `apps/api/app/auth.py`：`can_edit_plugin(user, plugin)`（admin 或所有者匹配 `owner_user_id` / `owner_github_login`）、`can_manage_plugin_submission(user, plugin)`。所有敏感端点在路由层强制角色，前端组件内的角色判定仅为 UX，不构成安全边界。
+权限函数位于 `apps/api/app/auth.py`：`can_edit_plugin()` 允许管理员或匹配 `owner_user_id` 的所有者编辑，`can_configure_plugin_cdn()` 仅允许核心管理员或所有者管理 CDN，另有 `can_manage_plugin_submission()`。敏感端点在路由层强制鉴权；CDN 配置还在持久化时复核身份，前端角色显示不代替服务端鉴权。
 
 ## API Key
 
@@ -115,8 +115,8 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 - **Markdown 渲染**：前端使用 `DOMPurify` 清理渲染输出，`marked` + `highlight.js` 渲染；审核操作在服务端存储。
 - **评论软删除**：删除根评论会隐藏其回复（`deleted` 标记 + partial index `WHERE deleted = false`），保留审计痕迹。
 - **审查内容最小披露**：源码、diff、finding evidence 和运行日志只通过 owner/admin 鉴权接口按需读取。
-  状态邮件由事件白名单生成，只包含插件或策略名称、版本、固定状态、固定短原因和工作台链接；payload 的
-  reason/code、requirements、comment、内部路径、对象 key 与凭据不会进入邮件。
+  状态邮件使用固定文案；批准及发布通知可附带已保存的管理员批准评价，限长并过滤敏感内容和代码块。
+  不直接转发 payload 的 reason/code、requirements、行评论、内部路径、对象 key 或扫描证据。
 
 ## 网络与部署安全
 

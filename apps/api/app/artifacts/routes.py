@@ -32,6 +32,8 @@ from .schemas import (
     ArtifactDiffListResponse,
     ArtifactDetailResponse,
     ArtifactEnvelope,
+    ReviewContextResponse,
+    ManualReviewPayload,
     ArtifactFileContentResponse,
     ArtifactFileListResponse,
     GithubArtifactSubmission,
@@ -60,6 +62,7 @@ from .service import (
     public_artifact,
     public_review_finding,
     public_review_run,
+    public_review_decision,
 )
 from .storage import ArtifactStorageError
 
@@ -73,6 +76,70 @@ PRIVATE_READ_HEADERS = {
 
 def build_artifact_router() -> APIRouter:
     router = APIRouter()
+
+    @router.get(
+        "/v1/artifacts/{artifact_id}/review-context",
+        tags=["reviews"],
+        response_model=ReviewContextResponse,
+    )
+    async def review_context(request: Request, artifact_id: str) -> dict[str, Any]:
+        service = _require_service(request)
+        artifact = await _visible_artifact(service, artifact_id, await _require_user(request))
+        return {
+            "artifact": public_artifact(artifact),
+            "decisions": [
+                public_review_decision(item)
+                for item in await service.repository.list_review_decisions(artifact_id)
+            ],
+        }
+
+    @router.get("/v1/admin/artifacts/{artifact_id}/retry-review-preview", tags=["reviews"])
+    async def retry_review_preview(request: Request, artifact_id: str) -> dict[str, Any]:
+        service = _require_service(request)
+        artifact = await _visible_artifact(service, artifact_id, await _require_admin(request))
+        jobs = await service.repository.list_artifact_jobs(artifact_id)
+        return {
+            "artifact_id": artifact_id,
+            "archive_sha256": artifact["archive_sha256"],
+            "policy_version_id": artifact.get("policy_version_id"),
+            "running": any(job["status"] == "running" for job in jobs),
+            "runs": [
+                public_review_run(run)
+                for run in await service.repository.list_review_runs(artifact_id)
+            ],
+        }
+
+    @router.post(
+        "/v1/admin/artifacts/{artifact_id}/review-action",
+        tags=["reviews"],
+        response_model=ArtifactEnvelope,
+    )
+    async def manual_review_action(
+        request: Request, artifact_id: str, payload: ManualReviewPayload
+    ) -> dict[str, Any]:
+        service = _require_service(request)
+        actor = await _require_admin(request)
+        try:
+            artifact = await service.repository.review_action(
+                artifact_id,
+                actor=actor,
+                **payload.model_dump(),
+            )
+            if artifact is None:
+                raise _http_error(404, "artifact_not_found", "Artifact 不存在")
+            return {"artifact": public_artifact(artifact)}
+        except ValueError as exc:
+            messages = {
+                "review_still_running": "仍有扫描任务运行，请等待结束后重跑；人工放行不受此限制",
+                "artifact_not_reviewable": "版本状态已变化，请刷新后重试",
+                "artifact_manifest_missing": "插件包尚未完成结构与完整性校验，暂不能发布",
+                "review_confirmation_required": "请确认人工决定",
+                "self_approval_forbidden": "不能批准自己名下的插件",
+                "repo_version_changed": "提交版本与仓库版本不一致，请重新提交",
+                "artifact_identity_changed": "提交包已变化，请刷新后确认",
+                "idempotency_key_conflict": "重复请求内容不一致，请刷新后重试",
+            }
+            raise _http_error(409, str(exc), messages.get(str(exc), "审查操作未通过校验")) from exc
 
     @router.post(
         "/v1/plugins/registrations",
@@ -97,6 +164,17 @@ def build_artifact_router() -> APIRouter:
         data["repo"] = proof["repo"]
         try:
             plugin = await _call_store(request, "register_plugin", user, data)
+            from ..cdn import CdnSubscriptions
+
+            if not plugin.get("cdn_enabled", True):
+                raise _http_error(409, "cdn_disabled", "请先在个人界面开启社区源 CDN")
+            plugin = await CdnSubscriptions(request.app.state.store).configure(
+                plugin["id"],
+                enabled=True,
+                actor=user,
+                authorization=proof,
+                queue_review=False,
+            )
         except PermissionError as exc:
             raise _http_error(403, "plugin_owner_mismatch", "插件已由其他用户登记") from exc
         return {"plugin": plugin}

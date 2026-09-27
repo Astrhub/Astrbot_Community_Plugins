@@ -11,7 +11,9 @@ from urllib.parse import urlencode
 from ..auth import is_admin, is_core_admin
 from ..config import Settings
 from .mail import send_artifact_status_email
+from .mail_settings import notification_settings
 from .repository import ArtifactRepository
+from .structured_llm import redact_llm_text
 
 LOGGER = logging.getLogger(__name__)
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -217,10 +219,17 @@ class ArtifactNotificationDispatcher:
         return len(events)
 
     async def _deliver(self, event: Mapping[str, Any]) -> None:
+        options = (
+            await self._call_store("list_options") if hasattr(self.store, "list_options") else {}
+        )
+        settings = notification_settings(self.settings, options or {})
         event_type = str(event.get("event_type") or "")
         copy = STATUS_COPY.get(event_type, _DEFAULT_COPY)
         payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
-        subject = await self._notification_subject(event, payload)
+        subject = await self._notification_subject(event, payload, settings)
+        if payload.get("suppress_email") is True:
+            settings = settings.with_updates(email_provider="disabled")
+            subject["metadata"]["email_delivery"] = "suppressed_by_admin_request"
         reason = _site_reason(payload)
         email_body = "\n".join(
             (
@@ -231,6 +240,9 @@ class ArtifactNotificationDispatcher:
                 f"工作台：{subject['link']}",
             )
         )
+        evaluation = await self._review_evaluation(event_type, subject["metadata"], payload)
+        if evaluation:
+            email_body += f"\n审查评价（不影响本次通过）：{evaluation}"
         full_body = f"{copy.body}\n"
         if reason:
             full_body += f"原因：{reason}\n"
@@ -247,6 +259,7 @@ class ArtifactNotificationDispatcher:
                     title=copy.title,
                     body=full_body,
                     email_body=email_body,
+                    settings=settings,
                     metadata=subject["metadata"],
                     notification_type=subject["notification_type"],
                     email_preference=(
@@ -284,6 +297,7 @@ class ArtifactNotificationDispatcher:
                     title=admin_title,
                     body=full_body,
                     email_body=email_body,
+                    settings=settings,
                     metadata=subject["metadata"],
                     notification_type=subject["notification_type"],
                     email_preference=(
@@ -295,6 +309,29 @@ class ArtifactNotificationDispatcher:
                         else "email_notify_unlist"
                     ),
                 )
+
+    async def _review_evaluation(
+        self,
+        event_type: str,
+        metadata: Mapping[str, str],
+        payload: Mapping[str, Any],
+    ) -> str:
+        if event_type not in {"artifact_approved", "artifact_published"}:
+            return ""
+        artifact_id = metadata.get("artifact_id")
+        if not artifact_id:
+            return ""
+        decisions = await self.repository.list_review_decisions(artifact_id)
+        for decision in reversed(decisions):
+            if payload.get("decision_id") and decision["id"] != payload["decision_id"]:
+                continue
+            if (
+                decision.get("source") == "admin"
+                and decision.get("action") in {"approve", "manual_approve"}
+                and decision.get("to_status") == "approved"
+            ):
+                return _email_evaluation(str(decision.get("reason") or ""))
+        return ""
 
     async def _notify_user(
         self,
@@ -308,6 +345,7 @@ class ArtifactNotificationDispatcher:
         metadata: Mapping[str, str],
         notification_type: str,
         email_preference: str,
+        settings: Settings,
     ) -> None:
         station_metadata = {
             **dict(metadata),
@@ -323,15 +361,15 @@ class ArtifactNotificationDispatcher:
             station_metadata,
             event_id,
         )
-        if self.settings.email_provider == "disabled" or user.get(email_preference) is False:
+        if settings.email_provider == "disabled" or user.get(email_preference) is False:
             return
         receiver = str(user.get("notification_email") or user.get("github_email") or "").strip()
         if not EMAIL_PATTERN.fullmatch(receiver):
             return
         await send_artifact_status_email(
-            self.settings,
+            settings,
             receiver=receiver,
-            subject=f"{self.settings.site_name} - {title}",
+            subject=f"{settings.site_name} - {title}",
             content=email_body,
         )
 
@@ -339,6 +377,7 @@ class ArtifactNotificationDispatcher:
         self,
         event: Mapping[str, Any],
         payload: Mapping[str, Any],
+        settings: Settings,
     ) -> dict[str, Any]:
         event_type = str(event.get("event_type") or "")
         if event_type in _POLICY_EVENTS or event.get("aggregate_type") == "review_policy":
@@ -348,7 +387,7 @@ class ArtifactNotificationDispatcher:
             return {
                 "name": "审查策略",
                 "version": version,
-                "link": self._policy_link(),
+                "link": self._policy_link(settings),
                 "metadata": {"policy_id": policy_id},
                 "notification_type": "review_policy",
             }
@@ -365,23 +404,35 @@ class ArtifactNotificationDispatcher:
         return {
             "name": name,
             "version": version,
-            "link": self._workbench_link(artifact_id),
+            "link": self._workbench_link(artifact_id, settings),
             "metadata": {"artifact_id": artifact_id},
             "notification_type": "plugin_artifact",
         }
 
-    def _workbench_link(self, artifact_id: str) -> str:
+    def _workbench_link(self, artifact_id: str, settings: Settings) -> str:
         query = urlencode({"artifact": artifact_id})
-        return f"{self.settings.web_url.rstrip('/')}/plugin-workbench?{query}"
+        return f"{settings.web_url.rstrip('/')}/plugin-workbench?{query}"
 
-    def _policy_link(self) -> str:
+    def _policy_link(self, settings: Settings) -> str:
         query = urlencode({"view": "policy"})
-        return f"{self.settings.web_url.rstrip('/')}/plugin-workbench?{query}"
+        return f"{settings.web_url.rstrip('/')}/plugin-workbench?{query}"
 
     async def _call_store(self, method_name: str, *args: Any) -> Any:
         method = getattr(self.store, method_name)
         result = method(*args)
         return await result if inspect.isawaitable(result) else result
+
+
+def _email_evaluation(reason: str) -> str:
+    # Only an administrator's approval opinion is eligible, never scan logs or arbitrary payloads.
+    if re.search(
+        r"(?i)(?:\b(?:password|secret|token|api[_-]?key|object_key|quarantine_key|"
+        r"content_key|logs_key)\b[\"']?\s*[:=]|(?:^|\s)/(?:etc|var|opt|home|root|tmp|mnt)/)",
+        reason,
+    ):
+        return "评价含敏感内容，请进入工作台查看完整意见。"
+    reason = re.sub(r"```[\s\S]*?(?:```|$)", "[代码片段请在工作台查看]", reason)
+    return redact_llm_text(reason, maximum=1000)
 
 
 def _mail_field(value: Any, fallback: str) -> str:

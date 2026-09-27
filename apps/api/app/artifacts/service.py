@@ -10,7 +10,7 @@ from .archive import PrecheckError, normalize_github_repo, normalize_version
 from .comments import ReviewCommentLimits, ReviewCommentService
 from .content import ArtifactContentLimits, ArtifactContentService
 from .findings import StableRiskService
-from .github_source import GithubSourceClient
+from .github_source import GithubSourceClient, ResolvedGithubSource
 from .history import ReviewHistoryLimits, ReviewHistoryService
 from .models import (
     ArtifactErrorCode,
@@ -62,6 +62,7 @@ class ArtifactService:
         stream: AsyncIterable[bytes],
         supersedes_artifact_id: str = "",
     ) -> dict[str, Any]:
+        await self._require_cdn_enabled(plugin)
         supersedes_id = await self._validated_supersedes(
             plugin,
             user,
@@ -94,13 +95,21 @@ class ArtifactService:
         user: Mapping[str, Any],
         source_ref: str,
         supersedes_artifact_id: str = "",
+        resolved_source: ResolvedGithubSource | None = None,
     ) -> dict[str, Any]:
+        await self._require_cdn_enabled(plugin)
         supersedes_id = await self._validated_supersedes(
             plugin,
             user,
             supersedes_artifact_id,
         )
-        source = await self.github.resolve(str(plugin.get("repo") or ""), source_ref)
+        source = resolved_source or await self.github.resolve(
+            str(plugin.get("repo") or ""), source_ref
+        )
+        if source.repo_url != normalize_github_repo(str(plugin.get("repo") or "")):
+            raise ArtifactServiceError(
+                "github_repository_changed", "仓库来源不一致", status_code=409
+            )
         artifact_id = new_domain_id("artifact")
         quarantine_key = build_quarantine_key(artifact_id)
         stored = await self.storage.put_quarantine(
@@ -362,7 +371,11 @@ class ArtifactService:
         return public_artifact(changed)
 
     async def retry_publish(
-        self, artifact_id: str, *, reviewer: Mapping[str, Any]
+        self,
+        artifact_id: str,
+        *,
+        reviewer: Mapping[str, Any],
+        suppress_email: bool = False,
     ) -> dict[str, Any]:
         artifact = await self.repository.get_artifact(artifact_id)
         if not artifact:
@@ -384,12 +397,16 @@ class ArtifactService:
             reason="管理员重试 CDN 发布",
             reviewer=reviewer,
             idempotency_key=decision_key,
+            metadata={"suppress_email": suppress_email},
         )
         job = await self.repository.enqueue_job(
             {
                 "artifact_id": artifact_id,
                 "type": "publish",
-                "payload": {"expected_repo_version": artifact.get("repo_version") or ""},
+                "payload": {
+                    "expected_repo_version": artifact.get("repo_version") or "",
+                    "suppress_email": suppress_email,
+                },
                 "max_attempts": 5,
                 "idempotency_key": f"publish-retry:{artifact_id}:{secrets.token_hex(8)}",
             }
@@ -464,6 +481,11 @@ class ArtifactService:
         source_commit_sha: str,
         supersedes_artifact_id: str | None,
     ) -> dict[str, Any]:
+        try:
+            await self._require_cdn_enabled(plugin)
+        except Exception:
+            await self.storage.delete_quarantine(quarantine_key)
+            raise
         existing = await self.repository.get_artifact_by_sha(str(plugin["id"]), archive_sha256)
         if existing:
             await self.storage.delete_quarantine(quarantine_key)
@@ -526,6 +548,20 @@ class ArtifactService:
             suffix="submitted",
         )
         return public_artifact(artifact)
+
+    async def _require_cdn_enabled(self, plugin: Mapping[str, Any]) -> None:
+        from ..cdn import cdn_enabled, cdn_generation, store_call
+
+        store = getattr(self.repository, "store", None)
+        current = await store_call(store, "get_plugin", plugin["id"]) if store else plugin
+        if (
+            not current
+            or not cdn_enabled(current)
+            or cdn_generation(current) != cdn_generation(plugin)
+        ):
+            raise ArtifactServiceError(
+                "cdn_disabled", "请先在个人界面开启社区源 CDN", status_code=409
+            )
 
     async def _validated_supersedes(
         self,
@@ -738,6 +774,7 @@ _ADVISORY_RUN_TYPES = {"category", "llm_package", "llm_file", "llm_summary"}
 
 def public_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
     result = _pick_fields(artifact, _PUBLIC_ARTIFACT_FIELDS)
+    result["published_version"] = result.get("published_version") or ""
     if isinstance(result.get("submitted_by_snapshot"), dict):
         result["submitted_by_snapshot"] = {
             key: value

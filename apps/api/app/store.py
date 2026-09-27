@@ -386,6 +386,15 @@ class InMemoryMarketStore:
             {
                 **(existing or {}),
                 **plugin_metadata_from_payload(payload),
+                **(
+                    {
+                        key: existing[key]
+                        for key in ("cdn_enabled", "cdn_generation")
+                        if key in existing
+                    }
+                    if existing
+                    else {}
+                ),
                 "id": plugin_id,
                 "name": payload["name"],
                 "display_name": payload.get("display_name") or "",
@@ -400,7 +409,9 @@ class InMemoryMarketStore:
                     if "category" in payload
                     else (existing or {}).get("category_source", "user")
                 ),
-                "repo_version": (existing or {}).get("repo_version", ""),
+                "repo_version": payload.get("repo_version")
+                or payload.get("version")
+                or (existing or {}).get("repo_version", ""),
                 "current_artifact_id": (existing or {}).get("current_artifact_id"),
                 "owner_user_id": user["id"],
                 "owner_github_login": (existing or {}).get(
@@ -1765,10 +1776,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     INSERT INTO market_plugins (
                         id, name, display_name, desc_text, author, repo, tags, social_link,
                         owner_user_id, owner_github_login, status, stars, likes, comments_count,
-                        metadata
+                        metadata, repo_version
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
-                            'pending', 0, 0, 0, $11::jsonb)
+                            'pending', 0, 0, 0, $11::jsonb, $12)
                     ON CONFLICT (id) DO UPDATE
                        SET name = EXCLUDED.name,
                            display_name = EXCLUDED.display_name,
@@ -1777,7 +1788,13 @@ class PgRedisMarketStore(InMemoryMarketStore):
                            repo = EXCLUDED.repo,
                            tags = EXCLUDED.tags,
                            social_link = EXCLUDED.social_link,
-                           metadata = EXCLUDED.metadata,
+                           repo_version = COALESCE(NULLIF(EXCLUDED.repo_version, ''), market_plugins.repo_version),
+                           metadata = EXCLUDED.metadata ||
+                               CASE WHEN market_plugins.metadata ? 'cdn_enabled'
+                                    THEN jsonb_build_object(
+                                        'cdn_enabled', market_plugins.metadata->'cdn_enabled',
+                                        'cdn_generation', COALESCE(market_plugins.metadata->'cdn_generation', '0'::jsonb))
+                                    ELSE '{}'::jsonb END,
                            updated_at = now()
                      WHERE market_plugins.owner_user_id = EXCLUDED.owner_user_id
                     RETURNING *
@@ -1793,6 +1810,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     user["id"],
                     user["github_login"],
                     metadata,
+                    payload.get("repo_version") or payload.get("version") or "",
                 )
                 if not row:
                     raise PermissionError("plugin_owner_mismatch")

@@ -839,6 +839,7 @@ class PgAdvancedReviewRepositoryMixin:
                    END,
                    updated_at = now()
              WHERE id = $1
+               AND NOT (review_coverage ? 'manual_approval')
          RETURNING *
             """,
             artifact_id,
@@ -1155,15 +1156,17 @@ class PgAdvancedReviewRepositoryMixin:
     async def create_runtime_dispatch(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         row = await self._advanced_pool().fetchrow(
             """
+            WITH candidate AS (
+                SELECT id FROM plugin_artifacts
+                 WHERE id=$2 AND review_status <> 'approved' FOR SHARE
+            )
             INSERT INTO runtime_dispatches (
                 id, artifact_id, run_id, status, request, request_sha256,
                 result_key, result_sha256, runner_id, image_digest,
                 attempts, max_attempts, error_code, error_message
             )
-            VALUES (
-                $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14
-            )
+            SELECT $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10,
+                   $11, $12, $13, $14 FROM candidate
             ON CONFLICT (run_id) WHERE status <> 'cancelled'
             DO UPDATE SET run_id = EXCLUDED.run_id
             RETURNING *
@@ -1183,6 +1186,8 @@ class PgAdvancedReviewRepositoryMixin:
             payload.get("error_code", ""),
             payload.get("error_message", ""),
         )
+        if row is None:
+            raise ValueError("review_already_approved")
         saved = _record(row)
         if (
             str(saved["artifact_id"]) != str(payload["artifact_id"])
@@ -3042,6 +3047,11 @@ class InMemoryAdvancedReviewRepositoryMixin:
         artifact = self.artifacts.get(artifact_id)
         if not artifact:
             return None
+        if any(
+            d["artifact_id"] == artifact_id and d["action"] == "manual_approve"
+            for d in self.decisions.values()
+        ):
+            return deepcopy(artifact)
         artifact["review_coverage"] = dict(coverage)
         if automated_review_completed:
             artifact["automated_review_completed_at"] = _utc_now()
@@ -3227,6 +3237,9 @@ class InMemoryAdvancedReviewRepositoryMixin:
 
     async def create_runtime_dispatch(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         async with self._lock:
+            artifact = self.artifacts.get(str(payload["artifact_id"]))
+            if artifact and artifact["review_status"] == "approved":
+                raise ValueError("review_already_approved")
             run = self.runs.get(str(payload["run_id"]))
             if not run or run["artifact_id"] != payload["artifact_id"] or run["type"] != "runtime":
                 raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)

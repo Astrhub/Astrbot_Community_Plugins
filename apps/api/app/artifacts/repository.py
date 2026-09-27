@@ -10,6 +10,8 @@ from typing import Any, Protocol
 
 import asyncpg
 
+from ..cdn import publication_payload, check_publication_cdn, cdn_enabled, cdn_generation
+from .manual_review import InMemoryManualReviewMixin, PgManualReviewMixin, REVIEW_JOB_TYPES
 from .advanced_repository import (
     InMemoryAdvancedReviewRepositoryMixin,
     PgAdvancedReviewRepositoryMixin,
@@ -279,6 +281,18 @@ class ArtifactRepository(Protocol):
         self, run_id: str, payload: Mapping[str, Any]
     ) -> dict[str, Any] | None: ...
 
+    async def review_action(
+        self,
+        artifact_id: str,
+        *,
+        action: str,
+        actor: Mapping[str, Any],
+        reason: str,
+        archive_sha256: str,
+        confirmed: bool,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
     async def list_review_runs(self, artifact_id: str) -> list[dict[str, Any]]: ...
 
     async def fail_open_review_runs(
@@ -404,6 +418,7 @@ class ArtifactRepository(Protocol):
         download_url: str,
         expected_repo: str | None = None,
         expected_owner_user_id: str | None = None,
+        expected_cdn_generation: int = 0,
     ) -> dict[str, Any] | None: ...
 
     async def revoke_artifact(self, artifact_id: str) -> dict[str, Any] | None: ...
@@ -456,7 +471,7 @@ class ArtifactRepository(Protocol):
     async def mark_outbox_delivered(self, event_id: str) -> bool: ...
 
 
-class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
+class PgArtifactRepository(PgManualReviewMixin, PgAdvancedReviewRepositoryMixin):
     def __init__(self, store: Any) -> None:
         self.store = store
 
@@ -516,6 +531,8 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                    p.name AS plugin_name,
                    p.repo AS plugin_repo,
                    p.repo_version,
+                   COALESCE((p.metadata->>'cdn_enabled')::boolean, true) AS cdn_enabled,
+                   COALESCE((p.metadata->>'cdn_generation')::integer, 0) AS cdn_generation,
                    p.current_artifact_id,
                    p.owner_user_id,
                    p.owner_github_login,
@@ -919,6 +936,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                    ruleset_version = COALESCE(NULLIF($13, ''), ruleset_version),
                    completed_at = now()
              WHERE id = $1
+               AND error_code <> 'manual_review_completed'
          RETURNING *
             """,
             run_id,
@@ -939,7 +957,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
 
     async def list_review_runs(self, artifact_id: str) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(
-            "SELECT * FROM review_runs WHERE artifact_id = $1 ORDER BY created_at",
+            "SELECT * FROM review_runs WHERE artifact_id = $1 AND superseded_at IS NULL ORDER BY created_at",
             artifact_id,
         )
         return [_record(row) for row in rows]
@@ -1071,6 +1089,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
             """
             SELECT * FROM review_findings
              WHERE artifact_id = $1
+               AND run_id IN (SELECT id FROM review_runs WHERE superseded_at IS NULL)
           ORDER BY CASE severity
                        WHEN 'critical' THEN 5
                        WHEN 'high' THEN 4
@@ -1150,11 +1169,18 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                 policy_version_id = payload.get("policy_version_id")
                 if artifact_id:
                     artifact = await connection.fetchrow(
-                        "SELECT policy_version_id FROM plugin_artifacts WHERE id = $1 FOR SHARE",
+                        """SELECT a.policy_version_id, a.review_status, p.metadata AS cdn_settings
+                             FROM plugin_artifacts a JOIN market_plugins p ON p.id=a.plugin_id
+                            WHERE a.id=$1 FOR SHARE OF a, p""",
                         artifact_id,
                     )
                     if not artifact:
                         raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+                    if (
+                        payload["type"] in REVIEW_JOB_TYPES
+                        and artifact["review_status"] == "approved"
+                    ):
+                        raise ValueError("review_already_approved")
                     policy_version_id = _resolved_policy_snapshot(
                         artifact["policy_version_id"],
                         policy_version_id,
@@ -1176,7 +1202,9 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     payload.get("id") or new_domain_id("job"),
                     artifact_id,
                     payload["type"],
-                    dict(payload.get("payload") or {}),
+                    publication_payload(artifact["cdn_settings"], payload.get("payload") or {})
+                    if artifact_id and payload["type"] == "publish"
+                    else dict(payload.get("payload") or {}),
                     int(payload.get("max_attempts") or 3),
                     payload.get("available_at"),
                     payload["idempotency_key"],
@@ -1195,7 +1223,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
 
     async def list_artifact_jobs(self, artifact_id: str) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(
-            "SELECT * FROM artifact_jobs WHERE artifact_id = $1 ORDER BY created_at",
+            "SELECT * FROM artifact_jobs WHERE artifact_id = $1 AND superseded_at IS NULL ORDER BY created_at",
             artifact_id,
         )
         return [_record(row) for row in rows]
@@ -1466,7 +1494,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
 
                 current = await connection.fetchrow(
                     """
-                    SELECT a.*, p.repo_version, p.owner_user_id
+                    SELECT a.*, p.repo_version, p.owner_user_id, p.metadata AS cdn_settings
                       FROM plugin_artifacts a
                       JOIN market_plugins p ON p.id = a.plugin_id
                      WHERE a.id = $1
@@ -1584,7 +1612,9 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     """,
                     new_domain_id("job"),
                     artifact_id,
-                    {"expected_repo_version": expected_repo_version},
+                    publication_payload(
+                        current["cdn_settings"], {"expected_repo_version": expected_repo_version}
+                    ),
                     f"publish:{artifact_id}",
                     effective_policy_id,
                 )
@@ -1631,7 +1661,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
 
                 current = await connection.fetchrow(
                     """
-                    SELECT a.*, p.repo_version
+                    SELECT a.*, p.repo_version, p.metadata AS cdn_settings
                       FROM plugin_artifacts a
                       JOIN market_plugins p ON p.id = a.plugin_id
                      WHERE a.id = $1
@@ -1754,7 +1784,9 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                     """,
                     new_domain_id("job"),
                     artifact_id,
-                    {"expected_repo_version": expected_repo_version},
+                    publication_payload(
+                        current["cdn_settings"], {"expected_repo_version": expected_repo_version}
+                    ),
                     f"publish:{artifact_id}",
                     effective_policy_id,
                 )
@@ -2053,12 +2085,14 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         download_url: str,
         expected_repo: str | None = None,
         expected_owner_user_id: str | None = None,
+        expected_cdn_generation: int = 0,
     ) -> dict[str, Any] | None:
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 row = await connection.fetchrow(
                     """
-                    SELECT a.*, p.repo_version, p.repo AS current_repo, p.owner_user_id
+                    SELECT a.*, p.repo_version, p.repo AS current_repo, p.owner_user_id,
+                           p.metadata AS cdn_settings
                       FROM plugin_artifacts a
                       JOIN market_plugins p ON p.id = a.plugin_id
                      WHERE a.id = $1
@@ -2068,6 +2102,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
                 )
                 if not row:
                     return None
+                check_publication_cdn(row["cdn_settings"], expected_cdn_generation)
                 if str(row["repo_version"]) != expected_repo_version:
                     raise ValueError("repo_version_changed")
                 if (expected_repo is not None and row["current_repo"] != expected_repo) or (
@@ -2389,7 +2424,7 @@ class PgArtifactRepository(PgAdvancedReviewRepositoryMixin):
         return self.store._pool()
 
 
-class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
+class InMemoryArtifactRepository(InMemoryManualReviewMixin, InMemoryAdvancedReviewRepositoryMixin):
     def __init__(self, store: Any | None = None) -> None:
         self.store = store
         self.artifacts: dict[str, dict[str, Any]] = {}
@@ -2723,6 +2758,8 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         run = self.runs.get(run_id)
         if not run:
             return None
+        if run.get("error_code") == "manual_review_completed":
+            return deepcopy(run)
         run.update(
             {
                 "status": str(payload["status"]),
@@ -2757,7 +2794,11 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         return deepcopy(run)
 
     async def list_review_runs(self, artifact_id: str) -> list[dict[str, Any]]:
-        values = [run for run in self.runs.values() if run["artifact_id"] == artifact_id]
+        values = [
+            run
+            for run in self.runs.values()
+            if run["artifact_id"] == artifact_id and not run.get("superseded_at")
+        ]
         return deepcopy(sorted(values, key=lambda item: item["created_at"]))
 
     async def fail_open_review_runs(
@@ -2868,6 +2909,7 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             for findings in self.findings.values()
             for item in findings
             if item["artifact_id"] == artifact_id
+            and not self.runs.get(item["run_id"], {}).get("superseded_at")
         ]
         order = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
         values.sort(
@@ -2917,6 +2959,8 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             artifact = self.artifacts.get(str(artifact_id))
             if not artifact:
                 raise ValueError(ArtifactErrorCode.RUNTIME_RESULT_INVALID.value)
+            if payload["type"] in REVIEW_JOB_TYPES and artifact["review_status"] == "approved":
+                raise ValueError("review_already_approved")
             policy_version_id = _resolved_policy_snapshot(
                 artifact.get("policy_version_id"),
                 policy_version_id,
@@ -2936,7 +2980,11 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
             "artifact_id": artifact_id,
             "type": str(payload["type"]),
             "status": JobStatus.QUEUED.value,
-            "payload": dict(payload.get("payload") or {}),
+            "payload": publication_payload(
+                self._plugin(artifact["plugin_id"]) or {}, payload.get("payload") or {}
+            )
+            if artifact_id and payload["type"] == "publish"
+            else dict(payload.get("payload") or {}),
             "attempts": 0,
             "max_attempts": int(payload.get("max_attempts") or 3),
             "available_at": payload.get("available_at") or now,
@@ -2956,7 +3004,11 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         return deepcopy(job)
 
     async def list_artifact_jobs(self, artifact_id: str) -> list[dict[str, Any]]:
-        values = [job for job in self.jobs.values() if job.get("artifact_id") == artifact_id]
+        values = [
+            job
+            for job in self.jobs.values()
+            if job.get("artifact_id") == artifact_id and not job.get("superseded_at")
+        ]
         return deepcopy(sorted(values, key=lambda item: item["created_at"]))
 
     async def claim_jobs(
@@ -3219,7 +3271,9 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 "artifact_id": artifact_id,
                 "type": "publish",
                 "status": JobStatus.QUEUED.value,
-                "payload": {"expected_repo_version": expected_repo_version},
+                "payload": publication_payload(
+                    plugin, {"expected_repo_version": expected_repo_version}
+                ),
                 "attempts": 0,
                 "max_attempts": 5,
                 "available_at": now,
@@ -3337,7 +3391,9 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
                 "artifact_id": artifact_id,
                 "type": JobType.PUBLISH.value,
                 "status": JobStatus.QUEUED.value,
-                "payload": {"expected_repo_version": expected_repo_version},
+                "payload": publication_payload(
+                    plugin, {"expected_repo_version": expected_repo_version}
+                ),
                 "attempts": 0,
                 "max_attempts": 5,
                 "available_at": now,
@@ -3619,11 +3675,13 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         download_url: str,
         expected_repo: str | None = None,
         expected_owner_user_id: str | None = None,
+        expected_cdn_generation: int = 0,
     ) -> dict[str, Any] | None:
         artifact = self.artifacts.get(artifact_id)
         if not artifact:
             return None
         plugin = self._plugin(artifact["plugin_id"])
+        check_publication_cdn(plugin or {}, expected_cdn_generation)
         if not plugin or str(plugin.get("repo_version") or "") != expected_repo_version:
             raise ValueError("repo_version_changed")
         if (expected_repo is not None and plugin.get("repo") != expected_repo) or (
@@ -3875,6 +3933,8 @@ class InMemoryArtifactRepository(InMemoryAdvancedReviewRepositoryMixin):
         current = self.artifacts.get(str(plugin.get("current_artifact_id") or "")) or {}
         return {
             **artifact,
+            "cdn_enabled": cdn_enabled(plugin),
+            "cdn_generation": cdn_generation(plugin),
             "plugin_name": plugin.get("name", artifact["plugin_id"]),
             "plugin_repo": plugin.get("repo", artifact.get("source_repo", "")),
             "repo_version": plugin.get("repo_version", ""),

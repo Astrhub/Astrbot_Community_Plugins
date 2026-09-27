@@ -187,6 +187,13 @@ async function installApi(page: Page, mode: FixtureMode, unknown: string[]): Pro
       });
     }
 
+    const contextMatch = pathname.match(
+      /^\/v1\/artifacts\/(artifact-(?:alpha|beta))\/review-context$/,
+    );
+    if (contextMatch) {
+      const payload = detail(contextMatch[1] as "artifact-alpha" | "artifact-beta");
+      return json(route, { artifact: payload.artifact, decisions: payload.decisions });
+    }
     const detailMatch = pathname.match(/^\/v1\/artifacts\/(artifact-(?:alpha|beta))$/);
     if (detailMatch) {
       return json(route, detail(detailMatch[1] as "artifact-alpha" | "artifact-beta"));
@@ -469,4 +476,42 @@ test("workbench renders loaded, loading, empty, error, and mobile queue states",
   }
 
   expect([...new Set(unknown)]).toEqual([]);
+});
+
+test("manual review remains usable when scan details fail", async ({ browser }, testInfo) => {
+  const unknown: string[] = [];
+  const { context, page } = await createPage(
+    browser,
+    { width: 1440, height: 1000 },
+    "loaded",
+    unknown,
+  );
+  const commands: Record<string, unknown>[] = [];
+  await page.route("**/v1/artifacts/artifact-alpha", (route) =>
+    json(route, { detail: "扫描报告加载失败" }, 500),
+  );
+  await page.route("**/v1/admin/artifacts/artifact-alpha/review-action", (route) => {
+    commands.push(route.request().postDataJSON());
+    return json(route, { artifact: artifact("artifact-alpha") });
+  });
+  await page.goto("/plugin-workbench?artifact=artifact-alpha", { waitUntil: "domcontentloaded" });
+  const input = page.getByRole("textbox", { name: "版本级审查意见" });
+  await expect(input).toBeVisible();
+  await input.fill("已核对提交源码及失败项，无需调整");
+  await page.getByRole("button", { name: "仅发表评论", exact: true }).click();
+  await expect.poll(() => commands.length).toBe(1);
+  expect(commands[0].action).toBe("comment");
+  await page
+    .getByRole("checkbox", { name: "我已核对当前提交包与检查状态，确认执行所选操作" })
+    .check();
+  await page.getByRole("button", { name: "评论并人工放行", exact: true }).click();
+  await expect.poll(() => commands.length).toBe(2);
+  expect(commands[1]).toMatchObject({
+    action: "manual_approve",
+    confirmed: true,
+    archive_sha256: "a".repeat(64),
+  });
+  await capture(page, testInfo, "workbench-manual-report-failed");
+  expect(unknown).toEqual([]);
+  await context.close();
 });

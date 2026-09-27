@@ -50,7 +50,9 @@ defineSlots<{
       <aside class="review-workspace__rail">
         <section
           class="review-workspace__thread"
-          :class="{ 'review-workspace__pane--mobile-active': activeView === 'comments' }"
+          :class="{
+            'review-workspace__pane--mobile-active': ['comments', 'summary'].includes(activeView),
+          }"
         >
           <slot name="thread" />
         </section>
@@ -121,14 +123,12 @@ defineSlots<{
 }
 
 .review-workspace__thread {
-  position: sticky;
-  top: 90px;
-  max-height: calc(100vh - 108px);
+  display: grid;
+  gap: 14px;
 }
 
 .review-workspace__decision {
-  position: sticky;
-  top: calc(100vh - 300px);
+  align-self: start;
 }
 
 .review-workspace__mobile-toolbar {
