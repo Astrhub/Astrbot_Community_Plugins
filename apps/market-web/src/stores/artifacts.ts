@@ -1,6 +1,11 @@
 import { computed, shallowRef } from "vue";
 import { defineStore } from "pinia";
-import type { ArtifactDetail, ArtifactRiskLevel, PluginArtifact } from "@/types/artifacts";
+import type {
+  ArtifactDecision,
+  ArtifactDetail,
+  ArtifactRiskLevel,
+  PluginArtifact,
+} from "@/types/artifacts";
 import { usePluginStore } from "./plugins";
 
 type QueueFilters = {
@@ -17,11 +22,22 @@ function errorText(value: unknown): string {
 export const useArtifactStore = defineStore("artifacts", () => {
   const items = shallowRef<PluginArtifact[]>([]);
   const detail = shallowRef<ArtifactDetail | null>(null);
+  const reviewContext = shallowRef<{
+    artifact: PluginArtifact;
+    decisions: ArtifactDecision[];
+  } | null>(null);
+  const contextError = shallowRef("");
+  const loadingContext = shallowRef(false);
+  let contextRequest = 0;
+  let contextTargetId = "";
+  const actionKeys = new Map<string, string>();
   const loadingList = shallowRef(false);
   const loadingDetail = shallowRef(false);
   const submitting = shallowRef(false);
   const deciding = shallowRef(false);
-  const selectedArtifact = computed(() => detail.value?.artifact ?? null);
+  const selectedArtifact = computed(
+    () => reviewContext.value?.artifact ?? detail.value?.artifact ?? null,
+  );
   let listRequest = 0;
   let detailRequest = 0;
   let detailTargetId = "";
@@ -92,6 +108,69 @@ export const useArtifactStore = defineStore("artifacts", () => {
       return payload;
     } finally {
       if (requestId === detailRequest) loadingDetail.value = false;
+    }
+  }
+
+  async function loadContext(artifactId: string): Promise<void> {
+    const requestId = ++contextRequest;
+    contextTargetId = artifactId;
+    if (reviewContext.value?.artifact.id !== artifactId) reviewContext.value = null;
+    contextError.value = "";
+    loadingContext.value = true;
+    try {
+      const payload = await request<{ artifact: PluginArtifact; decisions: ArtifactDecision[] }>(
+        `/v1/artifacts/${encodeURIComponent(artifactId)}/review-context`,
+      );
+      if (requestId === contextRequest) reviewContext.value = payload;
+    } catch (error) {
+      if (requestId === contextRequest)
+        contextError.value = error instanceof Error ? error.message : "版本信息加载失败";
+      throw error;
+    } finally {
+      if (requestId === contextRequest) loadingContext.value = false;
+    }
+  }
+
+  async function reviewAction(
+    artifact: PluginArtifact,
+    action: "comment" | "manual_approve" | "retry_review",
+    reason: string,
+  ): Promise<void> {
+    const key = JSON.stringify([artifact.id, artifact.archive_sha256, action, reason]);
+    if (!actionKeys.has(key)) actionKeys.set(key, crypto.randomUUID());
+    deciding.value = true;
+    try {
+      if (action === "retry_review") {
+        const preview = await request<{ running: boolean; archive_sha256: string }>(
+          `/v1/admin/artifacts/${encodeURIComponent(artifact.id)}/retry-review-preview`,
+        );
+        if (preview.running) throw new Error("仍有任务运行，请等待结束后重跑；人工放行不受此限制");
+        if (preview.archive_sha256 !== artifact.archive_sha256)
+          throw new Error("提交包已变化，请刷新");
+      }
+      const payload = await request<{ artifact: PluginArtifact }>(
+        `/v1/admin/artifacts/${encodeURIComponent(artifact.id)}/review-action`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action,
+            reason,
+            confirmed: action !== "comment",
+            archive_sha256: artifact.archive_sha256,
+            idempotency_key: actionKeys.get(key),
+          }),
+        },
+      );
+      if (contextTargetId === artifact.id) {
+        reviewContext.value = {
+          artifact: { ...artifact, ...payload.artifact },
+          decisions: reviewContext.value?.decisions || [],
+        };
+        await Promise.allSettled([loadContext(artifact.id), loadDetail(artifact.id)]);
+      }
+    } finally {
+      deciding.value = false;
     }
   }
 
@@ -200,6 +279,11 @@ export const useArtifactStore = defineStore("artifacts", () => {
 
   function clearDetail(): void {
     detailRequest += 1;
+    contextRequest += 1;
+    contextTargetId = "";
+    reviewContext.value = null;
+    contextError.value = "";
+    loadingContext.value = false;
     detailTargetId = "";
     detail.value = null;
     loadingDetail.value = false;
@@ -208,6 +292,11 @@ export const useArtifactStore = defineStore("artifacts", () => {
   return {
     items,
     detail,
+    reviewContext,
+    contextError,
+    loadingContext,
+    loadContext,
+    reviewAction,
     loadingList,
     loadingDetail,
     submitting,

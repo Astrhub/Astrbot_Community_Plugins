@@ -57,6 +57,7 @@ class ArtifactReviewSettings:
     clamav_config_ref: str
     clamav_host: str
     clamav_port: int
+    clamav_timezone: str
     yara_enabled: bool
     yara_ruleset_version: str
     yara_ruleset_path: str
@@ -484,6 +485,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                 ),
                 clamav_host=merged.get("ARTIFACT_CLAMAV_HOST", ""),
                 clamav_port=max(1, min(65535, _int(merged.get("ARTIFACT_CLAMAV_PORT"), 3310))),
+                clamav_timezone=merged.get("ARTIFACT_CLAMAV_TIMEZONE", "UTC"),
                 yara_enabled=_bool(merged.get("ARTIFACT_YARA_ENABLED")),
                 yara_ruleset_version=merged.get("ARTIFACT_YARA_RULESET_VERSION", ""),
                 yara_ruleset_path=merged.get("ARTIFACT_YARA_RULESET_PATH", ""),

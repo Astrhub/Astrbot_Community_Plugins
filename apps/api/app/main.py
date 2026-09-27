@@ -10,7 +10,7 @@ import logging
 import re
 import secrets
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
@@ -31,6 +31,8 @@ from redis.exceptions import RedisError
 from .artifacts import build_artifact_runtime
 from .artifacts.archive import PrecheckError, parse_plugin_metadata_bytes
 from .artifacts.routes import build_artifact_router
+from .cdn import CdnSubscriptions, cdn_enabled, process_cdn_reviews
+from .artifacts.github_source import ResolvedGithubSource, COMMIT_PATTERN
 from .auth import (
     Role,
     can_edit_plugin,
@@ -65,6 +67,7 @@ from .llms_txt import build_llms_txt
 from .openapi_filter import filter_openapi_by_role, role_for_openapi
 from .plugin_identity import PluginIdentityConflict, plugin_canonical_path
 from .schemas import (
+    PluginCdnPayload,
     AnnouncementCreate,
     ApiKeyCreate,
     CommentCreate,
@@ -936,7 +939,11 @@ def register_routes(app: FastAPI) -> None:
         supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
         if not expected or not secrets.compare_digest(supplied, expected):
             raise error(403, "Forbidden")
-        return await verify_publication_access(request, artifact_id)
+        return await verify_publication_access(
+            request,
+            artifact_id,
+            site_repository_loader=lambda repo: fetch_publication_repository(request.app, repo),
+        )
 
     @app.post(
         "/v1/auth/logout",
@@ -1125,7 +1132,7 @@ def register_routes(app: FastAPI) -> None:
         status_code=201,
         tags=["submissions"],
         summary="提交新插件",
-        description="提交一个新插件到市场。需要验证 GitHub 仓库归属。如果启用自动审核，提交后直接上架。",
+        description="验证 GitHub 仓库归属后提交。默认不使用 CDN，按站点自动通过设置上架；选择 CDN 后每次新版本均需包审查。",
         responses={
             201: {"description": "提交成功"},
             401: {"description": "未登录"},
@@ -1165,27 +1172,34 @@ def register_routes(app: FastAPI) -> None:
             )
         )
         artifact_runtime = request.app.state.artifact_runtime
-        if artifact_runtime.available and artifact_runtime.service is not None:
-            try:
-                plugin = await call_store(request, "register_plugin", user, data)
-                artifact = await artifact_runtime.service.submit_github(
-                    plugin=plugin,
-                    user=user,
-                    source_ref="",
+        if data["cdn_enabled"]:
+            if not artifact_runtime.available or artifact_runtime.service is None:
+                raise HTTPException(
+                    503,
+                    {
+                        "code": "cdn_unavailable",
+                        "error": "CDN 审查服务暂不可用，请稍后再试或取消 CDN",
+                    },
                 )
-            except PermissionError as exc:
-                raise error(403, "Plugin is already owned by another user") from exc
-            except Exception as exc:
-                from .artifacts.github_source import GithubSourceError
-                from .artifacts.storage import ArtifactStorageError
-
-                if isinstance(exc, GithubSourceError):
-                    raise error(503 if exc.retryable else 400, str(exc)) from exc
-                if isinstance(exc, ArtifactStorageError):
-                    raise error(413 if exc.code == "archive_too_large" else 400, str(exc)) from exc
-                raise
-            return {**plugin, "artifact": artifact}
+            plugin = await call_store(request, "register_plugin", user, data)
+            if existing:
+                metadata = {key: value for key, value in data.items() if key != "cdn_enabled"}
+                metadata["repo_version"] = data.get("version") or plugin.get("repo_version") or ""
+                plugin = await call_store(request, "update_plugin_metadata", plugin["id"], metadata)
+            plugin = await CdnSubscriptions(request.app.state.store).configure(
+                plugin["id"],
+                enabled=True,
+                actor=user,
+                authorization=proof,
+            )
+            queued = await CdnSubscriptions(request.app.state.store).get(plugin["id"])
+            return {**plugin, "cdn_review_pending": queued["state"] != "submitted"}
         plugin = await call_store(request, "submit_plugin", user, data)
+        plugin = await CdnSubscriptions(request.app.state.store).configure(
+            plugin["id"],
+            enabled=False,
+            actor=user,
+        )
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
                 request, "update_plugin_status", plugin["id"], "listed", user["id"]
@@ -1195,6 +1209,32 @@ def register_routes(app: FastAPI) -> None:
             return listed or plugin
         await notify_pending_plugin_review(request, plugin, user)
         return plugin
+
+    @app.patch("/v1/plugins/{plugin_id}/cdn", tags=["submissions"], summary="设置插件 CDN")
+    async def update_plugin_cdn(
+        request: Request, plugin_id: str, payload: PluginCdnPayload
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        plugin = await get_plugin_or_404(request, plugin_id)
+        if not can_edit_plugin(user, plugin):
+            raise error(403, "Forbidden")
+        subscriptions = CdnSubscriptions(request.app.state.store)
+        if cdn_enabled(plugin) == payload.enabled and await subscriptions.get(plugin_id):
+            return plugin
+        proof = None
+        if payload.enabled:
+            runtime = request.app.state.artifact_runtime
+            if not runtime.available or runtime.service is None:
+                raise HTTPException(
+                    503, {"code": "cdn_unavailable", "error": "CDN 审查服务暂不可用"}
+                )
+            proof = await require_repository_access(request, user, plugin["repo"])
+        return await subscriptions.configure(
+            plugin_id,
+            enabled=payload.enabled,
+            actor=user,
+            authorization=proof,
+        )
 
     @app.get(
         "/v1/plugins/by-author/{username}/{name}",
@@ -2869,6 +2909,11 @@ async def github_metadata_sync_worker(app: FastAPI) -> None:
             )
             if synced:
                 logger.info("github sync worker refreshed %d plugins", synced)
+            await process_cdn_reviews(
+                app,
+                repository_loader=lambda repo: fetch_publication_repository(app, repo),
+                source_loader=lambda repo: resolve_cdn_source(app, repo),
+            )
         except Exception:
             logger.exception("github sync worker crashed, will retry next cycle")
 
@@ -3035,9 +3080,12 @@ async def refresh_plugin_github_metadata_for_plugin(
         metadata["version"] = repo_version
     metadata.update(github_sync_success_metadata(settings, user))
     try:
-        return await resolve_optional_awaitable(
+        updated = await resolve_optional_awaitable(
             app.state.store.update_plugin_metadata(plugin["id"], metadata)
         )
+        if updated:
+            await CdnSubscriptions(app.state.store).queue_version(updated)
+        return updated
     except PluginIdentityConflict as exc:
         await update_plugin_github_sync_failure(app.state.store, plugin, settings, str(exc))
         if raise_errors:
@@ -3057,6 +3105,76 @@ async def safe_fetch_plugin_github_metadata(
         return await fetch_plugin_github_metadata(repo, settings, user, token=token, store=store)
     except GithubMetadataError:
         return {}
+
+
+async def fetch_publication_repository(app: FastAPI, repo: str) -> dict[str, Any]:
+    """Recheck public repository identity using an active site token, without OAuth fallback."""
+    return await _fetch_cdn_github_json(app, repo)
+
+
+async def resolve_cdn_source(app: FastAPI, repository: Mapping[str, Any]) -> ResolvedGithubSource:
+    owner, repo_name = str(repository["full_name"]).split("/", 1)
+    branch = str(repository.get("default_branch") or "")
+    if not branch:
+        raise HTTPException(
+            409, {"code": "github_default_branch_missing", "error": "仓库缺少默认分支"}
+        )
+    canonical = "https://github.com/" + str(repository["full_name"])
+    commit = await _fetch_cdn_github_json(
+        app, canonical, suffix="/commits/" + quote(branch, safe="")
+    )
+    sha = str(commit.get("sha") or "")
+    if not COMMIT_PATTERN.fullmatch(sha):
+        raise HTTPException(
+            503, {"code": "github_commit_invalid", "error": "GitHub 未返回有效提交"}
+        )
+    return ResolvedGithubSource(canonical, owner, repo_name, branch, sha)
+
+
+async def _fetch_cdn_github_json(app: FastAPI, repo: str, *, suffix: str = "") -> dict[str, Any]:
+    settings = await runtime_settings_for_app(app)
+    options = await load_system_options(app.state.store)
+    statuses = parse_github_api_token_statuses(options.get("GITHUB_API_TOKEN_STATUS", ""))
+    token = next_system_github_api_token(app, settings, statuses)
+    if not token:
+        raise HTTPException(
+            503,
+            {
+                "code": "site_github_authorization_unavailable",
+                "error": "站点 GitHub 令牌未配置或均已停用",
+            },
+        )
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            response = await client.get(
+                "https://api.github.com/repos/" + repo.removeprefix("https://github.com/") + suffix,
+                headers=github_api_headers(token=token),
+            )
+    except httpx.HTTPError:
+        raise HTTPException(
+            503, {"code": "github_unavailable", "error": "暂时无法复核仓库"}
+        ) from None
+    await record_github_api_token_response(app.state.store, token, response)
+    if response.status_code == 404:
+        raise HTTPException(
+            403, {"code": "github_repository_unavailable", "error": "仓库不存在或站点无法访问"}
+        )
+    if response.is_redirect:
+        raise HTTPException(409, {"code": "github_repository_changed", "error": "仓库地址已变化"})
+    if response.status_code != 200:
+        raise HTTPException(
+            503,
+            {"code": "site_github_authorization_unavailable", "error": "站点令牌暂时无法复核仓库"},
+        )
+    try:
+        data = response.json()
+        if not isinstance(data, dict) or (not suffix and not isinstance(data.get("owner"), dict)):
+            raise ValueError("invalid repository")
+        return data
+    except ValueError:
+        raise HTTPException(
+            503, {"code": "github_unavailable", "error": "GitHub 仓库响应无效"}
+        ) from None
 
 
 async def fetch_plugin_readme_document(
@@ -5023,6 +5141,10 @@ async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str,
     plugins = await call_store(request, "list_public_plugins")
     runtime = request.app.state.artifact_runtime
     if not runtime.config.enabled:
+        plugins = [
+            {**plugin, "download_url": ""} if not cdn_enabled(plugin) else plugin
+            for plugin in plugins
+        ]
         return plugins
     publications: dict[str, dict[str, Any]] = {}
     if runtime.repository is not None:
@@ -5042,7 +5164,7 @@ async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str,
         published = publication.get("publication_status") == "published"
         gated_download_url = (
             str(publication.get("download_url") or "")
-            if published and versions_match(feed_version, published_version)
+            if cdn_enabled(plugin) and published and versions_match(feed_version, published_version)
             else ""
         )
         enriched.append(
@@ -5059,6 +5181,8 @@ async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str,
 
 
 def public_market_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
+    if not cdn_enabled(plugin):
+        plugin = {**plugin, "download_url": ""}
     return {
         **{
             key: value
@@ -5076,13 +5200,15 @@ def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
         or plugin.get("published_version")
         or "1.0.0"
     )
-    download_url = str(plugin.get("download_url") or "")
+    download_url = str(plugin.get("download_url") or "") if cdn_enabled(plugin) else ""
     if plugin.get("_artifact_publication_checked"):
         published_version = str(plugin.get("published_version") or "")
         matches = versions_match(feed_version, published_version)
         published = plugin.get("artifact_publication_status") == "published"
         download_url = (
-            str(plugin.get("artifact_download_url") or "") if matches and published else ""
+            str(plugin.get("artifact_download_url") or "")
+            if cdn_enabled(plugin) and matches and published
+            else ""
         )
     return {
         "name": name,

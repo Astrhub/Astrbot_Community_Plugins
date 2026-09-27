@@ -77,6 +77,27 @@ docker compose --profile runtime-runner up -d runtime-package-proxy runtime-runn
 `RUNTIME_RUNNER_UID_GID` 和 `RUNTIME_RUNNER_DOCKER_SOCKET`。rootful 开关只允许本地故障排查；该结果的隔离
 证明不能用于生产自动批准。
 
+## 可选社区源 CDN
+
+提交默认不使用 CDN：不创建包审查，按站点的自动通过开关直接上架或进入普通上架审核。勾选 CDN 时进入逐版本包审查；审查服务不可用会明确拒绝，不降级为免审。
+
+个人设置可关闭 CDN，无需重新连接 GitHub；插件保持原上架状态，历史包和审计记录保留。插件源最多受已有 300 秒缓存影响，之后不再提供 CDN 链接；已知历史包地址不会因关闭开关自动删除。开启需验证仓库管理权限，并为当前未审版本持久化送审请求。
+
+GitHub 元数据同步发现新版本后自动送审，固定默认分支提交 SHA，并用站点令牌复核已授权仓库的 ID、归属和公开状态。任务按版本去重；临时故障重试，身份或归属变化时停止并要求重新授权。新版本过审前不提供其 CDN 链接，不拿旧包充当新版本。关闭与发布并发时，发布事务会再次校验开关及授权代次。
+
+迁移 `20260927_007_optional_cdn` 为已有 Artifact 的插件保留 CDN，其余默认关闭；历史仓库授权证据不足的订阅保留已有包，后续送审需要重新开启并授权。
+
+## 人工审查与重跑
+
+版本评论不需要文件或行号。管理员可在扫描中、待审或处理失败时填写意见并确认人工放行；包结构、版本一致性、权限和禁止自批仍会校验。人工意见与审批、发布任务同事务保存，失败或未执行的扫描不会改写成通过。
+
+工作台的基础版本信息独立于扫描报告加载。`GET /v1/artifacts/{id}/review-context` 返回版本与决定；管理员使用 `POST /v1/admin/artifacts/{id}/review-action` 提交 `comment`、`manual_approve` 或 `retry_review`，并携带理由、包 SHA-256、幂等键；后两者还需 `confirmed=true`。接口均为私有、禁止缓存。
+
+重跑前可读取 `GET /v1/admin/artifacts/{id}/retry-review-preview`。重跑保留固定策略和历史报告，标记旧任务/报告已被替代，从静态检查重新执行下游；包尚未解析时重新执行预检。在途任务未结束时拒绝重跑，人工放行不受此限制。人工批准会取消未完成的扫描调度，并阻止后续扫描覆盖决定。
+
+ClamAV 的 `VERSION` 不携带时区，worker 必须通过 `ARTIFACT_CLAMAV_TIMEZONE` 指定 daemon 的 IANA 时区（默认 `UTC`；jp 为 `Asia/Shanghai`）。部署时对照 `VERSION` 和病毒库头部 UTC 时间验证；不要通过放宽新鲜度阈值掩盖时差。
+
+
 ## 策略变更与回滚
 
 所有 mutation 都需要新的 request ID、稳定 idempotency key 和人工原因。推荐流程：
@@ -92,9 +113,11 @@ core admin 能改变策略。策略邮件只提供固定状态和工作台链接
 
 ## 通知投递
 
-邮件正文由服务端事件白名单生成，只包含插件或策略名称、版本、固定状态、固定短原因和工作台链接。
-源码、requirements、comment、diff、evidence、日志、对象 key、内部路径、自由文本 reason/code 和凭据不得
-进入邮件。站内通知可显示规范化且有长度上限的 reason，并受 owner/admin 权限保护。
+邮件正文由服务端事件白名单生成，包含名称、版本、固定状态和工作台链接。批准及发布通知还附带该版本管理员批准时的简短评价（最多 1000 字）；只取已保存的批准决定，不直接转发 payload 的 reason 或行评论。
+源码、requirements、comment、diff、evidence、日志、对象 key 和内部路径不自动附带；评价中的代码块省略，敏感内容隐藏或脱敏。站内保留完整审查记录。
+人工批准的决定、发布任务及通知 outbox 同事务提交。每次投递读取后台最新邮件配置，继续尊重作者的邮箱和通知偏好；邮件异常不撤销批准。
+
+运维按管理员明确要求静默重试发布时，可调用 `retry_publish(..., suppress_email=True)`；抑制标记写入重试审计及任务，传递到成功/失败通知。站内仍记录状态和 `email_delivery=suppressed_by_admin_request`，不发送邮件，也不修改用户全局通知偏好。
 
 站内记录用 outbox event dedupe key 条件写入；worker 重试不会重复创建。SMTP/Cloudflare 是 at-least-once，
 邮件发送成功但 outbox 确认前进程退出时可能重复投递。邮件失败不改变审查、发布或下架状态。

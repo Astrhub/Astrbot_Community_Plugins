@@ -830,6 +830,23 @@ export const usePluginStore = defineStore("plugins", () => {
     return normalizePluginItem(data, 0);
   }
 
+  async function updatePluginCdn(pluginId: number | string, enabled: boolean): Promise<Plugin> {
+    const response = await fetch(
+      `${apiBaseUrl}/v1/plugins/${encodeURIComponent(String(pluginId))}/cdn`,
+      {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "更新 CDN 设置失败");
+    if (data.cdn_enabled === false) data.download_url = "";
+    updatePluginInList(data);
+    return normalizePluginItem(data, 0);
+  }
+
   async function requestPluginListing(pluginId: number | string): Promise<Plugin> {
     const response = await fetch(`${apiBaseUrl}/v1/plugins/${pluginId}/request-list`, {
       method: "POST",
@@ -1453,6 +1470,7 @@ export const usePluginStore = defineStore("plugins", () => {
     createMyApiKey,
     deleteMyApiKey,
     updatePluginMetadata,
+    updatePluginCdn,
     requestPluginListing,
     unlistOwnPlugin,
     loadPluginDetail,

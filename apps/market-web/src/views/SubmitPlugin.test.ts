@@ -6,11 +6,13 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { usePluginStore } from "../stores/plugins";
 import SubmitPlugin from "./SubmitPlugin.vue";
 
+const messages = vi.hoisted(() => ({ success: vi.fn(), warning: vi.fn(), error: vi.fn() }));
+
 vi.mock("../composables/useSeo", () => ({ useSeo: vi.fn() }));
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn(), back: vi.fn() }) }));
 vi.mock("naive-ui", async (original) => ({
   ...(await original<typeof import("naive-ui")>()),
-  useMessage: () => ({ success: vi.fn(), warning: vi.fn(), error: vi.fn() }),
+  useMessage: () => messages,
 }));
 
 const repositories = ["a", "b"].map((id) => ({
@@ -24,6 +26,7 @@ const repositories = ["a", "b"].map((id) => ({
 }));
 
 function setup() {
+  messages.success.mockClear();
   const pinia = createTestingPinia({ createSpy: vi.fn });
   const store = usePluginStore(pinia);
   store.currentUser = { id: "user-1", github_login: "alice" } as never;
@@ -37,6 +40,49 @@ function setup() {
 
 describe("SubmitPlugin repository selection", () => {
   afterEach(() => vi.restoreAllMocks());
+  it.each([
+    { auto: true, cdn: false, status: "listed", label: "提交并上架", result: "插件已上架" },
+    { auto: false, cdn: false, status: "pending", label: "提交审核", result: "已提交上架审核" },
+    {
+      auto: true,
+      cdn: true,
+      status: "pending",
+      label: "提交 CDN 审查",
+      result: "已加入 CDN 审查队列，通过后提供资源链接",
+    },
+    { auto: true, cdn: false, status: "pending", label: "提交并上架", result: "已提交上架审核" },
+  ])(
+    "submits the selected CDN choice and reports the server outcome: $label / $status",
+    async (scenario) => {
+      const context = setup();
+      context.store.siteConfig.market.plugin_auto_approve_enabled = scenario.auto;
+      vi.mocked(context.store.fetchPluginSubmissionMetadata).mockResolvedValue({
+        name: "astrbot_plugin_a",
+        desc: "有效简介",
+        author: "Alice",
+      } as never);
+      vi.mocked(context.store.submitPlugin).mockResolvedValue({
+        cdn_enabled: scenario.cdn,
+        status: scenario.status,
+      });
+      const wrapper = context.mount();
+      await flushPromises();
+      expect(wrapper.get('[role="checkbox"]').attributes("aria-checked")).toBe("false");
+      wrapper.findAllComponents(NSelect)[0]!.vm.$emit("update:value", "a");
+      await flushPromises();
+      if (scenario.cdn) await wrapper.get('[role="checkbox"]').trigger("click");
+      expect(wrapper.text()).toContain("每次版本更新都需要审查");
+      const button = wrapper.findAll("button").find((item) => item.text() === scenario.label)!;
+      await button.trigger("click");
+      await flushPromises();
+      expect(context.store.submitPlugin).toHaveBeenCalledWith(
+        expect.objectContaining({ cdn_enabled: scenario.cdn }),
+      );
+      expect(messages.success).toHaveBeenCalledWith(scenario.result);
+      wrapper.unmount();
+    },
+  );
+
   it("leaves every missing metadata field empty instead of using repository details", async () => {
     const context = setup();
     vi.mocked(context.store.fetchPluginSubmissionMetadata)

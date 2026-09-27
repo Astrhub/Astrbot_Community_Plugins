@@ -9,6 +9,7 @@ import PluginReviewSidebar from "@/components/workbench/PluginReviewSidebar.vue"
 import PluginReviewWorkspace from "@/components/workbench/PluginReviewWorkspace.vue";
 import ReviewCommentThread from "@/components/workbench/ReviewCommentThread.vue";
 import ReviewDecisionPanel from "@/components/workbench/ReviewDecisionPanel.vue";
+import ReviewManualPanel from "@/components/workbench/ReviewManualPanel.vue";
 import ReviewDiffViewer from "@/components/workbench/ReviewDiffViewer.vue";
 import ReviewFileBrowser from "@/components/workbench/ReviewFileBrowser.vue";
 import ReviewHistoryTimeline from "@/components/workbench/ReviewHistoryTimeline.vue";
@@ -41,8 +42,18 @@ const policyStore = useReviewPolicyStore();
 const reviewRoute = useReviewSelection(route, router);
 
 const { currentUser } = storeToRefs(pluginStore);
-const { items, detail, loadingList, loadingDetail, submitting, deciding } =
-  storeToRefs(artifactStore);
+const {
+  items,
+  detail,
+  loadingList,
+  loadingDetail,
+  submitting,
+  deciding,
+  reviewContext,
+  contextError,
+  loadingContext,
+  selectedArtifact,
+} = storeToRefs(artifactStore);
 const {
   activeArtifactId,
   files,
@@ -107,17 +118,17 @@ const commandBusy = computed(
   () =>
     deciding.value ||
     mutating.value ||
-    loadingDetail.value ||
-    detail.value?.artifact.id !== selectedId.value,
+    loadingContext.value ||
+    selectedArtifact.value?.id !== selectedId.value,
 );
 const supersedesArtifact = computed(() => {
   const artifact = detail.value?.artifact;
   return !isAdmin.value && artifact?.review_status === "changes_requested" ? artifact : null;
 });
 const canCreateComments = computed(() => {
-  if (!isAdmin.value || !detail.value?.artifact) return false;
+  if (!isAdmin.value || !selectedArtifact.value) return false;
   return !["changes_requested", "approved", "rejected", "withdrawn"].includes(
-    detail.value.artifact.review_status,
+    selectedArtifact.value.review_status,
   );
 });
 const selectedAnchor = computed<ReviewAnchor | null>(() => {
@@ -182,6 +193,7 @@ async function loadSelected(artifactId: string): Promise<void> {
   workspaceStore.resetForArtifact(artifactId);
   const results = await Promise.allSettled([
     artifactStore.loadDetail(artifactId),
+    artifactStore.loadContext(artifactId),
     workspaceStore.loadFiles(artifactId),
     workspaceStore.loadDiffs(artifactId),
     workspaceStore.loadComments(artifactId),
@@ -468,20 +480,30 @@ async function refreshAfterDecision(artifactId: string): Promise<void> {
   if (!artifactId || selectedId.value !== artifactId) return;
   await Promise.allSettled([
     artifactStore.loadDetail(artifactId),
+    artifactStore.loadContext(artifactId),
     workspaceStore.loadComments(artifactId),
     workspaceStore.loadHistory(artifactId, { reset: true }),
   ]);
 }
 
-async function approve(reason: string): Promise<void> {
-  const artifactId = selectedId.value;
-  if (!artifactId || commandBusy.value) return;
+async function manualReviewAction(payload: {
+  action: "comment" | "manual_approve" | "retry_review";
+  reason: string;
+}): Promise<void> {
+  const artifact = selectedArtifact.value;
+  if (!artifact || artifact.id !== selectedId.value || commandBusy.value) return;
   try {
-    await artifactStore.approve(artifactId, reason);
-    message.success("版本已批准，正在排队发布 CDN 包");
-    await refreshAfterDecision(artifactId);
+    await artifactStore.reviewAction(artifact, payload.action, payload.reason);
+    message.success(
+      payload.action === "manual_approve"
+        ? "已记录人工意见并批准，正在排队发布"
+        : payload.action === "retry_review"
+          ? "已保留历史记录并重新排队审查"
+          : "版本评论已保存",
+    );
+    await refreshAfterDecision(artifact.id);
   } catch (error) {
-    message.error(errorMessage(error, "批准失败"));
+    message.error(errorMessage(error, "审查操作失败"));
   }
 }
 
@@ -666,7 +688,7 @@ onMounted(async () => {
         :is-admin="isAdmin"
         :item-count="selection.view === 'policy' ? policies.length : visibleItems.length"
         :refreshing="loadingList || loadingDetail || loadingPolicy"
-        :artifact="detail?.artifact || null"
+        :artifact="selectedArtifact?.id === selectedId ? selectedArtifact : null"
         :policy-mode="selection.view === 'policy'"
         @back="router.back()"
         @refresh="refreshAll"
@@ -775,6 +797,15 @@ onMounted(async () => {
     </NTabs>
 
     <template v-if="selection.view !== 'policy'" #thread>
+      <ReviewManualPanel
+        :artifact="selectedArtifact?.id === selectedId ? selectedArtifact : null"
+        :decisions="reviewContext?.decisions || []"
+        :is-admin="isAdmin"
+        :busy="commandBusy"
+        :error="contextError"
+        @action="manualReviewAction"
+        @refresh="refreshAll"
+      />
       <ReviewCommentThread
         :comments="comments"
         :anchor="selectedAnchor"
@@ -796,11 +827,10 @@ onMounted(async () => {
 
     <template v-if="selection.view !== 'policy'" #decision>
       <ReviewDecisionPanel
-        :artifact="detail?.artifact || null"
+        :artifact="selectedArtifact?.id === selectedId ? selectedArtifact : null"
         :findings="detail?.findings || []"
         :is-admin="isAdmin"
         :busy="commandBusy"
-        @approve="approve"
         @reject="reject"
         @request-changes="requestChanges"
         @retry-publish="retryPublish"

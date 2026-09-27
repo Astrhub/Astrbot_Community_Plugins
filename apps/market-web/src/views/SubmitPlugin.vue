@@ -10,7 +10,7 @@
           </n-button>
           <div>
             <h1>提交插件</h1>
-            <p>插件将提交到社区市场审核队列，数据保存在市场服务器。</p>
+            <p>提交到社区市场，可选择需要逐版本审查的 CDN 加速服务。</p>
           </div>
         </div>
         <div class="header-right">
@@ -226,6 +226,26 @@
                   <n-dynamic-tags v-model:value="formData.tags" :max="maxPluginTags" />
                 </n-form-item>
               </n-grid-item>
+              <n-grid-item span="2">
+                <n-form-item label="社区源 CDN">
+                  <div>
+                    <n-checkbox v-model:checked="formData.cdn_enabled" :disabled="submitting">
+                      使用社区源 CDN（需审查）
+                    </n-checkbox>
+                    <p class="repository-hint">
+                      开启后自动跟踪新版本，每次版本更新都需要审查。通过前不提供该版本的 CDN
+                      资源链接，仍可通过 GitHub 安装。可在个人界面关闭 CDN。
+                    </p>
+                    <p v-if="!formData.cdn_enabled" class="repository-hint">
+                      {{
+                        siteConfig.market.plugin_auto_approve_enabled
+                          ? "当前站点已开启自动通过，不使用 CDN 可直接上架。"
+                          : "不使用 CDN，仅按站点规则进行上架审核，不进入包审查。"
+                      }}
+                    </p>
+                  </div>
+                </n-form-item>
+              </n-grid-item>
             </n-grid>
           </n-form>
 
@@ -245,7 +265,13 @@
                 "
                 @click="handleSubmit"
               >
-                提交审核
+                {{
+                  formData.cdn_enabled
+                    ? "提交 CDN 审查"
+                    : siteConfig.market.plugin_auto_approve_enabled
+                      ? "提交并上架"
+                      : "提交审核"
+                }}
               </n-button>
             </div>
           </template>
@@ -263,6 +289,7 @@ import { useSeo } from "../composables/useSeo";
 import {
   NButton,
   NAlert,
+  NCheckbox,
   NCard,
   NDynamicTags,
   NForm,
@@ -300,6 +327,7 @@ const pluginCategoryOptions = PLUGIN_CATEGORY_OPTIONS;
 const githubRepoPattern = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(?:\.git)?\/?$/;
 
 type SubmissionFormData = {
+  cdn_enabled: boolean;
   repository_id: string;
   name: string;
   display_name: string;
@@ -312,7 +340,10 @@ type SubmissionFormData = {
   social_link: string;
 };
 
-type TextAutofillField = Exclude<keyof SubmissionFormData, "repo" | "repository_id" | "tags">;
+type TextAutofillField = Exclude<
+  keyof SubmissionFormData,
+  "repo" | "repository_id" | "tags" | "cdn_enabled"
+>;
 
 const metadataStatus = reactive({
   type: "" as "" | "success" | "warning" | "error",
@@ -320,6 +351,7 @@ const metadataStatus = reactive({
 });
 
 const formData = reactive<SubmissionFormData>({
+  cdn_enabled: false,
   repository_id: "",
   name: "",
   display_name: "",
@@ -669,8 +701,14 @@ const handleSubmit = () => {
 
     submitting.value = true;
     try {
-      await store.submitPlugin({ ...formData });
-      message.success("已提交审核");
+      const result = await store.submitPlugin({ ...formData });
+      message.success(
+        result.cdn_enabled
+          ? "已加入 CDN 审查队列，通过后提供资源链接"
+          : result.status === "listed"
+            ? "插件已上架"
+            : "已提交上架审核",
+      );
       router.push("/");
     } catch (error) {
       if ((error as { code?: string }).code === "github_authorization_required")

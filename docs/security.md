@@ -115,8 +115,8 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 - **Markdown 渲染**：前端使用 `DOMPurify` 清理渲染输出，`marked` + `highlight.js` 渲染；审核操作在服务端存储。
 - **评论软删除**：删除根评论会隐藏其回复（`deleted` 标记 + partial index `WHERE deleted = false`），保留审计痕迹。
 - **审查内容最小披露**：源码、diff、finding evidence 和运行日志只通过 owner/admin 鉴权接口按需读取。
-  状态邮件由事件白名单生成，只包含插件或策略名称、版本、固定状态、固定短原因和工作台链接；payload 的
-  reason/code、requirements、comment、内部路径、对象 key 与凭据不会进入邮件。
+  状态邮件使用固定文案；批准及发布通知可附带已保存的管理员批准评价，限长并过滤敏感内容和代码块。
+  不直接转发 payload 的 reason/code、requirements、行评论、内部路径、对象 key 或扫描证据。
 
 ## 网络与部署安全
 

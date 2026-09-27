@@ -170,6 +170,20 @@ class PublicReviewDecision(PublicResponseModel):
     created_at: datetime
 
 
+class ReviewContextResponse(PublicResponseModel):
+    artifact: PublicArtifact
+    decisions: list[PublicReviewDecision]
+
+
+class ManualReviewPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    action: Literal["comment", "manual_approve", "retry_review"]
+    reason: str = Field(min_length=1, max_length=10000)
+    archive_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    confirmed: bool = False
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
 class ArtifactDetailResponse(PublicResponseModel):
     artifact: PublicArtifact
     runs: list[PublicReviewRun]
@@ -524,6 +538,7 @@ class StableRiskPayload(BaseModel):
 
 
 class PluginRegistrationPayload(BaseModel):
+    cdn_enabled: Literal[True] = True
     name: str = Field(min_length=1, max_length=120)
     display_name: str = Field(default="", max_length=120)
     desc: str = Field(min_length=1, max_length=500)

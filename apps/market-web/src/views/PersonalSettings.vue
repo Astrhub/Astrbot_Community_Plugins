@@ -34,6 +34,7 @@ const {
   requestPluginListing,
   unlistOwnPlugin,
   updatePluginMetadata,
+  updatePluginCdn,
   updateProfile,
 } = store;
 
@@ -220,6 +221,20 @@ async function withPluginBusy(plugin, action, task) {
   }
 }
 
+async function togglePluginCdn({ plugin, enabled }: { plugin: Plugin; enabled: boolean }) {
+  if (pluginBusyIds[plugin.id]) return;
+  try {
+    const updated = await withPluginBusy(plugin, "cdn", () => updatePluginCdn(plugin.id, enabled));
+    message.success(
+      updated.cdn_enabled
+        ? "已开启 CDN，未审查的新版本会自动送审"
+        : "已关闭 CDN，插件仍可通过 GitHub 安装",
+    );
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "更新 CDN 设置失败");
+  }
+}
+
 async function savePluginMetadata({
   plugin,
   changes,
@@ -346,6 +361,7 @@ onMounted(async () => {
                 :max-tags="maxPluginTags"
                 @refresh="refreshMyPlugins"
                 @save-plugin="savePluginMetadata"
+                @toggle-cdn="togglePluginCdn"
                 @request-list="requestListPlugin"
                 @unlist="unlistPlugin"
               />

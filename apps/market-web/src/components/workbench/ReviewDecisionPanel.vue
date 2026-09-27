@@ -13,7 +13,6 @@ import {
   NTooltip,
 } from "naive-ui";
 import {
-  CheckmarkCircleOutline,
   CloseCircleOutline,
   CreateOutline,
   RefreshOutline,
@@ -22,7 +21,7 @@ import {
 } from "@vicons/ionicons5";
 import type { ArtifactFinding, PluginArtifact } from "@/types/artifacts";
 
-type DecisionAction = "approve" | "reject" | "requestChanges" | "revoke" | "stableRisk";
+type DecisionAction = "reject" | "requestChanges" | "revoke" | "stableRisk";
 
 const props = defineProps<{
   artifact: PluginArtifact | null;
@@ -32,7 +31,6 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  approve: [reason: string];
   reject: [reason: string];
   requestChanges: [reason: string];
   retryPublish: [];
@@ -89,7 +87,6 @@ const canStableRisk = computed(
 );
 const modalTitle = computed(() => {
   const titles: Record<DecisionAction, string> = {
-    approve: "批准候选版本",
     reject: "拒绝候选版本",
     requestChanges: "要求作者修改",
     revoke: isRetryRevoke.value ? "重试下架当前 CDN 版本" : "下架当前 CDN 版本",
@@ -97,7 +94,7 @@ const modalTitle = computed(() => {
   };
   return modalAction.value ? titles[modalAction.value] : "";
 });
-const reasonRequired = computed(() => modalAction.value !== "approve");
+const reasonRequired = computed(() => Boolean(modalAction.value));
 const canConfirm = computed(() => {
   if (!modalAction.value || props.busy) return false;
   if (reasonRequired.value && !reason.value.trim()) return false;
@@ -122,7 +119,6 @@ function closeModal(): void {
 function confirmDecision(): void {
   if (!canConfirm.value || !modalAction.value) return;
   const normalizedReason = reason.value.trim();
-  if (modalAction.value === "approve") emit("approve", normalizedReason);
   if (modalAction.value === "reject") emit("reject", normalizedReason);
   if (modalAction.value === "requestChanges") emit("requestChanges", normalizedReason);
   if (modalAction.value === "revoke") emit("revoke", normalizedReason);
@@ -233,18 +229,6 @@ function confirmDecision(): void {
         ></template>
         拒绝
       </NButton>
-      <NButton
-        v-if="pending"
-        type="primary"
-        :disabled="busy"
-        aria-label="批准并发布候选版本"
-        @click="openModal('approve')"
-      >
-        <template #icon
-          ><NIcon><CheckmarkCircleOutline /></NIcon
-        ></template>
-        批准并发布
-      </NButton>
     </NSpace>
 
     <NModal
@@ -292,13 +276,7 @@ function confirmDecision(): void {
           <NSpace justify="end">
             <NButton :disabled="busy" @click="closeModal">取消</NButton>
             <NButton
-              :type="
-                modalAction === 'approve'
-                  ? 'primary'
-                  : modalAction === 'requestChanges'
-                    ? 'warning'
-                    : 'error'
-              "
+              :type="modalAction === 'requestChanges' ? 'warning' : 'error'"
               :loading="busy"
               :disabled="!canConfirm"
               @click="confirmDecision"

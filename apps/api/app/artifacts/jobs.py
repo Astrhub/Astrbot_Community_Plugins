@@ -21,6 +21,7 @@ from .archive import (
     github_repo_name,
     normalize_version,
 )
+from ..cdn import CdnPublicationError, check_publication_cdn
 from .models import JobType, PublicationStatus, ReviewStatus
 from .malware import (
     ClamAvScanner,
@@ -566,6 +567,8 @@ class ArtifactJobRunner:
                     summary="Previous stage attempt lost its worker lease",
                 )
         artifact = await self._artifact_for_job(job)
+        if artifact["review_status"] in {"approved", "rejected", "withdrawn", "changes_requested"}:
+            return
         policy = None
         policy_version_id = str(artifact.get("policy_version_id") or "")
         if policy_version_id:
@@ -665,6 +668,16 @@ class ArtifactJobRunner:
 
     async def _run_publish(self, job: Mapping[str, Any]) -> None:
         artifact = await self._artifact_for_job(job)
+        artifact = {
+            **artifact,
+            "suppress_email": (job.get("payload") or {}).get("suppress_email") is True,
+        }
+        expected_cdn_generation = int((job.get("payload") or {}).get("cdn_generation") or 0)
+        try:
+            check_publication_cdn(artifact, expected_cdn_generation)
+        except CdnPublicationError as exc:
+            await self._mark_publish_failed(artifact, exc.code)
+            raise JobExecutionError(exc.code, "CDN 已关闭或设置已变化", retryable=False) from exc
         if artifact["review_status"] != ReviewStatus.APPROVED.value:
             raise JobExecutionError(
                 "artifact_not_approved", "Artifact is not approved", retryable=False
@@ -759,6 +772,7 @@ class ArtifactJobRunner:
             result = await self.repository.publish_artifact(
                 artifact["id"],
                 expected_repo_version=current_repo_version,
+                expected_cdn_generation=expected_cdn_generation,
                 published_key=published_key,
                 download_url=self.storage.public_url(published_key),
                 **(
@@ -787,7 +801,11 @@ class ArtifactJobRunner:
                 }
             )
             raise
-        await self._status_event(result, "artifact_published", "published")
+        await self._status_event(
+            {**result, "suppress_email": artifact["suppress_email"]},
+            "artifact_published",
+            "published",
+        )
 
     async def _run_revoke(self, job: Mapping[str, Any]) -> None:
         artifact = await self._artifact_for_job(job)
@@ -865,6 +883,8 @@ class ArtifactJobRunner:
             await self.repository.transition_publication_status(
                 str(artifact["id"]), PublicationStatus.PUBLISH_FAILED.value
             )
+        if error_code == "cdn_disabled_or_changed":
+            return
         await self._status_event(
             artifact,
             "artifact_publish_failed",
@@ -888,6 +908,7 @@ class ArtifactJobRunner:
                 "payload": {
                     "artifact_id": artifact["id"],
                     "plugin_id": artifact["plugin_id"],
+                    **({"suppress_email": True} if artifact.get("suppress_email") is True else {}),
                     **dict(extra or {}),
                 },
                 "dedupe_key": f"artifact:{artifact['id']}:{suffix}",

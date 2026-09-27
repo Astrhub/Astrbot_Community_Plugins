@@ -150,6 +150,8 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20260715_003_review_policy_snapshot",
         "20260717_004_review_observability",
         "20260910_005_plugin_namespace",
+        "20260927_006_manual_review",
+        "20260927_007_optional_cdn",
     ]
     sql = migrations[0].sql
     for table in (
@@ -253,6 +255,8 @@ async def run_artifact_migrations(database_url: str) -> None:
             "20260715_003_review_policy_snapshot",
             "20260717_004_review_observability",
             "20260910_005_plugin_namespace",
+            "20260927_006_manual_review",
+            "20260927_007_optional_cdn",
         ]
         assert second == []
         table_names = await connection.fetch(

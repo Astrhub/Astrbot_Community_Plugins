@@ -23,6 +23,7 @@ class _RecordingRepository:
             "id": artifact_id,
             "plugin_id": "astrbot_plugin_demo",
             "submitted_by": "owner-1",
+            "review_status": "scanning",
             "policy_version_id": None,
         }
 
