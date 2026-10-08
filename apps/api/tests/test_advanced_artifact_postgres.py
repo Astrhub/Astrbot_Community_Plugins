@@ -282,14 +282,17 @@ async def run_review_observability_scenario(url: str) -> None:
                 "error_code": "static_scan_failed",
             },
         )
-        await repository.enqueue_job(
+        job = await repository.enqueue_job(
             {
                 "artifact_id": artifact["id"],
                 "type": "static_scan",
                 "payload": {},
+                "available_at": datetime.now(UTC).isoformat(),
                 "idempotency_key": "observability-job",
             }
         )
+        # ISO 字符串 available_at 必须被接受并归一化为时间戳（回归：runtime collect 入队）
+        assert datetime.fromisoformat(str(job["available_at"]).replace("Z", "+00:00"))
 
         snapshot = await repository.get_review_observability_snapshot(
             datetime.now(UTC) - timedelta(hours=24)

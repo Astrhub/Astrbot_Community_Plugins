@@ -1206,7 +1206,7 @@ class PgArtifactRepository(PgManualReviewMixin, PgAdvancedReviewRepositoryMixin)
                     if artifact_id and payload["type"] == "publish"
                     else dict(payload.get("payload") or {}),
                     int(payload.get("max_attempts") or 3),
-                    payload.get("available_at"),
+                    _as_datetime(payload.get("available_at")),
                     payload["idempotency_key"],
                     policy_version_id,
                     payload.get("run_id"),
@@ -3978,6 +3978,13 @@ def _parse_time(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
         return value.astimezone(UTC)
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    """把可选的 ISO 字符串/时间戳归一化为 datetime，供 asyncpg 时间参数使用。"""
+    if value in {None, ""}:
+        return None
+    return _parse_time(value)
 
 
 def _reviewer_name(reviewer: Mapping[str, Any] | None) -> str:
