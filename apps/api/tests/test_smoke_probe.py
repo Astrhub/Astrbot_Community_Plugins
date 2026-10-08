@@ -178,6 +178,26 @@ def test_source_backed_factory_is_locked_to_version_and_commit(tmp_path: Path) -
         build_astrbot_lifecycle_session(changed, tmp_path, "astrbot_plugin_demo")
 
 
+def test_source_backed_factory_accepts_verified_4282(tmp_path: Path) -> None:
+    request = runtime_request()
+    (tmp_path / "data/plugins/astrbot_plugin_demo").mkdir(parents=True)
+    upgraded = request.model_copy(
+        update={"target": request.target.model_copy(update={"astrbot_version": "4.28.2"})}
+    )
+    session = build_astrbot_lifecycle_session(upgraded, tmp_path, "astrbot_plugin_demo")
+    assert isinstance(session, AstrBot4266LifecycleSession)
+    assert session.expected_version == "4.28.2"
+
+
+def test_startup_failure_message_carries_exception_detail(tmp_path: Path) -> None:
+    session = FakeSession(successful_observation(), startup_error=True)
+    result = run_probe(session, tmp_path)
+    assert result.error_code == "plugin_startup_failed"
+    assert "RuntimeError" in result.startup.message
+    assert "startup failed" in result.startup.message
+    assert "RuntimeError" in result.message
+
+
 def test_source_backed_session_requires_exactly_one_non_reserved_plugin(tmp_path: Path) -> None:
     first = tmp_path / "data/plugins/astrbot_plugin_demo"
     second = tmp_path / "data/plugins/astrbot_plugin_other"

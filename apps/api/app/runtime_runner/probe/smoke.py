@@ -27,6 +27,10 @@ from .command import redact_probe_text
 
 ASTRBOT_4266_VERSION = "4.26.6"
 ASTRBOT_4266_SOURCE_COMMIT = "5d10e0d428b41308cc63215db00359c61ee17195"
+ASTRBOT_4282_VERSION = "4.28.2"
+# 已验证与生命周期适配器契约兼容的 AstrBot 版本；新增版本须先核对 core_lifecycle/star API。
+SUPPORTED_ASTRBOT_VERSIONS = frozenset({ASTRBOT_4266_VERSION, ASTRBOT_4282_VERSION})
+_ASTRBOT_SOURCE_COMMITS = {ASTRBOT_4266_VERSION: ASTRBOT_4266_SOURCE_COMMIT}
 
 _PLUGIN_DIR = re.compile(r"^astrbot_plugin_[a-z0-9][a-z0-9_]{0,95}$")
 _HOOK_EVENT_NAMES = {
@@ -165,15 +169,17 @@ class AstrBotSmokeProbe:
                 startup_started = time.monotonic()
                 try:
                     await session.startup()
-                except Exception:
+                except Exception as exc:
                     startup = StartupProbeResult(
                         status=ProbeStatus.FAILED,
                         duration_ms=_duration_ms(startup_started),
                         error_code="plugin_startup_failed",
-                        message="Plugin startup hook failed",
+                        message=_safe_message(f"Plugin startup hook failed: {_exc_detail(exc)}"),
                     )
                     smoke_error = startup.error_code
-                    smoke_message = "Plugin startup hook did not pass"
+                    smoke_message = _safe_message(
+                        f"Plugin startup hook did not pass: {_exc_detail(exc)}"
+                    )
                 else:
                     startup_duration = _duration_ms(startup_started)
                     startup = StartupProbeResult(
@@ -185,29 +191,36 @@ class AstrBotSmokeProbe:
             termination_started = time.monotonic()
             try:
                 await session.terminate_plugin()
-            except Exception:
+            except Exception as exc:
                 termination = ProbeResult(
                     status=ProbeStatus.FAILED,
                     duration_ms=_duration_ms(termination_started),
                     error_code="plugin_terminate_failed",
-                    message="Plugin termination did not complete",
+                    message=_safe_message(
+                        f"Plugin termination did not complete: {_exc_detail(exc)}"
+                    ),
                 )
                 smoke_error = smoke_error or termination.error_code
-                smoke_message = smoke_message or "Plugin termination did not pass"
+                smoke_message = smoke_message or _safe_message(
+                    f"Plugin termination did not pass: {_exc_detail(exc)}"
+                )
             else:
                 termination = ProbeResult(
                     status=ProbeStatus.PASSED,
                     duration_ms=_duration_ms(termination_started),
                 )
-        except Exception:
+        except Exception as exc:
+            detail = _exc_detail(exc)
             import_probe = ProbeResult(
                 status=ProbeStatus.FAILED,
                 duration_ms=_duration_ms(started),
                 error_code="astrbot_lifecycle_failed",
-                message="AstrBot lifecycle could not initialize the smoke environment",
+                message=_safe_message(
+                    f"AstrBot lifecycle could not initialize the smoke environment: {detail}"
+                ),
             )
             smoke_error = "astrbot_lifecycle_failed"
-            smoke_message = "AstrBot lifecycle initialization failed"
+            smoke_message = _safe_message(f"AstrBot lifecycle initialization failed: {detail}")
         finally:
             if session is not None:
                 with suppress(Exception):
@@ -238,22 +251,32 @@ def build_astrbot_lifecycle_session(
     runtime_root: Path,
     plugin_dir_name: str,
 ) -> AstrBotLifecycleSession:
-    if request.target.astrbot_version != ASTRBOT_4266_VERSION:
+    version = request.target.astrbot_version
+    if version not in SUPPORTED_ASTRBOT_VERSIONS:
         raise ValueError("unsupported_astrbot_smoke_adapter")
+    pinned_commit = _ASTRBOT_SOURCE_COMMITS.get(version)
     if (
-        request.target.astrbot_commit
-        and request.target.astrbot_commit != ASTRBOT_4266_SOURCE_COMMIT
+        pinned_commit
+        and request.target.astrbot_commit
+        and request.target.astrbot_commit != pinned_commit
     ):
         raise ValueError("astrbot_smoke_adapter_commit_mismatch")
-    return AstrBot4266LifecycleSession(runtime_root, plugin_dir_name)
+    return AstrBot4266LifecycleSession(runtime_root, plugin_dir_name, expected_version=version)
 
 
 class AstrBot4266LifecycleSession:
-    def __init__(self, runtime_root: Path, plugin_dir_name: str) -> None:
+    def __init__(
+        self,
+        runtime_root: Path,
+        plugin_dir_name: str,
+        *,
+        expected_version: str = ASTRBOT_4266_VERSION,
+    ) -> None:
         self.runtime_root = runtime_root.resolve(strict=True)
         if not _PLUGIN_DIR.fullmatch(plugin_dir_name):
             raise ValueError("invalid_runtime_plugin_directory")
         self.plugin_dir_name = plugin_dir_name
+        self.expected_version = expected_version
         self.lifecycle: Any | None = None
         self.plugin_metadata: Any | None = None
         self._initialized = False
@@ -280,8 +303,11 @@ class AstrBot4266LifecycleSession:
             self._path_inserted = True
         before_tasks = set(asyncio.all_tasks())
         installed_version = importlib.metadata.version("AstrBot")
-        if installed_version != ASTRBOT_4266_VERSION:
-            raise RuntimeError("installed_astrbot_version_mismatch")
+        if installed_version != self.expected_version:
+            raise RuntimeError(
+                f"installed_astrbot_version_mismatch: "
+                f"expected {self.expected_version}, got {installed_version}"
+            )
         importlib.invalidate_caches()
         from astrbot.core import LogBroker, db_helper
         from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
@@ -560,6 +586,10 @@ def _skipped_registration() -> RegistrationProbeResult:
 
 def _safe_name(value: str) -> str:
     return redact_probe_text(str(value or ""), maximum=160)
+
+
+def _exc_detail(exc: BaseException) -> str:
+    return redact_probe_text(f"{type(exc).__name__}: {exc}", maximum=380)
 
 
 def _safe_message(value: str) -> str:
