@@ -63,6 +63,7 @@ export interface Plugin {
   support_platforms?: string[];
   updated_at?: string;
   version_updated_at?: string;
+  listed_at?: string;
   created_at?: string;
   metadata?: Record<string, unknown>;
   [key: string]: unknown;

@@ -491,6 +491,7 @@ class InMemoryMarketStore:
         plugin["status"] = status
         plugin["moderated_by"] = by_user_id
         if status == "listed":
+            plugin["listed_at"] = utc_now()
             for key in ("unlist_reason", "unlisted_at", "unlisted_by"):
                 plugin.pop(key, None)
         self._complete_pending_submissions(plugin_id, status)
@@ -1262,7 +1263,8 @@ CREATE TABLE IF NOT EXISTS market_plugins (
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    version_updated_at timestamptz NOT NULL DEFAULT now()
+    version_updated_at timestamptz NOT NULL DEFAULT now(),
+    listed_at timestamptz
 );
 CREATE INDEX IF NOT EXISTS market_plugins_status_idx ON market_plugins(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS market_plugins_tags_gin_idx ON market_plugins USING GIN (tags);
@@ -1908,6 +1910,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                                THEN metadata - 'unlist_reason' - 'unlisted_at' - 'unlisted_by'
                                ELSE metadata
                            END,
+                           listed_at = CASE WHEN $2 = 'listed' THEN now() ELSE listed_at END,
                            updated_at = now()
                      WHERE id = $1
                  RETURNING *

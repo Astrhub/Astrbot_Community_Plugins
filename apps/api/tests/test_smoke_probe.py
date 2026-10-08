@@ -193,7 +193,8 @@ def test_astrbot_contract_check_names_missing_apis() -> None:
         def __init__(self, broker):  # 缺少 db 参数
             pass
 
-        async def initialize(self) -> None: ...
+        async def initialize(self) -> None:
+            pass
 
     class BrokenRegistry:
         pass

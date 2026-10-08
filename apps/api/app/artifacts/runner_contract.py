@@ -738,8 +738,11 @@ def runtime_result_error_message(result: RuntimeDispatchResult) -> str:
         return result.cleanup.message
     if result.install.status != ProbeStatus.PASSED and result.install.message:
         return result.install.message
-    if result.smoke.status != ProbeStatus.PASSED and result.smoke.message:
-        return result.smoke.message
+    if result.smoke.status != ProbeStatus.PASSED:
+        if result.smoke.failed_plugin.present and result.smoke.failed_plugin.message:
+            return result.smoke.failed_plugin.message
+        if result.smoke.message:
+            return result.smoke.message
     return "Runtime validation reported a failed gate"
 
 

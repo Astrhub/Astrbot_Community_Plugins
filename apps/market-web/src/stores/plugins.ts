@@ -408,10 +408,10 @@ export const usePluginStore = defineStore("plugins", () => {
   }
 
   function getPluginTime(plugin: Plugin): number {
-    // updated 只按版本号变化时间排序；listed 按上架（创建）时间排序。
+    // updated 只按版本号变化时间排序；listed 按实际上架时间排序。
     const value =
       sortBy.value === "listed"
-        ? plugin.created_at
+        ? plugin.listed_at || plugin.created_at
         : plugin.version_updated_at || plugin.updated_at || plugin.created_at;
     return new Date(value || 0).getTime() || 0;
   }
