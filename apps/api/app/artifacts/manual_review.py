@@ -61,7 +61,10 @@ def validate_action(
     if not confirmed:
         raise ValueError("review_confirmation_required")
     if action == "manual_approve":
-        if str(artifact.get("owner_user_id") or "") == str(actor.get("id") or ""):
+        if (
+            actor.get("role") != "core_admin"
+            and str(artifact.get("owner_user_id") or "") == str(actor.get("id") or "")
+        ):
             raise ValueError("self_approval_forbidden")
         if not artifact.get("tree_sha256") or not artifact.get("normalized_version"):
             raise ValueError("artifact_manifest_missing")
