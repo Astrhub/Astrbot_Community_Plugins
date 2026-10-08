@@ -309,6 +309,7 @@ class AstrBot4266LifecycleSession:
         from astrbot.core import LogBroker, db_helper
         from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
         from astrbot.core.star.star_handler import star_handlers_registry
+
         _verify_astrbot_contract(AstrBotCoreLifecycle, star_handlers_registry)
 
         self.lifecycle = AstrBotCoreLifecycle(LogBroker(), db_helper)

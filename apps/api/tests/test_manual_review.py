@@ -102,11 +102,15 @@ def test_core_admin_may_self_approve_but_admin_cannot():
         )
         with pytest.raises(ValueError, match="self_approval_forbidden"):
             await repo.review_action(
-                aid, **base, actor={"id": owner["id"], "role": "admin"},
+                aid,
+                **base,
+                actor={"id": owner["id"], "role": "admin"},
                 idempotency_key="self-admin",
             )
         approved = await repo.review_action(
-            aid, **base, actor={"id": owner["id"], "role": "core_admin"},
+            aid,
+            **base,
+            actor={"id": owner["id"], "role": "core_admin"},
             idempotency_key="self-core-admin",
         )
         assert approved["review_status"] == "approved"

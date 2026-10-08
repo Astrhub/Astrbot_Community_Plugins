@@ -182,11 +182,7 @@ def test_source_backed_factory_accepts_any_version_and_enforces_commit_pin(
     assert session.expected_version == "9.99.9"
 
     mismatched = request.model_copy(
-        update={
-            "target": request.target.model_copy(
-                update={"astrbot_commit": "0" * 40}
-            )
-        }
+        update={"target": request.target.model_copy(update={"astrbot_commit": "0" * 40})}
     )
     with pytest.raises(ValueError, match="commit_mismatch"):
         build_astrbot_lifecycle_session(mismatched, tmp_path, "astrbot_plugin_demo")
