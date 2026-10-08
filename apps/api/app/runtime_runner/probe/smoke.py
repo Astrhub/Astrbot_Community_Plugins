@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.metadata
+import inspect
 import os
 import re
 import sys
@@ -27,9 +28,7 @@ from .command import redact_probe_text
 
 ASTRBOT_4266_VERSION = "4.26.6"
 ASTRBOT_4266_SOURCE_COMMIT = "5d10e0d428b41308cc63215db00359c61ee17195"
-ASTRBOT_4282_VERSION = "4.28.2"
-# 已验证与生命周期适配器契约兼容的 AstrBot 版本；新增版本须先核对 core_lifecycle/star API。
-SUPPORTED_ASTRBOT_VERSIONS = frozenset({ASTRBOT_4266_VERSION, ASTRBOT_4282_VERSION})
+# 适配器按运行时结构契约校验支持任意 AstrBot 版本；此处仅为已核验源码快照保留 commit 钉。
 _ASTRBOT_SOURCE_COMMITS = {ASTRBOT_4266_VERSION: ASTRBOT_4266_SOURCE_COMMIT}
 
 _PLUGIN_DIR = re.compile(r"^astrbot_plugin_[a-z0-9][a-z0-9_]{0,95}$")
@@ -252,8 +251,6 @@ def build_astrbot_lifecycle_session(
     plugin_dir_name: str,
 ) -> AstrBotLifecycleSession:
     version = request.target.astrbot_version
-    if version not in SUPPORTED_ASTRBOT_VERSIONS:
-        raise ValueError("unsupported_astrbot_smoke_adapter")
     pinned_commit = _ASTRBOT_SOURCE_COMMITS.get(version)
     if (
         pinned_commit
@@ -312,12 +309,14 @@ class AstrBot4266LifecycleSession:
         from astrbot.core import LogBroker, db_helper
         from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
         from astrbot.core.star.star_handler import star_handlers_registry
+        _verify_astrbot_contract(AstrBotCoreLifecycle, star_handlers_registry)
 
         self.lifecycle = AstrBotCoreLifecycle(LogBroker(), db_helper)
         await self.lifecycle.initialize()
         self._initialized = True
         self._background_tasks = set(asyncio.all_tasks()) - before_tasks
         plugin_manager = self.lifecycle.plugin_manager
+        _verify_plugin_manager_contract(plugin_manager)
         failed = plugin_manager.failed_plugin_dict.get(self.plugin_dir_name) or {}
         candidates = [
             item
@@ -586,6 +585,35 @@ def _skipped_registration() -> RegistrationProbeResult:
 
 def _safe_name(value: str) -> str:
     return redact_probe_text(str(value or ""), maximum=160)
+
+
+def _verify_astrbot_contract(core_lifecycle_cls: Any, star_handlers_registry: Any) -> None:
+    """校验 AstrBot 内部 API 结构契约，缺失时点名具体位置。"""
+    problems: list[str] = []
+    params = list(inspect.signature(core_lifecycle_cls.__init__).parameters)
+    if params[1:] != ["log_broker", "db"]:
+        problems.append(f"AstrBotCoreLifecycle.__init__{tuple(params[1:])}")
+    for name in ("initialize", "_load", "stop"):
+        if not callable(getattr(core_lifecycle_cls, name, None)):
+            problems.append(f"AstrBotCoreLifecycle.{name}")
+    for name in ("get_handlers_by_module_name", "get_handlers_by_event_type"):
+        if not callable(getattr(star_handlers_registry, name, None)):
+            problems.append(f"star_handlers_registry.{name}")
+    if problems:
+        raise RuntimeError("unsupported_astrbot_smoke_adapter: missing " + ", ".join(problems))
+
+
+def _verify_plugin_manager_contract(plugin_manager: Any) -> None:
+    problems = [
+        name
+        for name in ("failed_plugin_dict", "_iter_plugin_llm_tools", "_terminate_plugin")
+        if not hasattr(plugin_manager, name)
+    ]
+    context = getattr(plugin_manager, "context", None)
+    if not callable(getattr(context, "get_all_stars", None)):
+        problems.append("plugin_manager.context.get_all_stars")
+    if problems:
+        raise RuntimeError("unsupported_astrbot_smoke_adapter: missing " + ", ".join(problems))
 
 
 def _exc_detail(exc: BaseException) -> str:

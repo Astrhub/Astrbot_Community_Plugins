@@ -11,6 +11,8 @@ from app.runtime_runner.probe.smoke import (
     AstrBotLifecycleSession,
     AstrBotPluginObservation,
     AstrBotSmokeProbe,
+    _verify_astrbot_contract,
+    _verify_plugin_manager_contract,
     build_astrbot_lifecycle_session,
 )
 from tests.runtime_runner_helpers import runtime_request
@@ -158,7 +160,9 @@ def test_startup_and_termination_failures_are_distinct(
     assert session.calls[-1] == "close"
 
 
-def test_source_backed_factory_is_locked_to_version_and_commit(tmp_path: Path) -> None:
+def test_source_backed_factory_accepts_any_version_and_enforces_commit_pin(
+    tmp_path: Path,
+) -> None:
     request = runtime_request()
     plugins = tmp_path / "data/plugins/astrbot_plugin_demo"
     plugins.mkdir(parents=True)
@@ -171,22 +175,46 @@ def test_source_backed_factory_is_locked_to_version_and_commit(tmp_path: Path) -
     assert isinstance(session, AstrBotLifecycleSession)
     assert ASTRBOT_4266_SOURCE_COMMIT == "5d10e0d428b41308cc63215db00359c61ee17195"
 
-    changed = request.model_copy(
-        update={"target": request.target.model_copy(update={"astrbot_version": "4.27.0"})}
+    future = request.model_copy(
+        update={"target": request.target.model_copy(update={"astrbot_version": "9.99.9"})}
     )
-    with pytest.raises(ValueError, match="unsupported"):
-        build_astrbot_lifecycle_session(changed, tmp_path, "astrbot_plugin_demo")
+    session = build_astrbot_lifecycle_session(future, tmp_path, "astrbot_plugin_demo")
+    assert session.expected_version == "9.99.9"
+
+    mismatched = request.model_copy(
+        update={
+            "target": request.target.model_copy(
+                update={"astrbot_commit": "0" * 40}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="commit_mismatch"):
+        build_astrbot_lifecycle_session(mismatched, tmp_path, "astrbot_plugin_demo")
 
 
-def test_source_backed_factory_accepts_verified_4282(tmp_path: Path) -> None:
-    request = runtime_request()
-    (tmp_path / "data/plugins/astrbot_plugin_demo").mkdir(parents=True)
-    upgraded = request.model_copy(
-        update={"target": request.target.model_copy(update={"astrbot_version": "4.28.2"})}
-    )
-    session = build_astrbot_lifecycle_session(upgraded, tmp_path, "astrbot_plugin_demo")
-    assert isinstance(session, AstrBot4266LifecycleSession)
-    assert session.expected_version == "4.28.2"
+def test_astrbot_contract_check_names_missing_apis() -> None:
+    class BrokenLifecycle:
+        def __init__(self, broker):  # 缺少 db 参数
+            pass
+
+        async def initialize(self) -> None: ...
+
+    class BrokenRegistry:
+        pass
+
+    with pytest.raises(RuntimeError, match="unsupported_astrbot_smoke_adapter") as excinfo:
+        _verify_astrbot_contract(BrokenLifecycle, BrokenRegistry)
+    message = str(excinfo.value)
+    assert "AstrBotCoreLifecycle.__init__" in message
+    assert "AstrBotCoreLifecycle._load" in message
+    assert "star_handlers_registry.get_handlers_by_module_name" in message
+
+    class BrokenPluginManager:
+        context = object()
+
+    with pytest.raises(RuntimeError, match="failed_plugin_dict") as excinfo:
+        _verify_plugin_manager_contract(BrokenPluginManager())
+    assert "context.get_all_stars" in str(excinfo.value)
 
 
 def test_startup_failure_message_carries_exception_detail(tmp_path: Path) -> None:
