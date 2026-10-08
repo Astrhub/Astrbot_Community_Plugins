@@ -732,6 +732,20 @@ def runtime_result_error_code(result: RuntimeDispatchResult) -> str:
     return "runtime_validation_failed"
 
 
+def runtime_result_error_message(result: RuntimeDispatchResult) -> str:
+    """按失败阶段提取探针报告的真实失败信息。"""
+    if result.cleanup.status != ProbeStatus.PASSED and result.cleanup.message:
+        return result.cleanup.message
+    if result.install.status != ProbeStatus.PASSED and result.install.message:
+        return result.install.message
+    if result.smoke.status != ProbeStatus.PASSED:
+        if result.smoke.failed_plugin.present and result.smoke.failed_plugin.message:
+            return result.smoke.failed_plugin.message
+        if result.smoke.message:
+            return result.smoke.message
+    return "Runtime validation reported a failed gate"
+
+
 def runtime_result_object_key(
     request: RuntimeDispatchRequest,
     attempt: int,

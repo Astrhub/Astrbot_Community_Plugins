@@ -12,6 +12,7 @@ from ..artifacts.runner_contract import (
     RuntimeDispatchRequest,
     RuntimeDispatchResult,
     runtime_result_error_code,
+    runtime_result_error_message,
     runtime_result_object_key,
     runtime_result_passed,
     validate_runtime_result_identity,
@@ -187,7 +188,7 @@ class RuntimeRunnerQueue:
                 "result_sha256": parsed.result_sha256,
                 "image_digest": parsed.target.image_digest,
                 "error_code": error_code,
-                "error_message": "" if passed else "Runtime validation reported a failed gate",
+                "error_message": "" if passed else runtime_result_error_message(parsed),
             },
         )
         if completed is None:

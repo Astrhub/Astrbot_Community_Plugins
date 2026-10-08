@@ -1033,6 +1033,25 @@ def test_plugin_detail_returns_nested_comments_with_user_profile() -> None:
     assert detail["comments"][1]["floor"] == 2
 
 
+def test_listed_at_records_actual_listing_time() -> None:
+    store = make_client().app.state.store
+    login_user = store.upsert_github_user({"id": "1", "login": "alice", "name": "Alice"})
+    plugin = store.submit_plugin(login_user, plugin_payload())
+    assert plugin["status"] == "pending"
+    assert not plugin.get("listed_at")
+
+    listed = store.update_plugin_status(plugin["id"], "listed", login_user["id"])
+    assert listed["listed_at"]
+    assert listed["listed_at"] >= plugin["created_at"]
+
+    store.unlist_plugin(plugin["id"], login_user["id"], "cleanup")
+    import time
+
+    time.sleep(0.01)
+    relisted = store.update_plugin_status(plugin["id"], "listed", login_user["id"])
+    assert relisted["listed_at"] >= listed["listed_at"]
+
+
 def test_plugin_detail_marks_admin_author_comments() -> None:
     client = make_client()
     login = client.get("/v1/auth/debug-login?login=alice")

@@ -86,6 +86,38 @@ def test_manual_approve_without_scan_success_is_atomic_and_idempotent(state):
     asyncio.run(scenario())
 
 
+def test_core_admin_may_self_approve_but_admin_cannot():
+    async def scenario():
+        repo, owner, plugin = make_repository()
+        artifact = await repo.create_artifact(
+            {**artifact_payload(plugin, owner), "tree_sha256": "b" * 64}
+        )
+        aid = artifact["id"]
+        repo.artifacts[aid]["review_status"] = "pending_review"
+        base = dict(
+            action="manual_approve",
+            reason="已人工核对提交包",
+            archive_sha256=artifact["archive_sha256"],
+            confirmed=True,
+        )
+        with pytest.raises(ValueError, match="self_approval_forbidden"):
+            await repo.review_action(
+                aid,
+                **base,
+                actor={"id": owner["id"], "role": "admin"},
+                idempotency_key="self-admin",
+            )
+        approved = await repo.review_action(
+            aid,
+            **base,
+            actor={"id": owner["id"], "role": "core_admin"},
+            idempotency_key="self-core-admin",
+        )
+        assert approved["review_status"] == "approved"
+
+    asyncio.run(scenario())
+
+
 def test_retry_preserves_history_and_cannot_race_running_jobs():
     async def scenario():
         repo, owner, plugin = make_repository()
