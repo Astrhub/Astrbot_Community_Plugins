@@ -15,7 +15,14 @@ export type PluginCategory =
   | "other";
 
 /** 插件排序键。 */
-export type PluginSortBy = "default" | "stars" | "likes" | "comments" | "updated" | "random";
+export type PluginSortBy =
+  | "default"
+  | "stars"
+  | "likes"
+  | "comments"
+  | "updated"
+  | "listed"
+  | "random";
 
 export type SortDirection = "asc" | "desc";
 
@@ -55,6 +62,7 @@ export interface Plugin {
   astrbot_version?: string;
   support_platforms?: string[];
   updated_at?: string;
+  version_updated_at?: string;
   created_at?: string;
   metadata?: Record<string, unknown>;
   [key: string]: unknown;

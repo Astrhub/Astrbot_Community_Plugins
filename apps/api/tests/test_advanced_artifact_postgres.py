@@ -136,6 +136,7 @@ async def run_p1_upgrade_scenario(url: str) -> None:
             "20260910_005_plugin_namespace",
             "20260927_006_manual_review",
             "20260927_007_optional_cdn",
+            "20261001_008_plugin_version_updated_at",
         ]
         assert await apply_schema_migrations(connection, migrations) == []
 

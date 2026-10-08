@@ -58,6 +58,7 @@ const sortOptions: SelectOption[] = [
   { label: "默认排序", value: "default" },
   { label: "随机推荐", value: "random" },
   { label: "按更新时间", value: "updated" },
+  { label: "按上架时间", value: "listed" },
   { label: "按 Star", value: "stars" },
   { label: "按点赞", value: "likes" },
   { label: "按评论", value: "comments" },

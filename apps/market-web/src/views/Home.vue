@@ -67,7 +67,15 @@ useSeo({
 
 const { refreshRandomOrder } = store;
 const FILTER_QUERY_KEYS = ["q", "tag", "category", "page", "sort", "direction", "fuzzy", "view"];
-const SORT_VALUES = new Set(["default", "random", "updated", "stars", "likes", "comments"]);
+const SORT_VALUES = new Set([
+  "default",
+  "random",
+  "updated",
+  "listed",
+  "stars",
+  "likes",
+  "comments",
+]);
 let applyingRouteQuery = false;
 const viewMode = computed(() =>
   firstQueryValue(route.query.view) === "waterfall" ? "waterfall" : "paged",

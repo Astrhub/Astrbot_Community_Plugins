@@ -422,6 +422,13 @@ class InMemoryMarketStore:
                 "likes": int((existing or {}).get("likes") or 0),
                 "comments_count": int((existing or {}).get("comments_count") or 0),
                 "created_at": (existing or {}).get("created_at") or utc_now(),
+                "version_updated_at": (
+                    utc_now()
+                    if str(payload.get("repo_version") or payload.get("version") or "")
+                    and str(payload.get("repo_version") or payload.get("version"))
+                    != str((existing or {}).get("repo_version") or "")
+                    else (existing or {}).get("version_updated_at") or utc_now()
+                ),
                 "updated_at": utc_now(),
             }
         )
@@ -466,6 +473,7 @@ class InMemoryMarketStore:
                 "current_artifact_id": None,
                 "created_at": utc_now(),
                 "updated_at": utc_now(),
+                "version_updated_at": utc_now(),
             }
         )
         self._upsert_plugin(plugin)
@@ -553,6 +561,10 @@ class InMemoryMarketStore:
         if not plugin:
             return None
         changes = {key: value for key, value in patch.items() if value is not None}
+        changes.pop("version_updated_at", None)
+        new_repo_version = str(changes.get("repo_version") or "")
+        if new_repo_version and new_repo_version != str(plugin.get("repo_version") or ""):
+            changes["version_updated_at"] = utc_now()
         self._check_plugin_identity({**plugin, **changes})
         plugin.update(changes)
         plugin["updated_at"] = utc_now()
@@ -1165,7 +1177,7 @@ def plugin_metadata_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         key: value
         for key, value in payload.items()
         if key not in PLUGIN_COLUMN_KEYS
-        and key not in {"id", "created_at", "updated_at"}
+        and key not in {"id", "created_at", "updated_at", "version_updated_at"}
         and value is not None
     }
 
@@ -1249,7 +1261,8 @@ CREATE TABLE IF NOT EXISTS market_plugins (
     moderated_by text REFERENCES market_users(id) ON DELETE SET NULL,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    version_updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS market_plugins_status_idx ON market_plugins(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS market_plugins_tags_gin_idx ON market_plugins USING GIN (tags);
@@ -1789,6 +1802,12 @@ class PgRedisMarketStore(InMemoryMarketStore):
                            tags = EXCLUDED.tags,
                            social_link = EXCLUDED.social_link,
                            repo_version = COALESCE(NULLIF(EXCLUDED.repo_version, ''), market_plugins.repo_version),
+                           version_updated_at = CASE
+                               WHEN NULLIF(EXCLUDED.repo_version, '') IS NOT NULL
+                                    AND market_plugins.repo_version IS DISTINCT FROM EXCLUDED.repo_version
+                               THEN now()
+                               ELSE market_plugins.version_updated_at
+                           END,
                            metadata = EXCLUDED.metadata ||
                                CASE WHEN market_plugins.metadata ? 'cdn_enabled'
                                     THEN jsonb_build_object(
@@ -2021,7 +2040,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
             key: value
             for key, value in updated.items()
             if key not in PLUGIN_COLUMN_KEYS
-            and key not in {"id", "created_at", "updated_at"}
+            and key not in {"id", "created_at", "updated_at", "version_updated_at"}
             and value is not None
         }
         row = await self._pool().fetchrow(
@@ -2042,6 +2061,12 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    comments_count = $14,
                    moderated_by = $15,
                    repo_version = $16,
+                   version_updated_at = CASE
+                       WHEN NULLIF($16, '') IS NOT NULL
+                            AND market_plugins.repo_version IS DISTINCT FROM $16
+                       THEN now()
+                       ELSE market_plugins.version_updated_at
+                   END,
                    category = $17,
                    category_source = $18,
                    suggested_category = $19,
