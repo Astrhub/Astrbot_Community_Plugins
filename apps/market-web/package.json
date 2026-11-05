@@ -22,7 +22,7 @@
     "naive-ui": "2.43.1",
     "pinia": "3.0.4",
     "vfonts": "0.1.0",
-    "vue": "3.5.24",
+    "vue": "3.5.45",
     "vue-api-playground": "^2.6.0",
     "vue-router": "4.6.3"
   },
@@ -33,20 +33,25 @@
     "@vitejs/plugin-vue": "6.0.7",
     "@vue/test-utils": "^2.4.11",
     "jsdom": "^29.1.1",
-    "puppeteer-core": "^25.3.0",
+    "puppeteer-core": "25.16.0",
     "sirv-cli": "^3.0.1",
-    "vite": "npm:@voidzero-dev/vite-plus-core@0.2.6",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.5.0",
     "vite-plugin-sitemap": "0.8.2",
-    "vite-plus": "1.1.0"
+    "vite-plus": "1.5.0"
   },
   "overrides": {
-    "vite": "npm:@voidzero-dev/vite-plus-core@0.2.6",
-    "vitest": "4.1.10"
+    "editorconfig": "3.0.2",
+    "glob": "14.0.3",
+    "js-beautify": "2.0.3",
+    "minimatch": "11.0.4",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.5.0",
+    "vitest": "5.1.0",
+    "zod": "4.6.7"
   },
   "devEngines": {
     "packageManager": {
       "name": "npm",
-      "version": "11.18.0",
+      "version": ">=11.18.0 <13",
       "onFail": "download"
     }
   }
