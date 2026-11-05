@@ -13,6 +13,7 @@ dependencies = [
   "packaging>=24.2",
   "python-multipart>=0.0.20",
   "PyYAML>=6.0.2",
+  "certifi>=2026.10.19",
   "redis>=5.2.0",
   "uvicorn[standard]>=0.32.0",
   "yara-python>=4.5.4,<5.0.0",

@@ -14,7 +14,7 @@
 - `npm test` or `npm run test:api` runs the API pytest suite.
 - `npm --prefix apps/market-web test` runs frontend Vitest tests.
 
-Frontend tooling is routed through Vite Plus. Use the npm scripts above, or the package scripts in `apps/market-web/package.json` (`vp dev`, `vp build`, `vp preview`, `vp test --run`); do not call `vite` or `vitest` directly. `apps/market-web/package.json` pins the npm version through `devEngines`, so use the required npm version when local npm rejects a frontend command.
+Frontend tooling is routed through Vite Plus. Use the npm scripts above, or the package scripts in `apps/market-web/package.json` (`vp dev`, `vp build`, `vp preview`, `vp test --run`); do not call `vite` or `vitest` directly. `apps/market-web/package.json` declares the supported npm version range through `devEngines`, so use a compatible npm version when local npm rejects a frontend command.
 
 ## Coding Style & Naming Conventions
 
