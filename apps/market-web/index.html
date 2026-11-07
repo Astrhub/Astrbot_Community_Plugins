@@ -37,6 +37,19 @@
       crossorigin
     />
     <style id="site-config-boot-style">
+      html,
+      body {
+        background-color: #ffffff;
+        color: #18181b;
+      }
+
+      html.dark,
+      html.dark body {
+        color-scheme: dark;
+        background-color: #0f1115;
+        color: #f4f4f5;
+      }
+
       .site-config-loading #app .brand-name {
         visibility: hidden;
       }
@@ -51,6 +64,23 @@
     </style>
     <script data-cfasync="false">
       (() => {
+        if (!window.__ASTRHUB_PRERENDER__) {
+          let themeMode = "system";
+          try {
+            const savedTheme = localStorage.getItem("theme-mode");
+            if (savedTheme === "dark" || savedTheme === "light" || savedTheme === "system") {
+              themeMode = savedTheme;
+            }
+          } catch {}
+          const isDark =
+            themeMode === "dark" ||
+            (themeMode === "system" &&
+              typeof window.matchMedia === "function" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", isDark);
+          document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+        }
+
         const normalizePath = (value) => String(value || "/").replace(/\/+$/, "") || "/";
         const snapshotPath = document.documentElement.dataset.prerenderPath;
         if (snapshotPath && normalizePath(snapshotPath) !== normalizePath(location.pathname)) {

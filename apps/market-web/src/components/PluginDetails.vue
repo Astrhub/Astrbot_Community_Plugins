@@ -1350,7 +1350,7 @@ function updateCommentInDetail(updated) {
   margin: calc(-1 * var(--modal-padding)) calc(-1 * var(--modal-padding)) 0;
   padding-top: var(--modal-padding);
   padding-bottom: 16px;
-  border-bottom: 1px solid var(--n-border-color);
+  border-bottom: 1px solid var(--border-base, var(--n-border-color));
 }
 
 .plugin-details__title {
@@ -1382,7 +1382,7 @@ function updateCommentInDetail(updated) {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 0;
-  border-bottom: 1px solid var(--n-border-color);
+  border-bottom: 1px solid var(--border-base, var(--n-border-color));
 }
 
 .readme-navigation__main {
@@ -1397,37 +1397,62 @@ function updateCommentInDetail(updated) {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  color: var(--n-text-color-2);
+  color: var(--text-secondary, var(--n-text-color-2));
   font-size: 13px;
   font-weight: 600;
   word-break: break-all;
 }
 
 .muted-text {
-  color: var(--n-text-color-3);
+  color: var(--text-tertiary, var(--n-text-color-3));
   font-size: 13px;
 }
 
 .markdown-content {
-  color: var(--n-text-color-2);
+  color: var(--markdown-text-color);
   line-height: 1.6;
+  --markdown-heading-color: var(--text-primary, #18181b);
+  --markdown-text-color: var(--text-secondary, #52525b);
+  --markdown-muted-color: var(--text-tertiary, #71717a);
+  --markdown-surface-bg: var(--bg-card, #ffffff);
+  --markdown-surface-border: var(--border-base, #dfe3e8);
   --markdown-link-color: #1d4ed8;
   --markdown-link-hover: #1e40af;
   --markdown-code-bg: #f1f5f9;
+  --markdown-code-text: #0f172a;
   --markdown-code-border: #cbd5e1;
   --markdown-table-border: #94a3b8;
   --markdown-table-header: #eaf2ff;
   --markdown-table-row: rgba(37, 99, 235, 0.04);
+  --markdown-alert-bg: rgba(15, 23, 42, 0.03);
+  --markdown-alert-note: #0969da;
+  --markdown-alert-tip: #1a7f37;
+  --markdown-alert-important: #8250df;
+  --markdown-alert-warning: #9a6700;
+  --markdown-alert-caution: #cf222e;
 }
 
+:global(.dark) .markdown-content,
 .plugin-details--dark .markdown-content {
+  --markdown-heading-color: var(--text-primary, #f4f4f5);
+  --markdown-text-color: var(--text-secondary, #d4d4d8);
+  --markdown-muted-color: var(--text-tertiary, #a1a1aa);
+  --markdown-surface-bg: var(--bg-card, #13161b);
+  --markdown-surface-border: var(--border-base, #2d323b);
   --markdown-link-color: #93c5fd;
   --markdown-link-hover: #bfdbfe;
-  --markdown-code-bg: #020617;
+  --markdown-code-bg: #0b1220;
+  --markdown-code-text: #e2e8f0;
   --markdown-code-border: #334155;
   --markdown-table-border: #475569;
   --markdown-table-header: #1e293b;
   --markdown-table-row: rgba(96, 165, 250, 0.08);
+  --markdown-alert-bg: rgba(148, 163, 184, 0.08);
+  --markdown-alert-note: #60a5fa;
+  --markdown-alert-tip: #4ade80;
+  --markdown-alert-important: #c084fc;
+  --markdown-alert-warning: #fbbf24;
+  --markdown-alert-caution: #f87171;
 }
 
 .markdown-content :deep(h1),
@@ -1437,13 +1462,18 @@ function updateCommentInDetail(updated) {
 .markdown-content :deep(h5),
 .markdown-content :deep(h6) {
   margin: 1.5em 0 0.5em;
-  color: var(--n-text-color);
+  color: var(--markdown-heading-color);
 }
 
 .markdown-content :deep(h1:first-child),
 .markdown-content :deep(h2:first-child),
 .markdown-content :deep(h3:first-child) {
   margin-top: 0;
+}
+
+.markdown-content :deep(p),
+.markdown-content :deep(li) {
+  color: var(--markdown-text-color);
 }
 
 .markdown-content :deep(p) {
@@ -1468,7 +1498,7 @@ function updateCommentInDetail(updated) {
 
 .markdown-content :deep(.markdown-file-note) {
   margin: 0 0 12px;
-  color: var(--n-text-color-3);
+  color: var(--markdown-muted-color);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1482,12 +1512,13 @@ function updateCommentInDetail(updated) {
 
 .markdown-content :deep(.markdown-directory-list li) {
   padding: 8px 10px;
-  border: 1px solid var(--n-border-color);
+  border: 1px solid var(--markdown-surface-border);
   border-radius: 6px;
-  background: var(--n-color);
+  background: var(--markdown-surface-bg);
 }
 
 .markdown-content :deep(:not(pre) > code) {
+  color: var(--markdown-code-text);
   background: var(--markdown-code-bg);
   border: 1px solid var(--markdown-code-border);
   padding: 0.2em 0.4em;
@@ -1512,8 +1543,8 @@ function updateCommentInDetail(updated) {
   border: 1px solid var(--markdown-code-border);
   border-radius: 5px;
   padding: 4px 8px;
-  color: var(--n-text-color);
-  background: var(--n-color);
+  color: var(--markdown-heading-color);
+  background: var(--markdown-surface-bg);
   cursor: pointer;
   font-size: 12px;
   line-height: 1.2;
@@ -1527,11 +1558,13 @@ function updateCommentInDetail(updated) {
 .markdown-content :deep(pre) {
   margin: 0;
   padding: 42px 16px 16px;
+  color: var(--markdown-code-text);
   background: transparent;
   overflow-x: auto;
 }
 
 .markdown-content :deep(pre code) {
+  color: inherit;
   background: none;
   padding: 0;
   border: 0;
@@ -1551,16 +1584,17 @@ function updateCommentInDetail(updated) {
 .markdown-content :deep(blockquote) {
   margin: 1em 0;
   padding-left: 1em;
-  border-left: 4px solid var(--n-border-color);
-  color: var(--n-text-color-3);
+  border-left: 4px solid var(--markdown-surface-border);
+  color: var(--markdown-muted-color);
 }
 
 .markdown-content :deep(.markdown-alert) {
   margin: 1em 0;
   padding: 12px 16px;
-  border-left: 4px solid var(--n-border-color);
+  border-left: 4px solid var(--markdown-surface-border);
   border-radius: 0 8px 8px 0;
-  background: var(--n-color-hover, rgba(0, 0, 0, 0.03));
+  background: var(--markdown-alert-bg);
+  color: var(--markdown-text-color);
 }
 
 .markdown-content :deep(.markdown-alert-title) {
@@ -1579,38 +1613,38 @@ function updateCommentInDetail(updated) {
 }
 
 .markdown-content :deep(.markdown-alert-note) {
-  border-left-color: #0969da;
+  border-left-color: var(--markdown-alert-note);
 }
 .markdown-content :deep(.markdown-alert-note .markdown-alert-title) {
-  color: #0969da;
+  color: var(--markdown-alert-note);
 }
 
 .markdown-content :deep(.markdown-alert-tip) {
-  border-left-color: #1a7f37;
+  border-left-color: var(--markdown-alert-tip);
 }
 .markdown-content :deep(.markdown-alert-tip .markdown-alert-title) {
-  color: #1a7f37;
+  color: var(--markdown-alert-tip);
 }
 
 .markdown-content :deep(.markdown-alert-important) {
-  border-left-color: #8250df;
+  border-left-color: var(--markdown-alert-important);
 }
 .markdown-content :deep(.markdown-alert-important .markdown-alert-title) {
-  color: #8250df;
+  color: var(--markdown-alert-important);
 }
 
 .markdown-content :deep(.markdown-alert-warning) {
-  border-left-color: #9a6700;
+  border-left-color: var(--markdown-alert-warning);
 }
 .markdown-content :deep(.markdown-alert-warning .markdown-alert-title) {
-  color: #9a6700;
+  color: var(--markdown-alert-warning);
 }
 
 .markdown-content :deep(.markdown-alert-caution) {
-  border-left-color: #cf222e;
+  border-left-color: var(--markdown-alert-caution);
 }
 .markdown-content :deep(.markdown-alert-caution .markdown-alert-title) {
-  color: #cf222e;
+  color: var(--markdown-alert-caution);
 }
 
 .markdown-content :deep(ul),
@@ -1633,10 +1667,12 @@ function updateCommentInDetail(updated) {
   border: 1px solid var(--markdown-table-border);
   padding: 8px;
   text-align: left;
+  color: var(--markdown-text-color);
 }
 
 .markdown-content :deep(th) {
   background: var(--markdown-table-header);
+  color: var(--markdown-heading-color);
 }
 
 .markdown-content :deep(tr:nth-child(even) td) {
@@ -1647,7 +1683,7 @@ function updateCommentInDetail(updated) {
   padding: var(--modal-padding);
   margin: 0 calc(-1 * var(--modal-padding));
   margin-top: calc(-1 * var(--modal-padding));
-  border-top: 0px solid var(--n-border-color);
+  border-top: 0px solid var(--border-base, var(--n-border-color));
 }
 
 .readme-loading,

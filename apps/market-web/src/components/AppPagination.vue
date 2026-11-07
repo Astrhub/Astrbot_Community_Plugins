@@ -473,9 +473,7 @@ onUnmounted(() => {
   }
 }
 
-@media (prefers-color-scheme: dark) {
-  :deep(.n-pagination .n-pagination-item--active) {
-    box-shadow: 0 2px 12px rgba(96, 165, 250, 0.4);
-  }
+:global(.dark) :deep(.n-pagination .n-pagination-item--active) {
+  box-shadow: 0 2px 12px rgba(96, 165, 250, 0.4);
 }
 </style>

@@ -214,7 +214,8 @@ async function submitComment(parentId) {
   gap: 16px;
   margin-top: 24px;
   padding-top: 20px;
-  border-top: 1px solid var(--n-border-color);
+  border-top: 1px solid var(--border-base, var(--n-border-color));
+  color: var(--text-primary, var(--n-text-color));
 }
 
 .comments-header,
@@ -236,9 +237,20 @@ async function submitComment(parentId) {
   margin: 0;
 }
 
+.comments-header h3 {
+  color: var(--text-primary, var(--n-text-color));
+}
+
+.comment-body p,
+.reply-item p {
+  color: var(--text-secondary, var(--n-text-color-2));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .comments-header span,
 .comment-meta time {
-  color: var(--n-text-color-3);
+  color: var(--text-tertiary, var(--n-text-color-3));
   font-size: 13px;
 }
 
@@ -257,8 +269,8 @@ async function submitComment(parentId) {
 .comment-item,
 .reply-item {
   padding: 14px;
-  background: var(--n-color);
-  border: 1px solid var(--n-border-color);
+  background: var(--bg-card, var(--n-color));
+  border: 1px solid var(--border-base, var(--n-border-color));
   border-radius: 8px;
 }
 
@@ -275,7 +287,7 @@ async function submitComment(parentId) {
 .comment-meta {
   justify-content: space-between;
   gap: 12px;
-  color: var(--n-text-color);
+  color: var(--text-primary, var(--n-text-color));
   font-weight: 600;
 }
 
@@ -286,7 +298,7 @@ async function submitComment(parentId) {
 }
 
 .comment-floor {
-  color: var(--n-text-color-3);
+  color: var(--text-tertiary, var(--n-text-color-3));
   font-weight: 500;
 }
 
@@ -300,13 +312,13 @@ async function submitComment(parentId) {
 }
 
 .comment-badge--admin {
-  color: #2563eb;
-  background: rgba(37, 99, 235, 0.08);
+  color: var(--primary-color, #2563eb);
+  background: var(--primary-light, rgba(37, 99, 235, 0.08));
 }
 
 .comment-badge--author {
-  color: #16a34a;
-  background: rgba(22, 163, 74, 0.08);
+  color: var(--success-color, #16a34a);
+  background: rgba(22, 163, 74, 0.12);
 }
 
 .reply-list {
@@ -314,7 +326,7 @@ async function submitComment(parentId) {
   gap: 10px;
   margin-top: 12px;
   padding-left: 18px;
-  border-left: 2px solid var(--n-border-color);
+  border-left: 2px solid var(--border-base, var(--n-border-color));
 }
 
 .reply-editor {

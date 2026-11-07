@@ -275,8 +275,44 @@ export const usePluginStore = defineStore("plugins", () => {
   const selectedCategory = shallowRef("all");
   const currentPage = shallowRef(1);
   const pageSize = shallowRef(12);
-  const isDarkMode = shallowRef(false);
-  const themeMode = shallowRef<ThemeMode>("system");
+  const VALID_THEME_MODES: ThemeMode[] = ["system", "light", "dark"];
+
+  function readStoredThemeMode(): ThemeMode {
+    try {
+      const value = localStorage.getItem("theme-mode") as ThemeMode | null;
+      if (value && VALID_THEME_MODES.includes(value)) {
+        return value;
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+    return "system";
+  }
+
+  function prefersDark(): boolean {
+    if (typeof window === "undefined") return false;
+    if ((window as Window & { __ASTRHUB_PRERENDER__?: boolean }).__ASTRHUB_PRERENDER__) {
+      return false;
+    }
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
+  }
+
+  function resolveDarkMode(mode: ThemeMode): boolean {
+    if (mode === "dark") return true;
+    if (mode === "light") return false;
+    return prefersDark();
+  }
+
+  function syncDocumentTheme(dark: boolean): void {
+    if (typeof document === "undefined") return;
+    document.documentElement.classList.toggle("dark", dark);
+    document.documentElement.style.colorScheme = dark ? "dark" : "light";
+  }
+
+  const initialThemeMode = readStoredThemeMode();
+  const isDarkMode = shallowRef(resolveDarkMode(initialThemeMode));
+  const themeMode = shallowRef<ThemeMode>(initialThemeMode);
+  syncDocumentTheme(isDarkMode.value);
   const isLoading = shallowRef(true);
   const sortBy = shallowRef<PluginSortBy>("default");
   const sortDirection = shallowRef<SortDirection>("asc");
@@ -296,43 +332,45 @@ export const usePluginStore = defineStore("plugins", () => {
   let loadAnnouncementsPromise: Promise<Announcement[]> | null = null;
   let loadCurrentUserPromise: Promise<void> | null = null;
 
-  function prefersDark(): boolean {
-    return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
-  }
-
   function applyThemeFromSystem(): void {
     if (themeMode.value === "system") {
       isDarkMode.value = prefersDark();
+      syncDocumentTheme(isDarkMode.value);
     }
   }
 
-  function initTheme(): void {
-    themeMode.value = (localStorage.getItem("theme-mode") as ThemeMode) || "system";
-    if (themeMode.value === "dark") {
-      isDarkMode.value = true;
-    } else if (themeMode.value === "light") {
-      isDarkMode.value = false;
-    } else {
-      applyThemeFromSystem();
-    }
-
-    if (!mediaQuery && window.matchMedia) {
+  function ensureThemeMediaQueryListener(): void {
+    if (!mediaQuery && typeof window !== "undefined" && typeof window.matchMedia === "function") {
       mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
       mediaQuery.addEventListener?.("change", applyThemeFromSystem);
     }
   }
 
+  function initTheme(): void {
+    themeMode.value = readStoredThemeMode();
+    isDarkMode.value = resolveDarkMode(themeMode.value);
+    syncDocumentTheme(isDarkMode.value);
+    ensureThemeMediaQueryListener();
+  }
+
   function setThemeMode(value: string): void {
-    themeMode.value = (["system", "light", "dark"] as ThemeMode[]).includes(value as ThemeMode)
+    themeMode.value = VALID_THEME_MODES.includes(value as ThemeMode)
       ? (value as ThemeMode)
       : "system";
-    localStorage.setItem("theme-mode", themeMode.value);
-    if (themeMode.value === "system") {
-      applyThemeFromSystem();
-      return;
+    try {
+      localStorage.setItem("theme-mode", themeMode.value);
+    } catch {
+      // Ignore storage access errors
     }
-    isDarkMode.value = themeMode.value === "dark";
+    isDarkMode.value = resolveDarkMode(themeMode.value);
+    syncDocumentTheme(isDarkMode.value);
+    ensureThemeMediaQueryListener();
   }
+
+  ensureThemeMediaQueryListener();
+  watch(isDarkMode, (dark) => {
+    syncDocumentTheme(dark);
+  });
 
   function applySiteConfig(value: Partial<SiteConfig>): SiteConfig {
     const config = normalizeSiteConfig(value);

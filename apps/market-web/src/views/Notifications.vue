@@ -331,13 +331,14 @@ onMounted(async () => {
 <style scoped>
 .notifications-page {
   min-height: 100vh;
-  background: var(--body-color);
-  color: var(--text-color-base);
+  background: var(--bg-base, var(--body-color));
+  color: var(--text-primary, var(--text-color-base));
 }
 
 .notifications-header {
-  border-bottom: 1px solid var(--border-color);
-  background: var(--card-color);
+  border-bottom: 1px solid var(--border-base, var(--border-color));
+  background: var(--bg-card, var(--card-color));
+  color: var(--text-primary, var(--text-color-base));
 }
 
 .header-content {
@@ -378,12 +379,13 @@ onMounted(async () => {
 }
 
 .eyebrow {
-  color: #0e74e4;
+  color: var(--primary-color, #0e74e4);
   font-size: 12px;
   font-weight: 700;
 }
 
 .page-title {
+  color: var(--text-primary, var(--text-color-base));
   font-size: 24px;
   line-height: 1.25;
 }
@@ -399,14 +401,15 @@ onMounted(async () => {
   gap: 14px;
   padding: 14px 16px;
   margin-bottom: 16px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border-base, var(--border-color));
   border-radius: 8px;
-  background: var(--card-color);
+  background: var(--bg-card, var(--card-color));
+  color: var(--text-primary, var(--text-color-base));
 }
 
 .selection-state {
   flex: 1;
-  color: var(--text-color-3);
+  color: var(--text-tertiary, var(--text-color-3));
   font-size: 13px;
 }
 
@@ -437,9 +440,9 @@ onMounted(async () => {
   height: 38px;
   display: grid;
   place-items: center;
-  color: #0e74e4;
-  background: rgba(14, 116, 228, 0.12);
-  border: 1px solid rgba(14, 116, 228, 0.22);
+  color: var(--primary-color, #0e74e4);
+  background: var(--primary-light, rgba(14, 116, 228, 0.12));
+  border: 1px solid var(--border-base, rgba(14, 116, 228, 0.22));
   border-radius: 50%;
 }
 
@@ -447,10 +450,11 @@ onMounted(async () => {
   position: relative;
   min-width: 0;
   padding: 14px 16px;
-  background: var(--card-color);
-  border: 1px solid var(--border-color);
+  background: var(--bg-card, var(--card-color));
+  border: 1px solid var(--border-base, var(--border-color));
   border-radius: 8px;
   box-shadow: var(--shadow-sm);
+  color: var(--text-primary, var(--text-color-base));
 }
 
 .bubble-content::before {
@@ -460,16 +464,16 @@ onMounted(async () => {
   left: -7px;
   width: 12px;
   height: 12px;
-  background: var(--card-color);
-  border-left: 1px solid var(--border-color);
-  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-card, var(--card-color));
+  border-left: 1px solid var(--border-base, var(--border-color));
+  border-bottom: 1px solid var(--border-base, var(--border-color));
   transform: rotate(45deg);
 }
 
 .bubble-meta {
   justify-content: space-between;
   gap: 12px;
-  color: var(--text-color-base);
+  color: var(--text-primary, var(--text-color-base));
 }
 
 .title-row {
@@ -479,18 +483,19 @@ onMounted(async () => {
 
 .title-row strong {
   min-width: 0;
+  color: var(--text-primary, var(--text-color-base));
   overflow-wrap: anywhere;
 }
 
 .bubble-meta time {
   flex: none;
-  color: var(--text-color-3);
+  color: var(--text-tertiary, var(--text-color-3));
   font-size: 12px;
 }
 
 .bubble-content p {
   margin-top: 8px;
-  color: var(--text-color-2);
+  color: var(--text-secondary, var(--text-color-2));
   line-height: 1.7;
   white-space: pre-wrap;
 }
@@ -504,7 +509,7 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 14px;
   margin-top: 18px;
-  color: var(--text-color-3);
+  color: var(--text-tertiary, var(--text-color-3));
   font-size: 13px;
 }
 

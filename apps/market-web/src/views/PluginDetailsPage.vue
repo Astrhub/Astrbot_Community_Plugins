@@ -276,6 +276,12 @@ function updatePlugin(updated: PluginDetail): void {
 </template>
 
 <style scoped>
+.plugin-page-shell {
+  min-height: 100vh;
+  color: var(--text-primary);
+  background: var(--bg-base);
+}
+
 .plugin-page {
   width: min(1256px, calc(100% - 48px));
   margin: 0 auto;
@@ -368,6 +374,7 @@ function updatePlugin(updated: PluginDetail): void {
 }
 
 .plugin-info-card {
+  background: var(--bg-card);
   border: 1px solid var(--border-base);
   border-radius: 8px;
   box-shadow: none;
