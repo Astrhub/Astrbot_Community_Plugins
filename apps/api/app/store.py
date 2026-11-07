@@ -281,7 +281,6 @@ class InMemoryMarketStore:
             if str(plugin.get("owner_github_login") or "").lower() == username.lower()
             and plugin.get("status") == "listed"
         ]
-        return deepcopy(self.state["plugins"])
 
     def list_user_plugins(self, user_id: str, github_login: str = "") -> list[dict[str, Any]]:
         return [
