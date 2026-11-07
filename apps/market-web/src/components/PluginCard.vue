@@ -159,6 +159,26 @@ async function unlistPlugin(): Promise<void> {
       </div>
     </div>
 
+    <div v-if="isAdminUser" class="plugin-card__admin-actions">
+      <n-tooltip trigger="hover" placement="top">
+        <template #trigger>
+          <n-button
+            quaternary
+            circle
+            size="tiny"
+            type="warning"
+            :loading="isUnlisting"
+            :aria-label="`下架 ${displayName}`"
+            @click.stop="openUnlistModal"
+          >
+            <template #icon
+              ><n-icon><cloud-offline-outline /></n-icon
+            ></template>
+          </n-button>
+        </template>
+        下架插件
+      </n-tooltip>
+    </div>
     <p class="description">{{ plugin.short_desc || plugin.desc || "" }}</p>
 
     <div class="tags-container" aria-label="插件标签">
@@ -214,25 +234,6 @@ async function unlistPlugin(): Promise<void> {
           </template>
           作者主页
         </n-tooltip>
-        <n-tooltip v-if="isAdminUser" trigger="hover" placement="top">
-          <template #trigger>
-            <n-button
-              quaternary
-              circle
-              size="tiny"
-              type="warning"
-              :loading="isUnlisting"
-              :aria-label="`下架 ${displayName}`"
-              @click.stop="openUnlistModal"
-            >
-              <template #icon
-                ><n-icon><cloud-offline-outline /></n-icon
-              ></template>
-            </n-button>
-          </template>
-          下架插件
-        </n-tooltip>
-        <span class="detail-pill" aria-hidden="true">详情 ↗</span>
       </div>
     </footer>
   </article>
@@ -463,17 +464,30 @@ async function unlistPlugin(): Promise<void> {
 }
 
 .plugin-actions {
-  gap: 2px;
+  gap: 14px;
 }
 
-.detail-pill {
-  margin-left: 4px;
-  padding: 4px 10px;
-  color: var(--primary-color);
-  font-size: 11px;
-  font-weight: 700;
+.plugin-card__admin-actions {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+}
+
+.plugin-card__admin-actions .n-button {
+  width: 32px;
+  height: 32px;
+  color: var(--text-tertiary);
+  background: color-mix(in srgb, var(--bg-base) 75%, transparent);
   border: 1px solid var(--border-base);
-  border-radius: 999px;
+}
+
+.plugin-card__admin-actions .n-button:hover {
+  color: var(--danger-color);
+  background: var(--danger-light);
+  border-color: var(--danger-color);
 }
 
 .unlist-modal-actions {
@@ -501,12 +515,13 @@ async function unlistPlugin(): Promise<void> {
 }
 
 @media (max-width: 420px) {
-  .detail-pill {
-    display: none;
+  .plugin-actions {
+    gap: 12px;
   }
 
-  .plugin-actions {
-    gap: 0;
+  .plugin-actions .n-button {
+    width: 32px;
+    height: 32px;
   }
 }
 .plugin-card.plugin-card--masonry {
