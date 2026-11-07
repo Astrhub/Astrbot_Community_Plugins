@@ -621,7 +621,25 @@ def register_routes(app: FastAPI) -> None:
         responses={401: {"description": "未登录"}},
     )
     async def me(request: Request) -> dict[str, Any]:
-        return private_user(await require_user(request))
+        user = await require_user(request)
+        if not is_admin(user) and user.get("github_login"):
+            cache = getattr(request.app.state, "_org_admin_check_cache", None)
+            if cache is None:
+                cache = {}
+                request.app.state._org_admin_check_cache = cache
+            user_id = str(user["id"])
+            now = datetime.now(UTC)
+            last_checked = cache.get(user_id)
+            if last_checked is None or now - last_checked > timedelta(minutes=10):
+                cache[user_id] = now
+                try:
+                    await promote_org_admin_if_needed(request, user)
+                except Exception:
+                    logging.getLogger("astrbot_market.auth").exception(
+                        "Failed to verify organization admin membership for user %s", user_id
+                    )
+                user = await call_store(request, "get_user_by_id", user_id) or user
+        return private_user(user)
 
     @app.patch(
         "/v1/me/profile",
@@ -5330,12 +5348,36 @@ async def fetch_github_primary_email(client: httpx.AsyncClient, access_token: st
 async def promote_org_admin_if_needed(
     request: Request,
     user: dict[str, Any],
-    access_token: str,
+    access_token: str = "",
 ) -> None:
     settings = await runtime_settings_for_app(request.app)
     if not settings.github_admin_org or is_admin(user):
         return
-    if await is_github_org_member(settings.github_admin_org, access_token):
+
+    org = settings.github_admin_org
+    login = str(user.get("github_login") or "").strip()
+    is_member = False
+
+    if access_token:
+        try:
+            is_member = await is_github_org_member(org, access_token)
+        except httpx.HTTPError:
+            pass
+
+    if not is_member and login:
+        site_token = first_github_api_token(settings.github_api_token)
+        if site_token:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.get(
+                        f"https://api.github.com/orgs/{quote(org, safe='')}/members/{quote(login, safe='')}",
+                        headers=github_headers(site_token),
+                    )
+                is_member = response.status_code == 204
+            except httpx.HTTPError:
+                pass
+
+    if is_member:
         await call_store(request, "update_user_role", user["id"], "admin")
 
 
