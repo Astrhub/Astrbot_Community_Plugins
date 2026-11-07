@@ -81,12 +81,15 @@ const userMenuOptions = computed(() => [
         },
       ]
     : []),
-  {
-    key: "settings",
-    label: "系统设置",
-    icon: renderIcon(SettingsOutline),
-    disabled: !isCoreAdmin.value,
-  },
+  ...(isCoreAdmin.value
+    ? [
+        {
+          key: "settings",
+          label: "系统设置",
+          icon: renderIcon(SettingsOutline),
+        },
+      ]
+    : []),
   {
     key: "divider",
     type: "divider",
