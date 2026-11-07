@@ -42,6 +42,7 @@ class PluginSubmission(BaseModel):
 class PluginSubmissionMetadataPreviewPayload(BaseModel):
     repo: str
     repository_id: str = ""
+    strict: bool = False
 
     @field_validator("repo", mode="before")
     @classmethod

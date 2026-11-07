@@ -105,7 +105,16 @@ async function loadDynamicRoutes(origin?: string): Promise<string[]> {
             ? `/plugin/${encodeURIComponent(plugin.owner_github_login)}/${encodeURIComponent(plugin.name || plugin.id!)}`
             : `/plugin/${encodeURIComponent(plugin.id!)}`),
       );
-    return [...fallback, ...pluginRoutes];
+    const authorRoutes = [
+      ...new Set(
+        (payload.items || [])
+          .filter((plugin) => !plugin.status || plugin.status === "listed")
+          .map((plugin) => plugin.owner_github_login)
+          .filter((username): username is string => Boolean(username))
+          .map((username) => `/author/${encodeURIComponent(username)}`),
+      ),
+    ];
+    return [...fallback, ...pluginRoutes, ...authorRoutes];
   } catch (error) {
     console.warn(`[sitemap] Failed to load plugin routes from ${origin}:`, error);
     return fallback;

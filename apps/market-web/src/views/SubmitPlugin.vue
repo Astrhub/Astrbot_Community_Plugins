@@ -127,8 +127,23 @@
                     <n-button
                       v-if="metadataStatus.type === 'error'"
                       size="small"
-                      @click="fetchMetadataFromRepo"
+                      @click="() => fetchMetadataFromRepo()"
                       >重试读取信息</n-button
+                    >
+                    <n-button
+                      v-if="
+                        currentUser &&
+                        selectedRepositoryId &&
+                        !repositories.find((repo) => repo.id === selectedRepositoryId)?.fork &&
+                        !repositories.find((repo) => repo.id === selectedRepositoryId)?.submitted
+                      "
+                      class="import-metadata-btn"
+                      size="small"
+                      type="primary"
+                      secondary
+                      :loading="metadataLoading"
+                      @click="() => fetchMetadataFromRepo(true)"
+                      >一键导入已有插件</n-button
                     >
                   </div>
                 </n-form-item>
@@ -377,8 +392,9 @@ const nextRepositoryPage = shallowRef<number | null>(null);
 const selectedRepositoryId = shallowRef<string | null>(null);
 const repositoryOptions = computed(() =>
   repositories.value.map((repo) => ({
-    label: `${repo.full_name}${repo.owner_type === "Organization" ? " · 组织" : ""}`,
+    label: `${repo.full_name}${repo.owner_type === "Organization" ? " · 组织" : ""}${repo.fork ? " · Fork" : ""}${repo.submitted ? " · 已提交" : ""}`,
     value: repo.id,
+    disabled: !!repo.submitted,
   })),
 );
 let repositoryRequestId = 0;
@@ -466,6 +482,7 @@ async function loadRepositories(append: boolean, silent = false): Promise<void> 
       selectedRepositoryId.value = null;
       formData.repo = "";
       formData.repository_id = "";
+      formData.social_link = "";
       metadataRequestId++;
       metadataLoading.value = false;
       clearMetadataStatus();
@@ -490,6 +507,7 @@ async function selectRepository(id: string): Promise<void> {
   if (!repo) return;
   metadataRequestId++;
   selectedRepositoryId.value = id;
+  const defaultAuthorPage = `https://plugins.eloina.cn/author/${encodeURIComponent(repo.owner)}`;
   Object.assign(formData, {
     repository_id: id,
     repo: repo.repo,
@@ -498,7 +516,7 @@ async function selectRepository(id: string): Promise<void> {
     desc: "",
     short_desc: "",
     author: "",
-    social_link: "",
+    social_link: defaultAuthorPage,
     category: "",
     tags: [],
   });
@@ -642,7 +660,7 @@ function metadataErrorMessage(error: unknown): string {
   return rawMessage;
 }
 
-async function fetchMetadataFromRepo() {
+async function fetchMetadataFromRepo(strict = false) {
   const repo = formData.repo.trim();
   if (!repo) {
     message.warning("请先填写 GitHub 仓库地址");
@@ -667,15 +685,17 @@ async function fetchMetadataFromRepo() {
   metadataStatus.type = "";
   metadataStatus.text = "";
   try {
-    const preview = await store.fetchPluginSubmissionMetadata(repo, formData.repository_id);
+    const preview = await store.fetchPluginSubmissionMetadata(repo, formData.repository_id, strict);
     if (requestId !== metadataRequestId || repo !== formData.repo.trim()) return;
     const applied = applyMetadataPreview(preview);
     lastPreviewRepo.value = repo;
     metadataStatus.type = applied > 0 ? "success" : "warning";
     metadataStatus.text =
-      applied > 0
-        ? `已从元数据填充 ${applied} 项，缺失字段留空，可手动调整`
-        : "元数据中没有可填充的新字段，缺失字段保持为空";
+      strict && applied > 0
+        ? "已从元数据一键导入插件信息，确认后即可提交"
+        : applied > 0
+          ? `已从元数据填充 ${applied} 项，缺失字段留空，可手动调整`
+          : "元数据中没有可填充的新字段，缺失字段保持为空";
   } catch (error) {
     if (requestId !== metadataRequestId) return;
     if ((error as { code?: string }).code === "github_authorization_required")
