@@ -192,6 +192,8 @@ class GithubRepositoryAccess:
             "owner_id": str(owner["id"]),
             "owner_type": owner["type"],
             "description": repository.get("description") or "",
+            "fork": bool(repository.get("fork")),
+            "submitted": False,
         }
 
     async def list_repositories(self, page: int) -> dict[str, Any]:
@@ -208,6 +210,13 @@ class GithubRepositoryAccess:
         )
         if response.status_code != 200 or not isinstance(response.json(), list):
             raise auth_error(503, "github_unavailable", "GitHub 未返回有效的仓库列表")
+
+        plugins = await store_call(self.store, "list_plugins")
+        submitted_repos = {
+            str(plugin.get("repo") or "").lower().removesuffix(".git").rstrip("/")
+            for plugin in plugins
+        }
+
         items = []
         for repository in response.json():
             if not (
@@ -219,11 +228,15 @@ class GithubRepositoryAccess:
                 continue
             try:
                 if await self.can_manage(repository):
-                    items.append(self.public_repository(repository))
+                    item = self.public_repository(repository)
+                    item["submitted"] = item["repo"].lower() in submitted_repos
+                    items.append(item)
             except HTTPException as exc:
                 if exc.status_code != 403:
                     raise
                 # One restricted organization must not hide other accessible repositories.
+
+        items.sort(key=lambda item: (item["submitted"], item["fork"]))
         return {"items": items, "next_page": page + 1 if "next" in response.links else None}
 
     async def verify(self, repo: str, expected_repository_id: str = "") -> dict[str, Any]:

@@ -135,6 +135,8 @@ export interface GithubPluginRepository {
   owner: string;
   owner_type: "User" | "Organization";
   description: string;
+  fork?: boolean;
+  submitted?: boolean;
 }
 
 export interface Announcement {

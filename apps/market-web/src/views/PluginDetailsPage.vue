@@ -218,7 +218,16 @@ function updatePlugin(updated: PluginDetail): void {
               </div>
               <div>
                 <dt>作者</dt>
-                <dd>{{ plugin.author || "社区开发者" }}</dd>
+                <dd>
+                  <router-link
+                    v-if="plugin.owner_github_login"
+                    class="author-profile-link"
+                    :to="`/author/${encodeURIComponent(plugin.owner_github_login)}`"
+                  >
+                    {{ plugin.author || plugin.owner_github_login }}
+                  </router-link>
+                  <template v-else>{{ plugin.author || "社区开发者" }}</template>
+                </dd>
               </div>
               <div>
                 <dt>分类</dt>
@@ -276,6 +285,15 @@ function updatePlugin(updated: PluginDetail): void {
 </template>
 
 <style scoped>
+.author-profile-link {
+  color: inherit;
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+.author-profile-link:hover {
+  color: var(--primary-color);
+}
 .plugin-page-shell {
   min-height: 100vh;
   color: var(--text-primary);

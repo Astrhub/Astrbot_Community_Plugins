@@ -24,7 +24,16 @@ const pluginRoutes = (payload.items || [])
         ? `/plugin/${encodeURIComponent(plugin.owner_github_login)}/${encodeURIComponent(plugin.name || plugin.id)}`
         : `/plugin/${encodeURIComponent(plugin.id)}`),
   );
-const routes = ["/", "/submit", "/docs/rest", ...pluginRoutes];
+const authorRoutes = [
+  ...new Set(
+    (payload.items || [])
+      .filter((plugin) => !plugin.status || plugin.status === "listed")
+      .map((plugin) => plugin.owner_github_login)
+      .filter(Boolean)
+      .map((username) => `/author/${encodeURIComponent(username)}`),
+  ),
+];
+const routes = ["/", "/submit", "/docs/rest", ...pluginRoutes, ...authorRoutes];
 const privateRouteShells = [
   { route: "/plugin-workbench", title: "插件审查工作台 - Astrhub 插件市场" },
 ];
@@ -60,6 +69,8 @@ try {
         await page.waitForSelector(".plugin-card, .empty-state", { timeout: 20_000 });
       if (route.startsWith("/plugin/"))
         await page.waitForSelector(".plugin-layout", { timeout: 20_000 });
+      if (route.startsWith("/author/"))
+        await page.waitForSelector(".author-card", { timeout: 20_000 });
       const html = markPrerenderPath(
         rewritePrerenderOrigin(await page.content(), prerenderOrigin),
         route,

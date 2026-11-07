@@ -274,6 +274,15 @@ class InMemoryMarketStore:
     def list_plugins(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["plugins"])
 
+    def list_author_plugins(self, username: str) -> list[dict[str, Any]]:
+        return [
+            deepcopy(plugin)
+            for plugin in self.state["plugins"]
+            if str(plugin.get("owner_github_login") or "").lower() == username.lower()
+            and plugin.get("status") == "listed"
+        ]
+        return deepcopy(self.state["plugins"])
+
     def list_user_plugins(self, user_id: str, github_login: str = "") -> list[dict[str, Any]]:
         return [
             deepcopy(plugin)
@@ -1709,6 +1718,19 @@ class PgRedisMarketStore(InMemoryMarketStore):
              LIMIT $1
             """,
             limit,
+        )
+        return [self._plugin_from_record(row) for row in rows]
+
+    async def list_author_plugins(self, username: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            """
+            SELECT *
+              FROM market_plugins
+             WHERE lower(owner_github_login) = lower($1)
+               AND status = 'listed'
+             ORDER BY updated_at DESC
+            """,
+            username,
         )
         return [self._plugin_from_record(row) for row in rows]
 

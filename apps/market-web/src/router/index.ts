@@ -11,6 +11,7 @@ const Notifications = () => import("../views/Notifications.vue");
 const AdminLogin = () => import("../views/AdminLogin.vue");
 const RestDocs = () => import("../views/RestDocs.vue");
 const PluginDetailsPage = () => import("../views/PluginDetailsPage.vue");
+const AuthorPage = () => import("../views/AuthorPage.vue");
 const PluginWorkbench = () => import("../views/PluginWorkbench.vue");
 const NotFound = () => import("../views/NotFound.vue");
 
@@ -19,6 +20,12 @@ const routes: RouteRecordRaw[] = [
     path: "/plugin/:username/:name",
     name: "PluginDetails",
     component: PluginDetailsPage,
+    props: true,
+  },
+  {
+    path: "/author/:username",
+    name: "AuthorPage",
+    component: AuthorPage,
     props: true,
   },
   {

@@ -1361,12 +1361,13 @@ export const usePluginStore = defineStore("plugins", () => {
   async function fetchPluginSubmissionMetadata(
     repo: string,
     repositoryId = "",
+    strict = false,
   ): Promise<PluginSubmissionMetadataPreview> {
     const response = await fetch(`${apiBaseUrl}/v1/plugins/submissions/metadata-preview`, {
       method: "POST",
       credentials: "include",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ repo, repository_id: repositoryId }),
+      body: JSON.stringify({ repo, repository_id: repositoryId, strict }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok)

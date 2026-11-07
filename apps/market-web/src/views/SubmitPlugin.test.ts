@@ -24,6 +24,27 @@ const repositories = ["a", "b"].map((id) => ({
   owner_type: "Organization" as const,
   description: `Plugin ${id}`,
 }));
+const submittedRepository = {
+  id: "submitted",
+  name: "astrbot_plugin_submitted",
+  full_name: "my-org/astrbot_plugin_submitted",
+  repo: "https://github.com/my-org/astrbot_plugin_submitted",
+  owner: "my-org",
+  owner_type: "Organization" as const,
+  description: "Already submitted",
+  submitted: true,
+};
+
+const forkRepository = {
+  id: "fork",
+  name: "astrbot_plugin_fork",
+  full_name: "my-org/astrbot_plugin_fork",
+  repo: "https://github.com/my-org/astrbot_plugin_fork",
+  owner: "my-org",
+  owner_type: "Organization" as const,
+  description: "Forked plugin",
+  fork: true,
+};
 
 function setup() {
   messages.success.mockClear();
@@ -37,6 +58,58 @@ function setup() {
   });
   return { store, mount: () => mount(SubmitPlugin, { global: { plugins: [pinia] } }) };
 }
+it("marks submitted repositories as disabled and shows fork/submitted labels", async () => {
+  const context = setup();
+  vi.mocked(context.store.loadGithubRepositories).mockResolvedValue({
+    items: [...repositories, submittedRepository, forkRepository],
+    next_page: null,
+  });
+  const wrapper = context.mount();
+  await flushPromises();
+
+  const select = wrapper.findAllComponents(NSelect)[0]!;
+  const options = select.props("options") as Array<{
+    label: string;
+    value: string;
+    disabled?: boolean;
+  }>;
+  const submitted = options.find((option) => option.label.includes("已提交"));
+  const fork = options.find((option) => option.label.includes("Fork"));
+
+  expect(submitted?.disabled).toBe(true);
+  expect(fork?.label).toContain("Fork");
+  expect(options.find((option) => option.value === "a")?.disabled).toBeFalsy();
+  wrapper.unmount();
+});
+
+it("imports existing plugin metadata strictly for source repositories", async () => {
+  const context = setup();
+  vi.mocked(context.store.fetchPluginSubmissionMetadata).mockResolvedValue({
+    name: "astrbot_plugin_imported",
+    desc: "导入简介",
+    author: "作者",
+    repo: "https://github.com/my-org/astrbot_plugin_a",
+  } as never);
+  const wrapper = context.mount();
+  await flushPromises();
+
+  wrapper.findAllComponents(NSelect)[0]!.vm.$emit("update:value", "a");
+  await flushPromises();
+
+  const importButton = wrapper
+    .findAll("button")
+    .find((button) => button.text() === "一键导入已有插件");
+  expect(importButton).toBeDefined();
+  await importButton!.trigger("click");
+  await flushPromises();
+
+  expect(context.store.fetchPluginSubmissionMetadata).toHaveBeenCalledWith(
+    repositories[0]!.repo,
+    "a",
+    true,
+  );
+  wrapper.unmount();
+});
 
 describe("SubmitPlugin repository selection", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -154,6 +227,7 @@ describe("SubmitPlugin repository selection", () => {
     expect(context.store.fetchPluginSubmissionMetadata).toHaveBeenCalledWith(
       repositories[0]!.repo,
       "a",
+      false,
     );
     expect(
       (wrapper.get('input[name="plugin-display-name"]').element as HTMLInputElement).value,

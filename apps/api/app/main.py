@@ -1060,6 +1060,21 @@ def register_routes(app: FastAPI) -> None:
         return {"items": [public_market_plugin(plugin) for plugin in plugins]}
 
     @app.get(
+        "/v1/authors/{username}/plugins",
+        tags=["plugins"],
+        summary="获取作者已上架插件",
+        description="返回指定 GitHub 作者已上架的插件列表。无需登录。",
+        responses={200: {"description": "插件列表"}},
+    )
+    async def list_author_plugins(request: Request, username: str) -> dict[str, Any]:
+        plugins = await call_store(request, "list_author_plugins", username)
+        return {
+            "username": username,
+            "github_url": f"https://github.com/{username}",
+            "items": [public_market_plugin(plugin) for plugin in plugins],
+        }
+
+    @app.get(
         "/plugins.json",
         tags=["integration"],
         summary="AstrBot 插件源",
@@ -1142,6 +1157,7 @@ def register_routes(app: FastAPI) -> None:
                 settings,
                 user,
                 store=request.app.state.store,
+                strict=bool(payload.strict),
             )
         except GithubMetadataError as exc:
             raise error(exc.status_code, exc.message) from exc
@@ -3318,34 +3334,48 @@ async def fetch_plugin_submission_metadata_preview(
     settings: Settings,
     user: dict[str, Any],
     store: Any | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     match = validate_github_repo(repo)
     owner = match.group("owner")
     repo_name = match.group("repo")
     preview = build_plugin_submission_metadata_preview(owner, repo_name, settings=settings)
-    if not settings.github_metadata_sync_enabled:
-        return preview
+    if settings.github_metadata_sync_enabled:
+        runtime_config = await load_system_options(store) if store else {}
+        token_statuses = parse_github_api_token_statuses(
+            runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
+        )
+        headers = github_api_headers(user, settings, token_statuses=token_statuses)
+        uses_system_token = bool(headers.get("authorization")) and not user.get("github_token")
+        status_store = store if uses_system_token else None
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                metadata = await fetch_github_plugin_metadata_files(
+                    client, owner, repo_name, headers, store=status_store
+                )
+        except httpx.HTTPError as exc:
+            raise GithubMetadataError("GitHub metadata fetch failed", 502) from exc
+        preview = build_plugin_submission_metadata_preview(
+            owner,
+            repo_name,
+            metadata=metadata,
+            settings=settings,
+        )
 
-    runtime_config = await load_system_options(store) if store else {}
-    token_statuses = parse_github_api_token_statuses(
-        runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
-    )
-    headers = github_api_headers(user, settings, token_statuses=token_statuses)
-    uses_system_token = bool(headers.get("authorization")) and not user.get("github_token")
-    status_store = store if uses_system_token else None
-    try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            metadata = await fetch_github_plugin_metadata_files(
-                client, owner, repo_name, headers, store=status_store
+    if strict:
+        required_fields = {
+            "name": "插件名",
+            "desc": "插件简介",
+            "author": "作者",
+            "repo": "仓库地址",
+        }
+        missing = [label for field, label in required_fields.items() if not preview.get(field)]
+        if missing:
+            raise GithubMetadataError(
+                f"元数据缺少必填字段：{'、'.join(missing)}，请完善 metadata.yaml 后重试",
+                400,
             )
-    except httpx.HTTPError as exc:
-        raise GithubMetadataError("GitHub metadata fetch failed", 502) from exc
-    return build_plugin_submission_metadata_preview(
-        owner,
-        repo_name,
-        metadata=metadata,
-        settings=settings,
-    )
+    return preview
 
 
 async def fetch_plugin_github_metadata(
