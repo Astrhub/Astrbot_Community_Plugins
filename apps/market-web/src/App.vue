@@ -11,6 +11,7 @@ import { highlightConfig } from "./plugins/highlight";
 import { usePluginStore } from "./stores/plugins";
 
 const store = usePluginStore();
+store.initTheme();
 const { irisMaskActive, irisMaskPosition, isDarkMode } = storeToRefs(store);
 const route = useRoute();
 const router = useRouter();
@@ -29,7 +30,6 @@ useHead(() => ({
 }));
 
 onMounted(async () => {
-  store.initTheme();
   try {
     await store.loadSiteConfig();
   } finally {
@@ -72,6 +72,8 @@ onMounted(async () => {
 <style>
 body {
   margin: 0;
+  color: var(--text-primary);
+  background: var(--bg-base);
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
@@ -81,6 +83,7 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  color: var(--text-primary);
   background: var(--bg-base);
 }
 </style>

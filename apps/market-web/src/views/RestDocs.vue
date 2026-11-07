@@ -733,7 +733,7 @@ async function copyEndpointGuide() {
   --vap-syntax-punct: var(--text-tertiary);
 }
 
-:where(.app-container.dark) {
+:where(.dark, .app-container.dark) {
   --vap-bg: var(--bg-card);
   --vap-bg-soft: var(--bg-base);
   --vap-border: var(--border-base);

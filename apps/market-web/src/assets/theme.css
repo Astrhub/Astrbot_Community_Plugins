@@ -83,6 +83,16 @@
   --card-inner-radius: 8px;
   --logo-bg: rgba(37, 99, 235, 0.06);
   --logo-border: rgba(37, 99, 235, 0.12);
+
+  /* 页面与面板通用语义别名 */
+  --body-color: var(--bg-base);
+  --card-color: var(--bg-card);
+  --code-color: var(--bg-hover);
+  --border-color: var(--border-base);
+  --text-color-base: var(--text-primary);
+  --text-color-1: var(--text-primary);
+  --text-color-2: var(--text-secondary);
+  --text-color-3: var(--text-tertiary);
 }
 
 .dark {
@@ -166,6 +176,22 @@
   /* 卡片增强 dark */
   --logo-bg: rgba(96, 165, 250, 0.1);
   --logo-border: rgba(96, 165, 250, 0.18);
+
+  /* 页面与面板通用语义别名 dark */
+  --body-color: var(--bg-base);
+  --card-color: var(--bg-card);
+  --code-color: var(--bg-hover);
+  --border-color: var(--border-base);
+  --text-color-base: var(--text-primary);
+  --text-color-1: var(--text-primary);
+  --text-color-2: var(--text-secondary);
+  --text-color-3: var(--text-tertiary);
+}
+
+html,
+body {
+  background-color: var(--bg-base);
+  color: var(--text-primary);
 }
 
 * {
