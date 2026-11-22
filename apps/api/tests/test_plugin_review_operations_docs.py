@@ -44,3 +44,39 @@ def test_documented_deployment_files_exist() -> None:
 
     assert all((ROOT / path).is_file() for path in expected)
     assert not (ROOT / "deploy/systemd/astrbot-community-plugins.env.example").exists()
+
+
+def _markdown_headings(path: Path) -> set[str]:
+    headings: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^#+\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        title = re.sub(r"[`*_~]", "", match.group(1)).strip().lower()
+        slug = re.sub(r"\s+", "-", title)
+        headings.add(slug)
+    return headings
+
+
+def test_security_policy_and_security_docs_have_valid_links() -> None:
+    policy_path = ROOT / "SECURITY.md"
+    docs_security_path = ROOT / "docs/security.md"
+    assert policy_path.is_file()
+
+    policy = policy_path.read_text(encoding="utf-8")
+    assert "https://github.com/Astrhub/Astrbot_Community_Plugins/security/advisories/new" in policy
+    assert "mailto:plugins@eloina.cn" in policy
+    assert "(docs/security.md)" in policy
+
+    for source_path in (policy_path, docs_security_path):
+        content = source_path.read_text(encoding="utf-8")
+        for href in re.findall(r"\[[^]]+\]\(([^)]+)\)", content):
+            if href.startswith(("http://", "https://", "mailto:", "#")):
+                continue
+            target_part, _, anchor = href.partition("#")
+            target_file = (source_path.parent / target_part).resolve()
+            assert target_file.is_file(), f"Broken link in {source_path.name}: {href}"
+            if anchor:
+                assert anchor.lower() in _markdown_headings(target_file), (
+                    f"Broken anchor in {source_path.name}: {href}"
+                )

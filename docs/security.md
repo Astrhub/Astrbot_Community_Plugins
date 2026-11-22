@@ -25,9 +25,9 @@ OAuth 登录后，若用户属于 `GITHUB_ADMIN_ORG` 且当前非 admin，自动
 认证基于 cookie session（`astrbot_market_session`），**非 JWT**——服务端可即时撤销。
 
 - **token 格式**：`sess_{token_urlsafe(24)}`（`store.py`）。
-- **存储**：Redis，key 为 `astrbot_market:session:{token}`，value 为 `{token, user_id, created_at, last_seen_at}`。
+- **存储**：完整模式下存放在 Redis，key 为 `astrbot_market:session:{token}`，value 为 `{token, user_id, created_at, last_seen_at}`；本地单进程模式（`MARKET_STORAGE_MODE=local`）存放在本地持久化 JSON 文件并按 TTL 清理。
 - **过期**：TTL = `SESSION_MAX_AGE_SECONDS`（默认 7 天）；每次 `get_user_by_session()` 读取时刷新 TTL，活跃用户不会过期。
-- **注销**：`POST /v1/auth/logout` 同时清除客户端 cookie 与 Redis session。
+- **注销**：`POST /v1/auth/logout` 同时清除客户端 cookie 与服务端 session（含关联的短期 GitHub 仓库授权记录）。
 
 Cookie 属性（`main.py`）：
 
@@ -87,8 +87,9 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 
 ### 存储边界
 
-- **PostgreSQL**：持久化业务数据、artifact 状态机、结构化 findings、决策、lease 任务与通知 outbox。
-- **Redis**：**仅**存登录会话 token（带 TTL）。不存储 GitHub 密钥、OAuth 原始令牌等超出登录流程所需的敏感数据。
+- **PostgreSQL**：完整模式下持久化业务数据、artifact 状态机、结构化 findings、决策、lease 任务与通知 outbox。
+- **Redis**：存储登录会话 token（带 TTL），以及用于仓库管理权限校验的加密短期 GitHub OAuth 授权凭据（经 `GITHUB_CLIENT_SECRET` 通过 HKDF 派生的 Fernet 密钥加密，TTL 不超过 8 小时，注销或会话失效时删除）。不存储明文 OAuth 令牌或长期业务数据。
+- **本地单文件存储**：仅在自用单进程模式（`MARKET_STORAGE_MODE=local`）启用，通过原子替换持久化市场状态与会话，且默认关闭 artifact 审查管线。
 - **隔离存储**：上传/GitHub ZIP 与审查文本对象使用私有本地目录或私有 bucket，不生成公开 URL。
 - **发布存储**：只接收已批准 artifact 的原始隔离 ZIP，使用条件创建禁止覆盖；公开 URL 由独立 CDN base URL 组成。
 
@@ -99,7 +100,7 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 - `artifact-worker` 在独立进程/容器中执行 P0/P1 的 ZIP 目录检查、YAML safe load、Python AST 与 requirements 静态规则；这些步骤仍不执行插件代码。
 - 预检拒绝路径穿越、绝对路径、符号链接、加密 entry、zip bomb、超限文件/数量、重复路径、缺失或重复 metadata、非法版本/插件名、Git LFS、submodule 与原生可执行制品。
 - GitHub 来源只允许公开 `https://github.com/<owner>/<repo>`，分支/标签必须先解析为 40 位 commit SHA，再从固定 codeload 主机下载。
-- 后续 runtime smoke test 必须使用一次性隔离容器；不得复用 API 进程或当前 P0/P1 worker 进程。
+- runtime smoke test 通过独立 `runtime-runner` 和一次性隔离容器执行，不复用 API 进程或 P0/P1 worker 进程。
 - LLM 结果只能产生结构化建议，不能成为最终安全背书或绕过人工决策。
 
 发布路径为 `/{author_id}/{repo_name}/{version}/{plugin_name}-{version}-{suffix}.zip`；`suffix` 创建一次并持久化。对象已存在时只有 SHA-256 相同才视为幂等，否则发布失败。
@@ -162,7 +163,7 @@ API Key 用于机器客户端（如未来的 AstrBot WebUI 插件），通过 `A
 
 ## 安全测试覆盖
 
-`apps/api/tests/test_market.py`（72 个测试，基于 `InMemoryMarketStore` + `TestClient`，无需真实 PG/Redis）覆盖的关键安全场景：
+`apps/api/tests/` 中的安全相关测试（如 `test_market.py`、`test_github_authorization.py`、`test_local_market_store.py` 等，基于内存或临时本地存储与 `TestClient`，无需真实 PG/Redis）覆盖的关键安全场景：
 
 - 角色不可越级（GitHub 用户不自动成为 core_admin；admin 不能管理管理员）。
 - `PUBLIC_LOGIN_ENABLED=false` 时仅核心管理员可登录。
