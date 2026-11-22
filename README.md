@@ -45,7 +45,9 @@
 ├── deploy/systemd/      # 裸机部署的 systemd service 与 env 模板
 ├── docs/                # 架构、安全、OpenAPI 文档
 ├── Dockerfile           # 多阶段构建（前端 dist + 后端）
-├── docker-compose.yml   # 单机部署（app + artifact-worker + PostgreSQL + Redis）
+├── docker-compose.yml   # 完整部署（app + artifact-worker + PostgreSQL + Redis）
+├── docker-compose-local.yml # 本地自用单进程版（仅市场 app，本地文件持久化，无需 PG/Redis）
+├── .env.example         # Docker Compose 根目录环境变量示例
 └── package.json         # 工作区根脚本（dev:api / dev:web / build:web / start:api / test）
 ```
 
@@ -91,13 +93,33 @@ cd apps/market-web && vp test --run  # 运行前端 Vite+ 测试
 
 > FastAPI 通过路径保留机制区分 API 路由（`v1`、`health`、`plugins.json`、`plugins-md5.json`、`openapi.json`、`llms.txt`、`docs`、`redoc`）与静态文件回退，互不冲突。REST API 文档可访问 `/docs/rest`（Vue + Naive UI API Reference + 在线试用）。原生 Swagger UI 与 ReDoc 已关闭，`/docs` 与 `/redoc` 返回 404。
 
-后端依赖 **PostgreSQL**（持久化）与 **Redis**（会话）。两者均配置时启用 `PgRedisMarketStore`；否则回退 `InMemoryMarketStore`，仅适合开发与首次启动。
+后端支持两种持久化模式：
 
-### Docker Compose
+- **本地自用单进程模式**（`MARKET_STORAGE_MODE=local`）：使用本地 JSON 文件持久化所有市场数据与登录会话，仅运行单个 `app` 进程，无需 PostgreSQL、Redis 或审核 Worker。
+- **完整社区模式**（默认 `MARKET_STORAGE_MODE=postgres`）：依赖 **PostgreSQL**（持久化）与 **Redis**（会话），支持不可变插件包审查与 CDN 分发。两者均未配置时回退内存存储，仅用于开发与首次引导。
+
+### Docker Compose（本地自用单进程版）
+
+如果只需要一个自用插件市场和 AstrBot 插件源（`/plugins.json`），可以直接使用 `docker-compose-local.yml` 一条命令启动，无需部署 PostgreSQL、Redis 或手动创建 `apps/api/.env`：
+
+```bash
+docker compose -f docker-compose-local.yml up -d --build
+```
+
+- 数据文件与初始化配置默认保存在 Docker 命名卷 `market-local-data`（容器内 `/var/lib/astrbot-market/data/`），重启容器不丢数据。
+- 构建阶段 `VITE_BASE_URL` 默认为空，自动跳过 Chromium 预渲染，镜像体积更小、构建更快。
+- 首次启动后访问 `http://127.0.0.1:8787/setup`，只需填写站点名称和核心管理员账号密码即可启用；也可以在根目录 `.env` 中预先配置 `CORE_ADMIN_USERNAME` 和 `CORE_ADMIN_PASSWORD` 跳过向导。
+- 登录后访问 `/submit`，管理员无需配置 GitHub OAuth，直接粘贴公开 GitHub 插件仓库链接即可读取元数据并上架。
+- 如需自定义端口、域名或 GitHub API Token，可先 `cp .env.example .env` 再按需调整。
+
+### Docker Compose（完整版：PostgreSQL + Redis）
+
+根目录环境变量模板见 `.env.example`（包含 `SITE_URL` / `VITE_BASE_URL`、`APP_PORT`、`WEB_URL`、`CORS_ORIGIN` 和数据库配置；需要生产 SEO sitemap 与预渲染时在 `.env` 中填入你自己的公网域名 `SITE_URL=https://your-domain`）。
 
 首次运行前先创建后端 `.env` 文件，否则 Docker 会把挂载目标创建成目录：
 
 ```bash
+cp .env.example .env
 cp apps/api/.env.docker.example apps/api/.env
 sudo chown 10001:10001 apps/api/.env
 docker compose up -d --build
@@ -218,7 +240,10 @@ setup 写 `/etc`。生产环境还需在前置 Nginx/Caddy 启用 HTTPS，并设
 | `HOST` / `PORT` | `127.0.0.1` / `8787` | 监听地址与端口 |
 | `CORS_ORIGIN` | `http://127.0.0.1:3000,http://localhost:3000` | 允许的前端来源（逗号分隔） |
 | `WEB_URL` | `http://127.0.0.1:8787` | 站点公开 URL |
-| `DATABASE_URL` / `REDIS_URL` | 空 | 首次留空，经 `/setup` 配置；同时配置才启用持久化存储 |
+| `MARKET_STORAGE_MODE` | `postgres` | 存储模式：`postgres`（PostgreSQL + Redis）或 `local`（本地单文件持久化） |
+| `LOCAL_DATA_PATH` | `<env 目录>/data/market-state.json` | 本地模式的数据文件路径 |
+| `CORE_ADMIN_USERNAME` / `CORE_ADMIN_PASSWORD` | 空 | 可选：启动时自动初始化内部核心管理员（明文密码仅启动时哈希，不回写磁盘） |
+| `DATABASE_URL` / `REDIS_URL` | 空 | 首次留空，经 `/setup` 配置；`postgres` 模式下同时配置才启用持久化存储 |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App 凭证 |
 | `GITHUB_CALLBACK_URL` | 空 | OAuth 回调 URL，留空则在 `/admin/settings` 配置 |
 | `GITHUB_ADMIN_ORG` | 空 | 该组织成员登录后自动提权为 admin |

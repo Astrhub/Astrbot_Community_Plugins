@@ -251,8 +251,17 @@ export interface SiteConfig {
   contact_email: string;
   docs_url: string;
   setup_required?: boolean;
+  storage_mode?: "postgres" | "local";
   auth: AuthConfig;
   market: MarketConfig;
+}
+
+/** 初始化提交载体（本地模式可省略数据库与 Redis）。 */
+export interface SetupSubmitPayload {
+  site: Partial<SiteConfig>;
+  admin: { username: string; password: string };
+  postgres?: Partial<DbHostConfig>;
+  redis?: Partial<DbHostConfig>;
 }
 
 /** 初始化向导配置。 */
@@ -329,6 +338,8 @@ export interface DbHostConfig {
 export interface SetupStatus {
   required: boolean;
   missing: string[];
+  storage_mode?: "postgres" | "local";
+  local_data_path?: string;
   database_configured: boolean;
   redis_configured: boolean;
   saved_setup: SetupConfig;

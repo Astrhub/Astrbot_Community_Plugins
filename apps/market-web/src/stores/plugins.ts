@@ -20,6 +20,7 @@ import type {
   RawPlugin,
   SetupConfig,
   SetupStatus,
+  SetupSubmitPayload,
   SiteConfig,
   SortDirection,
   Submission,
@@ -167,6 +168,7 @@ function normalizeSiteConfig(value: Partial<SiteConfig> = {}): SiteConfig {
     description: String(value.description ?? DEFAULT_SITE_CONFIG.description).trim(),
     contact_email: String(value.contact_email || "").trim(),
     docs_url: String(value.docs_url ?? DEFAULT_SITE_CONFIG.docs_url).trim(),
+    ...(value.storage_mode === "local" ? { storage_mode: "local" as const } : {}),
     auth: { ...DEFAULT_SITE_CONFIG.auth, ...value.auth },
     market: { ...DEFAULT_SITE_CONFIG.market, ...value.market } as MarketConfig,
   };
@@ -634,6 +636,8 @@ export const usePluginStore = defineStore("plugins", () => {
     setupStatus.value = {
       required: Boolean(data.required),
       missing: Array.isArray(data.missing) ? data.missing : [],
+      storage_mode: data.storage_mode === "local" ? "local" : "postgres",
+      ...(data.local_data_path ? { local_data_path: String(data.local_data_path) } : {}),
       database_configured: Boolean(data.database_configured),
       redis_configured: Boolean(data.redis_configured),
       saved_setup: setupConfig,
@@ -689,7 +693,9 @@ export const usePluginStore = defineStore("plugins", () => {
     };
   }
 
-  async function saveSetupConfig(payload: SetupConfig): Promise<Record<string, unknown>> {
+  async function saveSetupConfig(
+    payload: SetupConfig | SetupSubmitPayload,
+  ): Promise<Record<string, unknown>> {
     const response = await fetch(`${apiBaseUrl}/v1/setup`, {
       method: "POST",
       credentials: "include",

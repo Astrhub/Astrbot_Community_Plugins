@@ -3,11 +3,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src/apps/market-web
-RUN apt-get update && apt-get install -y --no-install-recommends chromium \
-    && rm -rf /var/lib/apt/lists/*
-COPY apps/market-web/package*.json ./
 ARG NPM_REGISTRY=""
 ARG VITE_BASE_URL=""
+RUN if [ -n "$VITE_BASE_URL" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends chromium \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+COPY apps/market-web/package*.json ./
 ENV VITE_BASE_URL=$VITE_BASE_URL \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
@@ -37,7 +39,7 @@ RUN if [ -n "$PYPI_INDEX_URL" ]; then \
 COPY apps/api ./apps/api
 RUN groupadd --gid 10001 astrbot-market \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin astrbot-market \
-    && mkdir -p /var/lib/astrbot-market/artifacts /var/lib/astrbot-runtime-results \
+    && mkdir -p /var/lib/astrbot-market/artifacts /var/lib/astrbot-market/data /var/lib/astrbot-runtime-results \
     && chown -R 10001:10001 /var/lib/astrbot-market /var/lib/astrbot-runtime-results
 WORKDIR /app/apps/api
 
