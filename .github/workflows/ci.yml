@@ -3,8 +3,24 @@ name: Code Quality Checks
 on:
   push:
     branches: [main]
+    paths:
+      - "apps/api/**"
+      - "apps/market-web/**"
+      - "Dockerfile"
+      - "Dockerfile.*"
+      - "docker-compose*.yml"
+      - "deploy/**"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "apps/api/**"
+      - "apps/market-web/**"
+      - "Dockerfile"
+      - "Dockerfile.*"
+      - "docker-compose*.yml"
+      - "deploy/**"
+      - ".github/workflows/ci.yml"
   merge_group:
   workflow_dispatch:
 
@@ -12,8 +28,84 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect Changed Code
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      web: ${{ steps.filter.outputs.web }}
+
+    steps:
+      - name: Checkout repository
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Classify changed files
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" != "push" && "$EVENT_NAME" != "pull_request" ]]; then
+            echo "api=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null \
+              || ! git cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null; then
+              echo "api=true" >> "$GITHUB_OUTPUT"
+              echo "web=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            changed_files="$(git diff --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}")"
+          else
+            if [[ -z "$PUSH_BEFORE_SHA" || "$PUSH_BEFORE_SHA" == "0000000000000000000000000000000000000000" ]] \
+              || ! git cat-file -e "${PUSH_BEFORE_SHA}^{commit}" 2>/dev/null; then
+              echo "api=true" >> "$GITHUB_OUTPUT"
+              echo "web=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            changed_files="$(git diff --name-only "${PUSH_BEFORE_SHA}" "${CURRENT_SHA}")"
+          fi
+
+          api=false
+          web=false
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            case "$file" in
+              .github/workflows/ci.yml)
+                api=true
+                web=true
+                ;;
+              apps/api/*|Dockerfile|Dockerfile.*|docker-compose*.yml|deploy/*)
+                api=true
+                ;;
+              apps/market-web/*)
+                web=true
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          echo "Changed files:"
+          printf '%s\n' "$changed_files"
+          echo "api=${api}" >> "$GITHUB_OUTPUT"
+          echo "web=${web}" >> "$GITHUB_OUTPUT"
+
   api:
     name: Python API
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -39,6 +131,8 @@ jobs:
 
   web:
     name: Vue market
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
 
     steps:
