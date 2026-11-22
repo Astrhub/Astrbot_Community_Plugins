@@ -3,8 +3,24 @@ name: Code Quality Checks
 on:
   push:
     branches: [main]
+    paths:
+      - "apps/api/**"
+      - "apps/market-web/**"
+      - "Dockerfile"
+      - "Dockerfile.*"
+      - "docker-compose*.yml"
+      - "deploy/**"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "apps/api/**"
+      - "apps/market-web/**"
+      - "Dockerfile"
+      - "Dockerfile.*"
+      - "docker-compose*.yml"
+      - "deploy/**"
+      - ".github/workflows/ci.yml"
   merge_group:
   workflow_dispatch:
 
