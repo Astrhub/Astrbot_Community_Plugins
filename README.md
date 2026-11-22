@@ -33,7 +33,7 @@
 
 ```text
 .
-├── .github/workflows/ci.yml    # 按变更路径触发的 GitHub Actions 检查
+├── .github/workflows/ci.yml    # 按变更路径执行检查的 GitHub Actions 工作流
 ├── .vite-hooks/                # 前端 pre-commit（vp staged）与后端 pre-push（ruff）钩子
 ├── apps/
 │   ├── market-web/             # Vue 3 + Vite+ + TypeScript 前端应用
@@ -232,11 +232,12 @@ docker compose build
 
 ### CI/CD
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) 仅在代码或部署配置改动时按变更类型执行对应检查，不包含自动部署步骤：
+[.github/workflows/ci.yml](.github/workflows/ci.yml) 在 `push` / `pull_request` 时先运行变更检测并按需执行对应检查，不包含自动部署步骤：
 
 - 仅后端或部署配置改动（`apps/api/**`、`Dockerfile*`、`docker-compose*.yml`、`deploy/**`）：运行 `Python API`（`ruff check` + `pytest`）。
 - 仅前端改动（`apps/market-web/**`）：运行 `Vue market`（`vp check` + `vp test` + `vp build`）。
-- 纯文档改动（如 `README.md`、`SECURITY.md`、`docs/**`）不触发 CI。
+- 纯文档改动（如 `README.md`、`SECURITY.md`、`docs/**`）：仅完成变更检测，跳过 `Python API` 与 `Vue market` 检查。
+- 修改 `.github/workflows/ci.yml` 本身、进入 `merge_group` 或手动触发（`workflow_dispatch`）：同时运行 `Python API` 与 `Vue market` 全部检查。
 
 ## 配置参考
 

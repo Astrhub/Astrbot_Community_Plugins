@@ -3,24 +3,8 @@ name: Code Quality Checks
 on:
   push:
     branches: [main]
-    paths:
-      - "apps/api/**"
-      - "apps/market-web/**"
-      - "Dockerfile"
-      - "Dockerfile.*"
-      - "docker-compose*.yml"
-      - "deploy/**"
-      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "apps/api/**"
-      - "apps/market-web/**"
-      - "Dockerfile"
-      - "Dockerfile.*"
-      - "docker-compose*.yml"
-      - "deploy/**"
-      - ".github/workflows/ci.yml"
   merge_group:
   workflow_dispatch:
 
@@ -68,7 +52,7 @@ jobs:
               echo "web=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            changed_files="$(git diff --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}")"
+            changed_files="$(git diff --no-renames --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}")"
           else
             if [[ -z "$PUSH_BEFORE_SHA" || "$PUSH_BEFORE_SHA" == "0000000000000000000000000000000000000000" ]] \
               || ! git cat-file -e "${PUSH_BEFORE_SHA}^{commit}" 2>/dev/null; then
@@ -76,7 +60,7 @@ jobs:
               echo "web=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            changed_files="$(git diff --name-only "${PUSH_BEFORE_SHA}" "${CURRENT_SHA}")"
+            changed_files="$(git diff --no-renames --name-only "${PUSH_BEFORE_SHA}" "${CURRENT_SHA}")"
           fi
 
           api=false
