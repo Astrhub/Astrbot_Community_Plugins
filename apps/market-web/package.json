@@ -2,8 +2,8 @@
   "name": "astrbot-community-plugins-web",
   "version": "1.0.0",
   "private": true,
-  "author": "Astrhub",
   "license": "AGPL-3.0-only",
+  "author": "Astrhub",
   "type": "module",
   "scripts": {
     "dev": "vp dev",
