@@ -10,6 +10,8 @@ import { darkThemeOverrides, lightThemeOverrides } from "./config/darkTheme";
 import { highlightConfig } from "./plugins/highlight";
 import { usePluginStore } from "./stores/plugins";
 
+import type { SiteConfig } from "./types";
+
 const store = usePluginStore();
 store.initTheme();
 const { irisMaskActive, irisMaskPosition, isDarkMode } = storeToRefs(store);
@@ -30,13 +32,17 @@ useHead(() => ({
 }));
 
 onMounted(async () => {
+  let loadedSite: SiteConfig | null = null;
   try {
-    await store.loadSiteConfig();
+    loadedSite = await store.loadSiteConfig();
   } finally {
     document.documentElement.classList.remove("site-config-loading");
   }
-  const status = await store.loadSetupStatus();
-  if (status.required) {
+  const setupRequired =
+    typeof loadedSite?.setup_required === "boolean"
+      ? loadedSite.setup_required
+      : (await store.loadSetupStatus()).required;
+  if (setupRequired) {
     document.documentElement.classList.remove("auth-session-loading");
     if (route.path !== "/setup") await router.replace("/setup");
     return;

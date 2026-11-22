@@ -1909,6 +1909,7 @@ def test_public_site_config_uses_settings() -> None:
         "description": "浏览 AstrBot 插件。",
         "contact_email": "ops@example.com",
         "docs_url": "https://docs.example.com",
+        "setup_required": True,
         "auth": {
             "github_login_enabled": False,
             "public_login_enabled": True,
@@ -1929,8 +1930,18 @@ def test_public_site_config_uses_settings() -> None:
 
 def test_setup_status_closes_after_initial_setup(tmp_path) -> None:
     client = make_setup_client(tmp_path)
+    before_site = client.get("/v1/site")
+    assert before_site.status_code == 200
+    assert before_site.json()["setup_required"] is True
+    assert before_site.headers["cache-control"] == "private, no-store"
+
     client.post("/v1/setup", json=setup_payload())
     client.cookies.clear()
+
+    after_site = client.get("/v1/site")
+    assert after_site.status_code == 200
+    assert after_site.json()["setup_required"] is False
+    assert after_site.headers["cache-control"] == "public, max-age=60"
 
     public_status = client.get("/v1/setup/status")
     assert public_status.status_code == 404

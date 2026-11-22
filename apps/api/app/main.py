@@ -389,13 +389,17 @@ def register_routes(app: FastAPI) -> None:
         "/v1/site",
         tags=["system"],
         summary="获取站点配置",
-        description="返回站点名称、图标、描述、认证方式、市场功能开关等公开配置。",
+        description="返回站点名称、图标、描述、初始化状态、认证方式、市场功能开关等公开配置。",
     )
-    async def site_config(request: Request) -> dict[str, Any]:
+    async def site_config(request: Request, response: Response) -> dict[str, Any]:
         settings = get_settings(request)
         runtime_config = await effective_runtime_config(request)
+        setup_required = settings.is_setup_required()
+        if setup_required:
+            response.headers["Cache-Control"] = "private, no-store"
         return {
             **get_site_config(settings, runtime_config),
+            "setup_required": setup_required,
             "auth": get_public_auth_config(settings, runtime_config),
             "market": get_public_market_config(settings, runtime_config),
         }

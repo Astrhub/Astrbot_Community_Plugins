@@ -328,6 +328,45 @@ def test_worker_stops_execution_without_completion_after_lease_loss(tmp_path: Pa
     assert executor.cleaned == 1
 
 
+def test_orphan_cleanup_logs_zero_removals_at_debug_and_nonzero_at_info(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class CountingOrphanExecutor(BlockingExecutionService):
+        def __init__(self, counts: list[int]) -> None:
+            super().__init__()
+            self._counts = counts
+
+        async def cleanup_orphans(self) -> int:
+            self.orphan_runs += 1
+            return self._counts.pop(0)
+
+    async def scenario() -> None:
+        repository = FakeRunnerRepository()
+        executor = CountingOrphanExecutor([0, 2])
+        worker = RuntimeRunnerWorker(
+            queue=RuntimeRunnerQueue(repository, runner_id="runner-test"),
+            result_writer=LocalRuntimeResultWriter(tmp_path),
+            executor=executor,
+            settings=runner_settings(tmp_path),
+        )
+        await worker._maybe_cleanup_orphans(force=True)
+        await worker._maybe_cleanup_orphans(force=True)
+
+    with caplog.at_level("DEBUG", logger="astrbot.runtime_runner"):
+        asyncio.run(scenario())
+
+    cleanup_records = [
+        (record.levelname, record.getMessage())
+        for record in caplog.records
+        if "Runtime orphan cleanup completed:" in record.getMessage()
+    ]
+    assert cleanup_records == [
+        ("DEBUG", "Runtime orphan cleanup completed: removed=0"),
+        ("INFO", "Runtime orphan cleanup completed: removed=2"),
+    ]
+
+
 def test_worker_sigterm_path_stops_claiming_and_cancels_after_grace(tmp_path: Path) -> None:
     async def scenario() -> tuple[FakeRunnerRepository, BlockingExecutionService]:
         repository = FakeRunnerRepository()
