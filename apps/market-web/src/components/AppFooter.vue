@@ -3,11 +3,15 @@ import { computed } from "vue";
 import { storeToRefs } from "pinia";
 import { usePluginStore } from "../stores/plugins";
 
+const DEFAULT_COMMUNITY_REPO_URL = "https://github.com/Astrhub/Astrbot_Community_Plugins";
 const store = usePluginStore();
 const { siteConfig } = storeToRefs(store);
 const currentYear = new Date().getFullYear();
 const siteName = computed(() => siteConfig.value.name || "Astrhub Plugins Market");
-const communityRepoUrl = computed(() => store.communityRepoUrl);
+const communityRepoUrl = computed(() =>
+  String(store.communityRepoUrl || DEFAULT_COMMUNITY_REPO_URL).replace(/\/+$/, ""),
+);
+const licenseUrl = computed(() => `${communityRepoUrl.value}/blob/main/LICENSE`);
 </script>
 
 <template>
@@ -16,7 +20,7 @@ const communityRepoUrl = computed(() => store.communityRepoUrl);
       <section class="footer-brand" aria-label="市场说明">
         <strong>&gt; 把你的 astrbot_plugin_idea 挂到这面墙上</strong>
         <p>{{ siteName }} · Community Plugin Market</p>
-        <p>© {{ currentYear }} · API /v1</p>
+        <p>© {{ currentYear }} Astrhub · AGPL-3.0-only · API /v1</p>
       </section>
 
       <nav class="footer-group" aria-label="相关链接">
@@ -27,12 +31,16 @@ const communityRepoUrl = computed(() => store.communityRepoUrl);
         <a href="https://github.com/AstrBotDevs/AstrBot" target="_blank" rel="noopener noreferrer">
           AstrBot 本体 ↗
         </a>
+        <a href="https://github.com/Astrhub" target="_blank" rel="noopener noreferrer">
+          Astrhub 组织 ↗
+        </a>
       </nav>
 
       <nav class="footer-group" aria-label="开发相关">
         <h2>开发相关</h2>
         <router-link to="/docs/rest">REST 接口文档</router-link>
         <a :href="communityRepoUrl" target="_blank" rel="noopener noreferrer">市场仓库 ↗</a>
+        <a :href="licenseUrl" target="_blank" rel="noopener noreferrer">AGPL-3.0 协议 ↗</a>
       </nav>
     </div>
   </footer>
