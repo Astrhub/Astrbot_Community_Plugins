@@ -93,9 +93,10 @@ from .schemas import (
     TestEmailPayload,
     UserProfileUpdate,
 )
-from .store import InMemoryMarketStore
-from .store import PgRedisMarketStore
 from .store import GithubIdentityConflict
+from .store import InMemoryMarketStore
+from .store import LocalFileMarketStore
+from .store import PgRedisMarketStore
 
 GITHUB_REPO_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$"
@@ -315,7 +316,14 @@ async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse
     )
 
 
-def create_store(settings: Settings) -> InMemoryMarketStore | PgRedisMarketStore:
+def create_store(
+    settings: Settings,
+) -> InMemoryMarketStore | LocalFileMarketStore | PgRedisMarketStore:
+    if settings.is_local_storage():
+        return LocalFileMarketStore(
+            settings.local_data_path,
+            settings.session_max_age_seconds,
+        )
     if settings.database_url and settings.redis_url:
         return PgRedisMarketStore(
             settings.database_url,
@@ -359,14 +367,44 @@ async def resolve_optional_awaitable(value: Any) -> Any:
 
 async def bootstrap_internal_core_admin(app: FastAPI) -> None:
     settings = app.state.settings
-    if not settings.core_admin_username or not settings.core_admin_password_hash:
-        return
-    await resolve_optional_awaitable(
-        app.state.store.create_internal_admin(
-            settings.core_admin_username,
-            settings.core_admin_password_hash,
+    if settings.core_admin_username and settings.core_admin_password_hash:
+        await resolve_optional_awaitable(
+            app.state.store.create_internal_admin(
+                settings.core_admin_username,
+                settings.core_admin_password_hash,
+            )
         )
-    )
+        return
+    if settings.core_admin_username and settings.core_admin_password:
+        existing = await resolve_optional_awaitable(
+            app.state.store.get_user_by_internal_username(settings.core_admin_username)
+        )
+        if (
+            existing
+            and existing.get("role") == Role.CORE_ADMIN.value
+            and verify_password(
+                settings.core_admin_password, str(existing.get("password_hash") or "")
+            )
+        ):
+            password_hash = str(existing["password_hash"])
+        else:
+            password_hash = hash_password(settings.core_admin_password)
+            await resolve_optional_awaitable(
+                app.state.store.create_internal_admin(
+                    settings.core_admin_username,
+                    password_hash,
+                )
+            )
+        app.state.settings = settings.with_updates(core_admin_password_hash=password_hash)
+        return
+    if settings.is_local_storage():
+        find_admin = getattr(app.state.store, "get_first_internal_core_admin", None)
+        admin = find_admin() if find_admin else None
+        if admin:
+            app.state.settings = settings.with_updates(
+                core_admin_username=str(admin["internal_username"]),
+                core_admin_password_hash=str(admin["password_hash"]),
+            )
 
 
 def register_routes(app: FastAPI) -> None:
@@ -382,11 +420,18 @@ def register_routes(app: FastAPI) -> None:
     )
     async def health(request: Request) -> dict[str, Any]:
         settings = get_settings(request)
+        if settings.is_local_storage():
+            database_status = "local"
+            redis_status = "local"
+        else:
+            database_status = "configured" if settings.database_url else "missing"
+            redis_status = "configured" if settings.redis_url else "missing"
         return {
             "status": "ok",
+            "storage_mode": settings.storage_mode,
             "setup": "required" if settings.is_setup_required() else "complete",
-            "database": "configured" if settings.database_url else "missing",
-            "redis": "configured" if settings.redis_url else "missing",
+            "database": database_status,
+            "redis": redis_status,
             "artifacts": await request.app.state.artifact_runtime.health_status(),
         }
 
@@ -402,12 +447,15 @@ def register_routes(app: FastAPI) -> None:
         setup_required = settings.is_setup_required()
         if setup_required:
             response.headers["Cache-Control"] = "private, no-store"
-        return {
+        payload = {
             **get_site_config(settings, runtime_config),
             "setup_required": setup_required,
             "auth": get_public_auth_config(settings, runtime_config),
             "market": get_public_market_config(settings, runtime_config),
         }
+        if settings.is_local_storage():
+            payload["storage_mode"] = "local"
+        return payload
 
     @app.get(
         "/v1/admin/settings",
@@ -572,7 +620,41 @@ def register_routes(app: FastAPI) -> None:
         settings = get_settings(request)
         if not settings.is_setup_required():
             raise error(404, "Setup is unavailable after initial setup; update .env instead")
-        validate_setup_payload(payload)
+        if settings.is_local_storage():
+            validate_setup_payload(payload, local_storage=True)
+            core_admin_password_hash = hash_password(payload.admin.password)
+            store = get_store(request)
+            await resolve_optional_awaitable(
+                store.create_internal_admin(payload.admin.username, core_admin_password_hash)
+            )
+            await save_system_options_to_store(
+                store,
+                {
+                    "SITE_ICON_URL": payload.site.icon_url,
+                    "SITE_NAME": payload.site.name,
+                    "WEB_URL": payload.site.web_url,
+                },
+            )
+            write_env_file(
+                settings.env_file_path,
+                local_setup_env_values(settings, payload, core_admin_password_hash),
+            )
+            request.app.state.settings = settings.with_updates(
+                core_admin_password_hash=core_admin_password_hash,
+                core_admin_username=payload.admin.username,
+                site_icon_url=payload.site.icon_url,
+                site_name=payload.site.name,
+                web_url=payload.site.web_url,
+            )
+            request.app.state.artifact_runtime.update_settings(request.app.state.settings)
+            return {
+                "saved": True,
+                "restart_required": False,
+                "activated": True,
+                "message": "Configuration saved and local file storage is active.",
+            }
+        validate_setup_payload(payload, local_storage=False)
+        assert payload.postgres is not None and payload.redis is not None
         database_url = build_postgres_url(payload.postgres.model_dump())
         redis_url = build_redis_url(payload.redis.model_dump())
         core_admin_password_hash = hash_password(payload.admin.password)
@@ -1158,7 +1240,11 @@ def register_routes(app: FastAPI) -> None:
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
         proof = await require_repository_access(
-            request, user, payload.repo, expected_repository_id=payload.repository_id
+            request,
+            user,
+            payload.repo,
+            admin_override=allow_local_admin_repo_override(settings, user),
+            expected_repository_id=payload.repository_id,
         )
         try:
             return await fetch_plugin_submission_metadata_preview(
@@ -1195,16 +1281,30 @@ def register_routes(app: FastAPI) -> None:
         data = payload.model_dump()
         data["category_explicit"] = "category" in payload.model_fields_set
         validate_plugin_submission(data, settings)
+        local_admin_override = allow_local_admin_repo_override(
+            settings,
+            user,
+            cdn_enabled_flag=data["cdn_enabled"],
+        )
         proof = await require_repository_access(
-            request, user, data["repo"], expected_repository_id=data.pop("repository_id", "")
+            request,
+            user,
+            data["repo"],
+            admin_override=local_admin_override,
+            expected_repository_id=data.pop("repository_id", ""),
         )
         data["repo"] = proof["repo"]
         existing = await call_store(request, "get_owned_plugin_by_name", user["id"], data["name"])
         if existing:
             if not can_edit_plugin(user, existing):
                 raise error(403, "Plugin is already owned by another user")
-            current_proof = await require_repository_access(request, user, existing["repo"])
-            if current_proof.get("id") != proof.get("id"):
+            current_proof = await require_repository_access(
+                request,
+                user,
+                existing["repo"],
+                admin_override=local_admin_override,
+            )
+            if not local_admin_override and current_proof.get("id") != proof.get("id"):
                 raise error(409, "插件已关联其他仓库，请先在个人设置中更新仓库")
             user["_repository_authorization"] = proof
         data.update(
@@ -2280,8 +2380,19 @@ def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, s
     )
 
 
-def get_store(request: Request) -> InMemoryMarketStore | PgRedisMarketStore:
+def get_store(
+    request: Request,
+) -> InMemoryMarketStore | LocalFileMarketStore | PgRedisMarketStore:
     return request.app.state.store
+
+
+def allow_local_admin_repo_override(
+    settings: Settings,
+    user: Mapping[str, Any],
+    *,
+    cdn_enabled_flag: bool = False,
+) -> bool:
+    return settings.is_local_storage() and is_admin(user) and not cdn_enabled_flag
 
 
 async def call_store(request: Request, method_name: str, *args: Any) -> Any:
@@ -3869,21 +3980,26 @@ def has_metadata_value(value: Any) -> bool:
     return value is not None
 
 
-def validate_setup_payload(payload: SetupConfig) -> None:
+def validate_setup_payload(payload: SetupConfig, *, local_storage: bool = False) -> None:
     if not payload.admin.username:
         raise error(400, "Core admin username is required")
     if len(payload.admin.password) < 8:
         raise error(400, "Core admin password must be at least 8 characters")
-    if not payload.postgres.host:
-        raise error(400, "PostgreSQL host is required")
-    if not payload.postgres.database:
-        raise error(400, "PostgreSQL database is required")
-    if not payload.postgres.username:
-        raise error(400, "PostgreSQL username is required")
-    if not payload.postgres.password:
-        raise error(400, "PostgreSQL password is required")
-    if not payload.redis.host:
-        raise error(400, "Redis host is required")
+    if not local_storage:
+        if payload.postgres is None:
+            raise error(400, "PostgreSQL configuration is required")
+        if not payload.postgres.host:
+            raise error(400, "PostgreSQL host is required")
+        if not payload.postgres.database:
+            raise error(400, "PostgreSQL database is required")
+        if not payload.postgres.username:
+            raise error(400, "PostgreSQL username is required")
+        if not payload.postgres.password:
+            raise error(400, "PostgreSQL password is required")
+        if payload.redis is None:
+            raise error(400, "Redis configuration is required")
+        if not payload.redis.host:
+            raise error(400, "Redis host is required")
     if not payload.site.name:
         raise error(400, "Site name is required")
     if not payload.site.icon_url:
@@ -4251,12 +4367,26 @@ def settings_config_values(settings: Settings) -> dict[str, str]:
     return {key: value for key, value in values.items() if value != ""}
 
 
+def local_setup_env_values(
+    settings: Settings,
+    payload: SetupConfig,
+    core_admin_password_hash: str,
+) -> dict[str, str]:
+    return {
+        "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
+        "CORE_ADMIN_USERNAME": payload.admin.username,
+        "LOCAL_DATA_PATH": settings.local_data_path,
+        "MARKET_STORAGE_MODE": "local",
+    }
+
+
 def setup_env_values(
     payload: SetupConfig,
     database_url: str,
     redis_url: str,
     core_admin_password_hash: str,
 ) -> dict[str, str]:
+    assert payload.postgres is not None and payload.redis is not None
     return {
         "CORE_ADMIN_PASSWORD_HASH": core_admin_password_hash,
         "CORE_ADMIN_USERNAME": payload.admin.username,
@@ -4302,10 +4432,13 @@ def build_setup_status_response(
     status = {
         "required": settings.is_setup_required(),
         "missing": list(settings.missing_setup_fields()),
+        "storage_mode": settings.storage_mode,
         "database_configured": bool(settings.database_url or runtime_database_url),
         "redis_configured": bool(settings.redis_url or runtime_redis_url),
         "restart_required": settings_restart_required(settings, runtime_config),
     }
+    if settings.is_local_storage():
+        status["local_data_path"] = settings.local_data_path
     if include_saved_setup:
         saved_setup = build_saved_setup_config(settings, runtime_config)
         if redact_saved_setup:
@@ -4826,6 +4959,8 @@ def settings_from_system_settings(
 
 
 def settings_restart_required(settings: Settings, runtime_config: dict[str, str]) -> bool:
+    if settings.is_local_storage():
+        return False
     runtime_database_url = runtime_config.get("DATABASE_URL", "")
     runtime_redis_url = runtime_config.get("REDIS_URL", "")
     return bool(runtime_database_url or runtime_redis_url) and (

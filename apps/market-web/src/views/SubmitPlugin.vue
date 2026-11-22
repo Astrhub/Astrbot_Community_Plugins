@@ -16,7 +16,15 @@
         <div class="header-right">
           <theme-mode-button circle />
           <n-button
-            v-if="!currentUser && siteConfig.auth.github_login_enabled"
+            v-if="!currentUser && isLocalMode && !siteConfig.auth.github_login_enabled"
+            tag="a"
+            href="/admin"
+            type="primary"
+          >
+            管理员登录
+          </n-button>
+          <n-button
+            v-else-if="!currentUser && siteConfig.auth.github_login_enabled"
             type="primary"
             @click="connectGithub"
           >
@@ -33,16 +41,21 @@
       <section class="submit-aside">
         <n-card :bordered="false" class="info-panel">
           <h2>上架规则</h2>
-          <p v-if="siteConfig.market.submissions_enabled">
-            提交插件需要使用 GitHub OAuth 登录，用于校验仓库归属。
+          <p v-if="!siteConfig.market.submissions_enabled">当前站点已暂停插件提交。</p>
+          <p v-else-if="isLocalMode">
+            当前为本地自用模式，管理员登录后可直接填写公开 GitHub 仓库地址并自动读取元数据。
           </p>
-          <p v-else>当前站点已暂停插件提交。</p>
+          <p v-else>提交插件需要使用 GitHub OAuth 登录，用于校验仓库归属。</p>
           <ul>
             <li>仓库必须是公开 GitHub 仓库。</li>
             <li>插件名必须使用 `astrbot_plugin_` 前缀。</li>
           </ul>
           <p class="rule-tip">
-            连接 GitHub 后选择你可管理的插件仓库，信息会自动填充，确认后即可提交。
+            {{
+              isLocalMode
+                ? "输入仓库地址后点击“读取信息”可自动填充插件字段，确认后即可提交。"
+                : "连接 GitHub 后选择你可管理的插件仓库，信息会自动填充，确认后即可提交。"
+            }}
           </p>
         </n-card>
       </section>
@@ -53,7 +66,12 @@
             <div class="form-title">
               <h2>插件信息</h2>
               <n-tag v-if="currentUser" type="success" :bordered="false">
-                已登录：{{ currentUser.github_login || currentUser.login }}
+                已登录：{{
+                  currentUser.github_login || currentUser.internal_username || currentUser.login
+                }}
+              </n-tag>
+              <n-tag v-else-if="isLocalMode" type="warning" :bordered="false">
+                请先登录管理员账号
               </n-tag>
               <n-tag
                 v-else-if="!siteConfig.auth.github_login_enabled"
@@ -68,48 +86,81 @@
           <n-form ref="formRef" :model="formData" :rules="rules" label-placement="top">
             <n-grid :x-gap="16" :y-gap="10" :cols="2" responsive="screen">
               <n-grid-item span="2">
-                <n-form-item label="选择 GitHub 插件仓库" path="repo">
+                <n-form-item
+                  :label="isLocalAdminDirectSubmit ? 'GitHub 插件仓库地址' : '选择 GitHub 插件仓库'"
+                  path="repo"
+                >
                   <div class="repository-section">
-                    <div class="repository-picker">
-                      <n-select
-                        :value="selectedRepositoryId"
-                        :options="repositoryOptions"
-                        :loading="repositoriesLoading"
-                        :disabled="!currentUser || needsGithubConnection || submitting"
-                        filterable
-                        placeholder="搜索或选择 astrbot_plugin_ 开头的仓库"
-                        aria-label="选择 GitHub 插件仓库"
-                        @update:value="selectRepository"
-                        @update:show="refreshRepositoriesOnOpen"
+                    <n-input-group v-if="isLocalAdminDirectSubmit">
+                      <n-input
+                        v-model:value="formData.repo"
+                        placeholder="https://github.com/owner/astrbot_plugin_example"
+                        :disabled="submitting"
+                        :input-props="{
+                          name: 'plugin-repo',
+                          autocomplete: 'off',
+                          spellcheck: 'false',
+                        }"
                       />
-                    </div>
-                    <n-alert v-if="needsGithubConnection" type="info" :bordered="false">
-                      连接 GitHub 后即可选择个人或组织仓库，无需填写访问令牌。
-                      <n-button class="connect-github" type="primary" @click="connectGithub"
-                        >连接 GitHub</n-button
+                      <n-button
+                        :loading="metadataLoading"
+                        :disabled="submitting || !formData.repo.trim()"
+                        @click="() => fetchMetadataFromRepo(false)"
                       >
-                    </n-alert>
-                    <p
-                      v-else-if="repositoriesError"
-                      class="metadata-feedback is-error"
-                      role="alert"
-                    >
-                      {{ repositoriesError }}
-                    </p>
-                    <p
-                      v-else-if="currentUser && !repositoriesLoading && !repositories.length"
-                      class="repository-hint"
-                    >
-                      没有找到可管理的公开插件仓库。仓库名需以 astrbot_plugin_
-                      开头；组织仓库还需要允许此 GitHub 登录应用访问。
-                    </p>
-                    <n-button
-                      v-if="nextRepositoryPage"
-                      size="small"
-                      :loading="repositoriesLoading"
-                      @click="loadRepositories(true)"
-                      >继续加载仓库</n-button
-                    >
+                        读取信息
+                      </n-button>
+                      <n-button
+                        type="primary"
+                        secondary
+                        :loading="metadataLoading"
+                        :disabled="submitting || !formData.repo.trim()"
+                        @click="() => fetchMetadataFromRepo(true)"
+                      >
+                        一键导入
+                      </n-button>
+                    </n-input-group>
+                    <template v-else>
+                      <div class="repository-picker">
+                        <n-select
+                          :value="selectedRepositoryId"
+                          :options="repositoryOptions"
+                          :loading="repositoriesLoading"
+                          :disabled="!currentUser || needsGithubConnection || submitting"
+                          filterable
+                          placeholder="搜索或选择 astrbot_plugin_ 开头的仓库"
+                          aria-label="选择 GitHub 插件仓库"
+                          @update:value="selectRepository"
+                          @update:show="refreshRepositoriesOnOpen"
+                        />
+                      </div>
+                      <n-alert v-if="needsGithubConnection" type="info" :bordered="false">
+                        连接 GitHub 后即可选择个人或组织仓库，无需填写访问令牌。
+                        <n-button class="connect-github" type="primary" @click="connectGithub"
+                          >连接 GitHub</n-button
+                        >
+                      </n-alert>
+                      <p
+                        v-else-if="repositoriesError"
+                        class="metadata-feedback is-error"
+                        role="alert"
+                      >
+                        {{ repositoriesError }}
+                      </p>
+                      <p
+                        v-else-if="currentUser && !repositoriesLoading && !repositories.length"
+                        class="repository-hint"
+                      >
+                        没有找到可管理的公开插件仓库。仓库名需以 astrbot_plugin_
+                        开头；组织仓库还需要允许此 GitHub 登录应用访问。
+                      </p>
+                      <n-button
+                        v-if="nextRepositoryPage"
+                        size="small"
+                        :loading="repositoriesLoading"
+                        @click="loadRepositories(true)"
+                        >继续加载仓库</n-button
+                      >
+                    </template>
                     <a
                       v-if="formData.repo"
                       :href="formData.repo"
@@ -241,7 +292,7 @@
                   <n-dynamic-tags v-model:value="formData.tags" :max="maxPluginTags" />
                 </n-form-item>
               </n-grid-item>
-              <n-grid-item span="2">
+              <n-grid-item v-if="!isLocalMode" span="2">
                 <n-form-item label="社区源 CDN">
                   <div>
                     <n-checkbox v-model:checked="formData.cdn_enabled" :disabled="submitting">
@@ -272,10 +323,11 @@
                 :loading="submitting"
                 :disabled="
                   !currentUser ||
-                  !selectedRepositoryId ||
+                  (!isLocalAdminDirectSubmit && !selectedRepositoryId) ||
+                  (isLocalAdminDirectSubmit && !formData.repo.trim()) ||
                   metadataLoading ||
                   repositoriesLoading ||
-                  needsGithubConnection ||
+                  (!isLocalAdminDirectSubmit && needsGithubConnection) ||
                   !siteConfig.market.submissions_enabled
                 "
                 @click="handleSubmit"
@@ -313,6 +365,7 @@ import {
   NGridItem,
   NIcon,
   NInput,
+  NInputGroup,
   NLayoutHeader,
   NSelect,
   NTag,
@@ -332,6 +385,12 @@ useSeo({
 const message = useMessage();
 const store = usePluginStore();
 const { currentUser, siteConfig } = storeToRefs(store);
+const isLocalMode = computed(() => siteConfig.value.storage_mode === "local");
+const isLocalAdminDirectSubmit = computed(
+  () =>
+    isLocalMode.value &&
+    (currentUser.value?.role === "core_admin" || currentUser.value?.role === "admin"),
+);
 const connectGithub = () => store.loginWithGithub("/submit");
 const formRef = ref(null);
 const submitting = shallowRef(false);
@@ -437,7 +496,7 @@ function refreshRepositoriesOnOpen(show: boolean): void {
   if (!show) refreshRepositoriesAutomatically();
 }
 watch(
-  () => currentUser.value?.id,
+  [() => currentUser.value?.id, isLocalAdminDirectSubmit],
   () => {
     void loadRepositories(false);
   },
@@ -446,10 +505,12 @@ watch(
 
 async function loadRepositories(append: boolean, silent = false): Promise<void> {
   const requestId = ++repositoryRequestId;
-  if (!currentUser.value) {
+  if (!currentUser.value || isLocalAdminDirectSubmit.value) {
     repositories.value = [];
     repositoriesLoading.value = false;
     repositoriesRefreshing.value = false;
+    needsGithubConnection.value = false;
+    repositoriesError.value = "";
     return;
   }
   repositoriesLoading.value = !silent;

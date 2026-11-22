@@ -26,10 +26,18 @@
           </template>
 
           <n-alert v-if="activated" type="success" :bordered="false" class="setup-alert">
-            配置已保存，PostgreSQL 和 Redis 已在当前服务中启用。
+            {{
+              isLocalMode
+                ? "配置已保存，本地单文件存储已在当前服务中启用。"
+                : "配置已保存，PostgreSQL 和 Redis 已在当前服务中启用。"
+            }}
           </n-alert>
           <n-alert v-else type="info" :bordered="false" class="setup-alert">
-            PostgreSQL 用于持久化市场数据，Redis 用于登录会话。保存前会验证连接并初始化数据表。
+            {{
+              isLocalMode
+                ? "当前为本地单进程模式，市场数据与登录会话直接持久化到本地文件，无需配置 PostgreSQL 和 Redis。"
+                : "PostgreSQL 用于持久化市场数据，Redis 用于登录会话。保存前会验证连接并初始化数据表。"
+            }}
           </n-alert>
 
           <n-steps :current="activeStep + 1" class="setup-steps">
@@ -144,7 +152,15 @@
                   <span>核心管理员</span>
                   <strong>{{ formData.admin.username }}</strong>
                 </div>
-                <div class="review-item">
+                <div v-if="isLocalMode" class="review-item">
+                  <span>存储模式</span>
+                  <strong>本地单文件持久化（无需 PostgreSQL / Redis）</strong>
+                </div>
+                <div v-if="isLocalMode && setupStatus.local_data_path" class="review-item">
+                  <span>数据文件</span>
+                  <strong>{{ setupStatus.local_data_path }}</strong>
+                </div>
+                <div v-if="!isLocalMode" class="review-item">
                   <span>PostgreSQL</span>
                   <strong
                     >{{ formData.postgres.host }}:{{ formData.postgres.port }}/{{
@@ -152,7 +168,7 @@
                     }}</strong
                   >
                 </div>
-                <div class="review-item">
+                <div v-if="!isLocalMode" class="review-item">
                   <span>Redis</span>
                   <strong
                     >{{ formData.redis.host }}:{{ formData.redis.port }}/{{
@@ -222,13 +238,22 @@ const store = usePluginStore();
 const { setupStatus, siteConfig } = storeToRefs(store);
 const { loadSetupStatus, saveSetupConfig } = store;
 
-const steps = [
-  { id: "site", title: "站点" },
-  { id: "admin", title: "管理员" },
-  { id: "postgres", title: "PostgreSQL" },
-  { id: "redis", title: "Redis" },
-  { id: "review", title: "确认" },
-];
+const isLocalMode = computed(() => setupStatus.value.storage_mode === "local");
+const steps = computed(() =>
+  isLocalMode.value
+    ? [
+        { id: "site", title: "站点" },
+        { id: "admin", title: "管理员" },
+        { id: "review", title: "确认" },
+      ]
+    : [
+        { id: "site", title: "站点" },
+        { id: "admin", title: "管理员" },
+        { id: "postgres", title: "PostgreSQL" },
+        { id: "redis", title: "Redis" },
+        { id: "review", title: "确认" },
+      ],
+);
 
 const activeStep = ref(0);
 const saving = ref(false);
@@ -260,9 +285,9 @@ const formData = reactive({
   },
 });
 
-const currentStep = computed(() => steps[activeStep.value]);
+const currentStep = computed(() => steps.value[activeStep.value] || steps.value[0]);
 const isFirstStep = computed(() => activeStep.value === 0);
-const isLastStep = computed(() => activeStep.value === steps.length - 1);
+const isLastStep = computed(() => activeStep.value === steps.value.length - 1);
 
 function normalizeNumberFields() {
   formData.postgres.port = Number(formData.postgres.port || 5432);
@@ -270,7 +295,7 @@ function normalizeNumberFields() {
   formData.redis.database = Number(formData.redis.database || 0);
 }
 
-function applySetupConfig(config = {}) {
+function applySetupConfig(config: Partial<Record<string, any>> = {}) {
   Object.assign(formData.site, config.site || {});
   Object.assign(formData.postgres, config.postgres || {});
   Object.assign(formData.redis, config.redis || {});
@@ -283,10 +308,17 @@ async function reloadStatus() {
     router.replace("/");
     return;
   }
+  if (activeStep.value >= steps.value.length) activeStep.value = 0;
   applySetupConfig(status.saved_setup);
 }
 
 function setupPayload() {
+  if (isLocalMode.value) {
+    return {
+      site: { ...formData.site },
+      admin: { ...formData.admin },
+    };
+  }
   normalizeNumberFields();
   return {
     site: { ...formData.site },
@@ -296,7 +328,7 @@ function setupPayload() {
   };
 }
 
-function requireText(value, errorMessage) {
+function requireText(value: unknown, errorMessage: string) {
   if (!String(value || "").trim()) {
     message.error(errorMessage);
     return false;
@@ -304,13 +336,13 @@ function requireText(value, errorMessage) {
   return true;
 }
 
-function isRootOrHttpUrl(value) {
+function isRootOrHttpUrl(value: unknown) {
   return String(value || "").startsWith("/") || /^https?:\/\//.test(String(value || ""));
 }
 
 function validateStep(index = activeStep.value) {
   normalizeNumberFields();
-  const stepId = steps[index].id;
+  const stepId = steps.value[index]?.id;
   if (stepId === "site") {
     if (!requireText(formData.site.name, "请输入站点名称")) return false;
     if (!requireText(formData.site.icon_url, "请输入站点图标 URL")) return false;
@@ -347,7 +379,7 @@ function validateStep(index = activeStep.value) {
 }
 
 function validateAll() {
-  return steps.every((_, index) => validateStep(index));
+  return steps.value.every((_, index) => validateStep(index));
 }
 
 function nextStep() {

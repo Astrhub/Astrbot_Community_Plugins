@@ -563,12 +563,32 @@
                 <section class="settings-section">
                   <div class="section-title">
                     <h2>基础设施</h2>
-                    <p>
+                    <p v-if="setupStatus.storage_mode === 'local'">
+                      当前为本地单进程模式，市场数据与登录会话保存在本地文件中，无需配置 PostgreSQL
+                      和 Redis。
+                    </p>
+                    <p v-else>
                       PostgreSQL 和 Redis 只在首次初始化向导中通过 Web 配置，后续变更请修改 .env
                       并重启 API。
                     </p>
                   </div>
-                  <div class="infra-grid">
+                  <div v-if="setupStatus.storage_mode === 'local'" class="infra-grid">
+                    <div class="infra-item">
+                      <span>存储模式</span>
+                      <n-tag type="success" :bordered="false">本地单文件持久化</n-tag>
+                    </div>
+                    <div class="infra-item">
+                      <span>数据文件</span>
+                      <n-tag type="info" :bordered="false">
+                        {{ setupStatus.local_data_path || "本地数据文件" }}
+                      </n-tag>
+                    </div>
+                    <div class="infra-item">
+                      <span>重启状态</span>
+                      <n-tag type="success" :bordered="false">当前生效</n-tag>
+                    </div>
+                  </div>
+                  <div v-else class="infra-grid">
                     <div class="infra-item">
                       <span>PostgreSQL</span>
                       <n-tag
@@ -597,7 +617,11 @@
                       </n-tag>
                     </div>
                   </div>
-                  <p class="infra-note">
+                  <p v-if="setupStatus.storage_mode === 'local'" class="infra-note">
+                    初始化完成后 `/setup` 会关闭；存储路径与管理员引导变量可在部署环境的 .env
+                    中调整。
+                  </p>
+                  <p v-else class="infra-note">
                     初始化完成后 `/setup` 会关闭；数据库或 Redis 地址、账号、密码和 SSL
                     配置请在部署环境的 .env 中调整。
                   </p>

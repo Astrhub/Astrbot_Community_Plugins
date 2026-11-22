@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-import secrets
 import hashlib
+import json
+import os
+import secrets
+import tempfile
+import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import wraps
+from pathlib import Path
 from typing import Any
 
 import asyncpg
@@ -1154,6 +1161,357 @@ class InMemoryMarketStore:
             "avatar_url": user.get("avatar_url") or "",
             "role": normalize_role(user.get("role")).value,
         }
+
+
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+class LocalFileMarketStore(InMemoryMarketStore):
+    """Single-process store persisting market state and sessions in one atomic JSON file."""
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        session_ttl_seconds: int = 60 * 60 * 24 * 7,
+        seed: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(seed=seed)
+        self.data_path = Path(data_path)
+        self.session_ttl_seconds = max(1, int(session_ttl_seconds))
+        self._lock = threading.RLock()
+        self._write_depth = 0
+        self._session_persisted_at: dict[str, float] = {}
+
+    def connect(self) -> None:
+        with self._lock:
+            self.data_path.parent.mkdir(parents=True, exist_ok=True)
+            loaded = False
+            if self.data_path.exists():
+                raw = self.data_path.read_text(encoding="utf-8").strip()
+                if raw:
+                    data = json.loads(raw)
+                    if not isinstance(data, dict):
+                        raise ValueError("Local market data file must contain a JSON object")
+                    self._load_state_locked(data)
+                    loaded = True
+            pruned = self._prune_expired_sessions_locked()
+            if not loaded or pruned:
+                self._save_locked()
+
+    def close(self) -> None:
+        with self._lock:
+            self._save_locked()
+
+    def get_first_internal_core_admin(self) -> dict[str, Any] | None:
+        with self._lock:
+            for user in self.state["users"]:
+                if (
+                    user.get("role") == Role.CORE_ADMIN.value
+                    and user.get("internal_username")
+                    and user.get("password_hash")
+                ):
+                    return deepcopy(user)
+            return None
+
+    def _load_state_locked(self, data: dict[str, Any]) -> None:
+        self.state = {
+            "users": [self._normalize_user(user) for user in data.get("users", [])],
+            "plugins": [self._normalize_plugin(plugin) for plugin in data.get("plugins", [])],
+            "submissions": list(data.get("submissions", [])),
+            "comments": list(data.get("comments", [])),
+            "pluginLikes": list(data.get("pluginLikes", [])),
+            "commentLikes": list(data.get("commentLikes", [])),
+            "announcements": list(data.get("announcements", [])),
+            "notifications": list(data.get("notifications", [])),
+            "apiKeys": list(data.get("apiKeys", [])),
+            "options": {
+                str(key): str(value) for key, value in dict(data.get("options", {})).items()
+            },
+            "sessions": list(data.get("sessions", [])),
+            "nextNumericId": max(1, int(data.get("nextNumericId") or 1)),
+        }
+
+    def _prune_expired_sessions_locked(self) -> bool:
+        cutoff = datetime.now(UTC) - timedelta(seconds=self.session_ttl_seconds)
+        kept = []
+        pruned = False
+        for session in self.state["sessions"]:
+            seen = _parse_utc_timestamp(session.get("last_seen_at") or session.get("created_at"))
+            if seen is None or seen < cutoff:
+                pruned = True
+                token = str(session.get("token") or "")
+                if token:
+                    self._session_persisted_at.pop(token, None)
+                    self.delete_github_authorization(hashlib.sha256(token.encode()).hexdigest())
+                continue
+            kept.append(session)
+        if pruned:
+            self.state["sessions"] = kept
+        return pruned
+
+    def _save_locked(self) -> None:
+        self.data_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(serialize_value(self.state), ensure_ascii=False, indent=2) + "\n"
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.data_path.parent,
+                prefix=f".{self.data_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                tmp_path = handle.name
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, self.data_path)
+            tmp_path = None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    @contextmanager
+    def _persist(self) -> Iterator[None]:
+        with self._lock:
+            self._write_depth += 1
+            succeeded = False
+            try:
+                yield
+                succeeded = True
+            finally:
+                self._write_depth -= 1
+                if succeeded and self._write_depth == 0:
+                    self._save_locked()
+
+    def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
+        with self._persist():
+            return super().upsert_github_user(profile)
+
+    def create_internal_admin(self, username: str, password_hash: str) -> dict[str, Any]:
+        with self._persist():
+            return super().create_internal_admin(username, password_hash)
+
+    def create_internal_user(
+        self,
+        username: str,
+        password_hash: str,
+        role: str = Role.USER.value,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().create_internal_user(username, password_hash, role)
+
+    def upsert_options(self, values: dict[str, str]) -> dict[str, str]:
+        with self._persist():
+            return super().upsert_options(values)
+
+    def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        with self._persist():
+            return super().submit_plugin(user, payload)
+
+    def register_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        with self._persist():
+            return super().register_plugin(user, payload)
+
+    def update_plugin_status(
+        self,
+        plugin_id: str,
+        status: str,
+        by_user_id: str | None,
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().update_plugin_status(plugin_id, status, by_user_id)
+
+    def unlist_plugin(
+        self,
+        plugin_id: str,
+        by_user_id: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().unlist_plugin(plugin_id, by_user_id, reason)
+
+    def request_plugin_listing(
+        self,
+        plugin_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().request_plugin_listing(plugin_id, user_id)
+
+    def update_plugin_metadata(
+        self,
+        plugin_id: str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().update_plugin_metadata(plugin_id, patch)
+
+    def add_comment(
+        self,
+        plugin_id: str,
+        user_id: str,
+        body: str,
+        parent_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().add_comment(plugin_id, user_id, body, parent_id)
+
+    def like_plugin(self, plugin_id: str, user_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().like_plugin(plugin_id, user_id)
+
+    def unlike_plugin(self, plugin_id: str, user_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().unlike_plugin(plugin_id, user_id)
+
+    def like_comment(self, comment_id: str, user_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().like_comment(comment_id, user_id)
+
+    def unlike_comment(self, comment_id: str, user_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().unlike_comment(comment_id, user_id)
+
+    def delete_comment(self, comment_id: str, by_user_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().delete_comment(comment_id, by_user_id)
+
+    def mute_user(
+        self,
+        user_id: str,
+        muted_until: str,
+        by_user_id: str,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().mute_user(user_id, muted_until, by_user_id, reason)
+
+    def unmute_user(self, user_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().unmute_user(user_id)
+
+    def update_user_role(self, user_id: str, role: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().update_user_role(user_id, role)
+
+    def delete_user(self, user_id: str, replacement_user_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().delete_user(user_id, replacement_user_id)
+
+    def update_user_profile(
+        self,
+        user_id: str,
+        profile: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().update_user_profile(user_id, profile)
+
+    def merge_user_into_user(self, from_user_id: str, to_user_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().merge_user_into_user(from_user_id, to_user_id)
+
+    def publish_announcement(
+        self,
+        title: str,
+        body: str,
+        author_user_id: str,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().publish_announcement(title, body, author_user_id)
+
+    def create_notification(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        notification_type: str = "system",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().create_notification(user_id, title, body, notification_type, metadata)
+
+    def create_notification_once(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        notification_type: str,
+        metadata: dict[str, Any],
+        dedupe_key: str,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().create_notification_once(
+                user_id,
+                title,
+                body,
+                notification_type,
+                metadata,
+                dedupe_key,
+            )
+
+    def mark_notifications_read(self, user_id: str) -> int:
+        with self._persist():
+            return super().mark_notifications_read(user_id)
+
+    def delete_notifications(
+        self,
+        user_id: str,
+        notification_ids: list[str] | None = None,
+    ) -> int:
+        with self._persist():
+            return super().delete_notifications(user_id, notification_ids)
+
+    def issue_api_key(
+        self,
+        name: str,
+        user_id: str,
+        scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().issue_api_key(name, user_id, scopes)
+
+    def delete_api_key(self, user_id: str, key_id: str) -> int:
+        with self._persist():
+            return super().delete_api_key(user_id, key_id)
+
+    def create_session(self, user_id: str, token: str | None = None) -> dict[str, Any]:
+        with self._persist():
+            session = super().create_session(user_id, token)
+            self._session_persisted_at[session["token"]] = time.monotonic()
+            return session
+
+    def get_user_by_session(self, token: str) -> dict[str, Any] | None:
+        with self._lock:
+            session = self._find("sessions", "token", token)
+            if not session:
+                return None
+            seen = _parse_utc_timestamp(session.get("last_seen_at") or session.get("created_at"))
+            cutoff = datetime.now(UTC) - timedelta(seconds=self.session_ttl_seconds)
+            if seen is None or seen < cutoff:
+                self.revoke_session(token)
+                return None
+            session["last_seen_at"] = utc_now()
+            now_mono = time.monotonic()
+            if now_mono - self._session_persisted_at.get(token, 0.0) >= 60.0:
+                self._session_persisted_at[token] = now_mono
+                self._save_locked()
+            user = self.get_user_by_id(session["user_id"])
+            return deepcopy(user) if user else None
+
+    def revoke_session(self, token: str) -> bool:
+        with self._persist():
+            self._session_persisted_at.pop(token, None)
+            return super().revoke_session(token)
 
 
 PLUGIN_COLUMN_KEYS = {

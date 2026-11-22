@@ -415,8 +415,8 @@ class TestEmailPayload(BaseModel):
 
 
 class SetupConfig(BaseModel):
-    postgres: PostgresSetupConfig
-    redis: RedisSetupConfig
+    postgres: PostgresSetupConfig | None = None
+    redis: RedisSetupConfig | None = None
     site: SiteSetupConfig = Field(default_factory=SiteSetupConfig)
     admin: AdminSetupConfig
     auth: AuthSetupConfig = Field(default_factory=AuthSetupConfig)

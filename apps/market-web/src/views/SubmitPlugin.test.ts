@@ -344,4 +344,55 @@ describe("SubmitPlugin repository selection", () => {
     window.dispatchEvent(new Event("focus"));
     expect(context.store.loadGithubRepositories).toHaveBeenCalledTimes(2);
   });
+
+  it("supports direct repository URL submission for admins in local storage mode", async () => {
+    const context = setup();
+    context.store.siteConfig.storage_mode = "local";
+    context.store.siteConfig.market.plugin_auto_approve_enabled = true;
+    context.store.currentUser = {
+      id: "admin-1",
+      internal_username: "owner",
+      role: "core_admin",
+    } as never;
+    vi.mocked(context.store.fetchPluginSubmissionMetadata).mockResolvedValue({
+      name: "astrbot_plugin_local",
+      display_name: "本地插件",
+      desc: "本地直填提交",
+      author: "owner",
+    } as never);
+    vi.mocked(context.store.submitPlugin).mockResolvedValue({
+      cdn_enabled: false,
+      status: "listed",
+    });
+
+    const wrapper = context.mount();
+    await flushPromises();
+
+    expect(context.store.loadGithubRepositories).not.toHaveBeenCalled();
+    expect(wrapper.find('[role="checkbox"]').exists()).toBe(false);
+
+    const repoInput = wrapper.get('input[name="plugin-repo"]');
+    await repoInput.setValue("https://github.com/astrhub/astrbot_plugin_local");
+    const fetchButton = wrapper.findAll("button").find((button) => button.text() === "读取信息");
+    await fetchButton!.trigger("click");
+    await flushPromises();
+
+    expect(context.store.fetchPluginSubmissionMetadata).toHaveBeenCalledWith(
+      "https://github.com/astrhub/astrbot_plugin_local",
+      "",
+      false,
+    );
+    const submitButton = wrapper.findAll("button").find((button) => button.text() === "提交并上架");
+    await submitButton!.trigger("click");
+    await flushPromises();
+
+    expect(context.store.submitPlugin).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cdn_enabled: false,
+        repo: "https://github.com/astrhub/astrbot_plugin_local",
+        name: "astrbot_plugin_local",
+      }),
+    );
+    wrapper.unmount();
+  });
 });

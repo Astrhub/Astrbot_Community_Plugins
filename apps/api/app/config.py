@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 from .env_file import read_env_file
 
 DEFAULT_ENV_FILE_PATH = Path(__file__).resolve().parents[1] / ".env"
+DEFAULT_STORAGE_MODE = "postgres"
+DEFAULT_LOCAL_DATA_FILENAME = "market-state.json"
 DEFAULT_SITE_ICON_URL = "/logo.webp"
 DEFAULT_SITE_NAME = "Astrhub 插件市场"
 DEFAULT_SITE_SUBTITLE = "全新社区插件市场"
@@ -318,11 +320,24 @@ class Settings:
     artifacts: ArtifactSettings
     artifact_authorization_url: str = ""
     artifact_authorization_token: str = field(default="", repr=False)
+    storage_mode: str = DEFAULT_STORAGE_MODE
+    local_data_path: str = ""
+    core_admin_password: str = field(default="", repr=False)
+
+    def is_local_storage(self) -> bool:
+        return self.storage_mode == "local"
 
     def is_setup_required(self) -> bool:
+        if self.is_local_storage():
+            return not (
+                self.core_admin_username
+                and (self.core_admin_password_hash or self.core_admin_password)
+            )
         return not self.database_url or not self.redis_url
 
     def missing_setup_fields(self) -> tuple[str, ...]:
+        if self.is_local_storage():
+            return ("core_admin",) if self.is_setup_required() else ()
         missing = []
         if not self.database_url:
             missing.append("database_url")
@@ -339,7 +354,16 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     env_file_path = source.get("APP_ENV_FILE", str(DEFAULT_ENV_FILE_PATH))
     file_values = _normalize_env(read_env_file(env_file_path))
     merged = {**file_values, **source}
+    storage_mode = _storage_mode(merged.get("MARKET_STORAGE_MODE"))
+    local_data_path = merged.get("LOCAL_DATA_PATH", "").strip()
+    if storage_mode == "local" and not local_data_path:
+        local_data_path = str(
+            Path(env_file_path).resolve().parent / "data" / DEFAULT_LOCAL_DATA_FILENAME
+        )
     return Settings(
+        storage_mode=storage_mode,
+        local_data_path=local_data_path,
+        core_admin_password=merged.get("CORE_ADMIN_PASSWORD", ""),
         artifact_authorization_url=merged.get("ARTIFACT_AUTHORIZATION_URL", ""),
         artifact_authorization_token=merged.get("ARTIFACT_AUTHORIZATION_TOKEN", ""),
         host=merged.get("HOST", "127.0.0.1"),
@@ -693,6 +717,11 @@ def _bounded_int(value: str | None, default: int, minimum: int, maximum: int) ->
 def _email_provider(value: str) -> str:
     provider = str(value or "").strip().lower()
     return provider if provider in {"disabled", "smtp", "cloudflare"} else DEFAULT_EMAIL_PROVIDER
+
+
+def _storage_mode(value: str | None) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"postgres", "local"} else DEFAULT_STORAGE_MODE
 
 
 def normalize_smtp_encryption(value: str | None) -> str:
