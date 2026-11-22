@@ -3,6 +3,8 @@
   "private": true,
   "version": "0.1.0",
   "description": "Server-backed community plugin market for AstrBot.",
+  "author": "Astrhub",
+  "license": "AGPL-3.0-only",
   "scripts": {
     "dev:web": "npm --prefix apps/market-web run dev",
     "build:web": "npm --prefix apps/market-web run build",
