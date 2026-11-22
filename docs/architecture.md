@@ -1,368 +1,366 @@
-# 架构
+# 系统架构
 
-AstrBot Community Plugins 是一个服务端驱动的插件市场。FastAPI 负责可信控制面（市场 API、SPA 与插件
-源），独立 `artifact-worker` 负责预检、静态/恶意软件/依赖/LLM 审查、不可变对象发布和通知 outbox；
-独立 `runtime-runner` 只负责调度一次性隔离容器。任何插件代码都不得进入 API 或 artifact worker 进程。
+AstrBot Community Plugins 是一个服务端驱动的插件市场。FastAPI 负责可信控制面（市场 API、前端静态资源托管与 AstrBot 插件源）；在完整社区模式下，独立的 `artifact-worker` 负责插件包预检、静态/恶意软件/依赖/LLM 审查、不可变对象发布和通知 outbox，独立的 `runtime-runner` 负责调度一次性隔离容器。任何插件代码都不会在 API 或 `artifact-worker` 进程中执行。
 
 ## 系统全景
 
 ```mermaid
 flowchart LR
     subgraph Client["客户端"]
-        Web["浏览器<br/>(Vue 3 SPA)"]
-        Bot["AstrBot / WebUI 插件"]
+        Web["浏览器 (Vue 3 SPA)"]
+        Bot["AstrBot / API 客户端"]
     end
 
-    subgraph Server["可信控制面"]
-        Router["路由层 /v1/* + 静态回退"]
-        Auth["auth.py<br/>角色 / 会话 / API Key"]
-        Store["store.py<br/>InMemory | PgRedis"]
-        Sync["GitHub 元数据<br/>同步 worker"]
-        Email["邮件发送<br/>SMTP | Cloudflare"]
+    subgraph Server["可信控制面 (FastAPI)"]
+        Router["路由层 /v1/* 与静态页面分发"]
+        Auth["auth.py (角色 / 会话 / API Key)"]
+        Store["store.py (PgRedis / LocalFile / InMemory)"]
+        Sync["GitHub 元数据同步任务"]
+        Email["邮件发送 (SMTP / Cloudflare)"]
     end
 
-    subgraph Artifact["独立 artifact-worker"]
-        Precheck["ZIP / metadata 预检"]
-        Static["Python AST / requirements 扫描"]
-        Publish["条件创建发布对象"]
-        Outbox["状态通知 outbox"]
+    subgraph Artifact["独立审查执行面 (可选)"]
+        Worker["artifact-worker (预检 / 扫描 / 发布 / Outbox)"]
+        Runner["runtime-runner (一次性隔离容器)"]
     end
 
     subgraph Infra["基础设施"]
-        PG[("PostgreSQL<br/>业务数据 10 表")]
-        Redis[("Redis<br/>会话 token")]
-        GH["GitHub API<br/>OAuth + 元数据"]
+        PG[("PostgreSQL (业务与审查数据)")]
+        Redis[("Redis (会话与加密短期 OAuth 凭据)")]
+        LocalFile[("本地 JSON 数据文件 (单进程模式)")]
+        GH["GitHub API (OAuth / 元数据 / Release)"]
         Private[("私有隔离存储")]
-        CDN[("发布桶 / CDN")]
+        CDN[("发布存储 / CDN")]
     end
 
-    Web -->|HTTP + cookie session| Router
-    Bot -->|Bearer API Key| Router
+    Web -->|"HTTP + Cookie Session"| Router
+    Bot -->|"Bearer API Key"| Router
     Router --> Auth --> Store
     Store --> PG
+    Store --> LocalFile
     Auth --> Redis
     Sync --> GH
     Sync --> Store
     Email --> Store
     Router --> Private
-    Precheck --> Private
-    Precheck --> Static --> Publish --> CDN
-    Precheck --> PG
-    Publish --> PG
-    Outbox --> PG
-    Outbox --> Email
+    Worker --> Private
+    Worker --> PG
+    Worker --> CDN
+    Worker --> Email
+    Runner --> PG
+    Runner --> Private
 ```
 
-仓库组织为两个应用：
+仓库包含两个应用目录：
 
-1. `apps/market-web/` — Vue 3 + Vite SPA，渲染公开市场、主题、插件提交表单、管理后台与个人设置。生产构建产物输出到 `apps/market-web/dist`。
-2. `apps/api/` — FastAPI 后端，提供 GitHub OAuth、插件 CRUD、审核、评论、点赞、通知、公告、用户管理、API Key 端点，并托管前端构建产物。使用 uvicorn 运行。
-
-`registry/` 与 `packages/` 为预留空目录，当前不含代码。
+1. `apps/market-web/`：Vue 3 + Vite+（Vite Plus）+ TypeScript 前端应用，负责公开插件市场、详情与作者页、插件提交表单、审查工作台、后台设置与个人中心。生产构建输出到 `apps/market-web/dist`。
+2. `apps/api/`：FastAPI 后端服务，提供身份认证、插件 CRUD、审核、评论、点赞、通知、公告、用户管理、API Key、插件包审查控制面与 AstrBot 插件源，并托管前端构建产物。
 
 ## 后端架构
 
-应用代码集中在 `apps/api/app/`，文件职责单一：
+后端应用代码位于 `apps/api/app/`，按职责拆分为以下模块：
 
-| 文件 | 职责 |
-|---|---|
-| `main.py` | `create_app()` 工厂、lifespan、全部路由注册、静态文件回退、GitHub 元数据同步、邮件发送 |
-| `config.py` | `Settings` dataclass、`load_settings()`、环境变量与运行时配置合并 |
-| `schemas.py` | Pydantic 2 请求体模型（提交、评论、setup、系统设置、邮件等） |
-| `auth.py` | `Role` 枚举、权限函数（`can_edit_plugin` / `can_manage_plugin_submission`）、密码哈希、API Key 校验 |
-| `store.py` | `InMemoryMarketStore` + `PgRedisMarketStore` + `SCHEMA_SQL` |
-| `env_file.py` | `.env` 文件读写工具（setup 写入基础设施连接） |
-| `schema_migrations.py` / `migrations/` | 带 checksum、advisory lock 的版本化 SQL migration |
-| `artifacts/` | artifact 状态机、Repository、隔离存储、预检、静态扫描、发布、通知与独立 Worker |
+| 模块 | 职责 |
+| --- | --- |
+| `main.py` | `create_app()` 工厂、`lifespan` 生命周期、全部市场与系统路由、前端静态文件与 404 分发、GitHub 元数据同步、邮件发送 |
+| `config.py` | `Settings` 数据类、`load_settings()`、环境变量与 `.env` 合并、存储模式与安全配置解析 |
+| `schemas.py` | Pydantic 2 请求体校验模型（提交、评论、安装向导、系统设置、邮件等） |
+| `auth.py` | `Role` 枚举、权限检查函数（`can_edit_plugin` / `can_manage_plugin_submission` / `can_configure_plugin_cdn` 等）、PBKDF2 密码哈希、API Key 鉴权 |
+| `store.py` | `InMemoryMarketStore`、`LocalFileMarketStore`、`PgRedisMarketStore` 与 PostgreSQL 基础建表 SQL |
+| `cdn.py` | 按插件可选 CDN 订阅状态、版本代次管理与自动送审队列 |
+| `github_authorization.py` | 用户 GitHub OAuth 仓库管理权限核验、Fernet 加密凭据读写与发布前仓库身份复核 |
+| `plugin_identity.py` | 插件命名空间冲突异常与规范详情路径（`/plugin/{owner}/{name}`）生成 |
+| `openapi_filter.py` / `llms_txt.py` | 按当前登录角色过滤 `/openapi.json`（含 `components` 闭包）与生成 `/llms.txt` |
+| `env_file.py` | `.env` 文件解析与写回工具（供一次性 `/v1/setup` 使用） |
+| `schema_migrations.py` / `migrations/` | 带 SHA-256 checksum 校验与 PostgreSQL advisory lock 的版本化数据库迁移 |
+| `artifacts/` | 不可变插件包状态机、存储抽象、预检、静态/恶意软件/依赖/LLM 审查、人工复核、发布、通知与独立 `artifact-worker` |
+| `runtime_runner/` | 独立 `runtime-runner` 服务、Docker 执行器、受限安装网络校验与一次性探针入口 |
 
-### 启动流程
+### 启动与生命周期
 
-模块级 `app = create_app()` 完成单例初始化（`main.py`）：
+模块级 `app = create_app()` 完成 FastAPI 实例装配：
 
-```
+```text
 create_app(settings, store)
-  ├── app = FastAPI(lifespan=lifespan)
+  ├── FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
   ├── app.state.settings = settings or load_settings()
-  ├── app.state.store = store or create_store(settings)   ← 按 DATABASE_URL/REDIS_URL 选择存储
+  ├── app.state.store = store or create_store(settings)
   ├── app.state.artifact_runtime = build_artifact_runtime(...)
-  ├── 注册 CORS 中间件（来源 = settings.cors_origins）
-  ├── 注册 HTTPException 处理器
-  ├── register_routes(app)              ← 挂载全部 API 路由
-  └── register_market_web_routes(app)   ← 挂载 SPA / 静态文件回退
+  ├── 注册 CORS 与 Cache-Control 中间件
+  ├── 注册异常处理器（HTTPException / PluginIdentityConflict / GithubIdentityConflict）
+  ├── register_routes(app) + include_router(build_artifact_router())
+  └── register_market_web_routes(app)
 ```
 
-`lifespan` 管理启动/关闭事件：
+`lifespan` 负责管理启动与关闭顺序：
 
-- **API 启动**：`store.connect()`（同时执行版本化 migration）→ 构造 artifact 控制面组件但不启动任务循环 → 创建核心管理员 → 启动 GitHub metadata 同步。
-- **独立 Worker**：`python -m app.artifacts.worker` 通过 PostgreSQL lease + `FOR UPDATE SKIP LOCKED` 领取任务；任务超时后可由其他实例接管。
-- **关闭**：API 取消 metadata worker 并关闭存储；artifact-worker 停止领取任务并释放连接。
+- **API 启动**：执行 `store.connect()`（PostgreSQL 模式下同步执行版本化迁移，本地模式下加载或初始化 JSON 文件并清理过期会话）→ 初始化 artifact 控制面组件（不启动进程内审查循环）→ 引导或加载核心管理员账号 → 启动后台 GitHub 元数据同步任务。
+- **独立 Worker**：`python -m app.artifacts.worker` 通过 PostgreSQL lease 与 `FOR UPDATE SKIP LOCKED` 领取待处理任务；租约超时后可由其他实例接管。
+- **优雅关闭**：API 取消元数据同步任务并关闭 artifact 运行时与存储连接；Worker 停止领取新任务并释放连接。
 
-### 存储抽象与切换
+### 存储模式与热切换
 
-`create_store()`（`main.py`）按配置选择实现：
+`create_store()`（位于 `apps/api/app/main.py`）按配置选择存储后端：
 
-- **同时**配置 `DATABASE_URL` 与 `REDIS_URL` → `PgRedisMarketStore`（生产）。
-- 否则 → `InMemoryMarketStore`（开发 / 首次启动，不持久化）。
+- `MARKET_STORAGE_MODE=local`：`LocalFileMarketStore`，单进程线程锁保护，以临时文件 `fsync` + `os.replace` 原子写入单个 JSON 文件，持久化所有市场数据与带 TTL 的会话，无需 PostgreSQL 和 Redis。
+- `MARKET_STORAGE_MODE=postgres`（默认）且同时配置 `DATABASE_URL` 与 `REDIS_URL`：`PgRedisMarketStore`，PostgreSQL 存业务数据，Redis 存会话和加密短期 OAuth 凭据。
+- `MARKET_STORAGE_MODE=postgres` 且缺少数据库连接：回退 `InMemoryMarketStore`（不持久化），仅用于开发调试或首次打开 `/setup`。
 
-`PgRedisMarketStore` 继承 `InMemoryMarketStore`，覆写全部业务方法为 PostgreSQL 实现；Redis 仅承载会话 token。`/v1/setup` 完成初始化后通过 `activate_setup_store()` 动态替换 `app.state.store`，**当前进程内热切换，无需重启**。
+通过 `/v1/setup` 完成首次初始化后，后端调用 `activate_setup_store()` 在当前进程内热切换至持久化存储，无需重启服务。
 
 ## 数据模型
 
 ### PostgreSQL
 
+基础业务表（10 张）定义于 `store.py`：
+
 | 表 | 主键 | 核心字段与约束 |
-|---|---|---|
-| `market_users` | `id` | `github_id`（UNIQUE）、`internal_username`（UNIQUE）、`password_hash`、`auth_source`、`github_token`、`role`（CHECK: core_admin/admin/user）、`muted_until/by/reason` |
-| `market_plugins` | `id` | `name`（UNIQUE）、`repo`（UNIQUE）、`display_name`、`desc_text`、`tags`（jsonb, GIN 索引）、`owner_user_id`（FK）、`owner_github_login`、`status`（pending/listed/unlisted）、`stars`、`likes`、`comments_count`、`metadata`（jsonb） |
-| `market_submissions` | `id` | `plugin_id`（FK CASCADE）、`user_id`（FK CASCADE）、`payload`（jsonb）、`status` |
-| `market_comments` | `id` | `plugin_id`（FK）、`user_id`（FK）、`parent_id`（自引用 FK，支持嵌套）、`body`、`likes`、`muted`、`deleted`、`deleted_by/at`；partial index `WHERE deleted = false` |
-| `market_plugin_likes` | (plugin_id, user_id) | 联合主键保证每用户对每插件唯一点赞 |
-| `market_comment_likes` | (comment_id, user_id) | 联合主键保证评论点赞唯一 |
+| --- | --- | --- |
+| `market_users` | `id` | `github_id`（UNIQUE）、大小写不敏感 `github_login` / `internal_username` 唯一索引、`password_hash`、`auth_source`、`github_token`、`role`（`core_admin` / `admin` / `user`）、禁言字段 |
+| `market_plugins` | `id` | `repo`（UNIQUE）、`(owner_user_id, name)` 与大小写不敏感 `(owner_github_login, name)` 唯一索引、`display_name`、`desc_text`、`tags`（`jsonb` + GIN 索引）、`status`（`pending` / `listed` / `unlisted`）、`stars`、`likes`、`comments_count`、`metadata`（`jsonb`） |
+| `market_submissions` | `id` | `plugin_id`（FK CASCADE）、`user_id`（FK CASCADE）、`payload`（`jsonb`）、`status` |
+| `market_comments` | `id` | `plugin_id`（FK）、`user_id`（FK）、`parent_id`（自引用 FK，支持嵌套）、`body`、`likes`、`deleted`、`deleted_by` / `deleted_at`；有效评论部分索引 `WHERE deleted = false` |
+| `market_plugin_likes` | `(plugin_id, user_id)` | 联合主键，保证每用户对同一插件仅能点赞一次 |
+| `market_comment_likes` | `(comment_id, user_id)` | 联合主键，保证每用户对同一评论仅能点赞一次 |
 | `market_announcements` | `id` | `title`、`body`、`author_user_id`（FK） |
-| `market_notifications` | `id` | `user_id`（FK）、`type`、`title`、`body`、`metadata`（jsonb）、`dedupe_key`（artifact 通知可选唯一键）、`read` |
-| `market_api_keys` | `id` | `name`、`user_id`（FK）、`scopes`（jsonb）、`key`（UNIQUE） |
-| `market_options` | `option_key` | `option_value`；存储运行时站点/OAuth/市场/邮件系统设置 |
+| `market_notifications` | `id` | `user_id`（FK）、`type`、`title`、`body`、`metadata`（`jsonb`）、`dedupe_key`（可选唯一去重键）、`read` |
+| `market_api_keys` | `id` | `name`、`user_id`（FK）、`scopes`（`jsonb`）、`key`（UNIQUE） |
+| `market_options` | `option_key` | `option_value`，存储运行时站点、OAuth、市场策略与邮件配置 |
 
-artifact migration 另建 `plugin_artifacts`、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`artifact_jobs`、`outbox_events` 和 `market_schema_migrations`。`market_plugins.repo_version` 随仓库 metadata 更新，`current_artifact_id` 只由发布事务修改。历史 migration 的 checksum 变化会阻止启动，避免静默篡改。
+版本化迁移另建插件包与审查体系表，包括 `plugin_artifacts`、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`review_comments`、`review_policies`、`plugin_cdn_subscriptions`、`artifact_jobs`、`outbox_events` 与 `market_schema_migrations`。`market_plugins.repo_version` 随仓库元数据更新，`current_artifact_id` 仅由发布或下架事务更新。历史迁移脚本的 checksum 一旦被篡改，服务将拒绝启动。
 
-核心约束：`(plugin_id, archive_sha256)` 幂等、已发布 `(plugin_id, normalized_version)` 唯一、隔离/发布 key 唯一、人工决策与任务 idempotency key 唯一。发布事务再次锁定插件与 artifact 并校验仓库版本。
+关键不变式包括：`(plugin_id, archive_sha256)` 幂等、已发布 `(plugin_id, normalized_version)` 唯一、隔离与发布对象 key 唯一、人工决策与任务 `idempotency_key` 唯一。发布事务提交前会再次锁定插件与 artifact 记录，并校验仓库版本与 CDN 开关。
 
 ### Redis
 
-仅在 `PgRedisMarketStore` 中使用，**只存会话 token**：
+仅在 `PgRedisMarketStore` 中使用，存储两类带 TTL 的短期数据：
 
-- Key 格式：`astrbot_market:session:{token}`
-- Value：JSON 序列化的 `{token, user_id, created_at, last_seen_at}`
-- TTL 由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天）；每次 `get_user_by_session()` 读取时刷新 TTL。
+- **登录会话**：Key 为 `astrbot_market:session:{token}`，Value 为 JSON 序列化的 `{token, user_id, created_at, last_seen_at}`；TTL 由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天），读取时自动续期。
+- **加密短期 GitHub OAuth 授权凭据**：用于仓库管理权限校验，使用由 `GITHUB_CLIENT_SECRET` 经 HKDF 派生的 Fernet 密钥加密，TTL 不超过 8 小时，注销或会话失效时同步删除。
 
-### InMemoryMarketStore
+### 本地单文件与内存存储
 
-开发/首次启动用 Python `dict` 管理全部业务集合：`users`、`plugins`、`submissions`、`comments`、`pluginLikes`、`commentLikes`、`announcements`、`notifications`、`apiKeys`、`options`、`sessions`。
+`InMemoryMarketStore` 使用内存字典维护 `users`、`plugins`、`submissions`、`comments`、`pluginLikes`、`commentLikes`、`announcements`、`notifications`、`apiKeys`、`options`、`sessions` 与 `nextNumericId`。`LocalFileMarketStore` 在其基础上增加线程锁、会话过期清理与原子 JSON 文件持久化。
 
-## API 端点清单
+## API 端点概览
 
-路由统一在 `/v1/*`（AstrBot 源端点与静态回退除外），按职责分组。完整契约以 FastAPI 运行时自动生成的 `/openapi.json` 为权威；`/docs/rest` 提供 Vue + Naive UI API Reference，`/docs` 与 `/redoc` 保留 FastAPI 原生文档视图。本表为概览。
+所有业务路由统一位于 `/v1/*`（AstrBot 插件源、健康检查、文档契约与前端静态页面除外）。完整契约以运行时生成的 `/openapi.json` 为准（按当前登录角色动态过滤），`/docs/rest` 提供内置可视化文档与在线试用；FastAPI 原生 `/docs` 与 `/redoc` 已关闭并返回 404。
 
-### 公开端点（无认证）
+### 公开端点（无需登录）
 
-| 方法 | 路径 | 功能 |
-|---|---|---|
-| GET | `/health` | 健康检查（含 setup 状态、DB/Redis 是否配置） |
-| GET | `/v1/site` | 公开站点配置（名称、图标、认证与市场开关） |
-| GET | `/v1/setup/status` | setup 状态（仅首次设置前可用，脱敏） |
-| POST | `/v1/setup` | 执行初始化：建库、建表、创建管理员、写 `.env`（仅 setup_required 时） |
-| GET | `/v1/plugins` | 已上架插件列表（status=listed） |
-| GET | `/v1/plugins/{id}` | 插件详情（含评论树、点赞状态） |
-| GET | `/v1/plugins/submissions` | 待审核提交列表（admin） |
-| POST | `/v1/plugins/submissions` | 提交新插件（登录） |
-| GET | `/v1/announcements` | 公告列表 |
-| GET | `/plugins.json` · `/plugins-md5.json` | AstrBot 插件源 feed 与 MD5 摘要 |
-| GET | `/v1/astrbot/plugins(.json\|-md5.json)` | 带 `v1` 前缀的等价源端点 |
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/health` | 健康检查（包含 `storage_mode`、`setup`、存储与 artifact 状态） |
+| `GET` | `/v1/site` | 公开站点配置（名称、图标、认证与市场开关、`setup_required`） |
+| `GET` | `/v1/setup/status` | 首次安装状态（脱敏；初始化完成后返回 404） |
+| `POST` | `/v1/setup` | 提交首次初始化配置并热切换存储（初始化完成后返回 404） |
+| `GET` | `/v1/plugins` | 已上架插件列表（`status=listed`） |
+| `GET` | `/v1/plugins/by-author/{username}/{name}` | 按作者用户名与插件名获取已上架插件详情 |
+| `GET` | `/v1/plugins/{id}` | 按插件 ID 获取详情（含评论树与点赞状态） |
+| `GET` | `/v1/plugins/{id}/readme` | 获取插件 README 缓存或实时内容 |
+| `GET` | `/v1/authors/{username}/plugins` | 获取指定作者的已上架插件列表 |
+| `GET` | `/v1/announcements` | 公告列表 |
+| `GET` | `/plugins.json` · `/plugins-md5.json` | AstrBot 插件源 Feed 与 MD5 摘要 |
+| `GET` | `/v1/astrbot/plugins(.json\|-md5.json)` | 带 `v1` 前缀的等价 AstrBot 插件源端点 |
+| `GET` | `/openapi.json` · `/llms.txt` | 按当前角色过滤的 OpenAPI 契约与 LLM 端点索引 |
 
-### 认证
+### 认证端点
 
-| 方法 | 路径 | 功能 |
-|---|---|---|
-| POST | `/v1/auth/internal/login` | 内部账号登录（用户名 + 密码） |
-| GET | `/v1/auth/github/login` | 跳转 GitHub OAuth 授权页 |
-| GET | `/v1/auth/github/callback` | OAuth 回调，创建 session |
-| POST | `/v1/auth/logout` | 注销（清 cookie + Redis session） |
-| GET | `/v1/auth/session` | 校验当前 session |
-| GET | `/v1/auth/debug-login` | 开发调试登录（`ENABLE_DEV_AUTH=true` 时） |
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/v1/auth/internal/login` | 内部账号登录（用户名 + 密码） |
+| `GET` | `/v1/auth/github/login` | 跳转至 GitHub OAuth 授权页 |
+| `GET` | `/v1/auth/github/callback` | OAuth 回调，创建会话并保存加密仓库授权凭据 |
+| `POST` | `/v1/auth/logout` | 注销登录并清除服务端会话与短期 OAuth 凭据 |
+| `GET` | `/v1/auth/session` | 查询当前会话状态 |
+| `GET` | `/v1/auth/debug-login` | 开发调试登录（仅 `ENABLE_DEV_AUTH=true` 时可用） |
 
-### 当前用户（登录）
+### 当前用户（需登录）
 
-| 方法 | 路径 | 功能 |
-|---|---|---|
-| GET | `/v1/me` | 当前用户信息 |
-| PATCH | `/v1/me/profile` | 更新资料（头像、github_token、通知偏好） |
-| GET | `/v1/me/plugins` | 我的插件 |
-| GET/POST/DELETE | `/v1/me/api-keys[/{id}]` | 个人 API Key CRUD |
-| GET | `/v1/me/notifications` | 通知列表（分页） |
-| GET | `/v1/me/notifications/unread-count` | 未读计数 |
-| POST | `/v1/me/notifications/read` | 全部标记已读 |
-| DELETE | `/v1/me/notifications[/{id}]` | 清空 / 删除单条 |
-| POST | `/v1/me/notifications/delete` | 批量删除 |
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` / `PATCH` | `/v1/me` · `/v1/me/profile` | 获取当前用户信息 / 更新资料与通知偏好 |
+| `GET` | `/v1/me/plugins` | 我的插件列表 |
+| `GET` | `/v1/me/github/repositories` | 列出当前 OAuth 会话可管理的公开 `astrbot_plugin_*` 仓库 |
+| `GET` / `POST` / `DELETE` | `/v1/me/api-keys[/{id}]` | 个人 API Key 管理 |
+| `GET` / `POST` / `DELETE` | `/v1/me/notifications[/{id}]` | 通知分页查询、未读计数、标记已读与单条/批量/清空删除 |
 
-### 插件互动（登录）
+### 插件提交与互动（需登录）
 
-| 方法 | 路径 | 功能 |
-|---|---|---|
-| PATCH | `/v1/plugins/{id}` | 编辑元数据（所有者或 admin） |
-| POST | `/v1/plugins/{id}/request-list` | 申请上架（所有者） |
-| POST | `/v1/plugins/{id}/unlist` | 自主下架（所有者） |
-| POST | `/v1/plugins/{id}/refresh-github` | 手动刷新元数据（所有者） |
-| POST | `/v1/plugins/{id}/like` · `unlike` | 点赞 / 取消点赞 |
-| POST | `/v1/plugins/{id}/comments` | 添加评论 |
-| POST/DELETE | `/v1/comments/{id}[ /like\|/unlike]` | 评论点赞 / 删除（作者或 admin） |
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/v1/plugins/submissions/metadata-preview` | 核验仓库权限后从 GitHub 预取 `metadata.yaml` |
+| `POST` | `/v1/plugins/submissions` | 提交新插件或更新已有插件 |
+| `PATCH` | `/v1/plugins/{id}` | 编辑插件元数据（所有者或管理员） |
+| `PATCH` | `/v1/plugins/{id}/cdn` | 开启或关闭插件社区源 CDN（核心管理员或所有者） |
+| `POST` | `/v1/plugins/{id}/request-list` · `unlist` | 申请上架 / 自主下架（所有者） |
+| `POST` | `/v1/plugins/{id}/refresh-github` · `readme/refresh` | 手动刷新仓库元数据或 README 缓存 |
+| `POST` | `/v1/plugins/{id}/like` · `unlike` | 插件点赞 / 取消点赞 |
+| `POST` | `/v1/plugins/{id}/comments` | 发表或回复评论 |
+| `POST` / `DELETE` | `/v1/comments/{id}[/like\|/unlike]` | 评论点赞 / 取消点赞 / 删除（作者或管理员） |
 
-### 管理员（admin）
+### 管理员（`admin` 及以上）
 
-| 方法 | 路径 | 功能 |
-|---|---|---|
-| GET | `/v1/admin/check` · `/v1/permissions` | 当前用户权限位 / 功能权限 |
-| GET | `/v1/admin/summary` | 后台统计摘要 |
-| GET | `/v1/admin/plugins` | 全部插件（含 unlisted） |
-| POST | `/v1/admin/plugins/{id}/list` | 审核通过上架 |
-| POST | `/v1/admin/plugins/{id}/unlist` | 下架（需 reason，通知所有者） |
-| POST | `/v1/admin/plugins/{id}/refresh-github` | 异步刷新元数据 |
-| DELETE | `/v1/admin/comments/{id}` | 删除评论 |
-| GET | `/v1/admin/users` | 用户列表 |
-| POST | `/v1/admin/users/{id}/mute` · `unmute` | 禁言 / 解禁 |
-| POST | `/v1/api-keys` · GET `/v1/api-keys` | 颁发全局 Key / 列出 Key（Bearer market:read） |
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/v1/admin/check` · `/v1/permissions` | 查询当前用户管理权限与功能权限位 |
+| `GET` | `/v1/admin/summary` · `/v1/admin/plugins` · `/v1/plugins/submissions` | 后台统计摘要、全部插件与待审提交列表 |
+| `POST` | `/v1/admin/plugins/{id}/list` · `unlist` | 审核上架 / 填写理由下架并通知所有者 |
+| `POST` | `/v1/admin/plugins/{id}/refresh-github` | 触发仓库元数据刷新 |
+| `DELETE` | `/v1/admin/comments/{id}` | 删除任意评论 |
+| `GET` / `POST` | `/v1/admin/users` · `/v1/admin/users/{id}/mute` · `unmute` | 查看用户列表 / 禁言与解禁 |
+| `GET` / `POST` | `/v1/api-keys` | 列出或颁发全局 API Key |
 
-### 核心管理员（core_admin）
+> [!NOTE]
+> 插件包上传、审查工作台、版本评论、人工放行/重跑、审查策略管理与工具健康度端点由 `apps/api/app/artifacts/routes.py` 注册，具体操作流程见 [plugin-review-operations.md](plugin-review-operations.md)。
 
-| 方法 | 路径 | 功能 |
-|---|---|---|
-| GET/PUT | `/v1/admin/settings` | 读取 / 更新系统设置（脱敏） |
-| POST | `/v1/admin/settings/email/test` | 发送测试邮件 |
-| GET | `/v1/admin/setup/status` | setup 状态（含已保存脱敏配置） |
-| POST | `/v1/core/users` · DELETE `/v1/core/users/{id}` | 创建 / 删除内部用户 |
-| POST | `/v1/core/admins/{id}` | 修改用户角色（admin ↔ user） |
-| POST | `/v1/core/announcements` | 发布公告 |
+### 核心管理员（`core_admin`）
 
-### 静态回退
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` / `PUT` | `/v1/admin/settings` | 读取与更新运行时系统设置（密钥字段脱敏保留） |
+| `POST` | `/v1/admin/settings/github-tokens/verify` · `email/test` | 验证 GitHub API Token 池 / 发送测试邮件 |
+| `GET` | `/v1/admin/setup/status` | 查询初始化与基础设施状态 |
+| `POST` / `DELETE` | `/v1/core/users[/{id}]` | 创建或删除内部用户 |
+| `POST` | `/v1/core/admins/{id}` | 调整普通用户与管理员角色 |
+| `POST` | `/v1/core/announcements` | 发布全站公告 |
 
-`/` 与 `/{full_path:path}` 由 `register_market_web_routes` 处理，返回 `apps/market-web/dist/index.html` 或对应静态资源；通过 `is_reserved_api_path()` 排除 `v1`、`health`、`plugins.json`、`plugins-md5.json`、`openapi.json`、`docs`、`redoc` 等保留路径，避免覆盖 API 路由与文档页。
+### 前端静态文件与 404 分发
+
+`/` 与 `/{full_path:path}` 由 `register_market_web_routes` 处理：优先匹配 `apps/market-web/dist` 中的静态资源或预渲染 HTML（如 `/plugin/{username}/{name}/index.html`），已知前端路由回退到 `index.html`，保留 API 路径不参与前端回退，**未知路径返回真实 HTTP 404**，并按路径分类附加明确的 `Cache-Control` 响应头。
 
 ## 认证与权限模型
 
 ### 角色与能力矩阵
 
-| 能力 | core_admin | admin | user |
-|---|:---:|:---:|:---:|
-| 管理系统设置 / 邮件 | ✅ | — | — |
-| 管理管理员 / 创建删除内部用户 | ✅ | — | — |
-| 发布公告 | ✅ | — | — |
-| 审核上架/下架、刷新任意插件 | ✅ | ✅ | — |
-| 删除评论、禁言用户 | ✅ | ✅ | — |
-| 编辑自有插件 | ✅ | ✅（任意） | ✅（仅自己） |
-| 提交 / 评论 / 点赞 / 个人 Key | ✅ | ✅ | ✅ |
+| 能力 | `core_admin` | `admin` | `user` |
+| --- | :---: | :---: | :---: |
+| 管理系统设置、邮件与审查策略 | 支持 | — | — |
+| 管理管理员队伍、创建/删除内部用户 | 支持 | — | — |
+| 发布全站公告 | 支持 | — | — |
+| 管理任意插件 CDN | 支持 | 仅自有插件 | 仅自有插件 |
+| 审核上架/下架、审查插件包、刷新任意插件 | 支持 | 支持 | — |
+| 删除任意评论、禁言/解禁用户 | 支持 | 支持 | — |
+| 编辑插件元数据 | 任意插件 | 任意插件 | 仅自有插件 |
+| 提交插件、评论、点赞、管理个人 API Key | 支持 | 支持 | 支持 |
 
-权限函数：`can_edit_plugin(user, plugin)`（admin 或所有者匹配）、`can_manage_plugin_submission(user, plugin)`（admin 或所有者），定义于 `auth.py`。
+核心权限函数 `can_edit_plugin()`、`can_manage_plugin_submission()` 与 `can_configure_plugin_cdn()` 定义在 `apps/api/app/auth.py`。
 
 ### 登录方式
 
-1. **GitHub OAuth** — `/v1/auth/github/login` → 授权 → `/v1/auth/github/callback`，`upsert_github_user` 创建/关联用户并建 session；若属于 `GITHUB_ADMIN_ORG` 且非 admin 则自动提权。
-2. **内部账号** — `/v1/auth/internal/login`（用户名 + 密码，PBKDF2-SHA256 哈希）。
-3. **开发调试** — `/v1/auth/debug-login`（仅 `ENABLE_DEV_AUTH=true`，通过 `X-Dev-GitHub-Login` 头自动建用户）。
+1. **GitHub OAuth**：访问 `/v1/auth/github/login` 完成授权后回到 `/v1/auth/github/callback`，由 `upsert_github_user` 创建或更新用户并签发会话；若用户属于 `GITHUB_ADMIN_ORG` 且当前非管理员，则自动提权为 `admin`。
+2. **内部账号**：通过 `/v1/auth/internal/login` 校验用户名与 PBKDF2-SHA256 密码哈希。
+3. **开发调试**：仅当 `ENABLE_DEV_AUTH=true` 时开放 `/v1/auth/debug-login`，通过 `X-Dev-GitHub-Login` 请求头快速模拟登录，生产环境必须关闭。
 
-会话基于 cookie（`astrbot_market_session`），非 JWT。token 格式 `sess_{token_urlsafe(24)}`，存于 Redis。详见 [security.md](security.md)。
+会话基于 `HttpOnly` Cookie（`astrbot_market_session`，非 JWT），Token 格式为 `sess_{token_urlsafe(24)}`，可在服务端即时吊销。详细安全机制见 [security.md](security.md)。
 
 ## 关键机制
 
-### 配置双层
+### 双层配置模型
 
-- **静态层**：`.env` 环境变量（基础设施连接、`ENABLE_DEV_AUTH` 等启动期常量）。
-- **运行时层**：`market_options` 表（站点展示、GitHub OAuth、市场策略、邮件），核心管理员通过 `/v1/admin/settings` 修改，热更新当前 API 进程。
-- `runtime_settings_for_app()` 将运行时层合并到 `Settings`，实现无需重启的配置更新。Web 后台设置覆盖 `.env` 同名项。
+- **静态环境层**：`.env` 与系统环境变量承载基础设施连接（`DATABASE_URL`、`REDIS_URL`、`MARKET_STORAGE_MODE`、`LOCAL_DATA_PATH`）、密钥（如 `GITHUB_CLIENT_SECRET`）和启动期安全开关（`ENABLE_DEV_AUTH`、`COOKIE_SECURE`）。
+- **运行时配置层**：站点展示、GitHub OAuth 公开参数、市场功能开关与邮件参数保存在持久化配置表（`market_options` / 本地 `options`）中，由核心管理员通过 `/v1/admin/settings` 热更新，并通过 `runtime_settings_for_app()` 覆盖环境层同名项，无需重启进程。
 
 ### 首次启动热切换
 
-`/v1/setup` 流程：连接 PostgreSQL（目标库不存在则创建）→ 初始化 schema → 验证 Redis → 写入核心管理员 → 全部成功才写 `.env`（任何一步失败都不写）→ `activate_setup_store()` 进程内切换到 PgRedis 存储 → 关闭 `/v1/setup`。基础设施连接后续只通过 `.env` 修改。
+- **完整模式**：`/v1/setup` 依次连接 PostgreSQL（目标库不存在时自动建库）、执行表结构迁移、验证 Redis、写入核心管理员；所有步骤成功后才写入 `.env`，并通过 `activate_setup_store()` 在进程内切换存储，随后关闭 `/v1/setup`。
+- **本地单进程模式**：`/v1/setup` 只需校验站点信息与核心管理员账号，写入本地数据文件与 `.env` 后立即生效；也可通过 `CORE_ADMIN_USERNAME` + `CORE_ADMIN_PASSWORD` 在启动时免向导初始化。
 
 ### GitHub 元数据同步
 
-- API lifespan 的 metadata worker 周期性抓取仓库 stars、README、版本等；版本写入 `market_plugins.repo_version`，仓库中的 `download_url` 不参与同步。
-- `GITHUB_API_TOKEN` 支持多 token（`,` / `;` / 换行分隔），通过 `app.state.github_api_token_index` 轮转，应对速率限制；刷新遇 rate limit 会向上游报告。
-- 所有者可带临时 token 手动刷新（`/v1/plugins/{id}/refresh-github`），管理员触发异步刷新（`/v1/admin/plugins/{id}/refresh-github`）。
+- 后台任务周期性抓取已上架插件的星标、README 与版本信息，将版本写入 `market_plugins.repo_version`（不信任仓库自填的 `download_url`）。
+- `GITHUB_API_TOKEN` 支持逗号、分号或换行分隔多个 Token，通过轮转缓解 GitHub API 速率限制；触发限流时显式向上游报错。
+- 插件所有者可携带临时 Token 手动刷新自有插件（`/v1/plugins/{id}/refresh-github`），管理员可刷新任意插件。
 
-### 通知系统
+### 通知与 Outbox 投递
 
-评论回复、插件点赞和评论点赞沿用站内通知。artifact 状态与 policy activate/retire/rollback 先写
-`outbox_events`，再由独立 Worker 以 lease 领取，发送站内信和可选邮件；policy lifecycle event 与 outbox 在
-同一数据库事务提交。站内信使用 outbox event dedupe key 条件写入，worker 重试不会重复建站内记录。
-邮件正文完全由 event type 白名单生成，只含插件/策略名称、版本、固定状态、固定短原因和工作台链接；
-自由文本 reason/code、源码、diff、evidence、日志、requirements、comment、对象 key 和凭据不参与邮件渲染。
-
-站内通知以 PostgreSQL 唯一键实现 exactly-once 可见记录；外部 SMTP/Cloudflare 邮件是 at-least-once 提醒，进程在发送成功但确认 outbox 前崩溃时可能产生重复邮件。系统不以邮件投递结果作为审查或发布状态依据。
-
-管理员下架当前版本时，decision、`revoking` 状态、插件移出 feed 和 revoke job 在同一事务完成。公开对象删除失败会保留当前指针并进入 `revoke_failed`，插件仍保持不可见，管理员可重试下架。
+- 评论回复、插件点赞和评论点赞直接写入站内通知。
+- 插件包审查状态变更与 policy activate/retire/rollback 生命周期事件在同一数据库事务中写入 `outbox_events`，再由独立 `artifact-worker` 以 lease 机制异步领取并投递站内通知与可选邮件。
+- 站内通知使用 `dedupe_key` 唯一约束保证不重复创建；外部 SMTP/Cloudflare 邮件按 at-least-once 语义投递，邮件异常不会回滚或阻塞审查与发布状态。
+- 邮件正文严格由事件类型白名单模板渲染，仅包含插件或策略名称、版本、固定状态、工作台链接，以及批准通知中经过脱敏与长度限制的管理员评价；不附带源码、diff、扫描证据、日志或内部对象路径。
+- 管理员下架当前已发布版本时，决策记录、`revoking` 状态、将插件移出公开 Feed 与删除公开对象的 `revoke` 任务在同一事务中提交；若对象删除失败，状态进入 `revoke_failed` 且 Feed 保持隐藏，支持后续重试。
 
 ### API Key
 
-- **全局静态**：`MARKET_API_KEYS` 环境变量，格式 `name:key:scope1|scope2`。
-- **管理员动态颁发**：`POST /v1/api-keys`（admin），`sk-ah-` 前缀。
-- **个人 Key**：`/v1/me/api-keys`，登录用户自建自删。
-- 通过 `Authorization: Bearer <key>` 鉴权，校验逻辑在 `auth.py`。原文只在创建响应中返回一次，列表仅返回名称、scopes 与创建时间。
+- **全局静态 Key**：由 `MARKET_API_KEYS` 环境变量定义，格式为 `name:key:scope1|scope2`。
+- **管理员颁发 Key**：由管理员通过 `POST /v1/api-keys` 动态签发，带 `sk-ah-` 前缀。
+- **个人 Key**：登录用户通过 `/v1/me/api-keys` 自建与撤销，带 `sk-ah-` 前缀。
+- 请求通过 `Authorization: Bearer <key>` 鉴权并按 `scopes` 校验。明文仅在创建响应中返回一次，列表接口只返回元信息。
 
 ### 邮件服务
 
-`EMAIL_PROVIDER` 决定后端：
+由 `EMAIL_PROVIDER` 决定发送通道：
 
-- `disabled`（默认）— 发送即返回 400。
-- `smtp` — `aiosmtplib`，默认自动 STARTTLS/认证协商；可显式设置 `STARTTLS`、`SSL/TLS`、不加密、`AUTH LOGIN` 或 `AUTH PLAIN`。
-- `cloudflare` — Cloudflare Email Sending API `POST /accounts/{account_id}/email/sending/send`。
+- `disabled`（默认）：关闭邮件发送，测试发送返回 400。
+- `smtp`：基于 `aiosmtplib`，默认自动协商加密与认证方式，也可显式指定 `STARTTLS`、`SSL/TLS`、明文以及 `AUTH LOGIN` / `AUTH PLAIN`。
+- `cloudflare`：调用 Cloudflare Email Sending API 发送邮件。
 
-`EMAIL_DAILY_LIMIT` 控制每日上限（内存计数器，按日清零）。详见 [security.md](security.md)。
+每日发送总量受 `EMAIL_DAILY_LIMIT` 限制（内存按日计数），详见 [security.md](security.md)。
 
 ## 前端架构
 
-`apps/market-web` 为 Vue 3 + Vite+（Vite Plus）SPA，使用 TypeScript + `<script setup>` 与 Composition API。
+`apps/market-web` 基于 Vue 3.5、Vite+（Vite Plus）与 TypeScript（Composition API + `<script setup lang="ts">`）构建：
 
-| 层 | 选型 |
-|---|---|
-| 构建工具 | Vite+（Vite Plus）— `vp dev` / `vp build` / `vp staged`，配置见 `vite.config.ts` |
-| 语言 | TypeScript（strict），类型定义见 `src/types/index.ts` |
-| UI 库 | Naive UI 2.43（`NConfigProvider` / `NLayout` / `NForm` / `NDialog` 等） |
-| 路由 | Vue Router 4，`createWebHistory` |
-| 状态管理 | Pinia 3；市场域使用 `stores/plugins.ts`，artifact 工作台使用独立 `stores/artifacts.ts` |
-| HTTP | 原生 `fetch`，统一 `credentials: 'include'` |
-| Markdown | `marked` + `DOMPurify` + `highlight.js` |
-| 评论 | `@giscus/vue` |
-| 图标 | `@vicons/ionicons5` |
+| 模块 | 技术选型 |
+| --- | --- |
+| 构建与校验 | Vite+（`vp dev` / `vp build` / `vp check` / `vp test --run`），配置见 `apps/market-web/vite.config.ts` |
+| UI 组件 | Naive UI 2.43 与 `@vicons/ionicons5` 图标 |
+| 路由与 SEO | Vue Router 4（`createWebHistory`）、`@unhead/vue`、`vite-plugin-sitemap` 与 `scripts/prerender.mjs` |
+| 状态管理 | Pinia 3：`stores/plugins.ts`（市场域）、`stores/artifacts.ts`（插件包）、`stores/reviewWorkspace.ts`（审查工作台）、`stores/reviewPolicy.ts`（策略管理） |
+| 网络请求 | 原生 `fetch`（统一携带 `credentials: "include"`） |
+| Markdown 与文档 | `marked` + `marked-alert` + `DOMPurify` + `highlight.js`、`vue-api-playground` |
 
 ### 路由与守卫
 
-| path | 组件 | 说明 |
-|---|---|---|
-| `/` | `Home.vue` | 首页 / 插件市场 |
-| `/setup` | `Setup.vue` | 首次配置向导 |
-| `/submit` | `SubmitPlugin.vue` | 提交插件 |
-| `/admin` | `AdminLogin.vue` | 后台登录 |
-| `/admin/settings` | `Settings.vue` | 系统设置（core_admin） |
-| `/admin/plugins` | `AdminPlugins.vue` | 插件审核（admin） |
-| `/settings/personal` | `PersonalSettings.vue` | 个人设置 |
-| `/notifications` | `Notifications.vue` | 通知中心 |
-| `/plugin-workbench` | `PluginWorkbench.vue` | 作者版本历史 / 管理员审查队列（需登录） |
-| `/docs/rest` | `RestDocs.vue` | REST API 文档（Vue + Naive UI） |
+| 路径 | 视图组件 | 说明 |
+| --- | --- | --- |
+| `/` | `Home.vue` | 插件市场首页（支持分页与瀑布流切换、筛选与排序） |
+| `/plugin/:username/:name` | `PluginDetailsPage.vue` | 规范插件详情页（含 SEO、JSON-LD、README 与评论） |
+| `/plugin/:name` | `PluginDetailsPage.vue` | 兼容旧单段详情路由（服务端对已上架插件返回 301 重定向） |
+| `/author/:username` | `AuthorPage.vue` | 作者公开插件页 |
+| `/submit` | `SubmitPlugin.vue` | 插件提交页（社区模式走 GitHub 仓库选择，本地模式支持管理员直填 URL） |
+| `/setup` | `Setup.vue` | 首次安装向导（`noindex,nofollow`） |
+| `/admin` | `AdminLogin.vue` | 内部管理员登录页（`noindex,nofollow`） |
+| `/admin/settings` | `Settings.vue` | 核心管理员系统设置页（`/settings` 重定向至此，`noindex,nofollow`） |
+| `/settings/personal` | `PersonalSettings.vue` | 个人设置、个人插件管理与 API Key（`noindex,nofollow`） |
+| `/notifications` | `Notifications.vue` | 站内通知中心（`noindex,nofollow`） |
+| `/plugin-workbench` | `PluginWorkbench.vue` | 插件版本历史与审查工作台（`/admin/plugins` 重定向至此，需登录，`noindex,nofollow`） |
+| `/docs/rest` | `RestDocs.vue` | REST API 文档与在线试用页 |
+| `/:pathMatch(.*)*` | `NotFound.vue` | 404 页面（`noindex,nofollow`） |
 
-`/plugin-workbench` 使用 `meta.requiresAuth` 与异步 `beforeEach` 守卫；最终权限仍由后端逐端点强制。`App.vue` 继续负责首次 setup 跳转，管理员能力由服务端角色校验。
-
-
-Base URL 仍由 `stores/plugins.ts` 统一解析；artifact store 复用该公开值，不复制环境解析逻辑。
-
-store 管理的状态与 action 按域分组：插件 CRUD、评论、点赞、管理员操作、个人 Key、通知、认证、系统配置、公告、主题、搜索过滤。
+`/plugin-workbench` 通过 `meta.requiresAuth` 与异步 `beforeEach` 守卫拦截未登录访问；`App.vue` 负责在初始化未完成时跳转到 `/setup`。所有权限判断最终由后端逐端点强制校验。API 基础地址由 `stores/plugins.ts` 统一解析，其他 Pinia store 直接复用。
 
 ### 关键组件
 
-- 通用：`AppHeader`、`AppFooter`、`PluginCard`、`PluginDetails`（含站内 README 浏览与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`（页面切换动画）。
-- `components/settings/`：`AccessKeyManager`、`AdminUserManagement`、`NotificationPreferencesSection`、`PersonalPluginManager`、`ProfileAccountSection`。
+- 公共与市场视图：`AppHeader`、`AppFooter`、`PluginCard`、`PluginDetails`（含站内 README 渲染与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`。
+- 个人与后台设置（`components/settings/`）：`AccessKeyManager`、`AdminUserManagement`、`NotificationPreferencesSection`、`PersonalPluginManager`、`ProfileAccountSection`。
+- 审查工作台（`components/workbench/`）：`ArtifactSubmissionPanel`、`PluginReviewWorkspace`、`ReviewSummaryPanel`、`ReviewFileBrowser`、`ReviewDiffViewer`、`ReviewCommentThread`、`ReviewManualPanel`、`ReviewDecisionPanel`、`ReviewHistoryTimeline`、`ReviewPolicyPanel`。
 
-### 构建
+### 构建与预渲染
 
-根 `package.json` 暴露工作区脚本：`dev:web`、`build:web`、`dev:api`、`start:api`、`test`。前端使用 Vite+ CLI（`vp dev` / `vp build`），配置见 `vite.config.ts`（`defineConfig` 来自 `vite-plus`）。设置 `VITE_BASE_URL` 时构建自动生成 `sitemap.xml` 与 `robots.txt`（`vite-plugin-sitemap`）。Vite+ pre-commit hook（`.vite-hooks/pre-commit`）在暂存前端文件时自动执行 `vp staged`（`vp check --fix`）。
+根目录 `package.json` 提供 `dev:web`、`build:web`、`dev:api`、`start:api`、`start:runtime-runner`、`test` 等快捷脚本。执行 `npm run build:web` 时先运行 `vp build`，再运行 `scripts/prerender.mjs`：
+
+- 未设置 `VITE_BASE_URL` 时，自动跳过 Sitemap 与 Puppeteer 预渲染，仅输出标准 SPA 产物。
+- 设置 `VITE_BASE_URL=https://your-domain` 时，构建阶段从 `/v1/plugins` 拉取已上架清单，生成 `sitemap.xml`、`robots.txt` 以及首页、提交页、REST 文档页和各插件/作者详情页的静态 HTML 快照。
 
 ## 部署架构
 
-单服务在 `:8787` 按路径分发：
+API 进程默认监听 `:8787`，按路径统一分发：
 
-- `/` 与 SPA 路由 → `apps/market-web/dist/index.html`
-- `/assets/...`、`/font/...` → 构建静态资源
+- `/` 及已注册页面路径 → 对应预渲染 HTML 或 `apps/market-web/dist/index.html`（未知路径返回 404）
+- `/assets/...` → 长期强缓存指纹静态资源
 - `/plugins.json`、`/plugins-md5.json`、`/v1/astrbot/...` → AstrBot 插件源
-- `/v1/...` → 市场 API
-- `/openapi.json`、`/docs/rest`、`/docs`、`/redoc` → OpenAPI JSON、Vue API Reference 与 FastAPI 原生文档
+- `/v1/...` → 市场与审查 REST API
+- `/openapi.json`、`/llms.txt`、`/docs/rest` → 角色过滤契约与内置 API 文档
 
-可用部署方式：
+支持的部署形态：
 
-- **Docker Compose** — 默认 app + PostgreSQL + Redis；`artifacts` 增加独立 worker，`runtime-runner` 增加
-  rootless runner 和受限 package proxy。API/worker 不挂 Docker socket，runner 只读 artifact、只写 result。
-- **systemd** — API、artifact worker、runtime runner 使用不同用户、env 文件和文件系统授权；runner unit 不
-  携带 Redis、LLM、站点邮件或对象存储凭据。
+- **本地自用单进程版（`docker-compose-local.yml`）**：单容器运行 `app`，挂载单一数据卷持久化 `market-state.json` 与 `.env`，无需 PostgreSQL、Redis 与审核 Worker。
+- **完整社区版（`docker-compose.yml`）**：默认启动 `app`、`postgres` 与 `redis`；按需通过 `--profile artifacts` 启动 `artifact-worker`，通过 `--profile runtime-runner` 启动独立 `runtime-runner` 与受限包代理。API 与 Worker 均不挂载 Docker socket。
+- **裸机 systemd（`deploy/systemd/`）**：API、Worker 与 Runtime Runner 使用三个隔离的系统用户、独立 env 文件与最小文件权限，Runner 不持有 Redis、OAuth、LLM、邮件或对象存储凭据。
 
-尚未提供：Kubernetes/Helm、Nginx/Caddy 反向代理模板和 Terraform。CI 仅 lint + 测试 + 前端构建，不含部署。
+GitHub Actions（`.github/workflows/ci.yml`）仅按变更代码路径运行质量检查，不包含自动部署步骤。
 
 ## AstrBot 集成
 
-AstrBot 仍消费 `repo + download_url`。`repo` 永久保留；feed 的 `version` 优先使用仓库 `repo_version`。只有当前 published artifact 版本与之规范化相等时才输出 CDN `download_url`，否则为空且不覆盖/删除旧稳定对象。
+AstrBot 客户端通过 `/plugins.json` 消费插件列表，其中 `repo` 字段始终保留，`version` 优先同步仓库的 `repo_version`。仅当当前已发布 artifact 的规范化版本与 `repo_version` 一致时才输出 CDN `download_url`；否则 `download_url` 留空，客户端仍可通过 GitHub 直连安装，旧的稳定 CDN 对象也不会被未过审的新版本覆盖或冒充。
