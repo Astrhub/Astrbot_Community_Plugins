@@ -44,7 +44,7 @@ Docker Compose 为兼容共享命名卷，三个服务默认复用同一非 root
 > [!WARNING]
 > 当前 source-backed 运行时探针适配器固定对应 AstrBot `4.26.6`（源码提交 `5d10e0d428b41308cc63215db00359c61ee17195`）。升级 AstrBot 版本前必须先比对插件生命周期、管理器、处理器与工具注册路径，并同步更新适配器、镜像目录与策略目标；仅修改版本号不符合升级要求。
 
-市场插件源（`/plugins.json`）始终保留仓库地址 `repo`，`version` 跟随仓库 `metadata.yaml` 更新；仅当仓库版本与当前已发布 artifact 的规范化版本一致时，Feed 才输出 CDN `download_url`。当仓库出现尚未过审的新版本时，旧 CDN 对象保持不动但不会冒充新版本，此时 `download_url` 留空，用户仍可通过 GitHub 直连安装。
+市场插件源（`/plugins.json`）始终保留仓库地址 `repo`，`version` 跟随仓库 `metadata.yaml` 更新；仅当仓库版本与当前已发布 artifact 的规范化版本一致时，Feed 才输出 HTTPS CDN `download_url`。当仓库出现尚未过审的新版本时，旧 CDN 对象保持不动但不会冒充新版本，此时省略 `download_url`，用户仍可通过 GitHub 直连安装。
 
 ## 启动顺序与就绪校验
 

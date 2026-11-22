@@ -732,7 +732,7 @@ paths:
     get:
       tags: [AstrBot Source]
       summary: AstrBot 插件源 feed
-      description: 以插件名为键，兼容 AstrBot 自定义仓库格式。
+      description: 遵循 AstrBot 2026-06-27 插件市场 JSON 规范（Schema Version 1），顶层包含 $meta 并以 author/name 为插件键。
       responses:
         "200":
           description: 插件源 JSON

@@ -508,7 +508,8 @@ def test_stable_risk_route_hides_feed_handles_failure_and_notifies_admins(
         )
         assert response.status_code == 200
         assert response.json()["correlation"]["kind"] == "path_sha"
-        assert plugin["name"] not in client.get("/plugins.json").json()
+        plugin_key = f"{plugin['author']}/{plugin['name']}"
+        assert plugin_key not in client.get("/plugins.json").json()
         stored_stable = asyncio.run(repository.get_artifact(stable["id"]))
         assert stored_stable and stored_stable["publication_status"] == "revoking"
         assert stored_stable["published_key"]
@@ -524,7 +525,7 @@ def test_stable_risk_route_hides_feed_handles_failure_and_notifies_admins(
         asyncio.run(app.state.artifact_runtime.job_runner.run_once())
         failed = asyncio.run(repository.get_artifact(stable["id"]))
         assert failed and failed["publication_status"] == "revoke_failed"
-        assert plugin["name"] not in client.get("/plugins.json").json()
+        assert plugin_key not in client.get("/plugins.json").json()
         storage.revoke_published = original_revoke
         owner_notifications = store.list_notifications(owner["id"])
         admin_notifications = store.list_notifications(reviewer["id"])

@@ -117,7 +117,7 @@ create_app(settings, store)
 | 表 | 主键 | 核心字段与约束 |
 | --- | --- | --- |
 | `market_users` | `id` | `github_id`（UNIQUE）、大小写不敏感 `github_login` / `internal_username` 唯一索引、`password_hash`、`auth_source`、`github_token`、`role`（`core_admin` / `admin` / `user`）、禁言字段 |
-| `market_plugins` | `id` | `repo`（UNIQUE）、`(owner_user_id, name)` 与大小写不敏感 `(owner_github_login, name)` 唯一索引、`display_name`、`desc_text`、`tags`（`jsonb` + GIN 索引）、`status`（`pending` / `listed` / `unlisted`）、`stars`、`likes`、`comments_count`、`metadata`（`jsonb`） |
+| `market_plugins` | `id` | `repo`（UNIQUE）、`(owner_user_id, name)`、大小写不敏感 `(owner_github_login, name)` 与 `(author, name)` 唯一索引、`display_name`、`desc_text`、`tags`（`jsonb` + GIN 索引）、`status`（`pending` / `listed` / `unlisted`）、`stars`、`likes`、`comments_count`、`metadata`（`jsonb`） |
 | `market_submissions` | `id` | `plugin_id`（FK CASCADE）、`user_id`（FK CASCADE）、`payload`（`jsonb`）、`status` |
 | `market_comments` | `id` | `plugin_id`（FK）、`user_id`（FK）、`parent_id`（自引用 FK，支持嵌套）、`body`、`likes`、`deleted`、`deleted_by` / `deleted_at`；有效评论部分索引 `WHERE deleted = false` |
 | `market_plugin_likes` | `(plugin_id, user_id)` | 联合主键，保证每用户对同一插件仅能点赞一次 |
@@ -363,4 +363,4 @@ GitHub Actions（`.github/workflows/ci.yml`）仅按变更代码路径运行质�
 
 ## AstrBot 集成
 
-AstrBot 客户端通过 `/plugins.json` 消费插件列表，其中 `repo` 字段始终保留，`version` 优先同步仓库的 `repo_version`。仅当当前已发布 artifact 的规范化版本与 `repo_version` 一致时才输出 CDN `download_url`；否则 `download_url` 留空，客户端仍可通过 GitHub 直连安装，旧的稳定 CDN 对象也不会被未过审的新版本覆盖或冒充。
+AstrBot 客户端通过 `/plugins.json`（及等价 `/v1/astrbot/plugins(.json)` 与 `*-md5.json`）消费插件列表。Feed 遵循 AstrBot `2026-06-27` 规范（Schema Version 1），顶层包含 `$meta` 市场元数据并以 `${author}/${name}` 作为插件键，不输出客户端保留字段 `market_plugin_id`。条目保留仓库地址 `repo`，`version` 优先同步仓库的 `repo_version`（未同步时为空字符串，不虚构默认版本号），GitHub 同步还会采集根目录的 `logo.png`、README 与 CHANGELOG 的 HTTPS raw 地址（`readme_url`、`changelog_url`）以及 `.astrbot-plugin/i18n/<locale>.json` 中的 `metadata` 翻译。仅当当前已发布 artifact 的规范化版本与 `repo_version` 一致时才输出 HTTPS CDN `download_url`；否则省略 `download_url`，客户端仍可通过 GitHub 直连安装，旧的稳定 CDN 对象也不会被未过审的新版本覆盖或冒充。

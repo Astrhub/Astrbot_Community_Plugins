@@ -495,7 +495,7 @@ def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: P
     assert stable_feed["download_url"] == published["download_url"]
     assert changed_feed["version"] == "v1.1.0"
     assert changed_feed["repo"] == "https://github.com/alice/astrbot_plugin_demo"
-    assert changed_feed["download_url"] == ""
+    assert "download_url" not in changed_feed
 
 
 def test_advanced_precheck_fixes_policy_before_active_policy_changes(tmp_path: Path) -> None:
