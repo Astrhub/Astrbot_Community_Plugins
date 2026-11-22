@@ -325,4 +325,6 @@ uv run --project apps/api --directory apps/api pre-commit install --hook-type pr
 
 ## 许可
 
-详见 [LICENSE](LICENSE)。
+Copyright (C) 2026 [Astrhub](https://github.com/Astrhub)
+
+本项目基于 [GNU Affero General Public License v3.0（AGPL-3.0-only）](LICENSE) 开源。
