@@ -78,8 +78,9 @@ def test_default_non_cdn_auto_lists_without_fetching_or_reviewing(market):
     assert app.state.artifact_runtime.repository.jobs == {}
     service.submit_github.assert_not_awaited()
     source = client.get("/plugins.json")
-    assert source.json()[plugin["name"]]["download_url"] == ""
-    assert source.json()[plugin["name"]]["repo"] == plugin["repo"]
+    plugin_key = f"{plugin['author']}/{plugin['name']}"
+    assert "download_url" not in source.json()[plugin_key]
+    assert source.json()[plugin_key]["repo"] == plugin["repo"]
     assert source.headers["cache-control"] == "public, max-age=300"
     assert store.list_submissions() == []
 
@@ -446,12 +447,18 @@ def test_feed_never_exposes_disabled_or_unreviewed_new_version(market):
     app.state.artifact_runtime.repository.artifacts[publication["id"]] = publication
     store.update_plugin_metadata(plugin["id"], {"current_artifact_id": publication["id"]})
     store.update_plugin_status(plugin["id"], "listed", plugin["owner_user_id"])
+    plugin_key = f"{plugin['author']}/{plugin['name']}"
     assert (
-        client.get("/plugins.json").json()[plugin["name"]]["download_url"]
+        client.get("/plugins.json").json()[plugin_key]["download_url"]
         == publication["download_url"]
     )
+    published_md5 = client.get("/plugins-md5.json").json()["md5"]
+    assert client.get("/v1/astrbot/plugins-md5.json").json()["md5"] == published_md5
     store.update_plugin_metadata(plugin["id"], {"repo_version": "v2.0.0"})
-    assert client.get("/plugins.json").json()[plugin["name"]]["download_url"] == ""
+    assert "download_url" not in client.get("/plugins.json").json()[plugin_key]
+    changed_md5 = client.get("/plugins-md5.json").json()["md5"]
+    assert changed_md5 != published_md5
+    assert client.get("/v1/astrbot/plugins-md5.json").json()["md5"] == changed_md5
     store.update_plugin_metadata(plugin["id"], {"repo_version": "v1.0.0"})
     assert (
         client.patch(
@@ -462,7 +469,11 @@ def test_feed_never_exposes_disabled_or_unreviewed_new_version(market):
         == 200
     )
     for path in ("/plugins.json", "/v1/astrbot/plugins", "/v1/astrbot/plugins.json"):
-        assert client.get(path).json()[plugin["name"]]["download_url"] == ""
+        assert "download_url" not in client.get(path).json()[plugin_key]
+    assert (
+        client.get("/v1/astrbot/plugins-md5.json").json()["md5"]
+        == client.get("/plugins-md5.json").json()["md5"]
+    )
     assert client.get("/v1/plugins").json()["items"][0]["download_url"] == ""
     assert app.state.artifact_runtime.repository.artifacts[publication["id"]] == publication
 

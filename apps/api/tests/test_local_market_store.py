@@ -247,7 +247,8 @@ def test_local_mode_env_bootstrap_and_direct_admin_submission(tmp_path, monkeypa
 
         feed = client.get("/plugins.json")
         assert feed.status_code == 200
-        assert "astrbot_plugin_selfhost" in feed.json()
+        assert "$meta" in feed.json()
+        assert "selfhost/astrbot_plugin_selfhost" in feed.json()
 
         # Regular non-admin internal user still cannot bypass GitHub ownership checks.
         created_user = client.post(
@@ -280,7 +281,7 @@ def test_local_mode_env_bootstrap_and_direct_admin_submission(tmp_path, monkeypa
     with TestClient(main_module.create_app(settings=settings)) as restarted:
         plugins = restarted.get("/v1/plugins").json()["items"]
         assert [item["name"] for item in plugins] == ["astrbot_plugin_selfhost"]
-        assert "astrbot_plugin_selfhost" in restarted.get("/plugins.json").json()
+        assert "selfhost/astrbot_plugin_selfhost" in restarted.get("/plugins.json").json()
 
 
 def test_compose_files_remove_hardcoded_domain_and_provide_local_single_process_edition() -> None:

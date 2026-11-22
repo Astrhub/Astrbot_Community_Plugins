@@ -35,6 +35,8 @@ def plugin_identity_write(method: Any) -> Any:
         try:
             return await method(*args, **kwargs)
         except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "market_plugins_author_name_key":
+                raise PluginIdentityConflict("已存在相同作者与插件名组合的插件") from exc
             if exc.constraint_name in {
                 "market_plugins_owner_name_key",
                 "market_plugins_namespace_key",
@@ -380,15 +382,20 @@ class InMemoryMarketStore:
         return plugin_id, existing
 
     def _check_plugin_identity(self, candidate: dict[str, Any]) -> None:
+        candidate_name = str(candidate.get("name") or "").strip().lower()
+        candidate_author = str(candidate.get("author") or "").strip().lower()
+        login = str(candidate.get("owner_github_login") or "").lower()
         for other in self.state["plugins"]:
             if other["id"] == candidate["id"]:
                 continue
-            same_name = other["name"].lower() == candidate["name"].lower()
+            same_name = str(other.get("name") or "").strip().lower() == candidate_name
             same_owner = other.get("owner_user_id") == candidate.get("owner_user_id")
-            login = str(candidate.get("owner_github_login") or "").lower()
             same_login = bool(login) and str(other.get("owner_github_login") or "").lower() == login
             if same_name and (same_owner or same_login):
                 raise PluginIdentityConflict("该用户名下已存在同名插件")
+            other_author = str(other.get("author") or "").strip().lower()
+            if same_name and candidate_author and other_author == candidate_author:
+                raise PluginIdentityConflict("已存在相同作者与插件名组合的插件")
             if other["repo"].rstrip("/").lower() == candidate["repo"].rstrip("/").lower():
                 raise PluginIdentityConflict("该仓库已登记为其他插件")
 

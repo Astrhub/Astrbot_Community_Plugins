@@ -154,6 +154,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20260927_007_optional_cdn",
         "20261001_008_plugin_version_updated_at",
         "20261008_009_plugin_listed_at",
+        "20261122_010_plugin_author_name_identity",
     ]
     sql = migrations[0].sql
     for table in (

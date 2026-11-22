@@ -2231,13 +2231,19 @@ def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
     response = client.get("/plugins.json")
     assert response.status_code == 200
     feed = response.json()
-    assert list(feed) == ["astrbot_plugin_demo"]
-    plugin = feed["astrbot_plugin_demo"]
+    assert list(feed) == ["$meta", "Alice/astrbot_plugin_demo"]
+    plugin = feed["Alice/astrbot_plugin_demo"]
     assert plugin["updated_at"]
+    assert feed["$meta"] == {
+        "schema_version": 1,
+        "version": "2026-06-27",
+        "name": client.app.state.settings.site_name,
+        "description": client.app.state.settings.site_description,
+        "updated_at": plugin["updated_at"],
+    }
     plugin_without_timestamp = {key: value for key, value in plugin.items() if key != "updated_at"}
     assert plugin_without_timestamp == {
         "name": "astrbot_plugin_demo",
-        "market_plugin_id": "astrbot_plugin_demo",
         "display_name": "Demo",
         "desc": "Demo plugin",
         "short_desc": "",
@@ -2246,17 +2252,16 @@ def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
         "social_link": "https://github.com/alice",
         "tags": ["demo"],
         "stars": 0,
-        "version": "1.0.0",
-        "logo": "",
+        "version": "",
         "pinned": False,
-        "download_url": "",
-        "i18n": {},
         "astrbot_version": "",
         "category": "",
         "support_platforms": [],
     }
 
-    assert client.get("/plugins-md5.json").json()["md5"]
+    md5 = client.get("/plugins-md5.json").json()["md5"]
+    assert md5
+    assert client.get("/v1/astrbot/plugins-md5.json").json()["md5"] == md5
     assert client.get("/v1/astrbot/plugins.json").json() == feed
 
 
@@ -2325,7 +2330,7 @@ def test_submission_enriches_plugin_metadata_from_github(monkeypatch) -> None:
     submission = client.post("/v1/plugins/submissions", json=plugin_payload())
     client.post(f"/v1/admin/plugins/{submission.json()['id']}/list")
     public_plugin = client.get("/v1/plugins").json()["items"][0]
-    source_plugin = client.get("/plugins.json").json()["astrbot_plugin_demo"]
+    source_plugin = client.get("/plugins.json").json()["Repo Author/astrbot_plugin_demo"]
 
     assert public_plugin["stars"] == 42
     assert public_plugin["display_name"] == "Repo Demo"

@@ -54,7 +54,18 @@ def test_namespaces_use_oauth_username_and_preserve_interactions():
     assert store.get_comment(comment["id"])["plugin_id"] == first["id"]
     assert store.get_plugin(first["id"])["likes"] == 1
     assert store.register_plugin(bob, payload("Bob"))["id"] == second["id"]
-    assert len(build_astrbot_plugin_source([first, second])) == 2
+    feed = build_astrbot_plugin_source([first, second])
+    assert list(feed) == ["$meta", "Bob/astrbot_plugin_same", "organization/astrbot_plugin_same"]
+    assert all("market_plugin_id" not in feed[key] for key in feed if key != "$meta")
+    carol = store.upsert_github_user({"id": "104", "login": "Carol"})
+    with pytest.raises(PluginIdentityConflict):
+        store.register_plugin(
+            carol,
+            {
+                **payload("ORGANIZATION"),
+                "repo": "https://github.com/carol/astrbot_plugin_same",
+            },
+        )
     assert not can_edit_plugin({"id": "103", "github_login": "Alice"}, first)
     assert not store.list_user_plugins("103", "Alice")
     with pytest.raises(PluginIdentityConflict):

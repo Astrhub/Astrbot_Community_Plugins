@@ -154,6 +154,20 @@ GITHUB_RATE_LIMIT_MESSAGE = (
 README_CACHE_TTL_SECONDS = 3600
 README_MAX_CONTENT_BYTES = 1_000_000
 README_CANDIDATES = ("README.md", "Readme.md", "readme.md", "README.MD", "README")
+CHANGELOG_CANDIDATES = (
+    "CHANGELOG.md",
+    "Changelog.md",
+    "changelog.md",
+    "CHANGELOG.MD",
+    "CHANGELOG",
+    "changelog",
+)
+PLUGIN_I18N_MAX_FILES = 16
+PLUGIN_I18N_MAX_BYTES = 1_000_000
+PLUGIN_I18N_LOCALE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+PLUGIN_I18N_METADATA_FIELDS = ("display_name", "desc", "short_desc")
+ASTRBOT_MARKET_SCHEMA_VERSION = 1
+ASTRBOT_MARKET_SPEC_VERSION = "2026-06-27"
 SYSTEM_OPTION_KEYS = {
     "CLOUDFLARE_EMAIL_ACCOUNT_ID",
     "CLOUDFLARE_EMAIL_API_TOKEN",
@@ -1169,10 +1183,10 @@ def register_routes(app: FastAPI) -> None:
         "/plugins.json",
         tags=["integration"],
         summary="AstrBot 插件源",
-        description="返回 AstrBot 插件市场的完整插件源数据（机器可读格式）。无需登录。",
+        description="返回 AstrBot 插件市场的完整插件源数据（Schema Version 1，含 $meta 与 author/name 键）。无需登录。",
     )
     async def astrbot_plugin_source(request: Request) -> dict[str, dict[str, Any]]:
-        return build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
+        return await build_astrbot_plugin_source_for_request(request)
 
     @app.get(
         "/plugins-md5.json",
@@ -1181,13 +1195,13 @@ def register_routes(app: FastAPI) -> None:
         description="返回插件源数据的 MD5 校验值，用于增量更新检测。无需登录。",
     )
     async def astrbot_plugin_source_md5(request: Request) -> dict[str, str]:
-        feed = build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
+        feed = await build_astrbot_plugin_source_for_request(request)
         return {"md5": digest_plugin_source(feed)}
 
     @app.get("/v1/astrbot/plugins", tags=["integration"], summary="AstrBot 插件源 v1")
     @app.get("/v1/astrbot/plugins.json", tags=["integration"], summary="AstrBot 插件源 v1")
     async def astrbot_plugin_source_v1(request: Request) -> dict[str, dict[str, Any]]:
-        return build_astrbot_plugin_source(await list_public_plugins_with_artifacts(request))
+        return await build_astrbot_plugin_source_for_request(request)
 
     @app.get(
         "/v1/astrbot/plugins-md5.json",
@@ -1196,7 +1210,7 @@ def register_routes(app: FastAPI) -> None:
         description="返回 v1 插件源数据的 MD5 校验值。",
     )
     async def astrbot_plugin_source_v1_md5(request: Request) -> dict[str, str]:
-        feed = build_astrbot_plugin_source(await call_store(request, "list_public_plugins"))
+        feed = await build_astrbot_plugin_source_for_request(request)
         return {"md5": digest_plugin_source(feed)}
 
     @app.get(
@@ -1464,6 +1478,8 @@ def register_routes(app: FastAPI) -> None:
         await require_repository_access(request, user, plugin["repo"], admin_override=True)
         if "name" in patch:
             validate_plugin_name(patch["name"])
+        if "author" in patch:
+            validate_plugin_author(patch["author"])
         if "repo" in patch:
             validate_github_repo(patch["repo"])
             proof = await require_repository_access(
@@ -2954,6 +2970,7 @@ def validate_plugin_submission(payload: dict[str, Any], settings: Settings | Non
         if not payload.get(field):
             raise error(400, "Missing required plugin fields")
     validate_plugin_name(payload["name"])
+    validate_plugin_author(payload["author"])
     validate_github_repo(payload["repo"])
     payload["category"] = validate_plugin_category(payload.get("category", ""))
     validate_plugin_tag_count(payload.get("tags") or [], settings)
@@ -2973,6 +2990,23 @@ def validate_plugin_category(value: Any) -> str:
 def validate_plugin_tag_count(tags: list[str], settings: Settings | None = None) -> None:
     if settings and settings.max_plugin_tags and len(tags) > settings.max_plugin_tags:
         raise error(400, f"Plugin can have at most {settings.max_plugin_tags} tags")
+
+
+def has_ascii_control_chars(value: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+
+
+def is_valid_plugin_author(author: str) -> bool:
+    text = author.strip()
+    return bool(text) and "/" not in text and not has_ascii_control_chars(text)
+
+
+def validate_plugin_author(author: str) -> None:
+    if not is_valid_plugin_author(author or ""):
+        raise error(
+            400,
+            "Plugin author must be non-empty and cannot contain '/' or control characters",
+        )
 
 
 def validate_plugin_name(name: str) -> None:
@@ -3568,6 +3602,7 @@ async def fetch_plugin_github_metadata(
             )
             if not repository:
                 return {}
+            default_branch = str(repository.get("default_branch") or "main").strip() or "main"
             metadata = await fetch_github_plugin_metadata_files(
                 client,
                 owner,
@@ -3575,14 +3610,65 @@ async def fetch_plugin_github_metadata(
                 headers,
                 store=status_store,
             )
-            logo = await fetch_github_plugin_logo_url(
+            root_entries = await fetch_github_repo_directory(
                 client,
                 owner,
                 repo_name,
-                repository.get("default_branch") or "main",
+                "",
                 headers,
                 store=status_store,
             )
+            if root_entries is not None:
+                logo = github_root_file_raw_url(
+                    owner,
+                    repo_name,
+                    default_branch,
+                    root_entries,
+                    ("logo.png",),
+                )
+                readme_url = github_root_file_raw_url(
+                    owner,
+                    repo_name,
+                    default_branch,
+                    root_entries,
+                    README_CANDIDATES,
+                    fallback_lower_names=("readme.md", "readme"),
+                )
+                changelog_url = github_root_file_raw_url(
+                    owner,
+                    repo_name,
+                    default_branch,
+                    root_entries,
+                    CHANGELOG_CANDIDATES,
+                    fallback_lower_names=("changelog.md", "changelog"),
+                )
+                has_astrbot_plugin_dir = any(
+                    entry.get("type") == "dir" and entry.get("name") == ".astrbot-plugin"
+                    for entry in root_entries
+                )
+                i18n: dict[str, dict[str, dict[str, str]]] | None = (
+                    await fetch_github_plugin_i18n(
+                        client,
+                        owner,
+                        repo_name,
+                        headers,
+                        store=status_store,
+                    )
+                    if has_astrbot_plugin_dir
+                    else {}
+                )
+            else:
+                logo = await fetch_github_plugin_logo_url(
+                    client,
+                    owner,
+                    repo_name,
+                    default_branch,
+                    headers,
+                    store=status_store,
+                )
+                readme_url = ""
+                changelog_url = ""
+                i18n = None
     except httpx.HTTPError as exc:
         raise GithubMetadataError("GitHub metadata fetch failed", 502) from exc
     payload: dict[str, Any] = {
@@ -3593,7 +3679,12 @@ async def fetch_plugin_github_metadata(
         value = normalize_plugin_metadata_field(field, metadata.get(field))
         if has_metadata_value(value):
             payload[field] = value
-    if logo:
+    if root_entries is not None:
+        payload["logo"] = logo
+        payload["readme_url"] = readme_url
+        payload["changelog_url"] = changelog_url
+        payload["i18n"] = i18n or {}
+    elif logo:
         payload["logo"] = logo
     return payload
 
@@ -3807,6 +3898,140 @@ async def fetch_github_plugin_metadata_files(
     return {}
 
 
+async def fetch_github_repo_directory(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    path: str,
+    headers: dict[str, str],
+    store: Any | None = None,
+) -> list[dict[str, Any]] | None:
+    suffix = f"/{quote(path.strip('/'), safe='/')}" if path.strip("/") else ""
+    response = await github_get(
+        client,
+        f"https://api.github.com/repos/{owner}/{repo}/contents{suffix}",
+        headers,
+        store=store,
+    )
+    raise_for_github_rate_limit(response)
+    if response.status_code != 200:
+        return None
+    data = response.json()
+    if not isinstance(data, list):
+        return None
+    return [entry for entry in data if isinstance(entry, dict)]
+
+
+def github_raw_file_url(owner: str, repo: str, default_branch: str, filename: str) -> str:
+    branch = quote(default_branch.strip() or "main", safe="/")
+    path = quote(filename.lstrip("/"), safe="/")
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+
+
+def github_root_file_raw_url(
+    owner: str,
+    repo: str,
+    default_branch: str,
+    entries: list[dict[str, Any]],
+    candidates: tuple[str, ...],
+    *,
+    fallback_lower_names: tuple[str, ...] = (),
+) -> str:
+    files = {
+        str(entry.get("name") or ""): str(entry.get("name") or "")
+        for entry in entries
+        if entry.get("type") == "file" and entry.get("name")
+    }
+    for candidate in candidates:
+        if candidate in files:
+            return github_raw_file_url(owner, repo, default_branch, files[candidate])
+    if fallback_lower_names:
+        lower_files = {name.lower(): name for name in files}
+        for lower_name in fallback_lower_names:
+            if lower_name in lower_files:
+                return github_raw_file_url(owner, repo, default_branch, lower_files[lower_name])
+    return ""
+
+
+async def fetch_github_plugin_i18n(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    headers: dict[str, str],
+    store: Any | None = None,
+) -> dict[str, dict[str, dict[str, str]]]:
+    entries = await fetch_github_repo_directory(
+        client,
+        owner,
+        repo,
+        ".astrbot-plugin/i18n",
+        headers,
+        store=store,
+    )
+    if not entries:
+        return {}
+    raw_i18n: dict[str, Any] = {}
+    fetched = 0
+    for entry in sorted(entries, key=lambda item: str(item.get("name") or "")):
+        if fetched >= PLUGIN_I18N_MAX_FILES:
+            break
+        if entry.get("type") != "file":
+            continue
+        filename = str(entry.get("name") or "")
+        if not filename.lower().endswith(".json"):
+            continue
+        locale = filename[:-5]
+        if not PLUGIN_I18N_LOCALE_PATTERN.fullmatch(locale):
+            continue
+        if parse_int(entry.get("size"), 0) > PLUGIN_I18N_MAX_BYTES:
+            continue
+        fetched += 1
+        response = await github_get(
+            client,
+            f"https://api.github.com/repos/{owner}/{repo}/contents/.astrbot-plugin/i18n/{quote(filename, safe='')}",
+            headers,
+            store=store,
+        )
+        raise_for_github_rate_limit(response)
+        if response.status_code != 200:
+            continue
+        data = response.json()
+        content = data.get("content") if isinstance(data, dict) else ""
+        if not isinstance(content, str) or not content:
+            continue
+        try:
+            raw_bytes = base64.b64decode(re.sub(r"\s+", "", content))
+            if len(raw_bytes) > PLUGIN_I18N_MAX_BYTES:
+                continue
+            parsed = json.loads(raw_bytes.decode("utf-8-sig"))
+        except (ValueError, TypeError, UnicodeDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            raw_i18n[locale] = parsed
+    return normalize_plugin_i18n(raw_i18n)
+
+
+def normalize_plugin_i18n(value: Any) -> dict[str, dict[str, dict[str, str]]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, dict[str, str]]] = {}
+    for raw_locale, locale_data in value.items():
+        locale = str(raw_locale or "").strip()
+        if not PLUGIN_I18N_LOCALE_PATTERN.fullmatch(locale) or not isinstance(locale_data, dict):
+            continue
+        raw_metadata = locale_data.get("metadata")
+        if not isinstance(raw_metadata, dict):
+            continue
+        metadata_entry = {
+            field: raw_metadata[field].strip()
+            for field in PLUGIN_I18N_METADATA_FIELDS
+            if isinstance(raw_metadata.get(field), str) and raw_metadata[field].strip()
+        }
+        if metadata_entry:
+            normalized[locale] = {"metadata": metadata_entry}
+    return dict(sorted(normalized.items()))
+
+
 async def fetch_github_plugin_logo_url(
     client: httpx.AsyncClient,
     owner: str,
@@ -3823,7 +4048,7 @@ async def fetch_github_plugin_logo_url(
     )
     raise_for_github_rate_limit(response)
     if response.status_code == 200:
-        return f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/logo.png"
+        return github_raw_file_url(owner, repo, default_branch, "logo.png")
     return ""
 
 
@@ -3896,6 +4121,9 @@ def normalize_plugin_metadata_field(field: str, value: Any) -> Any:
         return ""
     if field == "name" and value and not PLUGIN_NAME_PATTERN.match(str(value)):
         return ""
+    if field == "author":
+        cleaned = value.strip()
+        return cleaned if is_valid_plugin_author(cleaned) else ""
     if field == "category":
         category = normalize_plugin_category(value)
         return category if category in OFFICIAL_PLUGIN_CATEGORIES else ""
@@ -5359,14 +5587,115 @@ def parse_int(value: str | int | None, default: int) -> int:
         return default
 
 
-def build_astrbot_plugin_source(plugins: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    feed: dict[str, dict[str, Any]] = {}
-    for plugin in plugins:
-        name = str(plugin.get("name") or plugin.get("id") or "").strip()
-        if not name:
+def is_https_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    parsed = urlparse(text)
+    return parsed.scheme.lower() == "https" and bool(parsed.netloc)
+
+
+def parse_utc_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    parsed = parse_iso_datetime(value.strip())
+    if parsed is None:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def normalize_iso_timestamp(value: Any) -> str:
+    parsed = parse_utc_datetime(value)
+    return isoformat_utc(parsed) if parsed else ""
+
+
+def astrbot_plugin_key(plugin: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    author = str(plugin.get("author") or plugin.get("owner_github_login") or "").strip()
+    name = str(plugin.get("name") or "").strip()
+    if (
+        not name
+        or not is_valid_plugin_author(author)
+        or "/" in name
+        or has_ascii_control_chars(name)
+    ):
+        return None
+    return f"{author}/{name}", author, name
+
+
+def build_astrbot_market_meta(
+    settings: Settings | None,
+    plugins: list[dict[str, Any]],
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "schema_version": ASTRBOT_MARKET_SCHEMA_VERSION,
+        "version": ASTRBOT_MARKET_SPEC_VERSION,
+    }
+    if settings is not None:
+        if settings.site_name.strip():
+            meta["name"] = settings.site_name.strip()
+        if settings.site_description.strip():
+            meta["description"] = settings.site_description.strip()
+        if is_https_url(settings.web_url):
+            meta["homepage"] = settings.web_url.strip().rstrip("/")
+    timestamps = [
+        parsed
+        for plugin in plugins
+        if (parsed := parse_utc_datetime(plugin.get("updated_at"))) is not None
+    ]
+    if timestamps:
+        meta["updated_at"] = isoformat_utc(max(timestamps))
+    return meta
+
+
+async def build_astrbot_plugin_source_for_request(
+    request: Request,
+) -> dict[str, dict[str, Any]]:
+    settings = await runtime_settings_for_app(request.app)
+    plugins = await list_public_plugins_with_artifacts(request)
+    return build_astrbot_plugin_source(plugins, settings=settings)
+
+
+def build_astrbot_plugin_source(
+    plugins: list[dict[str, Any]],
+    *,
+    settings: Settings | None = None,
+) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    seen_lower_ids: set[str] = set()
+    included_plugins: list[dict[str, Any]] = []
+    ordered_plugins = sorted(
+        plugins,
+        key=lambda item: (
+            str(item.get("created_at") or ""),
+            str(item.get("id") or ""),
+        ),
+    )
+    for plugin in ordered_plugins:
+        identity = astrbot_plugin_key(plugin)
+        if identity is None:
+            LOGGER.warning(
+                "Skipping plugin with invalid AstrBot identity in feed: id=%s",
+                plugin.get("id"),
+            )
             continue
-        feed[str(plugin.get("id") or name)] = format_astrbot_plugin(plugin, name)
-    return dict(sorted(feed.items()))
+        plugin_key, author, name = identity
+        lower_key = plugin_key.lower()
+        if lower_key in seen_lower_ids:
+            LOGGER.warning(
+                "Skipping duplicate case-insensitive AstrBot plugin_id in feed: %s (id=%s)",
+                plugin_key,
+                plugin.get("id"),
+            )
+            continue
+        seen_lower_ids.add(lower_key)
+        included_plugins.append(plugin)
+        entries[plugin_key] = format_astrbot_plugin(plugin, name, author=author)
+    feed: dict[str, dict[str, Any]] = {
+        "$meta": build_astrbot_market_meta(settings, included_plugins),
+    }
+    for key in sorted(entries):
+        feed[key] = entries[key]
+    return feed
 
 
 async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str, Any]]:
@@ -5387,15 +5716,12 @@ async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str,
     for plugin in plugins:
         publication = publications.get(str(plugin.get("id") or ""), {})
         feed_version = str(
-            plugin.get("repo_version")
-            or plugin.get("version")
-            or publication.get("version")
-            or "1.0.0"
-        )
-        published_version = str(publication.get("version") or "")
+            plugin.get("repo_version") or plugin.get("version") or publication.get("version") or ""
+        ).strip()
+        published_version = str(publication.get("version") or "").strip()
         published = publication.get("publication_status") == "published"
         gated_download_url = (
-            str(publication.get("download_url") or "")
+            str(publication.get("download_url") or "").strip()
             if cdn_enabled(plugin) and published and versions_match(feed_version, published_version)
             else ""
         )
@@ -5425,46 +5751,83 @@ def public_market_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def format_astrbot_plugin(plugin: dict[str, Any], name: str) -> dict[str, Any]:
+def format_astrbot_plugin(
+    plugin: dict[str, Any],
+    name: str,
+    *,
+    author: str | None = None,
+) -> dict[str, Any]:
+    resolved_author = str(
+        author
+        if author is not None
+        else plugin.get("author") or plugin.get("owner_github_login") or ""
+    ).strip()
     feed_version = str(
-        plugin.get("repo_version")
-        or plugin.get("version")
-        or plugin.get("published_version")
-        or "1.0.0"
-    )
-    download_url = str(plugin.get("download_url") or "") if cdn_enabled(plugin) else ""
+        plugin.get("repo_version") or plugin.get("version") or plugin.get("published_version") or ""
+    ).strip()
+    download_url = str(plugin.get("download_url") or "").strip() if cdn_enabled(plugin) else ""
     if plugin.get("_artifact_publication_checked"):
-        published_version = str(plugin.get("published_version") or "")
+        published_version = str(plugin.get("published_version") or "").strip()
         matches = versions_match(feed_version, published_version)
         published = plugin.get("artifact_publication_status") == "published"
         download_url = (
-            str(plugin.get("artifact_download_url") or "")
+            str(plugin.get("artifact_download_url") or "").strip()
             if cdn_enabled(plugin) and matches and published
             else ""
         )
-    return {
+    record: dict[str, Any] = {
         "name": name,
-        "market_plugin_id": str(plugin.get("id") or name),
-        "display_name": plugin.get("display_name") or "",
-        "desc": plugin.get("desc") or "",
-        "short_desc": plugin.get("short_desc") or "",
-        "author": plugin.get("author") or plugin.get("owner_github_login") or "",
-        "repo": plugin.get("repo") or "",
-        "social_link": plugin.get("social_link") or "",
-        "tags": plugin.get("tags") if isinstance(plugin.get("tags"), list) else [],
-        "stars": int(plugin.get("stars") or 0),
-        "updated_at": plugin.get("updated_at") or "",
+        "display_name": str(plugin.get("display_name") or "").strip(),
+        "desc": str(plugin.get("desc") or "").strip(),
+        "short_desc": str(plugin.get("short_desc") or "").strip(),
+        "author": resolved_author,
+        "repo": str(plugin.get("repo") or "").strip().rstrip("/"),
+        "tags": [
+            str(tag).strip()
+            for tag in (plugin.get("tags") if isinstance(plugin.get("tags"), list) else [])
+            if str(tag).strip()
+        ],
+        "stars": max(0, parse_int(plugin.get("stars"), 0)),
         "version": feed_version,
-        "logo": plugin.get("logo") or "",
         "pinned": bool(plugin.get("pinned")),
-        "download_url": download_url,
-        "i18n": plugin.get("i18n") if isinstance(plugin.get("i18n"), dict) else {},
-        "astrbot_version": plugin.get("astrbot_version") or "",
-        "category": plugin.get("category") or "",
-        "support_platforms": plugin.get("support_platforms")
-        if isinstance(plugin.get("support_platforms"), list)
-        else [],
+        "astrbot_version": str(plugin.get("astrbot_version") or "").strip(),
+        "category": str(plugin.get("category") or "").strip(),
+        "support_platforms": [
+            str(platform).strip()
+            for platform in (
+                plugin.get("support_platforms")
+                if isinstance(plugin.get("support_platforms"), list)
+                else []
+            )
+            if str(platform).strip()
+        ],
     }
+    updated_at = normalize_iso_timestamp(plugin.get("updated_at"))
+    if updated_at:
+        record["updated_at"] = updated_at
+    social_link = str(plugin.get("social_link") or "").strip()
+    if is_https_url(social_link):
+        record["social_link"] = social_link
+    logo = str(plugin.get("logo") or "").strip()
+    if logo:
+        record["logo"] = logo
+    if is_https_url(download_url):
+        record["download_url"] = download_url
+    readme_url = str(plugin.get("readme_url") or "").strip()
+    if is_https_url(readme_url):
+        record["readme_url"] = readme_url
+    changelog_url = str(plugin.get("changelog_url") or "").strip()
+    if is_https_url(changelog_url):
+        record["changelog_url"] = changelog_url
+    i18n = normalize_plugin_i18n(plugin.get("i18n"))
+    if i18n:
+        record["i18n"] = i18n
+    download_count = plugin.get("download_count")
+    if download_count is not None and not isinstance(download_count, bool):
+        parsed_count = parse_int(download_count, -1)
+        if parsed_count >= 0:
+            record["download_count"] = parsed_count
+    return record
 
 
 def versions_match(left: str, right: str) -> bool:

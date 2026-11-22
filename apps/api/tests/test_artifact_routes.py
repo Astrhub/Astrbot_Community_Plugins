@@ -56,10 +56,20 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         )
         assert repeated.status_code == 200
         assert repeated.json()["plugin"]["display_name"] == "Demo"
-        same_name = client.post(
+        same_author_name = client.post(
             "/v1/plugins/registrations",
             headers={"x-dev-github-login": "mallory"},
             json={**registration, "repo": "https://github.com/mallory/astrbot_plugin_demo"},
+        )
+        assert same_author_name.status_code == 409
+        same_name = client.post(
+            "/v1/plugins/registrations",
+            headers={"x-dev-github-login": "mallory"},
+            json={
+                **registration,
+                "author": "Mallory",
+                "repo": "https://github.com/mallory/astrbot_plugin_demo",
+            },
         )
         assert same_name.status_code == 200
         assert same_name.json()["plugin"]["id"] != plugin["id"]
@@ -191,8 +201,9 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         asyncio.run(app.state.artifact_runtime.job_runner.run_once())
 
         feed = client.get("/plugins.json").json()
-        assert feed["astrbot_plugin_demo"]["version"] == "v1.0.0"
-        assert feed["astrbot_plugin_demo"]["download_url"].startswith(
+        plugin_key = f"{plugin['author']}/{plugin['name']}"
+        assert feed[plugin_key]["version"] == "v1.0.0"
+        assert feed[plugin_key]["download_url"].startswith(
             f"https://cdn.example.test/{plugin['owner_user_id']}/astrbot_plugin_demo/v1.0.0/"
         )
         notifications = store.list_notifications(plugin["owner_user_id"])
@@ -201,8 +212,8 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
 
         store.update_plugin_metadata(plugin["id"], {"repo_version": "v1.1.0", "version": "v1.1.0"})
         changed_feed = client.get("/plugins.json").json()
-        assert changed_feed["astrbot_plugin_demo"]["version"] == "v1.1.0"
-        assert changed_feed["astrbot_plugin_demo"]["download_url"] == ""
+        assert changed_feed[plugin_key]["version"] == "v1.1.0"
+        assert "download_url" not in changed_feed[plugin_key]
 
         revoke = client.post(
             f"/v1/admin/plugins/{plugin['id']}/revoke-release",
@@ -211,7 +222,7 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         )
         assert revoke.status_code == 200
         assert revoke.json()["artifact"]["publication_status"] == "revoking"
-        assert "astrbot_plugin_demo" not in client.get("/plugins.json").json()
+        assert plugin_key not in client.get("/plugins.json").json()
         runtime = app.state.artifact_runtime
         revoke_job = next(
             job
@@ -228,7 +239,7 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         asyncio.run(runtime.job_runner.run_once())
         failed_revoke = client.get(f"/v1/artifacts/{artifact_id}", headers=owner_headers).json()
         assert failed_revoke["artifact"]["publication_status"] == "revoke_failed"
-        assert "astrbot_plugin_demo" not in client.get("/plugins.json").json()
+        assert plugin_key not in client.get("/plugins.json").json()
 
         runtime.storage.revoke_published = original_revoke
         retry_revoke = client.post(
@@ -241,7 +252,7 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         revoked = client.get(f"/v1/artifacts/{artifact_id}", headers=owner_headers).json()
         assert revoked["artifact"]["publication_status"] == "revoked"
         assert any(item["action"] == "revoke" for item in revoked["decisions"])
-        assert "astrbot_plugin_demo" not in client.get("/plugins.json").json()
+        assert plugin_key not in client.get("/plugins.json").json()
 
 
 def test_admin_can_idempotently_request_artifact_changes(tmp_path: Path) -> None:
