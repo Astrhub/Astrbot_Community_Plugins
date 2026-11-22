@@ -582,8 +582,15 @@ function currentReadmeSnapshot() {
   };
 }
 
+function sanitizeRenderedHtml(html) {
+  return DOMPurify.sanitize(String(html || ""), {
+    USE_PROFILES: { html: true },
+    ADD_ATTR: ["target"],
+  });
+}
+
 function setReadmeDocument(snapshot) {
-  readmeHtml.value = snapshot.html || "";
+  readmeHtml.value = sanitizeRenderedHtml(snapshot.html || "");
   readmeContext.value = snapshot.context ? { ...snapshot.context } : null;
   readmeView.value = {
     kind: "readme",
@@ -894,12 +901,16 @@ function renderTextFileHtml(text, path) {
 }
 
 function renderImageFileHtml(imageUrl, path) {
+  const safeUrl = String(imageUrl || "").trim();
+  if (!/^https?:\/\//i.test(safeUrl)) {
+    throw new Error("不支持的图片地址协议");
+  }
   const wrapper = document.createElement("div");
   const note = document.createElement("p");
   note.className = "markdown-file-note";
   note.textContent = "图片预览";
   const image = document.createElement("img");
-  image.src = imageUrl;
+  image.src = safeUrl;
   image.alt = path;
   image.loading = "lazy";
   wrapper.append(note, image);
