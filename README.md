@@ -232,11 +232,11 @@ docker compose build
 
 ### CI/CD
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) 在 `push` / `pull_request` 时先运行变更检测并按需执行对应检查，不包含自动部署步骤：
+[.github/workflows/ci.yml](.github/workflows/ci.yml) 仅在代码或部署配置改动时触发，并按变更类型运行对应检查，不包含自动部署步骤：
 
 - 仅后端或部署配置改动（`apps/api/**`、`Dockerfile*`、`docker-compose*.yml`、`deploy/**`）：运行 `Python API`（`ruff check` + `pytest`）。
 - 仅前端改动（`apps/market-web/**`）：运行 `Vue market`（`vp check` + `vp test` + `vp build`）。
-- 纯文档改动（如 `README.md`、`SECURITY.md`、`docs/**`）：仅完成变更检测，跳过 `Python API` 与 `Vue market` 检查。
+- 纯文档改动（如 `README.md`、`SECURITY.md`、`docs/**`、`LICENSE`）：不触发 `Code Quality Checks` 工作流。
 - 修改 `.github/workflows/ci.yml` 本身、进入 `merge_group` 或手动触发（`workflow_dispatch`）：同时运行 `Python API` 与 `Vue market` 全部检查。
 
 ## 配置参考
