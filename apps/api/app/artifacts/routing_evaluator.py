@@ -21,6 +21,10 @@ _DETERMINISTIC_GATE_TYPES = {
     ReviewPolicyStage.YARA.value,
     ReviewPolicyStage.DEPENDENCY.value,
 }
+_INCREMENTAL_SCOPE_STAGES = {
+    ReviewPolicyStage.DIFF.value,
+    ReviewPolicyStage.IMPORT_GRAPH.value,
+}
 
 
 class RouteKind(StrEnum):
@@ -131,7 +135,10 @@ class RoutingEvaluator:
         incomplete = [
             item
             for item in units
-            if not item.complete and item not in degraded and item not in blocked
+            if not item.complete
+            and item not in degraded
+            and item not in blocked
+            and (policy.llm.enabled or item.run_type not in _INCREMENTAL_SCOPE_STAGES)
         ]
         deterministic_blockers = [
             item

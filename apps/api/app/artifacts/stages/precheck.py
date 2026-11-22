@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -85,11 +86,21 @@ class PrecheckStage:
                     "sha256_mismatch",
                     "Quarantine artifact digest changed",
                 )
+            snapshot = context.artifact.get("submitted_by_snapshot")
+            github_release = (
+                snapshot.get("github_release") if isinstance(snapshot, Mapping) else None
+            )
+            expected_release_tag = (
+                str(github_release.get("tag_name") or "").strip()
+                if isinstance(github_release, Mapping)
+                else ""
+            )
             try:
                 result = await asyncio.to_thread(
                     prechecker.inspect,
                     archive_path,
                     expected_repo=str(context.artifact["source_repo"]),
+                    expected_release_tag=expected_release_tag,
                 )
             except PrecheckError as exc:
                 await context.repository.complete_review_run(

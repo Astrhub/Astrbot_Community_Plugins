@@ -32,7 +32,12 @@ from .artifacts import build_artifact_runtime
 from .artifacts.archive import PrecheckError, parse_plugin_metadata_bytes
 from .artifacts.routes import build_artifact_router
 from .cdn import CdnSubscriptions, cdn_enabled, process_cdn_reviews
-from .artifacts.github_source import ResolvedGithubSource, COMMIT_PATTERN
+from .artifacts.github_source import (
+    COMMIT_PATTERN,
+    ResolvedGithubSource,
+    is_formal_release,
+    select_release_zip_asset,
+)
 from .auth import (
     Role,
     can_configure_plugin_cdn,
@@ -389,13 +394,17 @@ def register_routes(app: FastAPI) -> None:
         "/v1/site",
         tags=["system"],
         summary="获取站点配置",
-        description="返回站点名称、图标、描述、认证方式、市场功能开关等公开配置。",
+        description="返回站点名称、图标、描述、初始化状态、认证方式、市场功能开关等公开配置。",
     )
-    async def site_config(request: Request) -> dict[str, Any]:
+    async def site_config(request: Request, response: Response) -> dict[str, Any]:
         settings = get_settings(request)
         runtime_config = await effective_runtime_config(request)
+        setup_required = settings.is_setup_required()
+        if setup_required:
+            response.headers["Cache-Control"] = "private, no-store"
         return {
             **get_site_config(settings, runtime_config),
+            "setup_required": setup_required,
             "auth": get_public_auth_config(settings, runtime_config),
             "market": get_public_market_config(settings, runtime_config),
         }
@@ -3149,12 +3158,35 @@ async def fetch_publication_repository(app: FastAPI, repo: str) -> dict[str, Any
 
 async def resolve_cdn_source(app: FastAPI, repository: Mapping[str, Any]) -> ResolvedGithubSource:
     owner, repo_name = str(repository["full_name"]).split("/", 1)
+    canonical = "https://github.com/" + str(repository["full_name"])
+    release = await _fetch_cdn_github_json_optional(app, canonical, suffix="/releases/latest")
+    if release and is_formal_release(release):
+        tag_name = str(release["tag_name"]).strip()
+        commit = await _fetch_cdn_github_json(
+            app, canonical, suffix="/commits/" + quote(tag_name, safe="")
+        )
+        sha = str(commit.get("sha") or "")
+        if not COMMIT_PATTERN.fullmatch(sha):
+            raise HTTPException(
+                503, {"code": "github_commit_invalid", "error": "GitHub 未返回有效提交"}
+            )
+        selected = select_release_zip_asset(release, owner=owner, repo_name=repo_name)
+        download_url, asset_name = selected or ("", "")
+        return ResolvedGithubSource(
+            canonical,
+            owner,
+            repo_name,
+            tag_name,
+            sha,
+            download_url=download_url,
+            release_tag=tag_name,
+            release_asset_name=asset_name,
+        )
     branch = str(repository.get("default_branch") or "")
     if not branch:
         raise HTTPException(
             409, {"code": "github_default_branch_missing", "error": "仓库缺少默认分支"}
         )
-    canonical = "https://github.com/" + str(repository["full_name"])
     commit = await _fetch_cdn_github_json(
         app, canonical, suffix="/commits/" + quote(branch, safe="")
     )
@@ -3167,6 +3199,20 @@ async def resolve_cdn_source(app: FastAPI, repository: Mapping[str, Any]) -> Res
 
 
 async def _fetch_cdn_github_json(app: FastAPI, repo: str, *, suffix: str = "") -> dict[str, Any]:
+    data = await _fetch_cdn_github_json_request(app, repo, suffix=suffix, allow_not_found=False)
+    assert data is not None
+    return data
+
+
+async def _fetch_cdn_github_json_optional(
+    app: FastAPI, repo: str, *, suffix: str
+) -> dict[str, Any] | None:
+    return await _fetch_cdn_github_json_request(app, repo, suffix=suffix, allow_not_found=True)
+
+
+async def _fetch_cdn_github_json_request(
+    app: FastAPI, repo: str, *, suffix: str = "", allow_not_found: bool = False
+) -> dict[str, Any] | None:
     settings = await runtime_settings_for_app(app)
     options = await load_system_options(app.state.store)
     statuses = parse_github_api_token_statuses(options.get("GITHUB_API_TOKEN_STATUS", ""))
@@ -3191,6 +3237,8 @@ async def _fetch_cdn_github_json(app: FastAPI, repo: str, *, suffix: str = "") -
         ) from None
     await record_github_api_token_response(app.state.store, token, response)
     if response.status_code == 404:
+        if allow_not_found:
+            return None
         raise HTTPException(
             403, {"code": "github_repository_unavailable", "error": "仓库不存在或站点无法访问"}
         )

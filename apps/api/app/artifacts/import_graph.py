@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
+from .archive import is_excluded_review_path
 from .diff import ArtifactManifestFile, validate_artifact_manifest
 from .models import ArtifactErrorCode
 from .repository import ArtifactRepository
@@ -272,7 +273,11 @@ class ImportGraphService:
         review_paths.update(finding_paths)
         review_paths.update(path for path in forced if path in current_by_path)
         if reasons:
-            review_paths = {item.path for item in current_files if item.is_text}
+            review_paths = {
+                item.path
+                for item in current_files
+                if item.is_text and not is_excluded_review_path(item.path)
+            }
         ordered_review_paths = sorted(review_paths)
         review_scope_complete = len(ordered_review_paths) <= self.limits.max_review_paths
         if not review_scope_complete:
@@ -328,7 +333,10 @@ class ImportGraphService:
             "forced_paths": sorted(path for path in forced if path in current_by_path),
             "force_full_runtime": force_full_runtime,
             "force_full_dependency": force_full_dependency,
-            "python_files": sum(_is_python(item) for item in current_files),
+            "python_files": sum(
+                _is_python(item) and not is_excluded_review_path(item.path)
+                for item in current_files
+            ),
             "edge_count": len(current_analysis.edges),
             "local_edges": sum(bool(item.get("target_file_id")) for item in current_analysis.edges),
             "external_edges": sum(
@@ -395,7 +403,9 @@ class ImportGraphService:
         removed_modules: frozenset[str],
         absolute_prefixes: frozenset[str],
     ) -> _Analysis:
-        python_files = tuple(item for item in files if _is_python(item))
+        python_files = tuple(
+            item for item in files if _is_python(item) and not is_excluded_review_path(item.path)
+        )
         module_index = _module_index(python_files)
         file_reasons: dict[str, list[str]] = defaultdict(list)
         reasons: list[str] = []

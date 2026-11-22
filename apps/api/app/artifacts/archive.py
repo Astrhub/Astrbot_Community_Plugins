@@ -65,6 +65,64 @@ LANGUAGE_BY_SUFFIX = {
     ".yaml": "yaml",
     ".yml": "yaml",
 }
+_EXCLUDED_TEST_DIRS = frozenset({"tests", "test", "__tests__"})
+_EXCLUDED_TEST_SUFFIXES = (
+    "_test.py",
+    ".test.js",
+    ".test.ts",
+    ".test.jsx",
+    ".test.tsx",
+    ".spec.js",
+    ".spec.ts",
+    ".spec.jsx",
+    ".spec.tsx",
+)
+
+
+def review_exclusion_reason(path: str) -> str | None:
+    """Return an exclusion reason for test or GitHub CI files, or None for plugin runtime files."""
+    parts = [part.casefold() for part in PurePosixPath(str(path or "")).parts]
+    if not parts:
+        return None
+    if parts[0] == ".github":
+        return "github_ci"
+    if any(part in _EXCLUDED_TEST_DIRS for part in parts[:-1]):
+        return "test_file"
+    filename = parts[-1]
+    if filename == "conftest.py":
+        return "test_file"
+    if filename.startswith("test_") and filename.endswith(".py"):
+        return "test_file"
+    if filename.endswith(_EXCLUDED_TEST_SUFFIXES):
+        return "test_file"
+    return None
+
+
+def is_excluded_review_path(path: str) -> bool:
+    return review_exclusion_reason(path) is not None
+
+
+def validate_release_version(
+    release_tag: str,
+    *,
+    package_version: str,
+    normalized_package_version: str,
+) -> None:
+    tag = str(release_tag or "").strip()
+    if not tag:
+        return
+    try:
+        normalized_tag = normalize_version(tag)
+    except PrecheckError as exc:
+        raise PrecheckError(
+            "release_version_mismatch",
+            f"GitHub Release 标签（{tag}）不是有效版本号，无法与插件包 metadata.yaml 版本（{package_version}）匹配",
+        ) from exc
+    if normalized_tag != normalized_package_version:
+        raise PrecheckError(
+            "release_version_mismatch",
+            f"GitHub Release 版本（{tag}）与插件包 metadata.yaml 版本（{package_version}）不一致",
+        )
 
 
 class PrecheckError(ValueError):
@@ -112,7 +170,13 @@ class ArchivePrechecker:
     def __init__(self, settings: ArtifactSettings) -> None:
         self.settings = settings
 
-    def inspect(self, archive_path: Path, *, expected_repo: str) -> PrecheckResult:
+    def inspect(
+        self,
+        archive_path: Path,
+        *,
+        expected_repo: str,
+        expected_release_tag: str = "",
+    ) -> PrecheckResult:
         try:
             archive = zipfile.ZipFile(archive_path)
         except (zipfile.BadZipFile, OSError) as exc:
@@ -207,6 +271,11 @@ class ArchivePrechecker:
                 raise PrecheckError("entrypoint_missing", "插件包根目录缺少 main.py")
             metadata = parse_plugin_metadata_bytes(content_by_path.get(metadata_paths[0], b""))
             version, normalized_version = _validate_metadata(metadata, expected_repo=expected_repo)
+            validate_release_version(
+                expected_release_tag,
+                package_version=version,
+                normalized_package_version=normalized_version,
+            )
             tree_sha256 = _tree_digest(members)
             return PrecheckResult(
                 metadata=metadata,

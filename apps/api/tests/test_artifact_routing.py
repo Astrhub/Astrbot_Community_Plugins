@@ -266,7 +266,7 @@ def test_incomplete_or_drifted_inputs_never_auto_approve(
     assert expected_reason in result.reason_codes
 
 
-def test_completed_import_graph_with_incomplete_coverage_requires_manual_review() -> None:
+def test_completed_import_graph_with_incomplete_coverage_only_blocks_when_llm_enabled() -> None:
     policy_data = _policy(auto_approve=True).model_dump(mode="json")
     policy_data["required_stages"] = ["static", "diff", "import_graph", "runtime"]
     runs = [
@@ -282,7 +282,8 @@ def test_completed_import_graph_with_incomplete_coverage_requires_manual_review(
             "coverage": {
                 "outcome": "completed",
                 "stage_name": "diff",
-                "complete": True,
+                "complete": False,
+                "reason": "diff_base_missing",
             },
         },
         {
@@ -303,13 +304,67 @@ def test_completed_import_graph_with_incomplete_coverage_requires_manual_review(
         },
     ]
 
-    result = _evaluate(
+    without_llm = _evaluate(
         policy=ReviewPolicyV1.model_validate(policy_data),
         runs=runs,
     )
+    assert without_llm.kind is RouteKind.AUTO_APPROVE
+    assert without_llm.reason_codes == ("all_auto_approve_gates_passed",)
 
-    assert result.kind is RouteKind.MANUAL_REVIEW
-    assert "required_stage_incomplete" in result.reason_codes
+    policy_with_llm = deepcopy(policy_data)
+    policy_with_llm["required_stages"] = [
+        "static",
+        "diff",
+        "import_graph",
+        "runtime",
+        "llm_package",
+        "llm_file",
+        "llm_summary",
+    ]
+    policy_with_llm["llm"] = {
+        "enabled": True,
+        "model": "review-model",
+        "max_tokens": 4096,
+        "max_cost_microusd": 100_000,
+        "input_cost_microusd_per_million_tokens": 1_000_000,
+        "output_cost_microusd_per_million_tokens": 4_000_000,
+    }
+    runs_with_llm = [
+        *runs,
+        *[
+            {
+                "id": f"run-{stage}",
+                "artifact_id": "artifact-routing-v1",
+                "type": stage,
+                "status": "succeeded",
+                "tool_name": "structured-llm",
+                "tool_version": "llm-v1",
+                "policy_version_id": POLICY_ID,
+                "coverage": {
+                    "outcome": "completed",
+                    "stage_name": stage,
+                    "complete": True,
+                },
+            }
+            for stage in ("llm_package", "llm_file", "llm_summary")
+        ],
+    ]
+    with_llm = _evaluate(
+        policy=ReviewPolicyV1.model_validate(policy_with_llm),
+        runs=runs_with_llm,
+    )
+    assert with_llm.kind is RouteKind.MANUAL_REVIEW
+    assert "required_stage_incomplete" in with_llm.reason_codes
+
+    degraded_runs = deepcopy(runs)
+    degraded_runs[2]["status"] = "failed"
+    degraded_runs[2]["coverage"]["outcome"] = "degraded"
+    degraded_without_llm = _evaluate(
+        policy=ReviewPolicyV1.model_validate(policy_data),
+        runs=degraded_runs,
+    )
+    assert degraded_without_llm.kind is RouteKind.MANUAL_REVIEW
+    assert "required_stage_degraded" in degraded_without_llm.reason_codes
 
 
 def test_fail_closed_policy_rejects_production_runtime_failure() -> None:

@@ -653,6 +653,14 @@ export const usePluginStore = defineStore("plugins", () => {
       if (!response.ok) return applySiteConfig(siteConfig.value);
       const config = applySiteConfig(data);
       writeCachedSiteConfig(config);
+      if (typeof data.setup_required === "boolean") {
+        setupStatus.value = {
+          ...setupStatus.value,
+          required: data.setup_required,
+          ...(data.setup_required ? {} : { missing: [], saved_setup: createDefaultSetupConfig() }),
+        };
+        return { ...config, setup_required: data.setup_required };
+      }
       return config;
     } catch {
       return applySiteConfig(siteConfig.value);

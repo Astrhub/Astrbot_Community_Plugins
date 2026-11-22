@@ -250,6 +250,7 @@ export interface SiteConfig {
   description: string;
   contact_email: string;
   docs_url: string;
+  setup_required?: boolean;
   auth: AuthConfig;
   market: MarketConfig;
 }

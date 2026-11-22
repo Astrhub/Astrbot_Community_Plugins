@@ -119,7 +119,10 @@ class RuntimeRunnerWorker:
             await self.queue.complete_result(work, result)
         except _LeaseLost:
             await self._abort_and_cleanup(work)
-            logger.warning("Runtime dispatch lease lost: %s", work.dispatch_id)
+            logger.warning(
+                "Runtime dispatch stopped because lease is no longer active (cancelled or reassigned): %s",
+                work.dispatch_id,
+            )
         except TimeoutError:
             await self._abort_and_cleanup(work)
             await self._complete_failure(
@@ -286,7 +289,10 @@ class RuntimeRunnerWorker:
             return
         try:
             removed = await self.executor.cleanup_orphans()
-            logger.info("Runtime orphan cleanup completed: removed=%d", removed)
+            if removed:
+                logger.info("Runtime orphan cleanup completed: removed=%d", removed)
+            else:
+                logger.debug("Runtime orphan cleanup completed: removed=0")
         except Exception as exc:
             logger.warning("Runtime orphan cleanup failed: %s", type(exc).__name__)
         finally:

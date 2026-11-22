@@ -11,6 +11,7 @@ from typing import Any
 from .models import JobStatus, JobType, ReviewRunStatus, ReviewStatus
 from .policy import ReviewPolicyStage, ReviewPolicyV1, parse_review_policy
 from .repository import ArtifactRepository
+from .static_scan import RULESET_VERSION
 from .runner_contract import runtime_dispatch_id
 
 ROUTING_STAGE_NAME = "routing"
@@ -315,7 +316,7 @@ class ReviewOrchestrator:
 
     def _tool_snapshot(self, stage: ReviewPolicyStage) -> StageToolSnapshot:
         if stage == ReviewPolicyStage.STATIC:
-            return self.tool_snapshots.get(stage) or StageToolSnapshot("p1.1")
+            return self.tool_snapshots.get(stage) or StageToolSnapshot(RULESET_VERSION)
         return self.tool_snapshots.get(stage) or StageToolSnapshot(
             "unconfigured",
             ready=False,
