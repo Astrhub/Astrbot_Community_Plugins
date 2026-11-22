@@ -1,122 +1,128 @@
 # AstrBot Community Plugins
 
-服务端驱动的 AstrBot 社区插件市场。本仓库托管市场前端、后端 API 与 API 契约；插件记录、评论、点赞、审核状态、用户账户与站点配置均存储在市场服务器（PostgreSQL）上，而非 GitHub。
+服务端驱动的 AstrBot 社区插件市场。仓库托管市场前端、FastAPI 后端、插件包审查链路与部署模板；插件记录、评论、点赞、审核状态、用户账户与站点配置均保存在市场服务端，不依赖 GitHub 作为业务数据库。
 
-- 同一个 FastAPI 服务同时提供**网站**、**市场 API** 和 **AstrBot 插件源**。
-- GitHub 仅作为身份来源（OAuth）与插件仓库元数据的抓取目标，不是插件数据的权威存储。
+- 同一个 FastAPI 服务同时对外提供 **Web 市场**、**REST API** 与 **AstrBot 插件源**（`/plugins.json`）。
+- 支持**完整社区模式**（PostgreSQL + Redis + 可选插件包审查与 CDN）与**本地自用单进程模式**（单文件 JSON 持久化，无需 PostgreSQL 和 Redis）。
+- GitHub 仅用于身份登录（OAuth）、仓库归属校验以及插件元数据与 Release 资产抓取。
 
 ## 功能特性
 
-- **浏览与检索**：插件卡片网格、关键词搜索、标签/分类筛选、多种排序（更新时间/星标/点赞/评论/随机）、模糊搜索、分页；插件详情弹窗内浏览 README 及仓库文件（Markdown 渲染、图片预览、目录导航、文本文件查看）。
-- **插件包与审核**：ZIP 或公开 GitHub 仓库被固定为不可变 artifact，先进入私有隔离区，再执行基础校验、静态扫描和人工复核；只有过审版本才会获得 CDN 链接。
-- **版本工作台**：`/plugin-workbench` 提供作者版本历史、结构化自动审查结果以及管理员待审队列、批准、拒绝、重试发布和安全下架。
-- **GitHub 元数据同步**：后台 worker 周期性抓取仓库 stars、README、版本等信息；支持多 API token 轮转应对速率限制；所有者与管理员可手动触发刷新。
-- **社区互动**：嵌套评论（支持 Markdown + 语法高亮）、插件与评论点赞、Giscus 评论集成；回复与点赞触发站内通知。
-- **身份与角色**：内部核心管理员（用户名/密码登录）+ GitHub OAuth 登录；三级角色（core_admin / admin / user）+ 受信任 GitHub 组织自动提权。
-- **用户管理**：管理员可创建内部用户、调整角色、禁言/解禁、删除用户；核心管理员管理管理员队伍。
-- **API Key**：全局静态 Key（环境变量）、管理员动态颁发 Key、登录用户个人 Key（`sk-ah-` 前缀，原文仅返回一次），均支持 scopes 与 `Bearer` 鉴权。
-- **API 文档与机器可读契约**：`/docs/rest` 提供 Vue API Reference 与在线试用；`/openapi.json` 和 `/llms.txt` 会按当前登录角色过滤可见端点，便于外部工具与 LLM 接入。
-- **通知中心**：未读徽标、分页列表、标记已读、批量/单条/清空删除；用户可按回复/点赞维度关闭通知偏好。
-- **运行时配置**：核心管理员在 `/admin/settings` 热更新站点展示、GitHub OAuth、市场功能开关、自动上架、最大标签数、邮件服务，无需重启进程。
-- **首次启动向导**：未配置数据库时，前端 `/setup` 分步引导填写站点信息、核心管理员、PostgreSQL、Redis、邮件；保存后进程内热切换到持久化存储。
-- **AstrBot 集成**：`/plugins.json` 与 `/plugins-md5.json` 输出兼容 AstrBot 自定义插件源格式，可直接作为 AstrBot 插件源。
-- **邮件服务**：SMTP 或 Cloudflare Email Service 二选一，含每日发送限额。
-- **主题**：亮色/暗色/跟随系统，页面切换动画。
+- **浏览、检索与 SEO**：插件卡片网格、关键词与模糊搜索、标签与官方分类筛选、多种排序（更新时间、星标、点赞、评论、随机）与 URL 查询分页；插件详情页（`/plugin/{username}/{name}`）与作者页（`/author/{username}`）支持独立路由、Markdown README 渲染、仓库目录浏览、文本/图片预览以及构建期 Sitemap 与 HTML 预渲染。
+- **可选社区源 CDN 与插件包审查**：提交插件默认走 GitHub 直连；按插件开启 CDN 后，ZIP 或公开 GitHub 仓库（优先采用正式 Release ZIP）会固定为不可变 artifact 进入私有隔离区，经预检、静态分析、依赖漏洞/ClamAV/YARA/LLM 辅助审查、一次性容器运行时探针和人工复核后才发布到 CDN。
+- **版本审查工作台**：`/plugin-workbench` 提供作者版本历史、文件 diff 与自动审查发现，以及管理员待审队列、评论、人工批准、重跑审查、重试发布与安全下架。
+- **GitHub 元数据同步**：后台任务周期性同步仓库星标、版本与 README，支持多 API Token 轮转应对速率限制；插件所有者与管理员也可手动触发刷新。
+- **社区互动与通知中心**：服务端持久化嵌套评论（Markdown + 语法高亮）、插件与评论点赞；回复、点赞、审核与下架事件自动触发站内通知，支持按维度配置站内与邮件通知偏好。
+- **身份、权限与 API Key**：内置核心管理员账号登录 + GitHub OAuth 登录；三级角色（`core_admin` / `admin` / `user`）与受信任 GitHub 组织自动提权；支持全局静态 Key、管理员颁发 Key 与个人 Key（`sk-ah-` 前缀，明文仅展示一次），按 `scopes` 通过 `Bearer` 鉴权。
+- **运行时配置与首次启动向导**：首次启动自动进入 `/setup` 分步初始化并热切换存储，无需重启进程；核心管理员可在 `/admin/settings` 热更新站点信息、GitHub OAuth、市场开关、邮件服务（SMTP / Cloudflare Email）与同步策略。
+- **API 文档与机器可读契约**：`/docs/rest` 提供内置 REST API 文档与在线试用；`/openapi.json` 和 `/llms.txt` 按当前登录角色动态过滤端点。
 
 ## 技术栈
 
-| 层 | 技术 |
-|---|---|
-| 前端 | Vue 3.5 + Vite+（Vite Plus）+ TypeScript + Naive UI + Pinia 3 + Vue Router 4；`marked` + `marked-alert` + `DOMPurify` + `highlight.js` 渲染 Markdown；`vue-api-playground` 在线试用 API；`@giscus/vue` 评论 |
-| 后端 | Python 3.11+ · FastAPI · uvicorn · Pydantic 2 · asyncpg · redis-py（异步）· httpx |
-| 存储 | PostgreSQL（市场、artifact、审查、任务与 outbox）· Redis（登录会话）· 本地私有目录或 S3/R2（隔离包与已发布包） |
-| 部署 | Docker Compose · systemd · uv（Python 包管理）· npm（前端） |
+| 层 | 技术选型 |
+| --- | --- |
+| 前端 | Vue 3.5 · Vite+（Vite Plus）· TypeScript · Naive UI · Pinia 3 · Vue Router 4 · `@unhead/vue` · `marked` + `marked-alert` + `DOMPurify` + `highlight.js` · `vue-api-playground` |
+| 后端 | Python 3.11+ · FastAPI · uvicorn · Pydantic 2 · asyncpg · redis-py（异步）· httpx · cryptography · boto3 · aiosmtplib · yara-python |
+| 存储 | 完整模式：PostgreSQL（业务数据、artifact、审查任务与 outbox）+ Redis（会话与加密短期 OAuth 凭据）+ 本地私有目录或 S3/R2；本地自用模式：单文件 JSON 原子持久化 |
+| 部署与构建 | Docker Compose · systemd · uv（Python）· npm / Vite+（前端）· Puppeteer 预渲染 |
 
-> 前端使用 TypeScript（`<script setup lang="ts">`），类型定义见 `apps/market-web/src/types/index.ts`。API 调用使用原生 `fetch`（`credentials: 'include'` cookie session）；`axios` 仅作为历史依赖保留，当前未被引用。
+> [!NOTE]
+> 前端全部采用 `<script setup lang="ts">` 与原生 `fetch`（`credentials: "include"` cookie 会话），类型定义集中在 [apps/market-web/src/types/index.ts](apps/market-web/src/types/index.ts)。
 
 ## 项目结构
 
-```
+```text
 .
-├── .vite-hooks/         # Vite+ pre-commit（前端检查）与 pre-push（后端 ruff）钩子
+├── .github/workflows/ci.yml    # 按变更路径触发的 GitHub Actions 检查
+├── .vite-hooks/                # 前端 pre-commit（vp staged）与后端 pre-push（ruff）钩子
 ├── apps/
-│   ├── market-web/      # Vue 3 + Vite+ + TypeScript 前端 SPA
-│   └── api/             # FastAPI 后端（路由 / schemas / auth / store / tests）
-├── deploy/systemd/      # 裸机部署的 systemd service 与 env 模板
-├── docs/                # 架构、安全、OpenAPI 文档
-├── Dockerfile           # 多阶段构建（前端 dist + 后端）
-├── docker-compose.yml   # 完整部署（app + artifact-worker + PostgreSQL + Redis）
-├── docker-compose-local.yml # 本地自用单进程版（仅市场 app，本地文件持久化，无需 PG/Redis）
-├── .env.example         # Docker Compose 根目录环境变量示例
-└── package.json         # 工作区根脚本（dev:api / dev:web / build:web / start:api / test）
+│   ├── market-web/             # Vue 3 + Vite+ + TypeScript 前端应用
+│   └── api/                    # FastAPI 后端、artifact 审查管线、runtime-runner 与 pytest 套件
+├── deploy/
+│   ├── compose/                # Docker Compose 角色分离 env 模板（API / artifact-worker）
+│   ├── runtime-runner/         # 运行时探针隔离代理与构建脚本
+│   └── systemd/                # 裸机部署的 systemd unit 与 env 模板
+├── docs/                       # 架构、安全、运维手册与 OpenAPI 契约
+├── Dockerfile                  # 多阶段镜像（按需安装 Chromium 预渲染；api / runtime-runner 目标）
+├── Dockerfile.runtime-probe    # 固定基础镜像 digest 的一次性插件运行时探针镜像
+├── Dockerfile.runtime-proxy    # 探针受限出站包安装代理镜像
+├── docker-compose.yml          # 完整版编排（app + PostgreSQL + Redis + 可选 artifacts/runtime-runner）
+├── docker-compose-local.yml    # 本地自用单进程版编排（仅 app，单文件持久化，无需 PG/Redis）
+├── .env.example                # 根目录 Docker Compose 环境变量示例
+├── SECURITY.md                 # 安全漏洞报告策略与受支持版本说明
+└── package.json                # 根目录快捷脚本（dev:api / dev:web / build:web / start:api / test）
 ```
 
-## 快速开始（开发）
+## 快速开始（本地开发）
 
 ```bash
-# 后端依赖
+# 安装后端与前端依赖
 uv sync --project apps/api
-
-# 前端依赖
 npm install --prefix apps/market-web
 
-# 分别启动（两个终端）
-npm run dev:api    # FastAPI + uvicorn --reload，监听 127.0.0.1:8787
+# 在两个终端分别启动后端与前端
+npm run dev:api    # FastAPI（uvicorn --reload），监听 127.0.0.1:8787
 npm run dev:web    # Vite+ 开发服务器（vp dev），监听 0.0.0.0:3000
 ```
 
-开发态前后端分属不同端口（前端 `3000`，后端 `8787`）。前端需通过环境变量指向后端，否则请求会打到前端自身域名：
+开发态前后端运行在不同端口，需要在 `apps/market-web/.env` 中指明后端地址，否则前端请求会发往自身端口：
 
-```bash
-# apps/market-web/.env（开发）
+```env
+# apps/market-web/.env
 VITE_API_BASE_URL=http://127.0.0.1:8787
 ```
 
-后端默认允许的 CORS 来源为 `http://127.0.0.1:3000,http://localhost:3000`（见 `apps/api/.env.example` 的 `CORS_ORIGIN`）。未配置 `DATABASE_URL`/`REDIS_URL` 时后端回退到内存存储，可直接启动；生产持久化存储请通过 `/setup` 或环境变量配置 PostgreSQL + Redis。
+后端默认允许的跨域来源为 `http://127.0.0.1:3000,http://localhost:3000`。未配置持久化存储时后端会回退到内存模式，适合直接调试；若希望本地开发也能持久化，可设置 `MARKET_STORAGE_MODE=local`，或在 `/setup` 中连接 PostgreSQL 与 Redis。
+
+常用本地构建与测试命令：
 
 ```bash
-npm run build:web   # Vite+ 生产构建（vp build），输出到 apps/market-web/dist，供 FastAPI 托管
-npm test            # 运行后端 pytest（使用内存存储，无需真实 PG/Redis）
-cd apps/market-web && vp test --run  # 运行前端 Vite+ 测试
+npm run build:web                       # 生产构建前端到 apps/market-web/dist
+npm test                                # 运行后端 pytest（无需真实 PG/Redis）
+npm --prefix apps/market-web test       # 运行前端 Vitest（vp test --run）
 ```
 
-## 部署
+## 部署指南
 
-生产部署时先构建前端，再由 FastAPI 直接托管 `apps/market-web/dist`。同一个服务对外提供：
+生产部署时由 FastAPI 直接托管构建好的 `apps/market-web/dist`，同一服务同时暴露以下入口：
 
-- 网站首页与 SPA 路由：`http://your-host:8787/`
-- AstrBot 插件源：`http://your-host:8787/plugins.json`
+- 网站与 SPA 页面：`http://your-host:8787/`
+- AstrBot 插件源：`http://your-host:8787/plugins.json`（以及 `/plugins-md5.json`）
 - 市场 API：`http://your-host:8787/v1/...`
 - REST API 文档页：`http://your-host:8787/docs/rest`
-- 角色过滤 OpenAPI：`http://your-host:8787/openapi.json`
-- LLM 友好 API 索引：`http://your-host:8787/llms.txt`
+- 角色过滤 OpenAPI 与 LLM 索引：`http://your-host:8787/openapi.json`、`http://your-host:8787/llms.txt`
 
-> FastAPI 通过路径保留机制区分 API 路由（`v1`、`health`、`plugins.json`、`plugins-md5.json`、`openapi.json`、`llms.txt`、`docs`、`redoc`）与静态文件回退，互不冲突。REST API 文档可访问 `/docs/rest`（Vue + Naive UI API Reference + 在线试用）。原生 Swagger UI 与 ReDoc 已关闭，`/docs` 与 `/redoc` 返回 404。
+> [!NOTE]
+> FastAPI 通过保留路径区分 API、Feed、爬虫文件与前端页面，未知路径返回真实 HTTP 404。原生 Swagger UI 和 ReDoc 已关闭（`/docs`、`/redoc` 返回 404），请统一访问 `/docs/rest`。
 
-后端支持两种持久化模式：
+### 模式选择
 
-- **本地自用单进程模式**（`MARKET_STORAGE_MODE=local`）：使用本地 JSON 文件持久化所有市场数据与登录会话，仅运行单个 `app` 进程，无需 PostgreSQL、Redis 或审核 Worker。
-- **完整社区模式**（默认 `MARKET_STORAGE_MODE=postgres`）：依赖 **PostgreSQL**（持久化）与 **Redis**（会话），支持不可变插件包审查与 CDN 分发。两者均未配置时回退内存存储，仅用于开发与首次引导。
+| 部署模式 | 适用场景 | 外部依赖 | 核心特性 |
+| --- | --- | --- | --- |
+| **本地自用单进程版**（`docker-compose-local.yml`） | 个人自建市场与私有 AstrBot 插件源 | 无（单容器单进程） | 单文件 JSON 原子持久化、三步向导、管理员免 OAuth 直填仓库提交、跳过 Chromium 构建 |
+| **完整社区版**（`docker-compose.yml` / `systemd`） | 公开社区市场、多人协作与 CDN 分发 | PostgreSQL 16 + Redis 7 | GitHub OAuth 归属校验、不可变 artifact 审查管线、独立 Worker 与容器沙箱探针、SEO 预渲染 |
 
-### Docker Compose（本地自用单进程版）
+### 方式一：Docker Compose（本地自用单进程版）
 
-如果只需要一个自用插件市场和 AstrBot 插件源（`/plugins.json`），可以直接使用 `docker-compose-local.yml` 一条命令启动，无需部署 PostgreSQL、Redis 或手动创建 `apps/api/.env`：
+如果只需要一个轻量、开箱即用的个人插件市场和 AstrBot 插件源，无需准备 PostgreSQL、Redis 或手动创建 `apps/api/.env`，直接启动即可：
 
 ```bash
 docker compose -f docker-compose-local.yml up -d --build
 ```
 
-- 数据文件与初始化配置默认保存在 Docker 命名卷 `market-local-data`（容器内 `/var/lib/astrbot-market/data/`），重启容器不丢数据。
-- 构建阶段 `VITE_BASE_URL` 默认为空，自动跳过 Chromium 预渲染，镜像体积更小、构建更快。
-- 首次启动后访问 `http://127.0.0.1:8787/setup`，只需填写站点名称和核心管理员账号密码即可启用；也可以在根目录 `.env` 中预先配置 `CORE_ADMIN_USERNAME` 和 `CORE_ADMIN_PASSWORD` 跳过向导。
-- 登录后访问 `/submit`，管理员无需配置 GitHub OAuth，直接粘贴公开 GitHub 插件仓库链接即可读取元数据并上架。
-- 如需自定义端口、域名或 GitHub API Token，可先 `cp .env.example .env` 再按需调整。
+启动后的默认行为：
 
-### Docker Compose（完整版：PostgreSQL + Redis）
+1. 数据文件与初始化配置保存在 Docker 命名卷 `market-local-data`（容器内 `/var/lib/astrbot-market/data/`），重建或重启容器不会丢失数据。
+2. 构建参数 `VITE_BASE_URL` 固定为空，Dockerfile 自动跳过 Chromium 安装与预渲染，镜像更轻、构建更快。
+3. 访问 `http://127.0.0.1:8787/setup`，只需填写站点名称和核心管理员账号密码即可启用；登录后可在 `/submit` 直接粘贴公开 GitHub 插件仓库地址读取元数据并上架。
 
-根目录环境变量模板见 `.env.example`（包含 `SITE_URL` / `VITE_BASE_URL`、`APP_PORT`、`WEB_URL`、`CORS_ORIGIN` 和数据库配置；需要生产 SEO sitemap 与预渲染时在 `.env` 中填入你自己的公网域名 `SITE_URL=https://your-domain`）。
+> [!TIP]
+> 若希望跳过网页向导或自定义端口与 GitHub Token，可先执行 `cp .env.example .env`，按需填写 `APP_PORT`、`GITHUB_API_TOKEN`、`CORE_ADMIN_USERNAME` 和 `CORE_ADMIN_PASSWORD` 后再启动。明文密码仅在启动时用于生成哈希，不会回写磁盘。
 
-首次运行前先创建后端 `.env` 文件，否则 Docker 会把挂载目标创建成目录：
+### 方式二：Docker Compose（完整社区版）
+
+> [!IMPORTANT]
+> 完整版挂载宿主机文件 `./apps/api/.env` 到容器内。首次启动前必须先创建该文件并把属主设为容器默认非 root UID/GID `10001:10001`，否则 Docker 会将其误建为目录，且 `/setup` 无法写回配置。
 
 ```bash
 cp .env.example .env
@@ -125,31 +131,15 @@ sudo chown 10001:10001 apps/api/.env
 docker compose up -d --build
 ```
 
-API 容器默认使用非 root UID/GID `10001:10001`；上面的 owner 设置让一次性 `/setup` 能原子写回该文件。
-完成初始化后可将文件改为只读挂载。打开 `http://127.0.0.1:8787/setup` 完成初始化。compose 内置服务地址：
+> [!TIP]
+> 面向公网部署且需要自动生成 `sitemap.xml`、`robots.txt` 与静态预渲染页面时，请在根目录 `.env` 中设置 `SITE_URL=https://your-domain`（或 `VITE_BASE_URL=https://your-domain`）；留空时会跳过 Chromium 预渲染，仅输出标准 SPA 产物。
 
-- PostgreSQL：host `postgres` / port `5432` / 默认库名、用户、密码均为 `market`（可用 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 覆盖）
-- Redis：host `redis` / port `6379`
+打开 `http://127.0.0.1:8787/setup` 完成初始化，Compose 内置服务连接信息如下：
 
-启用插件包功能时，API 与 worker 使用分离配置。复制 worker 示例到不提交的私有文件，配置数据库、CDN、
-存储和所需工具，最后显式设置 `ARTIFACTS_ENABLED=true`；通过
-`ARTIFACT_WORKER_ENV_FILE` 指向它后再启动独立 Worker：
+- **PostgreSQL**：主机 `postgres`，端口 `5432`，默认库名、用户名与密码均为 `market`（可在根目录 `.env` 用 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 覆盖）。
+- **Redis**：主机 `redis`，端口 `6379`。
 
-```bash
-ARTIFACT_WORKER_ENV_FILE=/etc/astrbot-community-plugins/artifact-worker.env \
-  docker compose --profile artifacts up -d --build
-docker compose logs -f artifact-worker
-```
-
-API 进程不执行插件源码；P0/P1 的 Worker 只读取 ZIP、YAML 和 Python AST。runtime smoke
-test 使用独立 runner 和一次性容器，部署边界见
-[docs/runtime-runner.md](docs/runtime-runner.md)。完整启动、策略回滚、孤儿清理和事故处置见
-[docs/plugin-review-operations.md](docs/plugin-review-operations.md)。当前 source-backed adapter 固定为
-AstrBot `4.26.6`（`5d10e0d428b41308cc63215db00359c61ee17195`）；源码更新后必须重新审计和验证。
-
-容器镜像：`node:24`（前端构建）、`python:3.11` + `uv:0.9.7`（后端）、`postgres:16-alpine`、`redis:7-alpine`。对外端口默认 `8787`，可用 `APP_PORT` 覆盖。
-
-常用命令：
+完成 `/setup` 后，可将 `docker-compose.yml` 中 `apps/api/.env` 的挂载权限调整为 `:ro`。常用运维命令：
 
 ```bash
 docker compose ps
@@ -158,33 +148,61 @@ docker compose restart app
 docker compose down
 ```
 
-### Systemd（裸机源码部署）
+如需启用不可变插件包审查与 CDN 分发，请为 API 与 Worker 使用分离的环境文件：先从 [deploy/compose/artifact-worker.env.example](deploy/compose/artifact-worker.env.example) 复制一份不入库的私有配置，填好数据库、存储、CDN 和审查工具参数并将 `ARTIFACTS_ENABLED=true`，再启动 `artifacts` profile：
 
-示例路径 `/opt/astrbot-community-plugins`。生产使用 `astrbot-market-api`、
-`astrbot-market-worker`、`astrbot-runtime` 三个服务用户和分离的 env 文件；共享 artifact 目录通过受限组授权。
-具体建用户、目录权限和 rootless engine 步骤见运维手册。安装 unit 与示例配置：
+```bash
+ARTIFACT_WORKER_ENV_FILE=/etc/astrbot-community-plugins/artifact-worker.env \
+  docker compose --profile artifacts up -d --build
+docker compose logs -f artifact-worker
+```
+
+> [!CAUTION]
+> API 进程和 `artifact-worker` 严禁挂载 Docker socket 或直接执行插件源码。运行时烟雾测试必须通过独立的 `runtime-runner` profile 和一次性隔离容器运行，隔离边界与事故处置详见 [docs/runtime-runner.md](docs/runtime-runner.md) 与 [docs/plugin-review-operations.md](docs/plugin-review-operations.md)。
+
+运行时探针的 source-backed 适配器当前固定对应 AstrBot `4.26.6`（提交 `5d10e0d428b41308cc63215db00359c61ee17195`）。
+
+> [!WARNING]
+> 升级 AstrBot 源码前必须先完成插件生命周期与工具注册路径的审计和验证，不要仅修改版本号。
+
+### 方式三：Systemd（裸机源码部署）
+
+裸机生产部署默认采用三用户隔离模型（`astrbot-market-api`、`astrbot-market-worker`、`astrbot-runtime`）与分离的 `/etc/astrbot-community-plugins/*.env` 配置文件，共享目录通过 `astrbot-market` 组控制读写权限。详细建用户、目录权限和 rootless 容器引擎步骤见 [docs/plugin-review-operations.md](docs/plugin-review-operations.md)。
 
 ```bash
 sudo mkdir -p /opt /etc/astrbot-community-plugins
 sudo rsync -a --delete ./ /opt/astrbot-community-plugins/
 cd /opt/astrbot-community-plugins
+
 sudo cp deploy/systemd/astrbot-community-plugins-api.env.example /etc/astrbot-community-plugins/api.env
 sudo cp deploy/systemd/astrbot-artifact-worker.env.example /etc/astrbot-community-plugins/artifact-worker.env
 sudo cp deploy/systemd/astrbot-runtime-runner.env.example /etc/astrbot-community-plugins/runtime-runner.env
 sudo cp deploy/systemd/astrbot-community-plugins.service /etc/systemd/system/
 sudo cp deploy/systemd/astrbot-artifact-worker.service /etc/systemd/system/
 sudo cp deploy/systemd/astrbot-runtime-runner.service /etc/systemd/system/
-```
 
-构建与安装依赖：
-
-```bash
 npm install --prefix apps/market-web
-npm run build:web
+VITE_BASE_URL=https://your-domain npm run build:web
 uv sync --project apps/api --no-dev
 ```
 
-依赖锁文件默认使用官方源。本地网络需要镜像时，**不要修改并提交锁文件**，仅在本机命令前设置环境变量：
+完成 `/etc/astrbot-community-plugins/*.env` 配置与服务用户创建后启动服务：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now astrbot-community-plugins
+# 仅在 ARTIFACTS_ENABLED=true 且存储/CDN 配置完整时启用：
+sudo systemctl enable --now astrbot-artifact-worker
+# 仅在 rootless engine、安装代理、最小权限数据库角色与 runner env 验证完成后启用：
+sudo systemctl enable --now astrbot-runtime-runner
+```
+
+> [!IMPORTANT]
+> systemd 模板将 `/etc/astrbot-community-plugins/` 视为只读配置，不支持通过 Web `/setup` 写回 `/etc`，请在启动服务前完成数据库、核心管理员与密钥配置。前置 Nginx/Caddy 启用 HTTPS 后务必设置 `COOKIE_SECURE=true`。
+
+<details>
+<summary>使用国内镜像源安装依赖或构建 Docker 镜像</summary>
+
+依赖锁文件默认指向官方源，需要加速时请通过临时环境变量传入镜像地址：
 
 ```bash
 export npm_config_registry=https://registry.npmmirror.com
@@ -193,7 +211,7 @@ npm install --prefix apps/market-web
 uv sync --project apps/api --no-dev
 ```
 
-Docker 构建同样默认用官方源，需要镜像时通过构建变量传入：
+Docker 构建同样支持通过构建变量传入：
 
 ```bash
 NPM_REGISTRY=https://registry.npmmirror.com \
@@ -201,152 +219,160 @@ PYPI_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
 docker compose build
 ```
 
-systemd service 已启用安全加固（`NoNewPrivileges` / `PrivateTmp` / `ProtectSystem=strict` / 受限
-`ReadWritePaths`）。编辑 env 后启动：
+> [!WARNING]
+> 请勿因为使用国内镜像而修改并提交 `package-lock.json` 或 `uv.lock`。
 
-```bash
-sudo systemctl daemon-reload
-# 必须先按 docs/plugin-review-operations.md 创建三个服务用户、共享组和目录权限。
-sudo systemctl enable --now astrbot-community-plugins
-# 仅在 ARTIFACTS_ENABLED=true 且存储/CDN 配置完整时启用：
-sudo systemctl enable --now astrbot-artifact-worker
-# 仅在 rootless engine、安装代理、最小权限数据库角色和 runner env 验证完成后启用：
-sudo systemctl enable --now astrbot-runtime-runner
-sudo systemctl status astrbot-community-plugins
-journalctl -u astrbot-community-plugins -f
-```
+</details>
 
-systemd 示例将 `/etc` 配置视为不可变，启用前应完成数据库、核心管理员和 secret 配置；它不支持让 Web
-setup 写 `/etc`。生产环境还需在前置 Nginx/Caddy 启用 HTTPS，并设置 `COOKIE_SECURE=true`。
+### 首次启动向导（`/setup`）
 
-### 首次启动向导
-
-若 PostgreSQL 或 Redis 缺失，前端会打开 `/setup`。向导只收集站点名称/图标、内部核心管理员、PostgreSQL、Redis 与邮件必要字段；GitHub OAuth、登录条款、服务条款和市场策略在核心管理员登录后到 `/admin/settings` 配置。
-
-保存首次配置时，后端会先连接 PostgreSQL（目标库不存在则创建）、初始化 schema、验证 Redis、写入核心管理员；全部成功后才把基础设施连接与核心管理员引导信息写入 `apps/api/.env`，站点展示与系统设置写入数据库配置表。当前 FastAPI 进程会立即切换到 PostgreSQL/Redis 存储，**无需重启服务**。初始化完成后 `/v1/setup` 关闭，基础设施连接后续只通过 `.env` 调整。
+- **本地自用模式（`MARKET_STORAGE_MODE=local`）**：未配置核心管理员时打开 `/setup`，向导精简为 **站点 → 管理员 → 确认** 三步，保存后直接写入本地持久化文件与 env 文件并立即生效。
+- **完整社区模式（`MARKET_STORAGE_MODE=postgres`）**：PostgreSQL 或 Redis 未配置时打开 `/setup`，向导引导填写 **站点 → 管理员 → PostgreSQL → Redis → 确认** 五步；后端会先验证连接（目标库不存在时自动建库）、初始化表结构并创建核心管理员，全部成功后才写回 `.env` 并在进程内热切换存储，无需重启。
+- 初始化完成后 `/v1/setup` 与 `/v1/setup/status` 自动关闭（返回 404）；GitHub OAuth、邮件服务、服务条款与市场策略随后由核心管理员在 `/admin/settings` 配置。
 
 ### CI/CD
 
-`.github/workflows/ci.yml` 仅在代码或部署配置改动时按变更类型执行对应检查（后端变更跑 `Python API` 的 ruff lint + pytest，前端变更跑 `Vue market` 的 `vp check` + `vp test` + `vp build`，纯文档改动不触发），**不包含部署步骤**。artifact 表通过带 checksum 和 advisory lock 的版本化 SQL migration 初始化；尚未提供 Kubernetes/Helm、Nginx/Caddy 反向代理模板与 Terraform。
+[.github/workflows/ci.yml](.github/workflows/ci.yml) 仅在代码或部署配置改动时按变更类型执行对应检查，不包含自动部署步骤：
 
-## 配置
+- 仅后端或部署配置改动（`apps/api/**`、`Dockerfile*`、`docker-compose*.yml`、`deploy/**`）：运行 `Python API`（`ruff check` + `pytest`）。
+- 仅前端改动（`apps/market-web/**`）：运行 `Vue market`（`vp check` + `vp test` + `vp build`）。
+- 纯文档改动（如 `README.md`、`SECURITY.md`、`docs/**`）不触发 CI。
+
+## 配置参考
 
 ### 后端环境变量
 
-完整列表见 `apps/api/.env.example`，关键项：
+完整模板见 [apps/api/.env.example](apps/api/.env.example) 与 [apps/api/.env.docker.example](apps/api/.env.docker.example)。
 
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `HOST` / `PORT` | `127.0.0.1` / `8787` | 监听地址与端口 |
+> [!NOTE]
+> 配置优先级从低到高为：`apps/api/.env`（或 `APP_ENV_FILE` 指定文件）→ 系统环境变量 → Web 后台 `/admin/settings` 写入持久化配置表的运行时设置。基础设施连接（`DATABASE_URL`、`REDIS_URL`、`MARKET_STORAGE_MODE`、`LOCAL_DATA_PATH`）仅从环境层读取。
+
+<details open>
+<summary>常用后端环境变量速查</summary>
+
+| 变量 | 代码默认值 | 说明 |
+| --- | --- | --- |
+| `HOST` / `PORT` | `127.0.0.1` / `8787` | 服务监听地址与端口 |
 | `CORS_ORIGIN` | `http://127.0.0.1:3000,http://localhost:3000` | 允许的前端来源（逗号分隔） |
-| `WEB_URL` | `http://127.0.0.1:8787` | 站点公开 URL |
+| `WEB_URL` | `http://127.0.0.1:8787` | 站点公开访问 URL |
 | `MARKET_STORAGE_MODE` | `postgres` | 存储模式：`postgres`（PostgreSQL + Redis）或 `local`（本地单文件持久化） |
 | `LOCAL_DATA_PATH` | `<env 目录>/data/market-state.json` | 本地模式的数据文件路径 |
-| `CORE_ADMIN_USERNAME` / `CORE_ADMIN_PASSWORD` | 空 | 可选：启动时自动初始化内部核心管理员（明文密码仅启动时哈希，不回写磁盘） |
-| `DATABASE_URL` / `REDIS_URL` | 空 | 首次留空，经 `/setup` 配置；`postgres` 模式下同时配置才启用持久化存储 |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App 凭证 |
-| `GITHUB_CALLBACK_URL` | 空 | OAuth 回调 URL，留空则在 `/admin/settings` 配置 |
-| `GITHUB_ADMIN_ORG` | 空 | 该组织成员登录后自动提权为 admin |
-| `GITHUB_API_TOKEN` | 空 | 元数据同步用 GitHub token，多 token 用 `,` 分隔自动轮转 |
-| `GITHUB_METADATA_SYNC_ENABLED` / `..._INTERVAL_SECONDS` | `true` / `3600` | 后台元数据同步开关与间隔（5 分钟 ~ 24 小时） |
-| `MARKET_SUBMISSIONS_ENABLED` / `MARKET_COMMENTS_ENABLED` / `MARKET_LIKES_ENABLED` | `true` | 市场功能开关 |
-| `PLUGIN_AUTO_APPROVE_ENABLED` | `false` | 仅保留给关闭 artifact 功能时的旧提交流程；artifact 流程永不绕过扫描与人工批准 |
-| `MAX_PLUGIN_TAGS` | `8` | 插件最大标签数 |
-| `ARTIFACTS_ENABLED` | `false` | 启用不可变插件包、审查任务和 CDN 发布门控 |
-| `ARTIFACT_STORAGE_BACKEND` | `local` | `local` 或 `s3`（兼容 R2/S3 API） |
-| `ARTIFACT_LOCAL_ROOT` | `/var/lib/astrbot-market/artifacts` | 本地隔离、文本清单与发布对象目录；API/Worker 必须共享 |
-| `ARTIFACT_CDN_BASE_URL` | 空 | 已发布对象的公开 CDN 域名；隔离对象不会使用该域名 |
-| `ARTIFACT_S3_*` / `ARTIFACT_*_BUCKET` | 空 | S3/R2 endpoint、区域、凭据、隔离桶与发布桶 |
-| `ARTIFACT_MAX_UPLOAD_BYTES` / `...UNPACKED...` / `...MAX_FILES` | `32 MiB` / `128 MiB` / `2000` | ZIP 流式接收和预检硬限制 |
-| `ARTIFACT_SUBMISSION_RPM` | `6` | Artifact ZIP/GitHub 提交按用户和来源 IP 的每分钟上限；`0` 关闭限制 |
-| `EMAIL_PROVIDER` | `disabled` | `disabled` / `smtp` / `cloudflare` |
-| `SESSION_MAX_AGE_SECONDS` | `604800` | 会话有效期（默认 7 天） |
-| `COOKIE_SECURE` / `COOKIE_SAME_SITE` | `false` / `Lax` | Cookie 安全属性（生产 HTTPS 应设 `COOKIE_SECURE=true`） |
-| `ENABLE_DEV_AUTH` | `true` | 开发调试登录（生产必须 `false`） |
-| `MARKET_API_KEYS` | `local:dev-market-key:market:read\|market:write` | 全局静态 API Key，格式 `name:key:scope1\|scope2` |
+| `CORE_ADMIN_USERNAME` / `CORE_ADMIN_PASSWORD` | 空 | 可选：启动时自动初始化内部核心管理员（明文仅启动时哈希，不落盘） |
+| `DATABASE_URL` / `REDIS_URL` | 空 | `postgres` 模式下同时配置后启用持久化存储；首次部署可留空并在 `/setup` 配置 |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App 凭证（`CLIENT_SECRET` 仅由部署环境注入，不存入数据库） |
+| `GITHUB_CALLBACK_URL` | `http://127.0.0.1:8787/v1/auth/github/callback` | OAuth 回调地址（生产启用 GitHub 登录时必须使用公网域名） |
+| `GITHUB_ADMIN_ORG` | 空 | 该 GitHub 组织成员登录后自动提权为 `admin` |
+| `GITHUB_API_TOKEN` | 空 | 元数据同步用 GitHub Token，支持逗号分隔多 Token 自动轮转 |
+| `GITHUB_METADATA_SYNC_ENABLED` / `..._INTERVAL_SECONDS` | `true` / `3600` | 后台元数据同步开关与周期（300 ~ 86400 秒） |
+| `MARKET_SUBMISSIONS_ENABLED` / `MARKET_COMMENTS_ENABLED` / `MARKET_LIKES_ENABLED` | `true` | 插件提交、评论、点赞功能开关 |
+| `PLUGIN_AUTO_APPROVE_ENABLED` | `false` | 仅对未开启 CDN 的普通提交生效；开启 CDN 的包审查永不绕过扫描与人工复核 |
+| `MAX_PLUGIN_TAGS` | `8` | 单个插件允许的最大标签数 |
+| `ARTIFACTS_ENABLED` | `false` | 启用不可变插件包、审查任务队列与 CDN 发布门控 |
+| `ARTIFACT_STORAGE_BACKEND` / `ARTIFACT_LOCAL_ROOT` | `local` / `/var/lib/astrbot-market/artifacts` | 隔离区与发布区存储后端（`local` 或 `s3`）及本地根目录 |
+| `ARTIFACT_CDN_BASE_URL` | 空 | 已发布对象的公开 CDN 域名（隔离对象永不暴露在该域名下） |
+| `ARTIFACT_S3_*` / `ARTIFACT_*_BUCKET` | 空 | S3/R2 兼容对象存储的 endpoint、区域、凭证、隔离桶与发布桶 |
+| `ARTIFACT_MAX_UPLOAD_BYTES` / `...UNPACKED...` / `...MAX_FILES` | `32 MiB` / `128 MiB` / `2000` | 插件包流式上传与解压预检硬限制 |
+| `ARTIFACT_SUBMISSION_RPM` | `6` | Artifact 提交按用户和 IP 的每分钟限流，`0` 表示关闭 |
+| `EMAIL_PROVIDER` | `disabled` | 邮件通道：`disabled`、`smtp` 或 `cloudflare` |
+| `SESSION_MAX_AGE_SECONDS` | `604800` | 登录会话有效期（默认 7 天） |
+| `COOKIE_SECURE` / `COOKIE_SAME_SITE` | `false` / `Lax` | Cookie 安全属性 |
+| `ENABLE_DEV_AUTH` | `false` | 开发调试登录头开关（`apps/api/.env.example` 为便于本地开发设为 `true`，生产必须 `false`） |
+| `MARKET_API_KEYS` | 空 | 全局静态 API Key，格式 `name:key:scope1\|scope2`，逗号分隔多个 |
 
-> 环境变量优先级：默认读取 `apps/api/.env`，同名系统环境变量覆盖之；测试或特殊部署可用 `APP_ENV_FILE` 指向其他 env 文件。Web 后台保存的站点、OAuth、市场策略与邮件设置进入数据库配置表，并覆盖 `.env` 中的同名系统设置。
+</details>
 
-直接用环境变量启动生产持久化的最小示例：
+> [!CAUTION]
+> 生产环境必须保持 `ENABLE_DEV_AUTH=false`（禁止通过 `X-Dev-GitHub-Login` 伪造登录），并在 HTTPS 反向代理后设置 `COOKIE_SECURE=true`。
+
+<details>
+<summary>直接通过环境变量启动完整持久化模式的最小示例</summary>
 
 ```env
 DATABASE_URL=postgresql://market:market@127.0.0.1:5432/market
 REDIS_URL=redis://127.0.0.1:6379/0
 WEB_URL=https://your-market-domain
+CORS_ORIGIN=https://your-market-domain
+COOKIE_SECURE=true
+ENABLE_DEV_AUTH=false
 GITHUB_CALLBACK_URL=https://your-market-domain/v1/auth/github/callback
-SITE_NAME=AstrBot Community Plugins
+SITE_NAME=Astrhub 插件市场
 SITE_ICON_URL=/logo.webp
 SITE_SUBTITLE=全新社区插件市场
 SITE_DESCRIPTION=发现、评价和提交 AstrBot 插件。
 EMAIL_PROVIDER=disabled
 ```
 
+</details>
+
 ### 前端环境变量
 
-定义在 `apps/market-web/.env.example`：
+构建与开发变量见 [apps/market-web/.env.example](apps/market-web/.env.example)：
 
 | 变量 | 说明 |
-|---|---|
-| `VITE_BASE_URL` | 站点公开基础 URL。留空时使用当前域名；构建时若已设置还会生成 `sitemap.xml` 与 `robots.txt` |
-| `VITE_API_BASE_URL` | API 服务器地址（优先级最高）。开发态前后端分端口时需要；生产同源部署通常留空 |
-| `VITE_COMMUNITY_REPO_URL` | 页脚展示的社区仓库链接 |
+| --- | --- |
+| `VITE_BASE_URL` | 站点公开基础 URL。设置后，生产构建会自动生成 `sitemap.xml`、`robots.txt` 并执行 Puppeteer 静态预渲染；留空时跳过预渲染 |
+| `VITE_API_BASE_URL` | 后端 API 基础地址（优先级最高）。前后端分端口本地开发时配置，同源部署通常留空 |
+| `VITE_COMMUNITY_REPO_URL` | 页脚展示的社区仓库链接（留空时自动读取当前 Git 仓库地址） |
 
 ## 身份与角色
 
-| 角色 | 能力 |
-|---|---|
-| **核心管理员**（core_admin） | 首次向导注册的内部账号；管理系统设置、管理员队伍、内部用户、发布公告 |
-| **普通管理员**（admin） | 审核上架/下架插件、删除评论、禁言用户、处理审核、刷新任意插件元数据 |
-| **插件所有者** | 经 GitHub 仓库所有权验证后，编辑自有插件元数据、申请上架、自主下架、手动刷新 |
-| **普通用户**（user） | 浏览、提交插件、评论、点赞；管理个人 API Key 与通知偏好 |
+| 角色 | 能力范围 |
+| --- | --- |
+| **核心管理员（`core_admin`）** | 首次向导或环境引导创建的内部账号；管理系统设置、管理员队伍、内部用户、公告与任意插件 CDN |
+| **普通管理员（`admin`）** | 审核上架/下架插件、处理包审查、删除评论、禁言用户、刷新任意插件元数据 |
+| **插件所有者** | 经 GitHub 仓库权限验证后，编辑自有插件元数据、配置自有插件 CDN、申请上架、自主下架与手动刷新 |
+| **普通用户（`user`）** | 浏览、提交插件、评论、点赞，管理个人 API Key 与通知偏好 |
 
-GitHub 用户不会自动成为核心管理员；受信任组织成员（`GITHUB_ADMIN_ORG`）登录后可自动提权为 admin。已登录的内部管理员可在个人设置绑定 GitHub，绑定时会将该 GitHub 账号名下的插件、评论与提交记录合并到当前管理员账号。权限检查函数位于 `apps/api/app/auth.py`，详见 [docs/security.md](docs/security.md)。
+GitHub 用户不会自动成为核心管理员；受信任组织成员（`GITHUB_ADMIN_ORG`）登录后可自动提权为 `admin`。已登录的内部管理员可在个人设置绑定 GitHub，绑定时会自动合并该 GitHub 账号名下的插件、评论与提交记录。权限实现位于 [apps/api/app/auth.py](apps/api/app/auth.py)，完整安全模型见 [docs/security.md](docs/security.md)。
 
 ## AstrBot 集成
 
-AstrBot 可将本市场作为自定义插件源。在 AstrBot WebUI 中添加：
+在 AstrBot WebUI 中将市场地址添加为自定义插件源：
 
 ```text
 https://your-market-domain/plugins.json
 ```
 
-数据格式兼容 AstrBot 自定义仓库格式：`repo` 永远保留；`version` 随 GitHub 仓库 metadata 更新；`download_url` 仅在当前已发布 artifact 的规范化版本与仓库版本一致时输出。仓库出现未过审新版本时，旧 CDN 对象仍保留但不会冒充新版本，feed 的 `download_url` 为空，用户仍可选择 GitHub 直连。发布路径固定为 `/{author_id}/{repo_name}/{version}/{plugin_name}-{version}-{suffix}.zip`。
+接口完全兼容 AstrBot 自定义仓库格式：`repo` 字段始终保留；`version` 随仓库元数据同步；仅当最新已发布 artifact 的规范化版本与当前仓库版本一致时才输出 CDN `download_url`。仓库发布尚未过审的新版本时，旧 CDN 对象保留但不冒充新版本，此时 `download_url` 为空，用户仍可通过 GitHub 直连安装。已发布对象路径固定为 `/{author_id}/{repo_name}/{version}/{plugin_name}-{version}-{suffix}.zip`。
 
-未来的 AstrBot WebUI 插件将通过 API Key 消费本 API，不应在本地重复存储市场状态。
-
-## 开发指引
+## 开发规范与 Git Hooks
 
 ```bash
-# 后端
+# 后端：Python 3.11+，Ruff 行宽 100
 cd apps/api
 uv sync
-uv run uvicorn app.main:app --reload
+uv run ruff check .
+uv run ruff format --check .
 uv run pytest
 
-# 前端
+# 前端：统一通过 Vite+（vp）执行，不要直接调用 vite 或 vitest
 cd apps/market-web
 npm install
-npm run dev      # Vite+ 开发服务器（vp dev）
-npm run build    # Vite+ 生产构建（vp build）
-vp test --run    # 前端 Vite+ 测试
+npm run dev       # vp dev
+npm run build     # vp build && node scripts/prerender.mjs
+vp check          # 格式、Lint 与类型检查
+vp test --run     # 前端单元测试（当前 32 个测试文件、102 项用例）
 ```
 
-安装 Git hooks：
+安装本地 Git hooks（前端在 `pre-commit` 自动运行 `vp staged`，后端在 `pre-push` 运行 Ruff 检查）：
 
 ```bash
-# 前端 Vite+ pre-commit hook（暂存文件自动 vp check --fix）
-# hook 脚本位于 .vite-hooks/pre-commit，手动创建符号链接激活：
 ln -sf ../../.vite-hooks/pre-commit .git/hooks/pre-commit
-
-# 后端 Ruff pre-push hook（推送前检查 Python 文件）
 uv sync --project apps/api
 uv run --project apps/api --directory apps/api pre-commit install --hook-type pre-push
 ```
 
-- Python 3.11+，4 空格缩进，公共 helper 加类型注解，单一职责的小函数。
-- 插件 ID 遵循 `astrbot_plugin_<name>` 模式；路由统一在 `/v1/*`，admin 与 core_admin 动作使用显式路径。
-- 后端测试位于 `apps/api/tests/`，基于 pytest + FastAPI `TestClient`，覆盖角色检查、登录/会话、提交流程、所有权校验、审核与失败路径。
-- 前端测试使用 `vp test --run`，放在对应源码旁边的 `*.test.ts` 文件中；当前覆盖插件卡片 logo 解析与默认 logo 回退。`npm test` 只是 `apps/market-web/package.json` 里的等价脚本别名。
+- 插件 ID 遵循 `astrbot_plugin_<name>` 命名约定，所有 API 路由位于 `/v1/*`，管理员与核心管理员操作使用显式路径。
+- 后端测试位于 `apps/api/tests/`，基于 `pytest` + FastAPI `TestClient`，无需真实 PostgreSQL/Redis 即可运行主测试套件。
+- 前端测试采用 `*.test.ts` 就近放置，通过 `vp test --run` 执行（`npm test` 为等价别名）。
+
+## 相关文档与安全反馈
+
+- [安全策略与漏洞上报（SECURITY.md）](SECURITY.md)：受支持版本、私有安全公告通道与安全联系邮箱
+- [系统架构（docs/architecture.md）](docs/architecture.md)：模块划分、数据模型与端点清单
+- [安全模型（docs/security.md）](docs/security.md)：认证、会话、权限与存储边界
+- [运行时探针设计（docs/runtime-runner.md）](docs/runtime-runner.md)：容器隔离与受限网络代理
+- [插件审查运维手册（docs/plugin-review-operations.md）](docs/plugin-review-operations.md)：生产部署、健康度门控与事故处置
 
 ## 许可
 
