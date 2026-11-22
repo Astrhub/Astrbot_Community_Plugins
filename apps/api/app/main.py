@@ -1479,7 +1479,7 @@ def register_routes(app: FastAPI) -> None:
         if "name" in patch:
             validate_plugin_name(patch["name"])
         if "author" in patch:
-            validate_plugin_author(patch["author"])
+            patch["author"] = validate_plugin_author(patch["author"])
         if "repo" in patch:
             validate_github_repo(patch["repo"])
             proof = await require_repository_access(
@@ -2970,7 +2970,7 @@ def validate_plugin_submission(payload: dict[str, Any], settings: Settings | Non
         if not payload.get(field):
             raise error(400, "Missing required plugin fields")
     validate_plugin_name(payload["name"])
-    validate_plugin_author(payload["author"])
+    payload["author"] = validate_plugin_author(payload["author"])
     validate_github_repo(payload["repo"])
     payload["category"] = validate_plugin_category(payload.get("category", ""))
     validate_plugin_tag_count(payload.get("tags") or [], settings)
@@ -2996,17 +2996,20 @@ def has_ascii_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
 
 
-def is_valid_plugin_author(author: str) -> bool:
+def is_valid_plugin_author(author: Any) -> bool:
+    if not isinstance(author, str):
+        return False
     text = author.strip()
     return bool(text) and "/" not in text and not has_ascii_control_chars(text)
 
 
-def validate_plugin_author(author: str) -> None:
-    if not is_valid_plugin_author(author or ""):
+def validate_plugin_author(author: Any) -> str:
+    if not is_valid_plugin_author(author):
         raise error(
             400,
             "Plugin author must be non-empty and cannot contain '/' or control characters",
         )
+    return author.strip()
 
 
 def validate_plugin_name(name: str) -> None:
@@ -3618,15 +3621,16 @@ async def fetch_plugin_github_metadata(
                 headers,
                 store=status_store,
             )
+            root_updates: dict[str, Any] = {}
             if root_entries is not None:
-                logo = github_root_file_raw_url(
+                root_updates["logo"] = github_root_file_raw_url(
                     owner,
                     repo_name,
                     default_branch,
                     root_entries,
                     ("logo.png",),
                 )
-                readme_url = github_root_file_raw_url(
+                root_updates["readme_url"] = github_root_file_raw_url(
                     owner,
                     repo_name,
                     default_branch,
@@ -3634,7 +3638,7 @@ async def fetch_plugin_github_metadata(
                     README_CANDIDATES,
                     fallback_lower_names=("readme.md", "readme"),
                 )
-                changelog_url = github_root_file_raw_url(
+                root_updates["changelog_url"] = github_root_file_raw_url(
                     owner,
                     repo_name,
                     default_branch,
@@ -3646,7 +3650,7 @@ async def fetch_plugin_github_metadata(
                     entry.get("type") == "dir" and entry.get("name") == ".astrbot-plugin"
                     for entry in root_entries
                 )
-                i18n: dict[str, dict[str, dict[str, str]]] | None = (
+                i18n = (
                     await fetch_github_plugin_i18n(
                         client,
                         owner,
@@ -3657,8 +3661,10 @@ async def fetch_plugin_github_metadata(
                     if has_astrbot_plugin_dir
                     else {}
                 )
+                if i18n is not None:
+                    root_updates["i18n"] = i18n
             else:
-                logo = await fetch_github_plugin_logo_url(
+                fallback_logo = await fetch_github_plugin_logo_url(
                     client,
                     owner,
                     repo_name,
@@ -3666,9 +3672,8 @@ async def fetch_plugin_github_metadata(
                     headers,
                     store=status_store,
                 )
-                readme_url = ""
-                changelog_url = ""
-                i18n = None
+                if fallback_logo:
+                    root_updates["logo"] = fallback_logo
     except httpx.HTTPError as exc:
         raise GithubMetadataError("GitHub metadata fetch failed", 502) from exc
     payload: dict[str, Any] = {
@@ -3679,13 +3684,7 @@ async def fetch_plugin_github_metadata(
         value = normalize_plugin_metadata_field(field, metadata.get(field))
         if has_metadata_value(value):
             payload[field] = value
-    if root_entries is not None:
-        payload["logo"] = logo
-        payload["readme_url"] = readme_url
-        payload["changelog_url"] = changelog_url
-        payload["i18n"] = i18n or {}
-    elif logo:
-        payload["logo"] = logo
+    payload.update(root_updates)
     return payload
 
 
@@ -3905,6 +3904,8 @@ async def fetch_github_repo_directory(
     path: str,
     headers: dict[str, str],
     store: Any | None = None,
+    *,
+    not_found_as_empty: bool = False,
 ) -> list[dict[str, Any]] | None:
     suffix = f"/{quote(path.strip('/'), safe='/')}" if path.strip("/") else ""
     response = await github_get(
@@ -3914,11 +3915,13 @@ async def fetch_github_repo_directory(
         store=store,
     )
     raise_for_github_rate_limit(response)
+    if response.status_code == 404 and not_found_as_empty:
+        return []
     if response.status_code != 200:
         return None
     data = response.json()
     if not isinstance(data, list):
-        return None
+        return [] if not_found_as_empty else None
     return [entry for entry in data if isinstance(entry, dict)]
 
 
@@ -3959,7 +3962,7 @@ async def fetch_github_plugin_i18n(
     repo: str,
     headers: dict[str, str],
     store: Any | None = None,
-) -> dict[str, dict[str, dict[str, str]]]:
+) -> dict[str, dict[str, dict[str, str]]] | None:
     entries = await fetch_github_repo_directory(
         client,
         owner,
@@ -3967,7 +3970,10 @@ async def fetch_github_plugin_i18n(
         ".astrbot-plugin/i18n",
         headers,
         store=store,
+        not_found_as_empty=True,
     )
+    if entries is None:
+        return None
     if not entries:
         return {}
     raw_i18n: dict[str, Any] = {}
@@ -3993,8 +3999,10 @@ async def fetch_github_plugin_i18n(
             store=store,
         )
         raise_for_github_rate_limit(response)
-        if response.status_code != 200:
+        if response.status_code == 404:
             continue
+        if response.status_code != 200:
+            return None
         data = response.json()
         content = data.get("content") if isinstance(data, dict) else ""
         if not isinstance(content, str) or not content:
@@ -4004,7 +4012,7 @@ async def fetch_github_plugin_i18n(
             if len(raw_bytes) > PLUGIN_I18N_MAX_BYTES:
                 continue
             parsed = json.loads(raw_bytes.decode("utf-8-sig"))
-        except (ValueError, TypeError, UnicodeDecodeError):
+        except (ValueError, TypeError, UnicodeDecodeError, RecursionError):
             continue
         if isinstance(parsed, dict):
             raw_i18n[locale] = parsed
@@ -5591,7 +5599,10 @@ def is_https_url(value: Any) -> bool:
     text = str(value or "").strip()
     if not text:
         return False
-    parsed = urlparse(text)
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return False
     return parsed.scheme.lower() == "https" and bool(parsed.netloc)
 
 

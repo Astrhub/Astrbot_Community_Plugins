@@ -430,3 +430,141 @@ def test_build_astrbot_plugin_source_dedupes_case_insensitive_ids_and_omits_non_
     assert "readme_url" not in entry
     assert entry["changelog_url"].startswith("https://")
     assert entry["version"] == ""
+
+
+def test_malformed_https_url_and_non_string_author_are_handled_safely() -> None:
+    assert main_module.is_https_url("https://[") is False
+    assert main_module.is_valid_plugin_author(123) is False
+    assert main_module.is_valid_plugin_author(["Alice"]) is False
+
+    feed = main_module.build_astrbot_plugin_source(
+        [
+            {
+                "id": "p-malformed",
+                "name": "astrbot_plugin_links",
+                "author": "Alice",
+                "desc": "Malformed URL test",
+                "repo": "https://github.com/alice/astrbot_plugin_links",
+                "social_link": "https://[",
+                "readme_url": "https://[::1",
+                "changelog_url": "https://raw.githubusercontent.com/alice/astrbot_plugin_links/main/CHANGELOG.md",
+            }
+        ]
+    )
+    entry = feed["Alice/astrbot_plugin_links"]
+    assert "social_link" not in entry
+    assert "readme_url" not in entry
+    assert entry["changelog_url"].endswith("/CHANGELOG.md")
+
+
+def test_github_sync_preserves_i18n_on_transient_errors_and_skips_deep_json(monkeypatch) -> None:
+    client = make_client()
+    login = client.get("/v1/auth/debug-login?login=alice").json()
+    client.app.state.store.update_user_role(login["user"]["id"], Role.ADMIN.value)
+    mode = {"i18n_dir": "ok", "en_file": "ok", "include_deep": False}
+
+    class FakeResponse:
+        def __init__(self, status_code: int, data: object) -> None:
+            self.status_code = status_code
+            self._data = data
+            self.headers: dict[str, str] = {}
+
+        def json(self) -> object:
+            return self._data
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs) -> FakeResponse:
+            if url == "https://api.github.com/repos/alice/astrbot_plugin_i18n_guard":
+                return FakeResponse(
+                    200,
+                    {
+                        "stargazers_count": 5,
+                        "updated_at": "2026-11-20T08:30:00Z",
+                        "default_branch": "main",
+                    },
+                )
+            if url.endswith("/contents/metadata.yaml"):
+                text = (
+                    "name: astrbot_plugin_i18n_guard\ndesc: Guard\nauthor: Alice\nversion: 1.0.0\n"
+                )
+                return FakeResponse(
+                    200, {"content": base64.b64encode(text.encode()).decode("ascii")}
+                )
+            if url.endswith("/contents"):
+                return FakeResponse(
+                    200,
+                    [
+                        {"name": "metadata.yaml", "type": "file"},
+                        {"name": ".astrbot-plugin", "type": "dir"},
+                    ],
+                )
+            if url.endswith("/contents/.astrbot-plugin/i18n"):
+                if mode["i18n_dir"] == "error":
+                    return FakeResponse(502, {"message": "bad gateway"})
+                if mode["i18n_dir"] == "missing":
+                    return FakeResponse(404, {"message": "Not Found"})
+                entries = [{"name": "en-US.json", "type": "file", "size": 64}]
+                if mode["include_deep"]:
+                    entries.append({"name": "ja-JP.json", "type": "file", "size": 4096})
+                return FakeResponse(200, entries)
+            if url.endswith("/contents/.astrbot-plugin/i18n/en-US.json"):
+                if mode["en_file"] == "error":
+                    return FakeResponse(503, {"message": "service unavailable"})
+                raw = json.dumps({"metadata": {"display_name": "Guard"}}).encode()
+                return FakeResponse(200, {"content": base64.b64encode(raw).decode("ascii")})
+            if url.endswith("/contents/.astrbot-plugin/i18n/ja-JP.json"):
+                deep = ("[" * 2500) + ("]" * 2500)
+                return FakeResponse(
+                    200, {"content": base64.b64encode(deep.encode()).decode("ascii")}
+                )
+            return FakeResponse(404, {})
+
+    monkeypatch.setattr(main_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    created = client.post(
+        "/v1/plugins/submissions",
+        json={
+            "cdn_enabled": False,
+            "name": "astrbot_plugin_i18n_guard",
+            "desc": "Guard",
+            "author": "\u3000Alice\u3000",
+            "repo": "https://github.com/alice/astrbot_plugin_i18n_guard",
+        },
+    )
+    assert created.status_code == 201
+    plugin_id = created.json()["id"]
+    assert created.json()["author"] == "Alice"
+    assert "en-US" in client.get("/plugins.json").json()["Alice/astrbot_plugin_i18n_guard"]["i18n"]
+
+    # Transient directory 502 keeps previously stored translations.
+    mode["i18n_dir"] = "error"
+    assert client.post(f"/v1/plugins/{plugin_id}/refresh-github", json={}).status_code == 200
+    assert "en-US" in client.get("/plugins.json").json()["Alice/astrbot_plugin_i18n_guard"]["i18n"]
+
+    # Transient file 503 keeps previously stored translations.
+    mode["i18n_dir"] = "ok"
+    mode["en_file"] = "error"
+    assert client.post(f"/v1/plugins/{plugin_id}/refresh-github", json={}).status_code == 200
+    assert "en-US" in client.get("/plugins.json").json()["Alice/astrbot_plugin_i18n_guard"]["i18n"]
+
+    # Deeply nested JSON triggers RecursionError and is skipped without failing refresh.
+    mode["en_file"] = "ok"
+    mode["include_deep"] = True
+    assert client.post(f"/v1/plugins/{plugin_id}/refresh-github", json={}).status_code == 200
+    assert list(client.get("/plugins.json").json()["Alice/astrbot_plugin_i18n_guard"]["i18n"]) == [
+        "en-US"
+    ]
+
+    # Genuine 404 on .astrbot-plugin/i18n clears stored translations.
+    mode["i18n_dir"] = "missing"
+    assert client.post(f"/v1/plugins/{plugin_id}/refresh-github", json={}).status_code == 200
+    assert "i18n" not in client.get("/plugins.json").json()["Alice/astrbot_plugin_i18n_guard"]
