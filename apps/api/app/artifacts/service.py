@@ -6,7 +6,12 @@ from decimal import Decimal
 from typing import Any
 
 from ..auth import is_admin
-from .archive import PrecheckError, normalize_github_repo, normalize_version
+from .archive import (
+    PrecheckError,
+    normalize_github_repo,
+    normalize_version,
+    validate_release_version,
+)
 from .comments import ReviewCommentLimits, ReviewCommentService
 from .content import ArtifactContentLimits, ArtifactContentService
 from .findings import StableRiskService
@@ -117,6 +122,15 @@ class ArtifactService:
             quarantine_key,
             self.max_upload_bytes,
         )
+        github_release = (
+            {
+                "tag_name": source.release_tag,
+                "asset_name": source.release_asset_name,
+                "source_kind": "release_asset" if source.download_url else "release_tag_archive",
+            }
+            if source.release_tag
+            else None
+        )
         return await self._create_artifact(
             artifact_id=artifact_id,
             plugin=plugin,
@@ -128,6 +142,7 @@ class ArtifactService:
             source_ref=source.requested_ref,
             source_commit_sha=source.commit_sha,
             supersedes_artifact_id=supersedes_id,
+            github_release=github_release,
         )
 
     async def artifact_detail(self, artifact_id: str) -> dict[str, Any] | None:
@@ -480,6 +495,7 @@ class ArtifactService:
         source_ref: str,
         source_commit_sha: str,
         supersedes_artifact_id: str | None,
+        github_release: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
             await self._require_cdn_enabled(plugin)
@@ -489,6 +505,19 @@ class ArtifactService:
         existing = await self.repository.get_artifact_by_sha(str(plugin["id"]), archive_sha256)
         if existing:
             await self.storage.delete_quarantine(quarantine_key)
+            release_tag = (
+                str(github_release.get("tag_name") or "").strip() if github_release else ""
+            )
+            existing_normalized = str(existing.get("normalized_version") or "").strip()
+            if release_tag and existing_normalized:
+                try:
+                    validate_release_version(
+                        release_tag,
+                        package_version=str(existing.get("version") or existing_normalized),
+                        normalized_package_version=existing_normalized,
+                    )
+                except PrecheckError as exc:
+                    raise ArtifactServiceError(exc.code, str(exc), status_code=400) from exc
             if supersedes_artifact_id and str(existing.get("supersedes_artifact_id") or "") != str(
                 supersedes_artifact_id
             ):
@@ -523,6 +552,7 @@ class ArtifactService:
                         or user.get("name")
                         or user.get("internal_username")
                         or "",
+                        **({"github_release": dict(github_release)} if github_release else {}),
                     },
                     "base_artifact_id": plugin.get("current_artifact_id"),
                     "supersedes_artifact_id": supersedes_artifact_id,

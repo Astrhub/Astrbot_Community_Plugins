@@ -102,6 +102,29 @@ def is_excluded_review_path(path: str) -> bool:
     return review_exclusion_reason(path) is not None
 
 
+def validate_release_version(
+    release_tag: str,
+    *,
+    package_version: str,
+    normalized_package_version: str,
+) -> None:
+    tag = str(release_tag or "").strip()
+    if not tag:
+        return
+    try:
+        normalized_tag = normalize_version(tag)
+    except PrecheckError as exc:
+        raise PrecheckError(
+            "release_version_mismatch",
+            f"GitHub Release 标签（{tag}）不是有效版本号，无法与插件包 metadata.yaml 版本（{package_version}）匹配",
+        ) from exc
+    if normalized_tag != normalized_package_version:
+        raise PrecheckError(
+            "release_version_mismatch",
+            f"GitHub Release 版本（{tag}）与插件包 metadata.yaml 版本（{package_version}）不一致",
+        )
+
+
 class PrecheckError(ValueError):
     def __init__(self, code: str, message: str, *, path: str = "") -> None:
         super().__init__(message)
@@ -147,7 +170,13 @@ class ArchivePrechecker:
     def __init__(self, settings: ArtifactSettings) -> None:
         self.settings = settings
 
-    def inspect(self, archive_path: Path, *, expected_repo: str) -> PrecheckResult:
+    def inspect(
+        self,
+        archive_path: Path,
+        *,
+        expected_repo: str,
+        expected_release_tag: str = "",
+    ) -> PrecheckResult:
         try:
             archive = zipfile.ZipFile(archive_path)
         except (zipfile.BadZipFile, OSError) as exc:
@@ -242,6 +271,11 @@ class ArchivePrechecker:
                 raise PrecheckError("entrypoint_missing", "插件包根目录缺少 main.py")
             metadata = parse_plugin_metadata_bytes(content_by_path.get(metadata_paths[0], b""))
             version, normalized_version = _validate_metadata(metadata, expected_repo=expected_repo)
+            validate_release_version(
+                expected_release_tag,
+                package_version=version,
+                normalized_package_version=normalized_version,
+            )
             tree_sha256 = _tree_digest(members)
             return PrecheckResult(
                 metadata=metadata,

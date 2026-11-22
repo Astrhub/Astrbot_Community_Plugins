@@ -417,6 +417,16 @@ async def process_cdn_reviews(
                     source_ref=source.requested_ref,
                     resolved_source=source,
                 )
+                if (
+                    getattr(source, "release_tag", "")
+                    and artifact.get("version")
+                    and version_key(artifact.get("version")) != claim["requested_version"]
+                ):
+                    raise cdn_error(
+                        "release_version_mismatch",
+                        "最新 GitHub Release 版本与仓库当前版本不一致",
+                        503,
+                    )
                 if artifact["review_status"] == "approved" and artifact["publication_status"] in {
                     "unpublished",
                     "publish_failed",
