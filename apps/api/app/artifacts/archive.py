@@ -65,6 +65,41 @@ LANGUAGE_BY_SUFFIX = {
     ".yaml": "yaml",
     ".yml": "yaml",
 }
+_EXCLUDED_TEST_DIRS = frozenset({"tests", "test", "__tests__"})
+_EXCLUDED_TEST_SUFFIXES = (
+    "_test.py",
+    ".test.js",
+    ".test.ts",
+    ".test.jsx",
+    ".test.tsx",
+    ".spec.js",
+    ".spec.ts",
+    ".spec.jsx",
+    ".spec.tsx",
+)
+
+
+def review_exclusion_reason(path: str) -> str | None:
+    """Return an exclusion reason for test or GitHub CI files, or None for plugin runtime files."""
+    parts = [part.casefold() for part in PurePosixPath(str(path or "")).parts]
+    if not parts:
+        return None
+    if parts[0] == ".github":
+        return "github_ci"
+    if any(part in _EXCLUDED_TEST_DIRS for part in parts[:-1]):
+        return "test_file"
+    filename = parts[-1]
+    if filename == "conftest.py":
+        return "test_file"
+    if filename.startswith("test_") and filename.endswith(".py"):
+        return "test_file"
+    if filename.endswith(_EXCLUDED_TEST_SUFFIXES):
+        return "test_file"
+    return None
+
+
+def is_excluded_review_path(path: str) -> bool:
+    return review_exclusion_reason(path) is not None
 
 
 class PrecheckError(ValueError):

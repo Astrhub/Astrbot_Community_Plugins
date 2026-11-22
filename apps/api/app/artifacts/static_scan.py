@@ -4,19 +4,109 @@ import ast
 import hashlib
 import re
 import zipfile
+from collections.abc import Iterable
 from pathlib import PurePosixPath
-from typing import Any, Iterable
+from typing import Any
 
-from .archive import ArchiveMember
+from .archive import ArchiveMember, is_excluded_review_path
 from .models import highest_risk
 from .requirements_parser import RequirementsParseError, parse_requirements
 
-RULESET_VERSION = "p1.1"
+RULESET_VERSION = "p1.2"
 URL_PATTERN = re.compile(r"https?://", re.IGNORECASE)
 LONG_ENCODED_PATTERN = re.compile(r"[A-Za-z0-9+/]{512,}={0,2}")
-SENSITIVE_PATTERN = re.compile(
-    r"(?:\.ssh|\.aws|credentials|id_rsa|private[_-]?key|api[_-]?key|access[_-]?token)",
-    re.IGNORECASE,
+_DATA_URI_PREFIX = re.compile(
+    r"^data:(?:image|audio|video|font)/[a-z0-9.+-]+;base64,", re.IGNORECASE
+)
+_SENSITIVE_PATH_PATTERNS = (
+    re.compile(r"(?:^|[/\\~])\.ssh(?:[/\\]|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[/\\~])\.aws(?:[/\\]|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[/\\~])(?:id_rsa|id_ed25519|id_ecdsa|id_dsa)$", re.IGNORECASE),
+    re.compile(r"(?:^|[/\\~])\.gnupg(?:[/\\]|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[/\\~])\.kube[/\\]config$", re.IGNORECASE),
+    re.compile(r"(?:^|[/\\~])\.docker[/\\]config\.json$", re.IGNORECASE),
+    re.compile(r"(?:^|[/\\~])\.git-credentials$", re.IGNORECASE),
+    re.compile(r"(?:^|[/\\~])\.netrc$", re.IGNORECASE),
+    re.compile(r"^/etc/(?:shadow|passwd|sudoers)$"),
+)
+_HARDCODED_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("private_key", re.compile(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----")),
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+    ("api_secret_key", re.compile(r"\bsk-[A-Za-z0-9_-]{24,}\b")),
+)
+_DYNAMIC_EXEC_NAMES = frozenset(
+    {
+        "eval",
+        "exec",
+        "compile",
+        "builtins.eval",
+        "builtins.exec",
+        "builtins.compile",
+    }
+)
+_PROCESS_EXEC_NAMES = frozenset(
+    {
+        "os.system",
+        "os.popen",
+        "subprocess.run",
+        "subprocess.Popen",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.getoutput",
+        "subprocess.getstatusoutput",
+        "asyncio.create_subprocess_exec",
+        "asyncio.create_subprocess_shell",
+    }
+)
+_DYNAMIC_IMPORT_NAMES = frozenset(
+    {
+        "__import__",
+        "builtins.__import__",
+        "importlib.import_module",
+        "importlib.util.spec_from_file_location",
+    }
+)
+_UNSAFE_DESERIALIZATION_NAMES = frozenset(
+    {
+        "marshal.loads",
+        "pickle.loads",
+        "pickle.load",
+        "cloudpickle.loads",
+        "dill.loads",
+    }
+)
+_DECODE_CALL_NAMES = frozenset(
+    {
+        "base64.b64decode",
+        "base64.urlsafe_b64decode",
+        "zlib.decompress",
+        "gzip.decompress",
+        "lzma.decompress",
+        "bz2.decompress",
+        "marshal.loads",
+        "codecs.decode",
+    }
+)
+_NETWORK_PREFIXES = ("requests.", "httpx.", "urllib.request.", "aiohttp.")
+_SHELL_OR_INTERPRETER_BINS = frozenset(
+    {
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ash",
+        "cmd",
+        "cmd.exe",
+        "powershell",
+        "pwsh",
+        "python",
+        "python3",
+        "node",
+        "perl",
+        "ruby",
+    }
 )
 
 
@@ -25,7 +115,7 @@ class StaticScanner:
         findings: list[dict[str, Any]] = []
         with zipfile.ZipFile(archive_path) as archive:
             for member in members:
-                if not member.is_text:
+                if not member.is_text or is_excluded_review_path(member.path):
                     continue
                 content = archive.read(member.source_name)
                 try:
@@ -64,16 +154,31 @@ def _scan_python(path: str, source: str) -> list[dict[str, Any]]:
             )
         ]
 
+    aliases = _imported_aliases(tree)
+    docstring_ids = _docstring_node_ids(tree)
+    nested_compile_ids = _nested_compile_call_ids(tree, aliases)
+
     findings: list[dict[str, Any]] = []
     call_names: set[str] = set()
+    has_dangerous_execute = False
+    has_dynamic_exec = False
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        name = _call_name(node.func)
+        name = _resolve_call_name(node.func, aliases)
+        if not name:
+            continue
         call_names.add(name)
         line = getattr(node, "lineno", None)
         evidence = _line_excerpt(source, line)
-        if name in {"eval", "exec", "compile", "builtins.eval", "builtins.exec"}:
+
+        if name in _DYNAMIC_EXEC_NAMES:
+            if name in {"compile", "builtins.compile"} and id(node) in nested_compile_ids:
+                continue
+            has_dynamic_exec = True
+            if name not in {"compile", "builtins.compile"}:
+                has_dangerous_execute = True
             findings.append(
                 _finding(
                     rule_id="PY001",
@@ -86,7 +191,9 @@ def _scan_python(path: str, source: str) -> list[dict[str, Any]]:
                     evidence=evidence,
                 )
             )
-        elif name == "os.system" or name.startswith("subprocess."):
+        elif name in _PROCESS_EXEC_NAMES:
+            if _is_dangerous_process_call(node, name):
+                has_dangerous_execute = True
             findings.append(
                 _finding(
                     rule_id="PY002",
@@ -99,11 +206,9 @@ def _scan_python(path: str, source: str) -> list[dict[str, Any]]:
                     evidence=evidence,
                 )
             )
-        elif name in {
-            "__import__",
-            "importlib.import_module",
-            "importlib.util.spec_from_file_location",
-        }:
+        elif name in _DYNAMIC_IMPORT_NAMES:
+            if _is_constant_module_import(node, name):
+                continue
             findings.append(
                 _finding(
                     rule_id="PY003",
@@ -116,7 +221,7 @@ def _scan_python(path: str, source: str) -> list[dict[str, Any]]:
                     evidence=evidence,
                 )
             )
-        elif name in {"marshal.loads", "pickle.loads", "cloudpickle.loads"}:
+        elif name in _UNSAFE_DESERIALIZATION_NAMES:
             findings.append(
                 _finding(
                     rule_id="PY005",
@@ -130,20 +235,15 @@ def _scan_python(path: str, source: str) -> list[dict[str, Any]]:
                 )
             )
 
-    lowered = source.lower()
-    has_download = bool(URL_PATTERN.search(source)) and any(
-        name.startswith(prefix)
-        for name in call_names
-        for prefix in ("requests.", "httpx.", "urllib.request.", "aiohttp.")
+    literals = _executable_string_literals(tree, docstring_ids)
+    has_url_literal = any(URL_PATTERN.search(value) for _, value in literals)
+    has_network_call = any(
+        name.startswith(prefix) for name in call_names for prefix in _NETWORK_PREFIXES
     )
-    has_execute = any(
-        name in {"exec", "eval", "os.system"} or name.startswith("subprocess.")
-        for name in call_names
-    )
-    if has_download and has_execute:
+    if has_url_literal and has_network_call and has_dangerous_execute:
         findings.append(
             _finding(
-                rule_id="PY003",
+                rule_id="PY006",
                 severity="critical",
                 category="download_and_execute",
                 path=path,
@@ -153,29 +253,50 @@ def _scan_python(path: str, source: str) -> list[dict[str, Any]]:
                 evidence="package-level heuristic: network + execution",
             )
         )
-    sensitive = SENSITIVE_PATTERN.search(source)
-    if sensitive:
+
+    sensitive_hit = _first_sensitive_path_literal(literals)
+    if sensitive_hit is not None:
+        line, _ = sensitive_hit
         findings.append(
             _finding(
                 rule_id="PY004",
                 severity="high",
                 category="sensitive_data_access",
                 path=path,
-                line=source[: sensitive.start()].count("\n") + 1,
-                message="检测到凭据或敏感目录访问模式",
-                suggestion="仅通过插件配置读取必要凭据，不扫描用户主目录",
-                evidence=_line_excerpt(source, source[: sensitive.start()].count("\n") + 1),
+                line=line,
+                message="检测到敏感凭据目录或系统密钥文件访问模式",
+                suggestion="仅通过插件配置读取必要凭据，不扫描用户主目录或系统敏感文件",
+                evidence=_line_excerpt(source, line),
             )
         )
-    obfuscation_terms = sum(
-        term in lowered
-        for term in ("base64.b64decode", "zlib.decompress", "marshal.loads", "codecs.decode")
-    )
-    if obfuscation_terms >= 2 or LONG_ENCODED_PATTERN.search(source):
+
+    secret_hit = _first_hardcoded_secret_literal(literals)
+    if secret_hit is not None:
+        line, secret_kind = secret_hit
         findings.append(
             _finding(
-                rule_id="PY005",
-                severity="critical" if obfuscation_terms >= 2 else "high",
+                rule_id="PY007",
+                severity="high",
+                category="hardcoded_secret",
+                path=path,
+                line=line,
+                message=f"检测到疑似硬编码密钥字面量（{secret_kind}）",
+                suggestion="移除代码中的固定密钥，改为通过插件配置项注入",
+                evidence=f"redacted hardcoded secret literal (kind={secret_kind})",
+            )
+        )
+
+    decode_calls = len(call_names & _DECODE_CALL_NAMES)
+    has_long_encoded = any(_is_suspicious_encoded_literal(value) for _, value in literals)
+    is_critical_obfuscation = (
+        decode_calls >= 2 and (has_dynamic_exec or "marshal.loads" in call_names)
+    ) or (has_long_encoded and has_dynamic_exec)
+    is_high_obfuscation = has_long_encoded and decode_calls >= 1
+    if is_critical_obfuscation or is_high_obfuscation:
+        findings.append(
+            _finding(
+                rule_id="PY008",
+                severity="critical" if is_critical_obfuscation else "high",
                 category="obfuscation",
                 path=path,
                 line=None,
@@ -242,13 +363,178 @@ def _scan_requirements(path: str, source: str) -> list[dict[str, Any]]:
     return findings
 
 
+def _imported_aliases(tree: ast.AST) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".", 1)[0]
+                target = alias.name if alias.asname else local
+                aliases[local] = target
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                local = alias.asname or alias.name
+                if node.level == 0 and node.module:
+                    aliases[local] = f"{node.module}.{alias.name}"
+                elif node.level > 0:
+                    prefix = "." * node.level + (node.module or "")
+                    aliases[local] = f"{prefix}.{alias.name}"
+    return aliases
+
+
 def _call_name(node: ast.expr) -> str:
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
         prefix = _call_name(node.value)
-        return f"{prefix}.{node.attr}" if prefix else node.attr
+        return f"{prefix}.{node.attr}" if prefix else ""
     return ""
+
+
+def _resolve_call_name(node: ast.expr, aliases: dict[str, str]) -> str:
+    raw = _call_name(node)
+    if not raw:
+        return ""
+    head, *rest = raw.split(".")
+    resolved_head = aliases.get(head, head)
+    return ".".join([resolved_head, *rest])
+
+
+def _docstring_node_ids(tree: ast.AST) -> set[int]:
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node,
+            (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            continue
+        if not node.body:
+            continue
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            ids.add(id(first.value))
+    return ids
+
+
+def _nested_compile_call_ids(tree: ast.AST, aliases: dict[str, str]) -> set[int]:
+    nested: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _resolve_call_name(node.func, aliases)
+        if name not in {"eval", "exec", "builtins.eval", "builtins.exec"}:
+            continue
+        if not node.args:
+            continue
+        first_arg = node.args[0]
+        if isinstance(first_arg, ast.Call) and _resolve_call_name(first_arg.func, aliases) in {
+            "compile",
+            "builtins.compile",
+        }:
+            nested.add(id(first_arg))
+    return nested
+
+
+def _is_constant_module_import(node: ast.Call, name: str) -> bool:
+    if name == "importlib.util.spec_from_file_location":
+        return False
+    if not node.args:
+        return False
+    first = node.args[0]
+    return isinstance(first, ast.Constant) and isinstance(first.value, str) and bool(first.value)
+
+
+def _is_dangerous_process_call(node: ast.Call, name: str) -> bool:
+    if name in {
+        "os.system",
+        "os.popen",
+        "subprocess.getoutput",
+        "subprocess.getstatusoutput",
+        "asyncio.create_subprocess_shell",
+    }:
+        return True
+    for keyword in node.keywords:
+        if (
+            keyword.arg == "shell"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+        ):
+            return True
+    if not node.args:
+        return True
+    cmd = node.args[0]
+    if isinstance(cmd, (ast.List, ast.Tuple)) and cmd.elts:
+        first_elem = cmd.elts[0]
+        if not (isinstance(first_elem, ast.Constant) and isinstance(first_elem.value, str)):
+            return True
+        program = PurePosixPath(first_elem.value.replace("\\", "/")).name.casefold()
+        return program in _SHELL_OR_INTERPRETER_BINS
+    return True
+
+
+def _executable_string_literals(
+    tree: ast.AST,
+    docstring_ids: set[int],
+) -> list[tuple[int | None, str]]:
+    literals: list[tuple[int | None, str]] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstring_ids
+        ):
+            literals.append((getattr(node, "lineno", None), node.value))
+    return literals
+
+
+def _first_sensitive_path_literal(
+    literals: list[tuple[int | None, str]],
+) -> tuple[int | None, str] | None:
+    for line, value in literals:
+        candidate = value.strip()
+        if not candidate or len(candidate) > 512:
+            continue
+        if any(pattern.search(candidate) for pattern in _SENSITIVE_PATH_PATTERNS):
+            return line, candidate
+    return None
+
+
+def _first_hardcoded_secret_literal(
+    literals: list[tuple[int | None, str]],
+) -> tuple[int | None, str] | None:
+    for line, value in literals:
+        if not value:
+            continue
+        for kind, pattern in _HARDCODED_SECRET_PATTERNS:
+            match = pattern.search(value)
+            if not match:
+                continue
+            if kind == "api_secret_key" and _is_placeholder_secret(match.group(0)):
+                continue
+            return line, kind
+    return None
+
+
+def _is_placeholder_secret(value: str) -> bool:
+    body = value.removeprefix("sk-").lower()
+    if not body:
+        return True
+    if len(set(body)) <= 3:
+        return True
+    return body.startswith(("test", "fake", "dummy", "example", "placeholder", "your"))
+
+
+def _is_suspicious_encoded_literal(value: str) -> bool:
+    stripped = value.strip()
+    if len(stripped) < 512 or _DATA_URI_PREFIX.match(stripped):
+        return False
+    return bool(LONG_ENCODED_PATTERN.search(stripped))
 
 
 def _finding(
