@@ -227,7 +227,7 @@ setup 写 `/etc`。生产环境还需在前置 Nginx/Caddy 启用 HTTPS，并设
 
 ### CI/CD
 
-`.github/workflows/ci.yml` 仅执行代码质量检查（ruff lint + pytest + 前端 build），**不包含部署步骤**。artifact 表通过带 checksum 和 advisory lock 的版本化 SQL migration 初始化；尚未提供 Kubernetes/Helm、Nginx/Caddy 反向代理模板与 Terraform。
+`.github/workflows/ci.yml` 仅在代码或部署配置改动时按变更类型执行对应检查（后端变更跑 `Python API` 的 ruff lint + pytest，前端变更跑 `Vue market` 的 `vp check` + `vp test` + `vp build`，纯文档改动不触发），**不包含部署步骤**。artifact 表通过带 checksum 和 advisory lock 的版本化 SQL migration 初始化；尚未提供 Kubernetes/Helm、Nginx/Caddy 反向代理模板与 Terraform。
 
 ## 配置
 
