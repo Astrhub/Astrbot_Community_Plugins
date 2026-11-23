@@ -2,7 +2,7 @@
 
 ## 构建时效与预渲染产物
 
-生产环境构建前端时，会从 `/v1/plugins` 拉取已上架插件清单，自动生成 `sitemap.xml`、`robots.txt` 以及首页、提交页、REST 文档页和各插件/作者详情页的静态预渲染 HTML。
+生产环境构建前端时，会从 `/v1/plugins` 拉取已上架插件清单，并从 `/v1/authors` 补充无上架插件作者，自动生成 `sitemap.xml`、`robots.txt` 以及首页、提交页、REST 文档页和各插件/作者详情页的静态预渲染 HTML。作者数据返回后会一次性提交标题、canonical 与 Open Graph 元信息，预渲染脚本等待这些元信息就绪后再保存快照。
 
 - 建议至少每天定时重新构建一次前端，或在插件新上架、下架、重命名后立即触发重建。
 - 构建时必须显式传入公网域名（例如 `VITE_BASE_URL=https://your-domain npm run build:web`），并在部署的 `apps/market-web/dist` 中保留生成的 `sitemap.xml`、`robots.txt`、`plugin/<owner>/<name>/index.html` 与 `author/<owner>/index.html`。

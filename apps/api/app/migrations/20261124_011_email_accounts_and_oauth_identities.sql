@@ -29,54 +29,89 @@ ALTER TABLE market_users
     ADD CONSTRAINT market_users_auth_source_check
     CHECK (auth_source IN ('github', 'internal', 'email', 'local', 'oauth'));
 
-WITH candidates AS (
-    SELECT
-        u.id,
-        COALESCE(
-            NULLIF(btrim(u.public_username), ''),
-            NULLIF(btrim(u.github_login), ''),
-            NULLIF(btrim(u.internal_username), ''),
-            u.id
-        ) AS base_name,
-        EXISTS (
+DO $$
+DECLARE
+    candidate_record record;
+    v_base_name text;
+    v_candidate_name text;
+    v_suffix integer;
+BEGIN
+    FOR candidate_record IN
+        WITH candidates AS (
+            SELECT
+                u.id,
+                COALESCE(
+                    NULLIF(btrim(u.github_login), ''),
+                    NULLIF(btrim(u.internal_username), ''),
+                    u.id
+                ) AS base_name,
+                EXISTS (
+                    SELECT 1
+                      FROM market_plugins p
+                     WHERE p.owner_user_id = u.id
+                       AND p.status = 'listed'
+                ) AS has_listed_plugin,
+                EXISTS (
+                    SELECT 1
+                      FROM market_plugins p
+                     WHERE p.owner_user_id = u.id
+                ) AS has_any_plugin,
+                (btrim(u.github_login) <> '') AS has_github_login,
+                u.created_at
+              FROM market_users u
+             WHERE btrim(u.public_username) = ''
+        ),
+        ranked AS (
+            SELECT
+                id,
+                base_name,
+                created_at,
+                row_number() OVER (
+                    PARTITION BY lower(base_name)
+                    ORDER BY
+                        has_listed_plugin DESC,
+                        has_any_plugin DESC,
+                        has_github_login DESC,
+                        created_at ASC,
+                        id ASC
+                ) AS rn
+              FROM candidates
+        )
+        SELECT id, base_name, created_at, rn
+          FROM ranked
+         ORDER BY lower(base_name), rn, created_at, id
+    LOOP
+        v_base_name = candidate_record.base_name;
+        v_candidate_name = v_base_name;
+        v_suffix = 0;
+        WHILE EXISTS (
             SELECT 1
-              FROM market_plugins p
-             WHERE p.owner_user_id = u.id
-               AND p.status = 'listed'
-        ) AS has_listed_plugin,
-        EXISTS (
+              FROM market_users u
+             WHERE u.id <> candidate_record.id
+               AND btrim(u.public_username) <> ''
+               AND lower(btrim(u.public_username)) = lower(v_candidate_name)
+        ) OR EXISTS (
             SELECT 1
-              FROM market_plugins p
-             WHERE p.owner_user_id = u.id
-        ) AS has_any_plugin,
-        (btrim(u.github_login) <> '') AS has_github_login,
-        u.created_at
-      FROM market_users u
-),
-ranked AS (
-    SELECT
-        id,
-        base_name,
-        row_number() OVER (
-            PARTITION BY lower(base_name)
-            ORDER BY
-                has_listed_plugin DESC,
-                has_any_plugin DESC,
-                has_github_login DESC,
-                created_at ASC,
-                id ASC
-        ) AS rn
-      FROM candidates
-)
-UPDATE market_users u
-   SET public_username = CASE
-           WHEN r.rn = 1 THEN r.base_name
-           ELSE r.base_name || '_' || substr(md5(u.id), 1, 6)
-       END
-  FROM ranked r
- WHERE u.id = r.id
-   AND btrim(u.public_username) = '';
-
+              FROM market_users u
+             WHERE u.id <> candidate_record.id
+               AND btrim(u.internal_username) <> ''
+               AND lower(btrim(u.internal_username)) = lower(v_candidate_name)
+        ) OR EXISTS (
+            SELECT 1
+              FROM market_users u
+             WHERE u.id <> candidate_record.id
+               AND btrim(u.github_login) <> ''
+               AND lower(btrim(u.github_login)) = lower(v_candidate_name)
+        ) LOOP
+            v_suffix = v_suffix + 1;
+            v_candidate_name = v_base_name || '_' || substr(md5(candidate_record.id), 1, 6)
+                || CASE WHEN v_suffix > 1 THEN '_' || v_suffix ELSE '' END;
+        END LOOP;
+        UPDATE market_users
+           SET public_username = v_candidate_name
+         WHERE id = candidate_record.id;
+    END LOOP;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS market_users_email_lower_idx
     ON market_users (lower(btrim(email)))
     WHERE btrim(email) <> '';
@@ -134,8 +169,8 @@ ALTER TABLE market_plugins
 
 UPDATE market_plugins p
    SET owner_username = COALESCE(
-       NULLIF(btrim(p.owner_github_login), ''),
        (SELECT NULLIF(btrim(u.public_username), '') FROM market_users u WHERE u.id = p.owner_user_id),
+       NULLIF(btrim(p.owner_github_login), ''),
        ''
    )
  WHERE btrim(p.owner_username) = '';

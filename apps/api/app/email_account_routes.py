@@ -23,10 +23,12 @@ from .email_challenges import (
     enforce_direct_register_rate_limit,
     enforce_verification_request_limits,
     release_email_challenge,
+    release_rate_limit_reservation,
     render_email_changed_notice,
     render_verification_email,
     reserve_email_challenge,
 )
+from .github_authorization import revoke_github_identity_authorizations
 from .oauth_identities import (
     can_unbind_oauth_identity,
     clean_email,
@@ -206,7 +208,7 @@ def build_email_account_router(
         _validate_password(payload.password)
 
         try:
-            await enforce_verification_request_limits(
+            reservation_key = await enforce_verification_request_limits(
                 request.app.state.store,
                 settings,
                 purpose="register",
@@ -220,34 +222,39 @@ def build_email_account_router(
             request, "get_user_by_public_username", clean_username
         ) or await call_store(request, "get_user_by_internal_username", clean_username)
         if existing_username:
+            await release_rate_limit_reservation(request.app.state.store, reservation_key)
             raise _http_error(409, "username_already_exists", "用户名已被占用")
 
         existing_email = await call_store(request, "get_user_by_email", cleaned_email)
         if existing_email:
+            await release_rate_limit_reservation(request.app.state.store, reservation_key)
             return {
                 "accepted": True,
                 "registration_id": f"chg_{secrets.token_urlsafe(24)}",
                 "expires_in": CHALLENGE_TTL_SECONDS,
             }
 
-        challenge_id, code, expires_in = await create_email_challenge(
-            request.app.state.store,
-            purpose="register",
-            email=cleaned_email,
-            payload={
-                "username": clean_username,
-                "email": cleaned_email,
-                "password_hash": hash_password(payload.password),
-            },
-        )
-        subject, body = render_verification_email(settings.site_name, "register", code)
+        challenge_id = ""
         try:
+            challenge_id, code, expires_in = await create_email_challenge(
+                request.app.state.store,
+                purpose="register",
+                email=cleaned_email,
+                payload={
+                    "username": clean_username,
+                    "email": cleaned_email,
+                    "password_hash": hash_password(payload.password),
+                },
+            )
+            subject, body = render_verification_email(settings.site_name, "register", code)
             await send_email(request.app, settings, cleaned_email, subject, body)
         except Exception:
-            await delete_email_challenge(request.app.state.store, challenge_id)
+            if challenge_id:
+                await delete_email_challenge(request.app.state.store, challenge_id)
             await clear_verification_cooldown(
                 request.app.state.store, purpose="register", email=cleaned_email
             )
+            await release_rate_limit_reservation(request.app.state.store, reservation_key)
             raise
 
         return {
@@ -327,7 +334,7 @@ def build_email_account_router(
             raise _http_error(400, "invalid_email", "请输入有效的邮箱地址")
 
         try:
-            await enforce_verification_request_limits(
+            reservation_key = await enforce_verification_request_limits(
                 request.app.state.store,
                 settings,
                 purpose="password_reset",
@@ -339,26 +346,30 @@ def build_email_account_router(
 
         user = await call_store(request, "get_user_by_email", cleaned_email)
         if not user:
+            await release_rate_limit_reservation(request.app.state.store, reservation_key)
             return {
                 "accepted": True,
                 "reset_id": f"chg_{secrets.token_urlsafe(24)}",
                 "expires_in": CHALLENGE_TTL_SECONDS,
             }
 
-        challenge_id, code, expires_in = await create_email_challenge(
-            request.app.state.store,
-            purpose="password_reset",
-            email=cleaned_email,
-            payload={"user_id": str(user["id"]), "email": str(user["email"])},
-        )
-        subject, body = render_verification_email(settings.site_name, "password_reset", code)
+        challenge_id = ""
         try:
+            challenge_id, code, expires_in = await create_email_challenge(
+                request.app.state.store,
+                purpose="password_reset",
+                email=cleaned_email,
+                payload={"user_id": str(user["id"]), "email": str(user["email"])},
+            )
+            subject, body = render_verification_email(settings.site_name, "password_reset", code)
             await send_email(request.app, settings, str(user["email"]), subject, body)
         except Exception:
-            await delete_email_challenge(request.app.state.store, challenge_id)
+            if challenge_id:
+                await delete_email_challenge(request.app.state.store, challenge_id)
             await clear_verification_cooldown(
                 request.app.state.store, purpose="password_reset", email=cleaned_email
             )
+            await release_rate_limit_reservation(request.app.state.store, reservation_key)
             raise
 
         return {
@@ -397,6 +408,7 @@ def build_email_account_router(
                 hash_password(payload.new_password),
                 bump_session_version=True,
                 verify_email_at=_utc_now(),
+                expected_email=str(challenge_payload.get("email") or ""),
             )
         except Exception:
             await release_email_challenge(request.app.state.store, payload.reset_id)
@@ -404,6 +416,9 @@ def build_email_account_router(
 
         await complete_email_challenge(request.app.state.store, payload.reset_id)
         if not updated:
+            current = await call_store(request, "get_user_by_id", user_id)
+            if current:
+                raise _http_error(409, "email_changed", "账号邮箱已变更，请重新获取重置验证码")
             raise _http_error(404, "user_not_found", "目标账号不存在")
         return {"reset": True}
 
@@ -506,7 +521,7 @@ def build_email_account_router(
             )
 
         try:
-            await enforce_verification_request_limits(
+            reservation_key = await enforce_verification_request_limits(
                 request.app.state.store,
                 settings,
                 purpose="email_change",
@@ -518,6 +533,7 @@ def build_email_account_router(
 
         existing = await call_store(request, "get_user_by_email", new_email)
         if existing and existing["id"] != user["id"]:
+            await release_rate_limit_reservation(request.app.state.store, reservation_key)
             return {
                 "accepted": True,
                 "completed": False,
@@ -526,24 +542,27 @@ def build_email_account_router(
                 "expires_in": CHALLENGE_TTL_SECONDS,
             }
 
-        challenge_id, code, expires_in = await create_email_challenge(
-            request.app.state.store,
-            purpose="email_change",
-            email=new_email,
-            payload={
-                "user_id": str(user["id"]),
-                "old_email": old_email,
-                "new_email": new_email,
-            },
-        )
-        subject, body = render_verification_email(settings.site_name, "email_change", code)
+        challenge_id = ""
         try:
+            challenge_id, code, expires_in = await create_email_challenge(
+                request.app.state.store,
+                purpose="email_change",
+                email=new_email,
+                payload={
+                    "user_id": str(user["id"]),
+                    "old_email": old_email,
+                    "new_email": new_email,
+                },
+            )
+            subject, body = render_verification_email(settings.site_name, "email_change", code)
             await send_email(request.app, settings, new_email, subject, body)
         except Exception:
-            await delete_email_challenge(request.app.state.store, challenge_id)
+            if challenge_id:
+                await delete_email_challenge(request.app.state.store, challenge_id)
             await clear_verification_cooldown(
                 request.app.state.store, purpose="email_change", email=new_email
             )
+            await release_rate_limit_reservation(request.app.state.store, reservation_key)
             raise
 
         return {
@@ -646,6 +665,13 @@ def build_email_account_router(
         revoked = await call_store(request, "revoke_oauth_identity", user["id"], identity_id)
         if not revoked:
             raise _http_error(404, "oauth_identity_not_found", "未找到该 OAuth 绑定记录")
+        if revoked.get("provider") == "github":
+            await revoke_github_identity_authorizations(
+                request.app.state.store,
+                request.app.state.settings,
+                str(user["id"]),
+                str(revoked.get("provider_user_id") or ""),
+            )
         refreshed = await call_store(request, "get_user_by_id", user["id"]) or user
         return {
             "revoked": True,

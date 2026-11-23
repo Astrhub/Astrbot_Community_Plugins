@@ -67,8 +67,9 @@ from .config import (
 from .email_account_routes import build_email_account_router
 from .email_challenges import (
     EmailChallengeError,
-    enforce_site_email_daily_limit,
     record_site_email_sent,
+    release_rate_limit_reservation,
+    reserve_site_email_daily_limit,
 )
 from .env_file import write_env_file
 from .github_authorization import (
@@ -963,15 +964,23 @@ def register_routes(app: FastAPI) -> None:
     )
     async def issue_my_api_key(request: Request, payload: ApiKeyCreate) -> dict[str, Any]:
         user = await require_user(request)
-        tier = await resolve_account_tier(get_store(request), user)
+        store = get_store(request)
+        tier = await resolve_account_tier(store, user)
+        has_oauth = await has_bound_oauth_identity(store, user)
+        can_write = can_issue_write_api_key(tier, has_oauth)
         scopes = list(payload.scopes)
-        if "scopes" not in payload.model_fields_set and not can_issue_write_api_key(tier):
+        if "scopes" not in payload.model_fields_set and not can_write:
             scopes = ["market:read"]
-        if "market:write" in scopes and not can_issue_write_api_key(tier):
+        if "market:write" in scopes and not can_write:
+            code = (
+                "oauth_binding_required"
+                if str(tier) == "developer" and not has_oauth
+                else "developer_required"
+            )
             raise HTTPException(
                 403,
                 {
-                    "code": "developer_required",
+                    "code": code,
                     "error": "仅开发者及以上身份可创建包含写入权限的 API Key，请先绑定 OAuth 账号",
                 },
             )
@@ -1213,7 +1222,9 @@ def register_routes(app: FastAPI) -> None:
             "has_oauth_binding": tier_ctx["has_oauth_binding"],
             "can_submit_plugin": tier_ctx["has_oauth_binding"]
             or allow_local_admin_repo_override(settings, user),
-            "can_create_write_api_key": can_issue_write_api_key(tier_ctx["account_tier"]),
+            "can_create_write_api_key": can_issue_write_api_key(
+                tier_ctx["account_tier"], tier_ctx["has_oauth_binding"]
+            ),
             "can_edit_any_plugin": is_admin(user),
             "can_moderate_plugins": can_moderate_plugins(user),
             "can_moderate_community": can_moderate_community(user),
@@ -1233,6 +1244,45 @@ def register_routes(app: FastAPI) -> None:
         return {"items": [public_market_plugin(plugin) for plugin in plugins]}
 
     @app.get(
+        "/v1/authors",
+        tags=["plugins"],
+        summary="获取公开作者列表",
+        description="返回公开作者名及其是否有已上架插件。无需登录。",
+        responses={200: {"description": "作者列表"}},
+    )
+    async def list_authors(request: Request) -> dict[str, list[dict[str, Any]]]:
+        users = await call_store(request, "list_users")
+        plugins = await call_store(request, "list_public_plugins")
+        listed_owner_ids = {
+            str(plugin.get("owner_user_id") or "")
+            for plugin in plugins
+            if plugin.get("owner_user_id")
+        }
+        listed_usernames = {
+            str(plugin.get("owner_username") or "").strip().lower()
+            for plugin in plugins
+            if str(plugin.get("owner_username") or "").strip()
+        }
+        items = []
+        for user in users:
+            username = str(
+                user.get("public_username")
+                or user.get("github_login")
+                or user.get("internal_username")
+                or ""
+            ).strip()
+            if not username:
+                continue
+            items.append(
+                {
+                    "username": username,
+                    "has_listed_plugins": str(user.get("id") or "") in listed_owner_ids
+                    or username.lower() in listed_usernames,
+                }
+            )
+        return {"items": items}
+
+    @app.get(
         "/v1/authors/{username}/plugins",
         tags=["plugins"],
         summary="获取作者已上架插件",
@@ -1243,7 +1293,12 @@ def register_routes(app: FastAPI) -> None:
         author = await call_store(request, "get_user_by_public_username", username)
         if not author:
             author = await call_store(request, "get_user_by_github_login", username)
-        plugins = await call_store(request, "list_author_plugins", username)
+        canonical_username = (
+            str(author.get("public_username") or author.get("github_login") or username).strip()
+            if author
+            else username
+        )
+        plugins = await call_store(request, "list_author_plugins", canonical_username)
         if not author and not plugins:
             raise error(404, "Author not found")
         identities = (
@@ -1268,11 +1323,6 @@ def register_routes(app: FastAPI) -> None:
             )
             if fallback_login:
                 github_url = f"https://github.com/{quote(fallback_login, safe='')}"
-        canonical_username = (
-            str(author.get("public_username") or author.get("github_login") or username).strip()
-            if author
-            else username
-        )
         return {
             "username": canonical_username,
             "display_name": user_display_name(author) if author else username,
@@ -2374,7 +2424,7 @@ def cache_control_for_path(path: str, content_type: str = "") -> str:
         return "public, max-age=300"
     if normalized in {"/sitemap.xml", "/robots.txt", "/llms.txt"}:
         return "public, max-age=3600"
-    if normalized in {"/v1/plugins", "/v1/site"}:
+    if normalized in {"/v1/plugins", "/v1/site", "/v1/authors"}:
         return "public, max-age=60"
     if normalized.startswith("/v1/"):
         return "private, no-store"
@@ -2698,8 +2748,13 @@ async def verify_api_key_access(
     owner_lookup = getattr(store, "get_user_by_id", None)
     owner = await resolve_optional_awaitable(owner_lookup(str(user_id))) if owner_lookup else None
     tier = await resolve_account_tier(store, owner)
-    if not can_issue_write_api_key(tier):
-        return (False, 403, "API key owner lacks developer permission for market:write")
+    has_oauth = await has_bound_oauth_identity(store, owner)
+    if not can_issue_write_api_key(tier, has_oauth):
+        return (
+            False,
+            403,
+            "API key owner lacks OAuth-backed developer permission for market:write",
+        )
     return (True, 200, "")
 
 
@@ -5697,9 +5752,10 @@ async def send_email(
     if settings.email_provider == "disabled":
         raise error(400, "Email service is disabled")
     store = getattr(app.state, "store", None)
+    reservation_key: str | None = None
     if store is not None and hasattr(store, "get_rate_limit_count"):
         try:
-            await enforce_site_email_daily_limit(store, settings)
+            reservation_key = await reserve_site_email_daily_limit(store, settings)
         except EmailChallengeError as exc:
             raise HTTPException(
                 status_code=exc.status_code,
@@ -5708,13 +5764,21 @@ async def send_email(
             ) from exc
     else:
         check_email_daily_limit(app, settings)
-    if settings.email_provider == "cloudflare":
-        await send_email_via_cloudflare(settings, receiver, subject, content)
-    elif settings.email_provider == "smtp":
-        await send_email_via_smtp(settings, receiver, subject, content)
-    else:
-        raise error(400, "Unsupported email provider")
-    if store is not None and hasattr(store, "increment_rate_limit"):
+    try:
+        if settings.email_provider == "cloudflare":
+            await send_email_via_cloudflare(settings, receiver, subject, content)
+        elif settings.email_provider == "smtp":
+            await send_email_via_smtp(settings, receiver, subject, content)
+        else:
+            raise error(400, "Unsupported email provider")
+    except Exception:
+        if reservation_key:
+            try:
+                await release_rate_limit_reservation(store, reservation_key)
+            except Exception:
+                LOGGER.exception("Failed to release site email quota reservation")
+        raise
+    if store is not None and hasattr(store, "increment_rate_limit") and reservation_key is None:
         await record_site_email_sent(store, settings)
     increment_email_daily_count(app, settings)
 

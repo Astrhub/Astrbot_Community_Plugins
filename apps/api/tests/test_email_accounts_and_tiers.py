@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+import redis.asyncio as redis_asyncio
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
-
 import app.main as main_module
 from app.auth import hash_password
 from app.config import load_settings
-from app.store import InMemoryMarketStore, LocalFileMarketStore
+from app.store import InMemoryMarketStore, LocalFileMarketStore, PgRedisMarketStore
+from app.email_challenges import utc_day_stamp
 from tests.github_access_helpers import install_github_access_double
 
 CODE_PATTERN = re.compile(r"(\d{6})")
@@ -416,6 +421,18 @@ def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(monkeypatch: A
     assert after_unbind["account_tier"] == "developer"
     assert after_unbind["is_developer"] is True
 
+    write_without_oauth = client.post(
+        "/v1/me/api-keys",
+        json={"name": "NoOAuthWrite", "scopes": ["market:read", "market:write"]},
+    )
+    assert write_without_oauth.status_code == 403
+    assert write_without_oauth.json()["code"] == "oauth_binding_required"
+    ok_write, status_write, _ = asyncio.run(
+        main_module.verify_api_key_access(
+            store, f"Bearer {write_secret}", store.list_api_keys(), "market:write"
+        )
+    )
+    assert ok_write is False and status_write == 403
     # Cannot submit new plugin or change repo without active OAuth binding
     new_submit = client.post(
         "/v1/plugins/submissions",
@@ -733,3 +750,260 @@ def test_local_file_store_persists_email_accounts_and_oauth_identities(tmp_path:
     identities = store2.list_oauth_identities(reloaded["id"])
     assert len(identities) == 1
     assert identities[0]["provider_login"] == "local_gh"
+
+
+def test_password_reset_code_is_invalidated_by_email_change(monkeypatch: Any) -> None:
+    sent = _capture_emails(monkeypatch)
+    client, store = _make_app(
+        {"EMAIL_REGISTRATION_ENABLED": "true", "EMAIL_VERIFICATION_REQUIRED": "false"}
+    )
+    registered = client.post(
+        "/v1/auth/email/register",
+        json={
+            "username": "reset_alice",
+            "email": "old@example.com",
+            "password": "password123",
+        },
+    )
+    assert registered.status_code == 201
+    reset = client.post("/v1/auth/email/password-reset/request", json={"email": "old@example.com"})
+    assert reset.status_code == 202
+    code = _extract_code(sent[-1])
+    changed = client.post(
+        "/v1/me/email/change/request",
+        json={"current_password": "password123", "new_email": "new@example.com"},
+    )
+    assert changed.status_code == 200
+
+    stale = client.post(
+        "/v1/auth/email/password-reset/verify",
+        json={
+            "reset_id": reset.json()["reset_id"],
+            "code": code,
+            "new_password": "newpassword123",
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "email_changed"
+    assert (
+        client.post(
+            "/v1/auth/internal/login",
+            json={"username": "new@example.com", "password": "newpassword123"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/v1/auth/internal/login",
+            json={"username": "new@example.com", "password": "password123"},
+        ).status_code
+        == 200
+    )
+    current = store.get_user_by_id(registered.json()["user"]["id"])
+    assert current["email"] == "new@example.com"
+    assert current["email_verified_at"] is None
+
+
+def test_email_quota_rolls_back_early_returns_and_send_failures(monkeypatch: Any) -> None:
+    sent = _capture_emails(monkeypatch)
+    client, store = _make_app(
+        {"EMAIL_DAILY_LIMIT": "1", "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER": "1"}
+    )
+    store.create_email_user(
+        username="existing",
+        email="existing@example.com",
+        password_hash=hash_password("password123"),
+    )
+    email_key = f"email_verification_daily:{utc_day_stamp()}:existing@example.com"
+    site_key = f"email_daily_site:{utc_day_stamp()}"
+    existing = client.post(
+        "/v1/auth/email/register/request",
+        json={
+            "username": "another_user",
+            "email": "existing@example.com",
+            "password": "password123",
+        },
+    )
+    assert existing.status_code == 202
+    assert sent == []
+    assert store.get_rate_limit_count(email_key) == 0
+    assert store.get_rate_limit_count(site_key) == 0
+
+    async def failing_smtp(*_args: Any, **_kwargs: Any) -> None:
+        raise main_module.error(502, "SMTP unavailable")
+
+    monkeypatch.setattr(main_module, "send_email_via_smtp", failing_smtp)
+    failed = client.post(
+        "/v1/auth/email/register/request",
+        json={
+            "username": "new_user",
+            "email": "new@example.com",
+            "password": "password123",
+        },
+    )
+    new_email_key = f"email_verification_daily:{utc_day_stamp()}:new@example.com"
+    assert failed.status_code == 502
+    assert store.get_rate_limit_count(new_email_key) == 0
+    assert store.get_rate_limit_count(site_key) == 0
+    assert store.state["emailChallenges"] == {}
+    assert not any("new@example.com" in key for key in store.state["cooldowns"])
+
+    _capture_emails(monkeypatch)
+    succeeded = client.post(
+        "/v1/auth/email/register/request",
+        json={
+            "username": "new_user",
+            "email": "new@example.com",
+            "password": "password123",
+        },
+    )
+    assert succeeded.status_code == 202
+    assert store.get_rate_limit_count(new_email_key) == 1
+    assert store.get_rate_limit_count(site_key) == 1
+
+
+def test_site_email_daily_limit_reservation_is_atomic(monkeypatch: Any) -> None:
+    async def smtp_ok(*_args: Any, **_kwargs: Any) -> None:
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(main_module, "send_email_via_smtp", smtp_ok)
+    client, store = _make_app({"EMAIL_DAILY_LIMIT": "1"})
+
+    async def run() -> list[int]:
+        async def send(index: int) -> int:
+            try:
+                await main_module.send_email(
+                    client.app,
+                    client.app.state.settings,
+                    f"user{index}@example.com",
+                    "Subject",
+                    "Body",
+                )
+                return 200
+            except HTTPException as exc:
+                return exc.status_code
+
+        return list(await asyncio.gather(*(send(index) for index in range(2))))
+
+    assert sorted(asyncio.run(run())) == [200, 429]
+    assert store.get_rate_limit_count(f"email_daily_site:{utc_day_stamp()}") == 1
+
+
+def test_ambiguous_internal_and_public_username_login_is_rejected() -> None:
+    client, store = _make_app(
+        {"EMAIL_REGISTRATION_ENABLED": "true", "EMAIL_VERIFICATION_REQUIRED": "false"}
+    )
+    first = store.create_email_user(
+        username="a_gh", email="a@example.com", password_hash=hash_password("password-a")
+    )
+    second = store.create_email_user(
+        username="shared", email="b@example.com", password_hash=hash_password("password-b")
+    )
+    store.get_user_by_id(first["id"])["internal_username"] = "shared"
+    store.get_user_by_id(second["id"])["internal_username"] = "b_internal"
+
+    response = client.post(
+        "/v1/auth/internal/login", json={"username": "shared", "password": "password-b"}
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "login_identifier_ambiguous"
+
+
+def test_author_namespace_uses_public_username_for_aliases_and_legacy_plugins() -> None:
+    client, store = _make_app(
+        {"EMAIL_REGISTRATION_ENABLED": "true", "EMAIL_VERIFICATION_REQUIRED": "false"}
+    )
+    registered = client.post(
+        "/v1/auth/email/register",
+        json={
+            "username": "alice_local",
+            "email": "alice@example.com",
+            "password": "password123",
+        },
+    )
+    user = store.get_user_by_id(registered.json()["user"]["id"])
+    user["github_login"] = "alice_gh"
+    plugin = store.submit_plugin(
+        user,
+        {
+            "name": "astrbot_plugin_demo",
+            "desc": "Demo",
+            "author": "alice_local",
+            "repo": "https://github.com/alice/astrbot_plugin_demo",
+        },
+    )
+    store.update_plugin_status(plugin["id"], "listed", None)
+    by_github_login = client.get("/v1/authors/alice_gh/plugins")
+    assert by_github_login.status_code == 200
+    assert by_github_login.json()["username"] == "alice_local"
+    assert len(by_github_login.json()["items"]) == 1
+    assert len(client.get("/v1/authors/alice_local/plugins").json()["items"]) == 1
+
+    seeded = InMemoryMarketStore(
+        {
+            "users": [
+                {
+                    "id": "user-1",
+                    "github_login": "name",
+                    "internal_username": "user1_internal",
+                },
+                {"id": "user-2", "github_login": "", "internal_username": "name"},
+                {
+                    "id": "user-3",
+                    "github_login": "name_3d58ce",
+                    "internal_username": "user3_internal",
+                },
+                {"id": "a", "public_username": "a_gh", "internal_username": "a_internal"},
+                {"id": "b", "public_username": "shared", "internal_username": "b_internal"},
+            ],
+            "plugins": [
+                {
+                    "id": "p1",
+                    "name": "astrbot_plugin_a",
+                    "owner_user_id": "a",
+                    "owner_github_login": "shared",
+                    "owner_username": "",
+                    "status": "listed",
+                },
+                {
+                    "id": "p2",
+                    "name": "astrbot_plugin_b",
+                    "owner_user_id": "b",
+                    "owner_github_login": "shared",
+                    "owner_username": "shared",
+                    "status": "listed",
+                },
+            ],
+        }
+    )
+    assert seeded.get_user_by_id("user-2")["public_username"] == "name_3d58ce_2"
+    assert seeded.get_plugin("p1")["owner_username"] == "a_gh"
+    assert [item["name"] for item in seeded.list_author_plugins("shared")] == ["astrbot_plugin_b"]
+    assert [item["name"] for item in seeded.list_author_plugins("a_gh")] == ["astrbot_plugin_a"]
+
+
+def test_pg_redis_rate_limit_reservation_is_atomic() -> None:
+    url = os.getenv("ASTRBOT_TEST_REDIS_URL")
+    if not url:
+        pytest.skip("Set ASTRBOT_TEST_REDIS_URL for Redis tests")
+
+    async def run() -> None:
+        store = PgRedisMarketStore("postgresql://unused", url, 60)
+        store.redis = redis_asyncio.from_url(url)
+        key = f"test:email-rate-limit:{uuid4().hex}"
+        redis_key = f"astrbot_market:rl:{key}"
+        try:
+            reservations = await asyncio.gather(
+                *(store.reserve_rate_limit(key, 1, 60) for _ in range(8))
+            )
+            assert sum(reservations) == 1
+            assert await store.get_rate_limit_count(key) == 1
+            await store.decrement_rate_limit(key)
+            assert await store.get_rate_limit_count(key) == 0
+            assert await store.reserve_rate_limit(key, 1, 60) is True
+            assert await store.get_rate_limit_count(key) == 1
+        finally:
+            await store.redis.delete(redis_key)
+            await store.redis.aclose()
+
+    asyncio.run(run())

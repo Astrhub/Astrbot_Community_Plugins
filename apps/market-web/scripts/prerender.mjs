@@ -6,12 +6,13 @@ import puppeteer from "puppeteer-core";
 import { markPrerenderPath, rewritePrerenderOrigin } from "./prerender-route.mjs";
 
 const baseUrl = String(process.env.VITE_BASE_URL || "").replace(/\/$/, "");
+const apiBaseUrl = String(process.env.VITE_API_BASE_URL || baseUrl).replace(/\/$/, "");
 if (!baseUrl) {
   console.log("[prerender] VITE_BASE_URL is not set; skipping.");
   process.exit(0);
 }
 
-const response = await fetch(`${baseUrl}/v1/plugins`);
+const response = await fetch(`${apiBaseUrl}/v1/plugins`);
 if (!response.ok) throw new Error(`[prerender] Plugin list returned HTTP ${response.status}`);
 const payload = await response.json();
 const pluginRoutes = (payload.items || [])
@@ -35,7 +36,27 @@ const authorRoutes = [
       .map((username) => `/author/${encodeURIComponent(username)}`),
   ),
 ];
-const routes = ["/", "/submit", "/docs/rest", ...pluginRoutes, ...authorRoutes];
+const authorsResponse = await fetch(`${apiBaseUrl}/v1/authors`);
+if (!authorsResponse.ok)
+  throw new Error(`[prerender] Author list returned HTTP ${authorsResponse.status}`);
+const authorsPayload = await authorsResponse.json();
+const emptyAuthorRoutes = [
+  ...new Set(
+    (authorsPayload.items || [])
+      .filter((author) => !author.has_listed_plugins)
+      .map((author) => author.username)
+      .filter(Boolean)
+      .map((username) => `/author/${encodeURIComponent(username)}`),
+  ),
+];
+const routes = [
+  "/",
+  "/submit",
+  "/docs/rest",
+  ...pluginRoutes,
+  ...authorRoutes,
+  ...emptyAuthorRoutes,
+];
 const privateRouteShells = [
   { route: "/plugin-workbench", title: "插件审查工作台 - Astrhub 插件市场" },
 ];
@@ -71,8 +92,21 @@ try {
         await page.waitForSelector(".plugin-card, .empty-state", { timeout: 20_000 });
       if (route.startsWith("/plugin/"))
         await page.waitForSelector(".plugin-layout", { timeout: 20_000 });
-      if (route.startsWith("/author/"))
+      if (route.startsWith("/author/")) {
         await page.waitForSelector(".author-card", { timeout: 20_000 });
+        await page.waitForFunction(
+          (expectedRoute) => {
+            const canonical = document.querySelector('link[rel="canonical"]')?.href || "";
+            return (
+              !document.querySelector(".loading-container") &&
+              new URL(canonical).pathname === expectedRoute &&
+              document.title.includes("的插件 - Astrhub 插件市场")
+            );
+          },
+          { timeout: 20_000 },
+          route,
+        );
+      }
       const html = markPrerenderPath(
         rewritePrerenderOrigin(await page.content(), prerenderOrigin),
         route,

@@ -79,6 +79,53 @@ async def save_authorization(
     )
 
 
+async def revoke_github_identity_authorizations(
+    store: Any,
+    settings: Any,
+    user_id: str,
+    github_id: str,
+) -> int:
+    references = await store_call(store, "list_github_authorization_references", user_id)
+    latest = await store_call(store, "get_latest_github_authorization", user_id)
+    deleted: set[str] = set()
+    retained: str | None = None
+    for reference in references:
+        encrypted = await store_call(store, "get_github_authorization", reference)
+        if not encrypted:
+            deleted.add(reference)
+            continue
+        try:
+            payload = json.loads(
+                oauth_cipher(settings.github_client_secret).decrypt(
+                    encrypted.encode(), ttl=OAUTH_TTL
+                )
+            )
+        except (InvalidToken, ValueError, KeyError):
+            payload = None
+        revoked = (
+            not payload
+            or str(payload.get("user_id") or "") != str(user_id)
+            or str(payload.get("github_id") or "") == str(github_id)
+        )
+        if revoked:
+            await store_call(store, "delete_github_authorization", reference)
+            deleted.add(reference)
+        elif retained is None:
+            retained = reference
+    if latest is None or latest in deleted:
+        if retained:
+            await store_call(
+                store,
+                "set_latest_github_authorization",
+                user_id,
+                retained,
+                OAUTH_TTL,
+            )
+        else:
+            await store_call(store, "clear_latest_github_authorization", user_id)
+    return len(deleted)
+
+
 class GithubRepositoryAccess:
     def __init__(
         self,
@@ -99,16 +146,29 @@ class GithubRepositoryAccess:
             return self._credential
         encrypted = await store_call(self.store, "get_github_authorization", self.reference)
         try:
-            if not encrypted or not self.user.get("github_login"):
+            if not encrypted:
                 raise InvalidToken()
             payload = json.loads(
                 oauth_cipher(self.settings.github_client_secret).decrypt(
                     encrypted.encode(), ttl=OAUTH_TTL
                 )
             )
-            github_id = str(self.user.get("github_id") or self.user.get("id") or "")
-            if payload["user_id"] != str(self.user["id"]) or payload["github_id"] != github_id:
+            if payload["user_id"] != str(self.user["id"]):
                 raise InvalidToken()
+            if hasattr(self.store, "list_oauth_identities"):
+                identities = await store_call(
+                    self.store, "list_oauth_identities", str(self.user["id"])
+                )
+                if not any(
+                    item.get("provider") == "github"
+                    and str(item.get("provider_user_id") or "") == str(payload["github_id"])
+                    for item in identities
+                ):
+                    raise InvalidToken()
+            else:
+                github_id = str(self.user.get("github_id") or self.user.get("id") or "")
+                if not self.user.get("github_login") or payload["github_id"] != github_id:
+                    raise InvalidToken()
         except (InvalidToken, ValueError, KeyError):
             await store_call(self.store, "delete_github_authorization", self.reference)
             raise auth_error(

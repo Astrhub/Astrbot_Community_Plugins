@@ -13,12 +13,13 @@ from app.github_authorization import (
     GithubRepositoryAccess,
     authorization_reference,
     oauth_cipher,
+    revoke_github_identity_authorizations,
     save_authorization,
     verify_publication_access,
 )
 from app.main import create_app
 import app.main as main_module
-from app.store import InMemoryMarketStore
+from app.store import InMemoryMarketStore, PgRedisMarketStore
 
 
 def settings(tmp_path):
@@ -343,3 +344,123 @@ def test_revoked_organization_member_cannot_repoint_existing_listing_to_a_person
     )
     assert response.status_code == 403
     assert store.get_plugin("astrbot_plugin_demo")["repo"].startswith("https://github.com/my-org/")
+
+
+def test_revoking_one_github_identity_preserves_other_credentials(tmp_path):
+    async def run():
+        store = InMemoryMarketStore()
+        cfg = settings(tmp_path)
+        user = store.upsert_github_user({"id": "111", "login": "first_gh"})
+        first_identity = store.list_oauth_identities(user["id"])[0]
+        store.upsert_oauth_identity(
+            user["id"],
+            provider="github",
+            instance_url="https://github.com",
+            provider_user_id="222",
+            provider_login="second_gh",
+            provider_email="second@example.com",
+        )
+        user["github_id"] = "222"
+        user["github_login"] = "second_gh"
+        user["github_email"] = "second@example.com"
+        first_session = store.create_session(user["id"])
+        second_session = store.create_session(user["id"])
+        await save_authorization(
+            store, cfg, first_session["token"], user["id"], "111", "first_gh", "token-1"
+        )
+        await save_authorization(
+            store, cfg, second_session["token"], user["id"], "222", "second_gh", "token-2"
+        )
+        first_reference = authorization_reference(first_session["token"])
+        second_reference = authorization_reference(second_session["token"])
+
+        revoked = store.revoke_oauth_identity(user["id"], first_identity["id"])
+        assert revoked is not None
+        deleted = await revoke_github_identity_authorizations(store, cfg, user["id"], "111")
+        assert deleted == 1
+        assert user["github_id"] == "222"
+        assert user["github_login"] == "second_gh"
+        assert user["github_email"] == "second@example.com"
+        assert store.get_github_authorization(first_reference) is None
+        assert store.get_latest_github_authorization(user["id"]) == second_reference
+        credential = await GithubRepositoryAccess(store, cfg, user, second_reference).credential()
+        assert credential["access_token"] == "token-2"
+        with pytest.raises(HTTPException) as denied:
+            await GithubRepositoryAccess(store, cfg, user, first_reference).credential()
+        assert denied.value.status_code == 409
+
+    asyncio.run(run())
+
+
+def test_pg_redis_unbind_scans_sessions_and_deletes_only_revoked_identity(tmp_path):
+    class FakeRedis:
+        def __init__(self, sessions):
+            self.data = dict(sessions)
+
+        async def scan_iter(self, match, count):
+            prefix = match.removesuffix("*")
+            for key in list(self.data):
+                if key.startswith(prefix):
+                    yield key
+
+        async def get(self, key):
+            return self.data.get(key)
+
+        async def set(self, key, value, ex=None):
+            self.data[key] = value
+
+        async def delete(self, key):
+            return int(self.data.pop(key, None) is not None)
+
+    async def run():
+        sessions = {
+            "astrbot_market:session:session-1": json.dumps(
+                {"token": "session-1", "user_id": "user-1"}
+            ),
+            "astrbot_market:session:session-2": json.dumps(
+                {"token": "session-2", "user_id": "user-1"}
+            ),
+            "astrbot_market:session:other-user": json.dumps(
+                {"token": "other-user", "user_id": "user-2"}
+            ),
+        }
+        store = PgRedisMarketStore("postgresql://unused", "redis://unused", 60)
+        store.redis = FakeRedis(sessions)
+        cfg = settings(tmp_path)
+        await save_authorization(store, cfg, "session-1", "user-1", "111", "first_gh", "token-1")
+        await save_authorization(store, cfg, "session-2", "user-1", "222", "second_gh", "token-2")
+        first_reference = authorization_reference("session-1")
+        second_reference = authorization_reference("session-2")
+
+        deleted = await revoke_github_identity_authorizations(store, cfg, "user-1", "111")
+        assert deleted == 1
+        assert await store.get_github_authorization(first_reference) is None
+        assert await store.get_github_authorization(second_reference) is not None
+        assert await store.get_latest_github_authorization("user-1") == second_reference
+
+    asyncio.run(run())
+
+
+def test_legacy_store_credential_uses_shared_github_fields(tmp_path):
+    async def run():
+        backing = InMemoryMarketStore()
+        user = backing.upsert_github_user({"id": "1", "login": "alice"})
+        session = backing.create_session(user["id"])
+        legacy = SimpleNamespace(
+            get_github_authorization=backing.get_github_authorization,
+            set_github_authorization=backing.set_github_authorization,
+            delete_github_authorization=backing.delete_github_authorization,
+            get_latest_github_authorization=backing.get_latest_github_authorization,
+            set_latest_github_authorization=backing.set_latest_github_authorization,
+        )
+        cfg = settings(tmp_path)
+        await save_authorization(
+            legacy, cfg, session["token"], user["id"], "1", "alice", "legacy-token"
+        )
+        user["github_login"] = "renamed_alice"
+        credential = await GithubRepositoryAccess(
+            legacy, cfg, user, authorization_reference(session["token"])
+        ).credential()
+        assert credential["access_token"] == "legacy-token"
+
+    asyncio.run(run())

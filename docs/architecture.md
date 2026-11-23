@@ -348,7 +348,7 @@ create_app(settings, store)
 根目录 `package.json` 提供 `dev:web`、`build:web`、`dev:api`、`start:api`、`start:runtime-runner`、`test` 等快捷脚本。执行 `npm run build:web` 时先运行 `vp build`，再运行 `scripts/prerender.mjs`：
 
 - 未设置 `VITE_BASE_URL` 时，自动跳过 Sitemap 与 Puppeteer 预渲染，仅输出标准 SPA 产物。
-- 设置 `VITE_BASE_URL=https://your-domain` 时，构建阶段从 `/v1/plugins` 拉取已上架清单，生成 `sitemap.xml`、`robots.txt` 以及首页、提交页、REST 文档页和各插件/作者详情页的静态 HTML 快照。
+- 设置 `VITE_BASE_URL=https://your-domain` 时，构建阶段从 `/v1/plugins` 拉取已上架清单，并从 `/v1/authors` 补充无上架插件作者，生成 `sitemap.xml`、`robots.txt` 以及首页、提交页、REST 文档页和各插件/作者详情页的静态 HTML 快照。
 
 ## 部署架构
 

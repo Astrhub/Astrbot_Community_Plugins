@@ -148,9 +148,20 @@ class InMemoryMarketStore:
                 or str(user.get("id") or "")
             )
             candidate = base
-            if candidate.lower() in seen_public:
-                suffix = hashlib.md5(str(user["id"]).encode("utf-8")).hexdigest()[:6]
-                candidate = f"{base}_{suffix}"
+            reserved = {
+                str(other.get(field) or "").strip().lower()
+                for other in self.state["users"]
+                if other["id"] != user["id"]
+                for field in ("public_username", "internal_username", "github_login")
+                if str(other.get(field) or "").strip()
+            }
+            suffix = 0
+            while candidate.lower() in seen_public or candidate.lower() in reserved:
+                suffix += 1
+                digest = hashlib.md5(str(user["id"]).encode("utf-8")).hexdigest()[:6]
+                candidate = f"{base}_{digest}"
+                if suffix > 1:
+                    candidate = f"{candidate}_{suffix}"
             user["public_username"] = candidate
             seen_public.add(candidate.lower())
 
@@ -193,8 +204,8 @@ class InMemoryMarketStore:
             if not str(plugin.get("owner_username") or "").strip():
                 owner = self.get_user_by_id(str(plugin.get("owner_user_id") or "")) or {}
                 plugin["owner_username"] = (
-                    str(plugin.get("owner_github_login") or "").strip()
-                    or str(owner.get("public_username") or "").strip()
+                    str(owner.get("public_username") or "").strip()
+                    or str(plugin.get("owner_github_login") or "").strip()
                 )
 
     def _allocate_public_username(self, preferred: str, *, exclude_user_id: str = "") -> str:
@@ -457,7 +468,13 @@ class InMemoryMarketStore:
             return None
         if "@" in clean:
             return self.get_user_by_email(clean)
-        return self.get_user_by_internal_username(clean) or self.get_user_by_public_username(clean)
+        internal = self.get_user_by_internal_username(clean)
+        public = self.get_user_by_public_username(clean)
+        if internal and public and internal["id"] != public["id"]:
+            raise UserIdentityConflict(
+                "登录标识符存在歧义，请联系管理员处理", "login_identifier_ambiguous"
+            )
+        return internal or public
 
     def get_user_by_github_id(self, github_id: str) -> dict[str, Any] | None:
         target = str(github_id or "").strip()
@@ -516,9 +533,15 @@ class InMemoryMarketStore:
         bump_session_version: bool = True,
         verify_email_at: str | None = None,
         email: str | None = None,
+        expected_email: str | None = None,
     ) -> dict[str, Any] | None:
         user = self.get_user_by_id(user_id)
         if not user:
+            return None
+        if (
+            expected_email is not None
+            and str(user.get("email") or "").strip().lower() != str(expected_email).strip().lower()
+        ):
             return None
         if email is not None:
             clean_email = str(email).strip()
@@ -673,21 +696,40 @@ class InMemoryMarketStore:
         target["updated_at"] = now
         if target.get("provider") == "github":
             user = self.get_user_by_id(user_id)
+            remaining = [
+                item
+                for item in self.list_oauth_identities(user_id)
+                if item.get("provider") == "github"
+            ]
+            latest = max(
+                remaining,
+                key=lambda item: (
+                    str(item.get("updated_at") or ""),
+                    str(item.get("created_at") or ""),
+                    str(item.get("id") or ""),
+                ),
+                default=None,
+            )
             if user:
-                user["github_id"] = None
-                user["github_login"] = ""
-                user["github_email"] = ""
+                user["github_id"] = str(latest["provider_user_id"]) if latest else None
+                user["github_login"] = str(latest.get("provider_login") or "") if latest else ""
+                user["github_email"] = str(latest.get("provider_email") or "") if latest else ""
                 user["updated_at"] = now
-            self._clear_github_authorizations_for_user(user_id)
         return deepcopy(target)
 
-    def _clear_github_authorizations_for_user(self, user_id: str) -> None:
+    def list_github_authorization_references(self, user_id: str) -> list[str]:
+        references = [
+            hashlib.sha256(str(session["token"]).encode()).hexdigest()
+            for session in self.state["sessions"]
+            if session.get("user_id") == user_id
+        ]
+        latest = self.get_latest_github_authorization(user_id)
+        if latest:
+            references.append(latest)
+        return list(dict.fromkeys(references))
+
+    def clear_latest_github_authorization(self, user_id: str) -> None:
         getattr(self, "_github_authorization_references", {}).pop(user_id, None)
-        for session in self.state["sessions"]:
-            if session.get("user_id") == user_id:
-                self.delete_github_authorization(
-                    hashlib.sha256(str(session["token"]).encode()).hexdigest()
-                )
 
     def list_public_plugins(self) -> list[dict[str, Any]]:
         return [
@@ -1571,6 +1613,18 @@ class InMemoryMarketStore:
         entry["count"] = int(entry.get("count") or 0) + 1
         return int(entry["count"])
 
+    def reserve_rate_limit(self, key: str, limit: int, ttl_seconds: int) -> bool:
+        if self.get_rate_limit_count(key) >= int(limit):
+            return False
+        self.increment_rate_limit(key, ttl_seconds)
+        return True
+
+    def decrement_rate_limit(self, key: str) -> None:
+        limits = self.state.setdefault("rateLimits", {})
+        entry = limits.get(key)
+        if entry:
+            entry["count"] = max(0, int(entry.get("count") or 0) - 1)
+
     def check_and_set_cooldown(self, key: str, ttl_seconds: int) -> int:
         cooldowns = self.state.setdefault("cooldowns", {})
         now = time.time()
@@ -1737,9 +1791,7 @@ class InMemoryMarketStore:
     def _normalize_plugin(self, plugin: dict[str, Any]) -> dict[str, Any]:
         return {
             **plugin,
-            "owner_username": str(
-                plugin.get("owner_username") or plugin.get("owner_github_login") or ""
-            ),
+            "owner_username": str(plugin.get("owner_username") or ""),
             "tags": plugin.get("tags") if isinstance(plugin.get("tags"), list) else [],
             "stars": int(plugin.get("stars") or 0),
             "likes": int(plugin.get("likes") or 0),
@@ -1951,6 +2003,7 @@ class LocalFileMarketStore(InMemoryMarketStore):
         bump_session_version: bool = True,
         verify_email_at: str | None = None,
         email: str | None = None,
+        expected_email: str | None = None,
     ) -> dict[str, Any] | None:
         with self._persist():
             return super().set_user_password(
@@ -1959,6 +2012,7 @@ class LocalFileMarketStore(InMemoryMarketStore):
                 bump_session_version=bump_session_version,
                 verify_email_at=verify_email_at,
                 email=email,
+                expected_email=expected_email,
             )
 
     def update_user_email(
@@ -2258,6 +2312,14 @@ class LocalFileMarketStore(InMemoryMarketStore):
     def increment_rate_limit(self, key: str, ttl_seconds: int) -> int:
         with self._persist():
             return super().increment_rate_limit(key, ttl_seconds)
+
+    def reserve_rate_limit(self, key: str, limit: int, ttl_seconds: int) -> bool:
+        with self._persist():
+            return super().reserve_rate_limit(key, limit, ttl_seconds)
+
+    def decrement_rate_limit(self, key: str) -> None:
+        with self._persist():
+            super().decrement_rate_limit(key)
 
     def check_and_set_cooldown(self, key: str, ttl_seconds: int) -> int:
         with self._persist():
@@ -3042,17 +3104,21 @@ class PgRedisMarketStore(InMemoryMarketStore):
             return None
         if "@" in clean:
             return await self.get_user_by_email(clean)
-        row = await self._pool().fetchrow(
+        rows = await self._pool().fetch(
             """
             SELECT *
               FROM market_users
              WHERE lower(btrim(internal_username)) = lower($1)
                 OR lower(btrim(public_username)) = lower($1)
-             LIMIT 1
+             LIMIT 2
             """,
             clean,
         )
-        return self._user_from_record(row) if row else None
+        if len(rows) > 1:
+            raise UserIdentityConflict(
+                "登录标识符存在歧义，请联系管理员处理", "login_identifier_ambiguous"
+            )
+        return self._user_from_record(rows[0]) if rows else None
 
     async def get_user_by_github_id(self, github_id: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow(
@@ -3099,8 +3165,10 @@ class PgRedisMarketStore(InMemoryMarketStore):
         bump_session_version: bool = True,
         verify_email_at: str | None = None,
         email: str | None = None,
+        expected_email: str | None = None,
     ) -> dict[str, Any] | None:
         clean_email = str(email).strip() if email is not None else None
+        expected = str(expected_email or "").strip()
         try:
             row = await self._pool().fetchrow(
                 """
@@ -3114,6 +3182,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                        END,
                        updated_at = now()
                  WHERE id = $1
+                   AND ($6 = '' OR lower(btrim(email)) = lower($6))
              RETURNING *
                 """,
                 user_id,
@@ -3121,6 +3190,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 clean_email or "",
                 verify_email_at,
                 bump_session_version,
+                expected,
             )
         except asyncpg.UniqueViolationError as exc:
             if exc.constraint_name == "market_users_email_lower_idx":
@@ -3255,22 +3325,32 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 if not row:
                     return None
                 if row["provider"] == "github":
+                    remaining = await connection.fetchrow(
+                        """
+                        SELECT provider_user_id, provider_login, provider_email
+                          FROM market_oauth_identities
+                         WHERE user_id = $1
+                           AND provider = 'github'
+                           AND revoked_at IS NULL
+                         ORDER BY updated_at DESC, created_at DESC, id DESC
+                         LIMIT 1
+                        """,
+                        user_id,
+                    )
                     await connection.execute(
                         """
                         UPDATE market_users
-                           SET github_id = NULL,
-                               github_login = '',
-                               github_email = '',
+                           SET github_id = $2,
+                               github_login = $3,
+                               github_email = $4,
                                updated_at = now()
                          WHERE id = $1
                         """,
                         user_id,
+                        str(remaining["provider_user_id"]) if remaining else None,
+                        str(remaining["provider_login"] or "") if remaining else "",
+                        str(remaining["provider_email"] or "") if remaining else "",
                     )
-        if row["provider"] == "github":
-            latest_ref = await self.get_latest_github_authorization(user_id)
-            if latest_ref:
-                await self.delete_github_authorization(latest_ref)
-            await self._redis().delete(f"astrbot_market:github_oauth_user:{user_id}")
         return serialize_value(dict(row))
 
     async def list_users(self) -> list[dict[str, Any]]:
@@ -4591,6 +4671,40 @@ class PgRedisMarketStore(InMemoryMarketStore):
             await self._redis().expire(redis_key, max(1, int(ttl_seconds)))
         return count
 
+    async def reserve_rate_limit(self, key: str, limit: int, ttl_seconds: int) -> bool:
+        redis_key = f"astrbot_market:rl:{key}"
+        result = await self._redis().eval(
+            """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if current >= tonumber(ARGV[1]) then
+    return 0
+end
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 1
+            """,
+            1,
+            redis_key,
+            str(int(limit)),
+            str(max(1, int(ttl_seconds))),
+        )
+        return bool(result)
+
+    async def decrement_rate_limit(self, key: str) -> None:
+        await self._redis().eval(
+            """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if current > 0 then
+    return redis.call('DECR', KEYS[1])
+end
+return 0
+            """,
+            1,
+            f"astrbot_market:rl:{key}",
+        )
+
     async def check_and_set_cooldown(self, key: str, ttl_seconds: int) -> int:
         redis_key = f"astrbot_market:cd:{key}"
         acquired = await self._redis().set(redis_key, "1", ex=max(1, int(ttl_seconds)), nx=True)
@@ -4626,6 +4740,28 @@ class PgRedisMarketStore(InMemoryMarketStore):
     async def get_latest_github_authorization(self, user_id: str) -> str | None:
         value = await self._redis().get(f"astrbot_market:github_oauth_user:{user_id}")
         return value.decode() if isinstance(value, bytes) else value
+
+    async def list_github_authorization_references(self, user_id: str) -> list[str]:
+        references: list[str] = []
+        async for key in self._redis().scan_iter(match="astrbot_market:session:*", count=200):
+            payload = await self._redis().get(key)
+            if not payload:
+                continue
+            session = parse_json(payload)
+            if str(session.get("user_id") or "") != str(user_id):
+                continue
+            token = str(session.get("token") or "")
+            if not token:
+                decoded = key.decode() if isinstance(key, bytes) else str(key)
+                token = decoded.rsplit(":", 1)[-1]
+            references.append(hashlib.sha256(token.encode()).hexdigest())
+        latest = await self.get_latest_github_authorization(user_id)
+        if latest:
+            references.append(latest)
+        return list(dict.fromkeys(references))
+
+    async def clear_latest_github_authorization(self, user_id: str) -> None:
+        await self._redis().delete(f"astrbot_market:github_oauth_user:{user_id}")
 
     async def list_comments(self, plugin_id: str) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(

@@ -30,6 +30,7 @@ _PUBLIC_SECTION = """\
 ### 浏览
 - 获取已上架插件列表：GET /v1/plugins
 - 获取插件详情：GET /v1/plugins/{plugin_id}
+- 获取公开作者列表：GET /v1/authors
 - 获取作者已上架插件：GET /v1/authors/{username}/plugins
 - 获取站点配置：GET /v1/site
 - 获取公告：GET /v1/announcements

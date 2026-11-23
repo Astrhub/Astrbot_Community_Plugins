@@ -80,6 +80,28 @@ function normalizeGitRemoteUrl(value: string): string {
   return remoteUrl || "https://github.com/Astrhub/Astrbot_Community_Plugins";
 }
 
+async function loadEmptyAuthorRoutes(origin: string): Promise<string[]> {
+  try {
+    const response = await fetch(`${origin.replace(/\/$/, "")}/v1/authors`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = (await response.json()) as {
+      items?: { username?: string; has_listed_plugins?: boolean }[];
+    };
+    return [
+      ...new Set(
+        (payload.items || [])
+          .filter((author) => !author.has_listed_plugins)
+          .map((author) => author.username)
+          .filter((username): username is string => Boolean(username))
+          .map((username) => `/author/${encodeURIComponent(username)}`),
+      ),
+    ];
+  } catch (error) {
+    console.warn(`[sitemap] Failed to load authors without plugins from ${origin}:`, error);
+    return [];
+  }
+}
+
 async function loadDynamicRoutes(origin?: string): Promise<string[]> {
   const fallback = ["/submit", "/docs/rest"];
   if (!origin) return fallback;
@@ -117,7 +139,12 @@ async function loadDynamicRoutes(origin?: string): Promise<string[]> {
           .map((username) => `/author/${encodeURIComponent(username)}`),
       ),
     ];
-    return [...fallback, ...pluginRoutes, ...authorRoutes];
+    return [
+      ...fallback,
+      ...pluginRoutes,
+      ...authorRoutes,
+      ...(await loadEmptyAuthorRoutes(origin)),
+    ];
   } catch (error) {
     console.warn(`[sitemap] Failed to load plugin routes from ${origin}:`, error);
     return fallback;

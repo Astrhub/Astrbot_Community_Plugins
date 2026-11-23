@@ -93,6 +93,7 @@
 </template>
 
 <script setup lang="ts">
+import { injectHead } from "@unhead/vue";
 import { computed, onMounted, shallowRef, watch } from "vue";
 import { useRoute } from "vue-router";
 import { NIcon } from "naive-ui";
@@ -107,11 +108,14 @@ import {
 import AppHeader from "@/components/AppHeader.vue";
 import AppFooter from "@/components/AppFooter.vue";
 import PluginCard from "@/components/PluginCard.vue";
-import { useSeo, absoluteSiteUrl } from "@/composables/useSeo";
+import { useSeo, commitSeo, absoluteSiteUrl } from "@/composables/useSeo";
 import { githubRawUrl } from "@/utils/github";
+import { usePluginStore } from "@/stores/plugins";
 import type { AuthorOAuthProfile, Plugin } from "@/types";
 
+const head = injectHead();
 const route = useRoute();
+const pluginStore = usePluginStore();
 const username = computed(() => String(route.params.username || "").trim());
 const canonicalUsername = shallowRef("");
 const displayName = shallowRef("");
@@ -142,35 +146,41 @@ const externalProfiles = computed<AuthorOAuthProfile[]>(() => {
   return [];
 });
 
+const authorTitle = computed(() =>
+  notFound.value ? "作者不存在" : `${authorDisplayName.value || username.value} 的插件`,
+);
+const authorDescription = computed(() =>
+  notFound.value
+    ? "未找到该作者或公开账号。"
+    : `查看 ${authorDisplayName.value || username.value} 在 Astrhub 插件市场发布的所有插件。`,
+);
+const authorPath = computed(
+  () => `/author/${encodeURIComponent(canonicalUsername.value || username.value)}`,
+);
+const authorRobots = computed(() => (notFound.value ? "noindex,nofollow" : undefined));
+const authorJsonLd = computed(() => {
+  if (notFound.value) return undefined;
+  const authorPageUrl = absoluteSiteUrl(authorPath.value);
+  const sameAs = externalProfiles.value.map((item) => item.url).filter(Boolean);
+  return {
+    "@context": "https://schema.org",
+    "@type": "ProfilePage",
+    mainEntity: {
+      "@type": "Person",
+      name: authorDisplayName.value || username.value,
+      url: externalProfiles.value[0]?.url || authorPageUrl,
+      ...(sameAs.length ? { sameAs } : {}),
+    },
+    url: authorPageUrl,
+  };
+});
+
 useSeo({
-  title: computed(() =>
-    notFound.value ? "作者不存在" : `${authorDisplayName.value || username.value} 的插件`,
-  ),
-  description: computed(() =>
-    notFound.value
-      ? "未找到该作者或公开账号。"
-      : `查看 ${authorDisplayName.value || username.value} 在 Astrhub 插件市场发布的所有插件。`,
-  ),
-  path: computed(() => `/author/${encodeURIComponent(canonicalUsername.value || username.value)}`),
-  robots: computed(() => (notFound.value ? "noindex,nofollow" : undefined)),
-  jsonLd: computed(() => {
-    if (notFound.value) return undefined;
-    const authorPageUrl = absoluteSiteUrl(
-      `/author/${encodeURIComponent(canonicalUsername.value || username.value)}`,
-    );
-    const sameAs = externalProfiles.value.map((item) => item.url).filter(Boolean);
-    return {
-      "@context": "https://schema.org",
-      "@type": "ProfilePage",
-      mainEntity: {
-        "@type": "Person",
-        name: authorDisplayName.value || username.value,
-        url: externalProfiles.value[0]?.url || authorPageUrl,
-        ...(sameAs.length ? { sameAs } : {}),
-      },
-      url: authorPageUrl,
-    };
-  }),
+  title: authorTitle,
+  description: authorDescription,
+  path: authorPath,
+  robots: authorRobots,
+  jsonLd: authorJsonLd,
 });
 
 async function loadAuthorPlugins() {
@@ -185,7 +195,9 @@ async function loadAuthorPlugins() {
   githubUrl.value = "";
   oauthProfiles.value = [];
   try {
-    const response = await fetch(`/v1/authors/${encodeURIComponent(username.value)}/plugins`);
+    const response = await fetch(
+      `${pluginStore.apiBaseUrl}/v1/authors/${encodeURIComponent(username.value)}/plugins`,
+    );
     const data = await response.json().catch(() => ({}));
     if (response.status === 404) {
       notFound.value = true;
@@ -198,6 +210,18 @@ async function loadAuthorPlugins() {
     avatarUrl.value = String(data.avatar_url || "").trim();
     githubUrl.value = String(data.github_url || "").trim();
     oauthProfiles.value = Array.isArray(data.oauth_profiles) ? data.oauth_profiles : [];
+    if (window.__ASTRHUB_PRERENDER__) {
+      commitSeo(
+        {
+          title: authorTitle.value,
+          description: authorDescription.value,
+          path: authorPath.value,
+          robots: authorRobots.value,
+          jsonLd: authorJsonLd.value,
+        },
+        head,
+      );
+    }
     plugins.value = data.items || [];
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "作者插件加载失败";

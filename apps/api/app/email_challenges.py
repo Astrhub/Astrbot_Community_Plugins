@@ -112,6 +112,32 @@ async def record_site_email_sent(store: Any, settings: Settings) -> None:
     await _call_store(store, "increment_rate_limit", key, seconds_until_utc_midnight())
 
 
+async def reserve_site_email_daily_limit(store: Any, settings: Settings) -> str | None:
+    limit = int(settings.email_daily_limit or 0)
+    if limit <= 0:
+        return None
+    if not hasattr(store, "reserve_rate_limit"):
+        await enforce_site_email_daily_limit(store, settings)
+        return None
+    key = f"email_daily_site:{utc_day_stamp()}"
+    reserved = await _call_store(
+        store, "reserve_rate_limit", key, limit, seconds_until_utc_midnight()
+    )
+    if not reserved:
+        raise EmailChallengeError(
+            429,
+            "email_daily_limit_exceeded",
+            "站点今日邮件发送额度已达上限，请明天再试",
+            retry_after=seconds_until_utc_midnight(),
+        )
+    return key
+
+
+async def release_rate_limit_reservation(store: Any, key: str | None) -> None:
+    if key:
+        await _call_store(store, "decrement_rate_limit", key)
+
+
 async def enforce_direct_register_rate_limit(store: Any, client_ip: str) -> None:
     ip = client_ip.strip() or "unknown"
     key = f"direct_register_ip:{ip}"
@@ -133,7 +159,7 @@ async def enforce_verification_request_limits(
     email: str,
     client_ip: str,
     check_cooldown: bool = True,
-) -> None:
+) -> str | None:
     normalized = normalize_email(email)
     ip = client_ip.strip() or "unknown"
 
@@ -164,21 +190,24 @@ async def enforce_verification_request_limits(
             )
 
     daily_limit = int(settings.email_verification_daily_limit_per_user or 0)
-    if daily_limit > 0:
-        day_key = f"email_verification_daily:{utc_day_stamp()}:{normalized}"
-        day_count = await _call_store(
-            store,
-            "increment_rate_limit",
-            day_key,
-            seconds_until_utc_midnight(),
+    if daily_limit <= 0:
+        return None
+    day_key = f"email_verification_daily:{utc_day_stamp()}:{normalized}"
+    reserved = await _call_store(
+        store,
+        "reserve_rate_limit",
+        day_key,
+        daily_limit,
+        seconds_until_utc_midnight(),
+    )
+    if not reserved:
+        raise EmailChallengeError(
+            429,
+            "email_verification_daily_limit_exceeded",
+            "该邮箱今日验证码发送次数已达上限，请明天再试",
+            retry_after=seconds_until_utc_midnight(),
         )
-        if day_count > daily_limit:
-            raise EmailChallengeError(
-                429,
-                "email_verification_daily_limit_exceeded",
-                "该邮箱今日验证码发送次数已达上限，请明天再试",
-                retry_after=seconds_until_utc_midnight(),
-            )
+    return day_key
 
 
 async def create_email_challenge(
