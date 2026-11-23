@@ -30,6 +30,8 @@ describe("bootstrap cache", () => {
       auth: {
         github_login_enabled: true,
         public_login_enabled: true,
+        email_registration_enabled: false,
+        email_verification_required: true,
         login_agreement_enabled: false,
         login_agreement_text: "",
         service_terms_enabled: false,

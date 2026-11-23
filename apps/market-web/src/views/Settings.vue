@@ -119,20 +119,32 @@
               <div class="settings-tab-content">
                 <section class="settings-section">
                   <div class="section-title">
-                    <h2>登录与条款</h2>
-                    <p>控制后台内部登录、GitHub OAuth，以及登录前必须确认的条款。</p>
+                    <h2>登录与注册策略</h2>
+                    <p>控制密码登录、邮箱注册、注册邮箱验证码开关、GitHub OAuth 及条款确认。</p>
                   </div>
                   <div class="switch-grid">
                     <setting-switch
                       v-model="formData.auth.public_login_enabled"
-                      label="内部账号登录"
-                      enabled="允许 /admin 内部账号登录"
-                      disabled="仅保留已登录会话"
+                      label="公开密码登录"
+                      enabled="允许用户名或邮箱密码登录"
+                      disabled="仅核心管理员可密码登录"
+                    />
+                    <setting-switch
+                      v-model="formData.auth.email_registration_enabled"
+                      label="邮箱开放注册"
+                      enabled="允许游客通过邮箱注册账号"
+                      disabled="关闭公开邮箱注册"
+                    />
+                    <setting-switch
+                      v-model="formData.auth.email_verification_required"
+                      label="邮箱验证码开关"
+                      enabled="注册与换绑邮箱需验证码校验"
+                      disabled="注册与换绑免验证码直通（限流保护）"
                     />
                     <setting-switch
                       v-model="formData.auth.github_login_enabled"
                       label="GitHub OAuth"
-                      enabled="允许 GitHub 登录 / 注册"
+                      enabled="允许 GitHub 登录 / 注册 / 绑定"
                       disabled="关闭 GitHub 登录 / 注册"
                     />
                     <setting-switch

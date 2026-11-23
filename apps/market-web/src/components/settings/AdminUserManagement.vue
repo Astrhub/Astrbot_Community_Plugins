@@ -61,6 +61,7 @@ const showMuteModal = shallowRef(false);
 const muteTarget = shallowRef(null);
 const createForm = reactive({
   username: "",
+  email: "",
   password: "",
   role: "user",
 });
@@ -80,10 +81,13 @@ const filteredUsers = computed(() => {
   return props.users.filter((user) => {
     const searchText = [
       user.id,
+      user.public_username,
+      user.email,
       user.github_login,
       user.internal_username,
       user.github_name,
       user.auth_source,
+      user.account_tier,
       user.role,
     ]
       .filter(Boolean)
@@ -103,27 +107,39 @@ const muteDisabled = computed(() => {
 });
 
 function displayName(user) {
-  return user.github_name || user.github_login || user.internal_username || user.id;
+  return (
+    user.github_name ||
+    user.public_username ||
+    user.github_login ||
+    user.internal_username ||
+    user.id
+  );
 }
 
 function username(user) {
-  return user.github_login || user.internal_username || "-";
+  return user.public_username || user.github_login || user.internal_username || "-";
 }
 
-function roleLabel(role) {
-  if (role === "core_admin") return "核心管理员";
-  if (role === "admin") return "管理员";
-  return "普通用户";
+function tierLabel(user) {
+  const tier = user.account_tier || user.role;
+  if (tier === "core_admin") return "核心管理员";
+  if (tier === "admin") return "管理员";
+  if (tier === "developer") return "开发者";
+  return "注册用户";
 }
 
-function roleTagType(role) {
-  if (role === "core_admin") return "error";
-  if (role === "admin") return "warning";
+function tierTagType(user) {
+  const tier = user.account_tier || user.role;
+  if (tier === "core_admin") return "error";
+  if (tier === "admin") return "warning";
+  if (tier === "developer") return "info";
   return "default";
 }
 
 function sourceLabel(source) {
-  return source === "internal" ? "内部账号" : "GitHub";
+  if (source === "email") return "邮箱注册";
+  if (source === "internal") return "本地账号";
+  return "GitHub";
 }
 
 function isCurrentUser(user) {
@@ -150,6 +166,7 @@ function busyState(user) {
 
 function resetCreateForm() {
   createForm.username = "";
+  createForm.email = "";
   createForm.password = "";
   createForm.role = "user";
 }
@@ -161,10 +178,12 @@ function openCreateModal() {
 
 function submitCreateUser() {
   const usernameValue = createForm.username.trim();
+  const emailValue = createForm.email.trim();
   const passwordValue = createForm.password;
   if (createDisabled.value) return;
   emit("create-user", {
     username: usernameValue,
+    ...(emailValue ? { email: emailValue } : {}),
     password: passwordValue,
     role: createForm.role,
   });
@@ -233,8 +252,8 @@ function confirmDelete(user) {
     <section class="settings-section">
       <div class="section-title row-title">
         <div>
-          <h2>添加内部用户</h2>
-          <p>用于后台登录和协作管理；GitHub 用户仍通过 OAuth 自动创建。</p>
+          <h2>添加本地用户</h2>
+          <p>用于后台登录与协作管理，可选填登录邮箱；普通用户也可自行通过邮箱或 OAuth 注册。</p>
         </div>
         <NButton type="primary" :loading="creating" @click="openCreateModal">
           <template #icon>
@@ -249,13 +268,17 @@ function confirmDelete(user) {
       <div class="section-title row-title">
         <div>
           <h2>用户列表</h2>
-          <p>搜索用户名、GitHub 登录名或显示名称，并执行封禁、解封、删除和角色调整。</p>
+          <p>搜索用户名、邮箱、GitHub 登录名或身份分层，并执行封禁、解封、删除和角色调整。</p>
         </div>
         <NButton tertiary :loading="loading" @click="emit('refresh')">刷新</NButton>
       </div>
 
       <div class="user-toolbar">
-        <NInput v-model:value="searchQuery" clearable placeholder="搜索用户名 / GitHub / 显示名称">
+        <NInput
+          v-model:value="searchQuery"
+          clearable
+          placeholder="搜索用户名 / 邮箱 / GitHub / 身份分层"
+        >
           <template #prefix>
             <NIcon><SearchOutline /></NIcon>
           </template>
@@ -271,13 +294,21 @@ function confirmDelete(user) {
             <div class="user-main">
               <div class="user-title">
                 <strong>{{ displayName(user) }}</strong>
-                <NTag :type="roleTagType(user.role)" size="small" round>
-                  {{ roleLabel(user.role) }}
+                <NTag :type="tierTagType(user)" size="small" round>
+                  {{ tierLabel(user) }}
                 </NTag>
+                <NTag v-if="user.email && user.email_verified" type="success" size="small" round>
+                  邮箱已验证
+                </NTag>
+                <NTag v-else-if="user.email" type="warning" size="small" round>邮箱未验证</NTag>
                 <NTag v-if="isMuted(user)" type="error" size="small" round>已封禁</NTag>
               </div>
               <div class="user-meta">
-                <span>{{ sourceLabel(user.auth_source) }}：{{ username(user) }}</span>
+                <span>{{ sourceLabel(user.auth_source) }}：@{{ username(user) }}</span>
+                <span v-if="user.email">邮箱：{{ user.email }}</span>
+                <span v-if="user.oauth_providers?.length">
+                  OAuth：{{ user.oauth_providers.join(", ") }}
+                </span>
                 <span>ID：{{ user.id }}</span>
                 <span>注册：{{ formatTime(user.created_at) }}</span>
                 <span v-if="isMuted(user)">封禁至：{{ formatTime(user.muted_until) }}</span>
@@ -346,7 +377,7 @@ function confirmDelete(user) {
     <NModal
       v-model:show="showCreateModal"
       preset="card"
-      title="添加内部用户"
+      title="添加本地用户"
       :bordered="false"
       :mask-closable="!creating"
       class="management-modal"
@@ -354,6 +385,13 @@ function confirmDelete(user) {
       <div class="modal-form">
         <NFormItem label="用户名">
           <NInput v-model:value="createForm.username" placeholder="至少 3 个字符" />
+        </NFormItem>
+        <NFormItem label="邮箱（可选）">
+          <NInput
+            v-model:value="createForm.email"
+            placeholder="可选，例如：user@example.com"
+            inputmode="email"
+          />
         </NFormItem>
         <NFormItem label="密码">
           <NInput
@@ -363,7 +401,7 @@ function confirmDelete(user) {
             placeholder="至少 8 个字符"
           />
         </NFormItem>
-        <NFormItem label="角色">
+        <NFormItem label="管理角色">
           <NSelect v-model:value="createForm.role" :options="roleOptions" />
         </NFormItem>
       </div>

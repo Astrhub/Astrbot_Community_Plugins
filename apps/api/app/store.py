@@ -29,6 +29,12 @@ class GithubIdentityConflict(ValueError):
     pass
 
 
+class UserIdentityConflict(ValueError):
+    def __init__(self, message: str, code: str = "user_identity_conflict") -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def plugin_identity_write(method: Any) -> Any:
     @wraps(method)
     async def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -40,6 +46,7 @@ def plugin_identity_write(method: Any) -> Any:
             if exc.constraint_name in {
                 "market_plugins_owner_name_key",
                 "market_plugins_namespace_key",
+                "market_plugins_owner_username_name_key",
                 "market_plugins_repo_key",
             }:
                 raise PluginIdentityConflict("该用户名下已存在同名插件，或仓库已被登记") from exc
@@ -81,6 +88,10 @@ USER_PROFILE_FIELDS = (
     "github_login",
     "github_name",
     "github_email",
+    "email",
+    "email_verified_at",
+    "public_username",
+    "session_version",
     "avatar_url",
     "auth_source",
     "github_token",
@@ -115,12 +126,94 @@ class InMemoryMarketStore:
             "announcements": state.get("announcements", []),
             "notifications": state.get("notifications", []),
             "apiKeys": state.get("apiKeys", []),
+            "oauthIdentities": state.get("oauthIdentities", []),
+            "emailChallenges": state.get("emailChallenges", {}),
+            "rateLimits": state.get("rateLimits", {}),
+            "cooldowns": state.get("cooldowns", {}),
             "options": state.get("options", {}),
             "sessions": state.get("sessions", []),
             "nextNumericId": state.get("nextNumericId", 1),
         }
         self.state["users"] = [self._normalize_user(user) for user in self.state["users"]]
         self.state["plugins"] = [self._normalize_plugin(plugin) for plugin in self.state["plugins"]]
+        self._backfill_seeded_identities()
+
+    def _backfill_seeded_identities(self) -> None:
+        seen_public: set[str] = set()
+        for user in self.state["users"]:
+            base = (
+                str(user.get("public_username") or "").strip()
+                or str(user.get("github_login") or "").strip()
+                or str(user.get("internal_username") or "").strip()
+                or str(user.get("id") or "")
+            )
+            candidate = base
+            if candidate.lower() in seen_public:
+                suffix = hashlib.md5(str(user["id"]).encode("utf-8")).hexdigest()[:6]
+                candidate = f"{base}_{suffix}"
+            user["public_username"] = candidate
+            seen_public.add(candidate.lower())
+
+            if user.get("github_id") or user.get("github_login"):
+                provider_uid = str(user.get("github_id") or user["id"])
+                existing = next(
+                    (
+                        item
+                        for item in self.state["oauthIdentities"]
+                        if item.get("provider") == "github"
+                        and item.get("revoked_at") is None
+                        and (
+                            item.get("user_id") == user["id"]
+                            or str(item.get("provider_user_id")) == provider_uid
+                        )
+                    ),
+                    None,
+                )
+                if not existing:
+                    self.state["oauthIdentities"].append(
+                        {
+                            "id": f"oauth_github_{user['id']}",
+                            "user_id": user["id"],
+                            "provider": "github",
+                            "instance_url": "https://github.com",
+                            "provider_user_id": provider_uid,
+                            "provider_login": str(user.get("github_login") or ""),
+                            "provider_email": str(user.get("github_email") or ""),
+                            "avatar_url": str(user.get("avatar_url") or ""),
+                            "scopes": "",
+                            "credential_ref": "",
+                            "expires_at": None,
+                            "revoked_at": None,
+                            "created_at": user.get("created_at") or utc_now(),
+                            "updated_at": user.get("updated_at") or utc_now(),
+                        }
+                    )
+
+        for plugin in self.state["plugins"]:
+            if not str(plugin.get("owner_username") or "").strip():
+                owner = self.get_user_by_id(str(plugin.get("owner_user_id") or "")) or {}
+                plugin["owner_username"] = (
+                    str(plugin.get("owner_github_login") or "").strip()
+                    or str(owner.get("public_username") or "").strip()
+                )
+
+    def _allocate_public_username(self, preferred: str, *, exclude_user_id: str = "") -> str:
+        base = str(preferred or "").strip() or f"user_{secrets.token_hex(4)}"
+        taken = {
+            str(u.get("public_username") or "").strip().lower()
+            for u in self.state["users"]
+            if u["id"] != exclude_user_id and str(u.get("public_username") or "").strip()
+        }
+        if base.lower() not in taken:
+            return base
+        candidate = f"{base}_gh"
+        if candidate.lower() not in taken:
+            return candidate
+        for index in range(1, 1000):
+            candidate = f"{base}_{index}"
+            if candidate.lower() not in taken:
+                return candidate
+        return f"{base}_{secrets.token_hex(3)}"
 
     def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
         login = profile.get("login") or profile.get("github_login")
@@ -137,34 +230,63 @@ class InMemoryMarketStore:
         ):
             raise GithubIdentityConflict("GitHub 用户名已关联其他身份，请联系管理员核对")
         existing = existing or login_owner
+        github_email = str(profile.get("github_email") or profile.get("email") or "")
+        avatar_url = str(profile.get("avatar_url") or "")
         if existing:
+            is_github_origin = existing.get("auth_source") == "github"
+            next_name = (
+                profile.get("name") or login
+                if is_github_origin or not existing.get("github_name")
+                else existing["github_name"]
+            )
+            next_avatar = (
+                avatar_url or existing.get("avatar_url", "")
+                if is_github_origin or not existing.get("avatar_url")
+                else existing["avatar_url"]
+            )
             existing.update(
                 self._normalize_user(
                     {
                         **existing,
                         "github_id": github_id or existing.get("github_id"),
                         "github_login": login,
-                        "github_name": profile.get("name") or login,
-                        "avatar_url": profile.get("avatar_url") or "",
-                        "github_email": profile.get("github_email")
-                        or profile.get("email")
-                        or existing.get("github_email", ""),
+                        "public_username": existing.get("public_username")
+                        or self._allocate_public_username(login, exclude_user_id=existing["id"]),
+                        "github_name": next_name,
+                        "avatar_url": next_avatar,
+                        "github_email": github_email or existing.get("github_email", ""),
                     }
                 )
             )
             existing["updated_at"] = utc_now()
+            self.upsert_oauth_identity(
+                existing["id"],
+                provider="github",
+                instance_url="https://github.com",
+                provider_user_id=str(existing.get("github_id") or existing["id"]),
+                provider_login=str(login),
+                provider_email=github_email,
+                avatar_url=avatar_url,
+            )
             return deepcopy(existing)
 
+        user_id = str(profile.get("id") or self._next_id("user"))
+        public_username = self._allocate_public_username(str(login))
         user = self._normalize_user(
             {
-                "id": str(profile.get("id") or self._next_id("user")),
+                "id": user_id,
                 "github_id": str(profile.get("id")) if profile.get("id") else None,
                 "github_login": login,
                 "internal_username": "",
+                "public_username": public_username,
+                "email": "",
+                "email_verified_at": None,
+                "session_version": 1,
                 "password_hash": "",
                 "auth_source": "github",
                 "github_name": profile.get("name") or login,
-                "avatar_url": profile.get("avatar_url") or "",
+                "github_email": github_email,
+                "avatar_url": avatar_url,
                 "role": Role.USER,
                 "muted_until": None,
                 "muted_reason": "",
@@ -173,6 +295,15 @@ class InMemoryMarketStore:
             }
         )
         self.state["users"].append(user)
+        self.upsert_oauth_identity(
+            user["id"],
+            provider="github",
+            instance_url="https://github.com",
+            provider_user_id=str(user.get("github_id") or user["id"]),
+            provider_login=str(login),
+            provider_email=github_email,
+            avatar_url=avatar_url,
+        )
         return deepcopy(user)
 
     def create_internal_admin(self, username: str, password_hash: str) -> dict[str, Any]:
@@ -180,6 +311,10 @@ class InMemoryMarketStore:
         if existing:
             existing["password_hash"] = password_hash
             existing["role"] = Role.CORE_ADMIN.value
+            if not existing.get("public_username"):
+                existing["public_username"] = self._allocate_public_username(
+                    username, exclude_user_id=existing["id"]
+                )
             existing["updated_at"] = utc_now()
             return deepcopy(existing)
 
@@ -189,6 +324,10 @@ class InMemoryMarketStore:
                 "github_id": None,
                 "github_login": "",
                 "internal_username": username,
+                "public_username": self._allocate_public_username(username),
+                "email": "",
+                "email_verified_at": None,
+                "session_version": 1,
                 "password_hash": password_hash,
                 "auth_source": "internal",
                 "github_name": username,
@@ -208,16 +347,70 @@ class InMemoryMarketStore:
         username: str,
         password_hash: str,
         role: str = Role.USER.value,
+        email: str = "",
     ) -> dict[str, Any]:
+        clean_username = str(username or "").strip()
+        clean_email = str(email or "").strip()
+        if self.get_user_by_internal_username(clean_username) or self.get_user_by_public_username(
+            clean_username
+        ):
+            raise UserIdentityConflict("用户名已被占用", "username_already_exists")
+        if clean_email and self.get_user_by_email(clean_email):
+            raise UserIdentityConflict("邮箱已被注册", "email_already_exists")
         user = self._normalize_user(
             {
                 "id": self._next_id("user"),
                 "github_id": None,
                 "github_login": "",
-                "internal_username": username,
+                "internal_username": clean_username,
+                "public_username": clean_username,
+                "email": clean_email,
+                "email_verified_at": None,
+                "session_version": 1,
                 "password_hash": password_hash,
                 "auth_source": "internal",
-                "github_name": username,
+                "github_name": clean_username,
+                "avatar_url": "",
+                "role": normalize_role(role),
+                "muted_until": None,
+                "muted_reason": "",
+                "created_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+        )
+        self.state["users"].append(user)
+        return deepcopy(user)
+
+    def create_email_user(
+        self,
+        *,
+        username: str,
+        email: str,
+        password_hash: str,
+        email_verified_at: str | None = None,
+        role: str = Role.USER.value,
+    ) -> dict[str, Any]:
+        clean_username = str(username or "").strip()
+        clean_email = str(email or "").strip()
+        if self.get_user_by_internal_username(clean_username) or self.get_user_by_public_username(
+            clean_username
+        ):
+            raise UserIdentityConflict("用户名已被占用", "username_already_exists")
+        if clean_email and self.get_user_by_email(clean_email):
+            raise UserIdentityConflict("邮箱已被注册", "email_already_exists")
+        user = self._normalize_user(
+            {
+                "id": self._next_id("user"),
+                "github_id": None,
+                "github_login": "",
+                "internal_username": clean_username,
+                "public_username": clean_username,
+                "email": clean_email,
+                "email_verified_at": email_verified_at,
+                "session_version": 1,
+                "password_hash": password_hash,
+                "auth_source": "email",
+                "github_name": clean_username,
                 "avatar_url": "",
                 "role": normalize_role(role),
                 "muted_until": None,
@@ -232,35 +425,269 @@ class InMemoryMarketStore:
     def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
         return self._find("users", "id", user_id)
 
-    def get_user_by_github_id(self, github_id: str) -> dict[str, Any] | None:
+    def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        target = str(email or "").strip().lower()
+        if not target:
+            return None
         return next(
             (
-                user
+                deepcopy(user)
                 for user in self.state["users"]
-                if str(user.get("github_id") or user["id"]) == github_id
+                if str(user.get("email") or "").strip().lower() == target
+            ),
+            None,
+        )
+
+    def get_user_by_public_username(self, username: str) -> dict[str, Any] | None:
+        target = str(username or "").strip().lower()
+        if not target:
+            return None
+        return next(
+            (
+                deepcopy(user)
+                for user in self.state["users"]
+                if str(user.get("public_username") or "").strip().lower() == target
+            ),
+            None,
+        )
+
+    def get_user_by_login_identifier(self, identifier: str) -> dict[str, Any] | None:
+        clean = str(identifier or "").strip()
+        if not clean:
+            return None
+        if "@" in clean:
+            return self.get_user_by_email(clean)
+        return self.get_user_by_internal_username(clean) or self.get_user_by_public_username(clean)
+
+    def get_user_by_github_id(self, github_id: str) -> dict[str, Any] | None:
+        target = str(github_id or "").strip()
+        if not target:
+            return None
+        identity = self.get_oauth_identity_by_provider_user("github", "https://github.com", target)
+        if identity:
+            user = self.get_user_by_id(identity["user_id"])
+            if user:
+                return deepcopy(user)
+        return next(
+            (
+                deepcopy(user)
+                for user in self.state["users"]
+                if str(user.get("github_id") or "") == target
+                or (
+                    not user.get("github_id")
+                    and user.get("auth_source") == "github"
+                    and str(user["id"]) == target
+                )
             ),
             None,
         )
 
     def get_user_by_github_login(self, login: str) -> dict[str, Any] | None:
+        target = str(login or "").strip().lower()
+        if not target:
+            return None
         return next(
             (
-                user
+                deepcopy(user)
                 for user in self.state["users"]
-                if user["github_login"].lower() == str(login).lower()
+                if str(user.get("github_login") or "").lower() == target
             ),
             None,
         )
 
     def get_user_by_internal_username(self, username: str) -> dict[str, Any] | None:
+        target = str(username or "").strip().lower()
+        if not target:
+            return None
         return next(
             (
-                user
+                deepcopy(user)
                 for user in self.state["users"]
-                if user.get("internal_username", "").lower() == str(username).lower()
+                if str(user.get("internal_username") or "").lower() == target
             ),
             None,
         )
+
+    def set_user_password(
+        self,
+        user_id: str,
+        password_hash: str,
+        *,
+        bump_session_version: bool = True,
+        verify_email_at: str | None = None,
+        email: str | None = None,
+    ) -> dict[str, Any] | None:
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        if email is not None:
+            clean_email = str(email).strip()
+            if clean_email:
+                owner = self.get_user_by_email(clean_email)
+                if owner and owner["id"] != user_id:
+                    raise UserIdentityConflict("该邮箱已被其他账号使用", "email_already_exists")
+                user["email"] = clean_email
+        user["password_hash"] = password_hash
+        if verify_email_at:
+            user["email_verified_at"] = verify_email_at
+        if bump_session_version:
+            user["session_version"] = int(user.get("session_version") or 1) + 1
+            self._revoke_sessions_for_user_locked(user_id)
+        user["updated_at"] = utc_now()
+        return deepcopy(user)
+
+    def update_user_email(
+        self,
+        user_id: str,
+        new_email: str,
+        *,
+        email_verified_at: str | None,
+    ) -> dict[str, Any] | None:
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        clean_email = str(new_email or "").strip()
+        owner = self.get_user_by_email(clean_email)
+        if owner and owner["id"] != user_id:
+            raise UserIdentityConflict("该邮箱已被其他账号使用", "email_already_exists")
+        user["email"] = clean_email
+        user["email_verified_at"] = email_verified_at
+        user["updated_at"] = utc_now()
+        return deepcopy(user)
+
+    def list_oauth_identities(
+        self,
+        user_id: str,
+        include_revoked: bool = False,
+    ) -> list[dict[str, Any]]:
+        return [
+            deepcopy(item)
+            for item in self.state["oauthIdentities"]
+            if item.get("user_id") == user_id
+            and (include_revoked or item.get("revoked_at") is None)
+        ]
+
+    def get_oauth_identity_by_provider_user(
+        self,
+        provider: str,
+        instance_url: str,
+        provider_user_id: str,
+    ) -> dict[str, Any] | None:
+        norm_provider = str(provider or "").strip().lower()
+        norm_instance = str(instance_url or "").strip().lower()
+        uid = str(provider_user_id or "").strip()
+        return next(
+            (
+                deepcopy(item)
+                for item in self.state["oauthIdentities"]
+                if item.get("revoked_at") is None
+                and str(item.get("provider") or "").lower() == norm_provider
+                and str(item.get("instance_url") or "").lower() == norm_instance
+                and str(item.get("provider_user_id") or "") == uid
+            ),
+            None,
+        )
+
+    def upsert_oauth_identity(
+        self,
+        user_id: str,
+        *,
+        provider: str,
+        instance_url: str,
+        provider_user_id: str,
+        provider_login: str,
+        provider_email: str = "",
+        avatar_url: str = "",
+        scopes: str = "",
+        credential_ref: str = "",
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        norm_provider = str(provider or "").strip().lower()
+        norm_instance = str(instance_url or "").strip()
+        uid = str(provider_user_id or "").strip()
+        active_conflict = next(
+            (
+                item
+                for item in self.state["oauthIdentities"]
+                if item.get("revoked_at") is None
+                and str(item.get("provider") or "").lower() == norm_provider
+                and str(item.get("instance_url") or "").lower() == norm_instance.lower()
+                and str(item.get("provider_user_id") or "") == uid
+            ),
+            None,
+        )
+        if active_conflict:
+            if active_conflict["user_id"] != user_id:
+                raise GithubIdentityConflict("该 OAuth 账号已绑定到其他市场账号")
+            active_conflict.update(
+                {
+                    "provider_login": str(provider_login or ""),
+                    "provider_email": str(provider_email or "")
+                    or active_conflict.get("provider_email", ""),
+                    "avatar_url": str(avatar_url or "") or active_conflict.get("avatar_url", ""),
+                    "scopes": str(scopes or "") or active_conflict.get("scopes", ""),
+                    "credential_ref": str(credential_ref or "")
+                    or active_conflict.get("credential_ref", ""),
+                    "expires_at": expires_at
+                    if expires_at is not None
+                    else active_conflict.get("expires_at"),
+                    "updated_at": utc_now(),
+                }
+            )
+            return deepcopy(active_conflict)
+
+        record = {
+            "id": self._next_id("oauth"),
+            "user_id": user_id,
+            "provider": norm_provider,
+            "instance_url": norm_instance,
+            "provider_user_id": uid,
+            "provider_login": str(provider_login or ""),
+            "provider_email": str(provider_email or ""),
+            "avatar_url": str(avatar_url or ""),
+            "scopes": str(scopes or ""),
+            "credential_ref": str(credential_ref or ""),
+            "expires_at": expires_at,
+            "revoked_at": None,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+        }
+        self.state["oauthIdentities"].append(record)
+        return deepcopy(record)
+
+    def revoke_oauth_identity(self, user_id: str, identity_id: str) -> dict[str, Any] | None:
+        target = next(
+            (
+                item
+                for item in self.state["oauthIdentities"]
+                if item.get("id") == identity_id
+                and item.get("user_id") == user_id
+                and item.get("revoked_at") is None
+            ),
+            None,
+        )
+        if not target:
+            return None
+        now = utc_now()
+        target["revoked_at"] = now
+        target["updated_at"] = now
+        if target.get("provider") == "github":
+            user = self.get_user_by_id(user_id)
+            if user:
+                user["github_id"] = None
+                user["github_login"] = ""
+                user["github_email"] = ""
+                user["updated_at"] = now
+            self._clear_github_authorizations_for_user(user_id)
+        return deepcopy(target)
+
+    def _clear_github_authorizations_for_user(self, user_id: str) -> None:
+        getattr(self, "_github_authorization_references", {}).pop(user_id, None)
+        for session in self.state["sessions"]:
+            if session.get("user_id") == user_id:
+                self.delete_github_authorization(
+                    hashlib.sha256(str(session["token"]).encode()).hexdigest()
+                )
 
     def list_public_plugins(self) -> list[dict[str, Any]]:
         return [
@@ -284,12 +711,20 @@ class InMemoryMarketStore:
         return deepcopy(self.state["plugins"])
 
     def list_author_plugins(self, username: str) -> list[dict[str, Any]]:
+        target = str(username or "").strip().lower()
         return [
             deepcopy(plugin)
             for plugin in self.state["plugins"]
-            if str(plugin.get("owner_github_login") or "").lower() == username.lower()
+            if str(plugin.get("owner_username") or plugin.get("owner_github_login") or "").lower()
+            == target
             and plugin.get("status") == "listed"
         ]
+
+    def has_active_plugins(self, user_id: str) -> bool:
+        return any(
+            plugin.get("owner_user_id") == user_id and plugin.get("status") in {"listed", "pending"}
+            for plugin in self.state["plugins"]
+        )
 
     def list_user_plugins(self, user_id: str, github_login: str = "") -> list[dict[str, Any]]:
         return [
@@ -334,11 +769,13 @@ class InMemoryMarketStore:
         return self._find("plugins", "id", plugin_id)
 
     def get_plugin_by_author(self, username: str, name: str) -> dict[str, Any] | None:
+        target = str(username or "").strip().lower()
         return next(
             (
                 p
                 for p in self.state["plugins"]
-                if str(p.get("owner_github_login", "")).lower() == username.lower()
+                if str(p.get("owner_username") or p.get("owner_github_login") or "").lower()
+                == target
                 and p["name"].lower() == name.lower()
             ),
             None,
@@ -369,6 +806,14 @@ class InMemoryMarketStore:
         plugin_id = existing["id"] if existing else (payload.get("id") or payload["name"])
         if not existing and self.get_plugin(plugin_id):
             plugin_id = new_id("astrbot_plugin")
+        owner_username = (
+            (existing or {}).get("owner_username")
+            or (existing or {}).get("owner_github_login")
+            or user.get("public_username")
+            or user.get("github_login")
+            or user.get("internal_username")
+            or ""
+        )
         self._check_plugin_identity(
             {
                 **payload,
@@ -377,6 +822,7 @@ class InMemoryMarketStore:
                 "owner_github_login": (existing or {}).get(
                     "owner_github_login", user.get("github_login", "")
                 ),
+                "owner_username": owner_username,
             }
         )
         return plugin_id, existing
@@ -385,13 +831,17 @@ class InMemoryMarketStore:
         candidate_name = str(candidate.get("name") or "").strip().lower()
         candidate_author = str(candidate.get("author") or "").strip().lower()
         login = str(candidate.get("owner_github_login") or "").lower()
+        owner_username = str(candidate.get("owner_username") or login).lower()
         for other in self.state["plugins"]:
             if other["id"] == candidate["id"]:
                 continue
             same_name = str(other.get("name") or "").strip().lower() == candidate_name
             same_owner = other.get("owner_user_id") == candidate.get("owner_user_id")
-            same_login = bool(login) and str(other.get("owner_github_login") or "").lower() == login
-            if same_name and (same_owner or same_login):
+            other_login = str(other.get("owner_github_login") or "").lower()
+            other_username = str(other.get("owner_username") or other_login).lower()
+            same_login = bool(login) and other_login == login
+            same_username = bool(owner_username) and other_username == owner_username
+            if same_name and (same_owner or same_login or same_username):
                 raise PluginIdentityConflict("该用户名下已存在同名插件")
             other_author = str(other.get("author") or "").strip().lower()
             if same_name and candidate_author and other_author == candidate_author:
@@ -437,8 +887,14 @@ class InMemoryMarketStore:
                 "current_artifact_id": (existing or {}).get("current_artifact_id"),
                 "owner_user_id": user["id"],
                 "owner_github_login": (existing or {}).get(
-                    "owner_github_login", user["github_login"]
+                    "owner_github_login", user.get("github_login", "")
                 ),
+                "owner_username": (existing or {}).get("owner_username")
+                or (existing or {}).get("owner_github_login")
+                or user.get("public_username")
+                or user.get("github_login")
+                or user.get("internal_username")
+                or "",
                 "status": (existing or {}).get("status", "pending"),
                 "stars": int((existing or {}).get("stars") or 0),
                 "likes": int((existing or {}).get("likes") or 0),
@@ -487,6 +943,10 @@ class InMemoryMarketStore:
                 "category_source": "user",
                 "owner_user_id": user["id"],
                 "owner_github_login": user.get("github_login", ""),
+                "owner_username": user.get("public_username")
+                or user.get("github_login")
+                or user.get("internal_username")
+                or "",
                 "status": "pending",
                 "stars": 0,
                 "likes": 0,
@@ -768,7 +1228,7 @@ class InMemoryMarketStore:
         for target in self.state["users"]:
             if target.get("muted_by") == user_id:
                 target["muted_by"] = None
-        for collection in ("notifications", "apiKeys", "sessions"):
+        for collection in ("notifications", "apiKeys", "sessions", "oauthIdentities"):
             self.state[collection] = [
                 item for item in self.state[collection] if item.get("user_id") != user_id
             ]
@@ -823,6 +1283,9 @@ class InMemoryMarketStore:
         for api_key in self.state["apiKeys"]:
             if api_key.get("user_id") == from_user_id:
                 api_key["user_id"] = to_user_id
+        for identity in self.state["oauthIdentities"]:
+            if identity.get("user_id") == from_user_id:
+                identity["user_id"] = to_user_id
         self._merge_likes("pluginLikes", "plugin_id", from_user_id, to_user_id)
         self._merge_likes("commentLikes", "comment_id", from_user_id, to_user_id)
         self._refresh_like_counts()
@@ -974,9 +1437,11 @@ class InMemoryMarketStore:
         return before - len(self.state["apiKeys"])
 
     def create_session(self, user_id: str, token: str | None = None) -> dict[str, Any]:
+        user = self.get_user_by_id(user_id)
         session = {
             "token": token or f"sess_{secrets.token_urlsafe(24)}",
             "user_id": user_id,
+            "session_version": int((user or {}).get("session_version") or 1),
             "created_at": utc_now(),
             "last_seen_at": utc_now(),
         }
@@ -987,8 +1452,15 @@ class InMemoryMarketStore:
         session = self._find("sessions", "token", token)
         if not session:
             return None
+        user = self.get_user_by_id(session["user_id"])
+        if not user:
+            return None
+        expected_version = int(user.get("session_version") or 1)
+        if int(session.get("session_version") or 1) != expected_version:
+            self.revoke_session(token)
+            return None
         session["last_seen_at"] = utc_now()
-        return self.get_user_by_id(session["user_id"])
+        return user
 
     def revoke_session(self, token: str) -> bool:
         self.delete_github_authorization(hashlib.sha256(token.encode()).hexdigest())
@@ -998,6 +1470,118 @@ class InMemoryMarketStore:
             return False
         sessions.pop(index)
         return True
+
+    def _revoke_sessions_for_user_locked(self, user_id: str) -> int:
+        kept = []
+        removed = 0
+        for session in self.state["sessions"]:
+            if session.get("user_id") == user_id:
+                self.delete_github_authorization(
+                    hashlib.sha256(str(session["token"]).encode()).hexdigest()
+                )
+                removed += 1
+            else:
+                kept.append(session)
+        self.state["sessions"] = kept
+        getattr(self, "_github_authorization_references", {}).pop(user_id, None)
+        return removed
+
+    def revoke_all_user_sessions(self, user_id: str) -> int:
+        user = self.get_user_by_id(user_id)
+        if user:
+            user["session_version"] = int(user.get("session_version") or 1) + 1
+            user["updated_at"] = utc_now()
+        return self._revoke_sessions_for_user_locked(user_id)
+
+    def save_email_challenge(
+        self, challenge_id: str, record: dict[str, Any], ttl_seconds: int
+    ) -> None:
+        challenges = self.state.setdefault("emailChallenges", {})
+        challenges[challenge_id] = {
+            **deepcopy(record),
+            "expires_at_ts": time.time() + max(1, int(ttl_seconds)),
+        }
+
+    def get_email_challenge_salt(self, challenge_id: str) -> str | None:
+        challenges = self.state.setdefault("emailChallenges", {})
+        entry = challenges.get(challenge_id)
+        if not entry:
+            return None
+        if float(entry.get("expires_at_ts") or 0) <= time.time():
+            challenges.pop(challenge_id, None)
+            return None
+        return str(entry.get("salt") or "") or None
+
+    def reserve_email_challenge(
+        self,
+        challenge_id: str,
+        purpose: str,
+        expected_digest: str,
+        max_attempts: int,
+    ) -> tuple[str, dict[str, Any] | None]:
+        challenges = self.state.setdefault("emailChallenges", {})
+        entry = challenges.get(challenge_id)
+        if not entry:
+            return ("not_found", None)
+        if float(entry.get("expires_at_ts") or 0) <= time.time():
+            challenges.pop(challenge_id, None)
+            return ("expired", None)
+        if str(entry.get("purpose") or "") != purpose:
+            return ("wrong_purpose", None)
+        if str(entry.get("state") or "") != "pending":
+            return ("in_progress", None)
+        attempts = int(entry.get("attempts") or 0)
+        if attempts >= max_attempts:
+            challenges.pop(challenge_id, None)
+            return ("too_many_attempts", None)
+        if not secrets.compare_digest(str(entry.get("code_digest") or ""), expected_digest):
+            attempts += 1
+            entry["attempts"] = attempts
+            if attempts >= max_attempts:
+                challenges.pop(challenge_id, None)
+                return ("too_many_attempts", None)
+            return ("invalid_code", None)
+        entry["state"] = "in_progress"
+        return ("ok", deepcopy(entry.get("payload") or {}))
+
+    def release_email_challenge(self, challenge_id: str) -> None:
+        entry = self.state.setdefault("emailChallenges", {}).get(challenge_id)
+        if entry and entry.get("state") == "in_progress":
+            entry["state"] = "pending"
+
+    def delete_email_challenge(self, challenge_id: str) -> None:
+        self.state.setdefault("emailChallenges", {}).pop(challenge_id, None)
+
+    def get_rate_limit_count(self, key: str) -> int:
+        limits = self.state.setdefault("rateLimits", {})
+        entry = limits.get(key)
+        now = time.time()
+        if not entry or float(entry.get("expires_at_ts") or 0) <= now:
+            limits.pop(key, None)
+            return 0
+        return int(entry.get("count") or 0)
+
+    def increment_rate_limit(self, key: str, ttl_seconds: int) -> int:
+        limits = self.state.setdefault("rateLimits", {})
+        now = time.time()
+        entry = limits.get(key)
+        if not entry or float(entry.get("expires_at_ts") or 0) <= now:
+            entry = {"count": 0, "expires_at_ts": now + max(1, int(ttl_seconds))}
+            limits[key] = entry
+        entry["count"] = int(entry.get("count") or 0) + 1
+        return int(entry["count"])
+
+    def check_and_set_cooldown(self, key: str, ttl_seconds: int) -> int:
+        cooldowns = self.state.setdefault("cooldowns", {})
+        now = time.time()
+        expires_at = float(cooldowns.get(key) or 0)
+        if expires_at > now:
+            return max(1, int(expires_at - now + 0.999))
+        cooldowns[key] = now + max(1, int(ttl_seconds))
+        return 0
+
+    def clear_cooldown(self, key: str) -> None:
+        self.state.setdefault("cooldowns", {}).pop(key, None)
 
     def set_github_authorization(self, reference: str, ciphertext: str, ttl_seconds: int) -> None:
         credentials = getattr(self, "_github_authorizations", {})
@@ -1106,15 +1690,22 @@ class InMemoryMarketStore:
         self.state["plugins"].append(plugin)
 
     def _normalize_user(self, user: dict[str, Any]) -> dict[str, Any]:
+        github_login = user.get("github_login") or user.get("login") or ""
+        internal_username = user.get("internal_username") or ""
+        public_username = user.get("public_username") or github_login or internal_username or ""
         return {
             **user,
             "role": normalize_role(user.get("role")).value,
-            "github_login": user.get("github_login") or user.get("login") or "",
-            "internal_username": user.get("internal_username") or "",
+            "github_login": github_login,
+            "internal_username": internal_username,
+            "public_username": public_username,
+            "email": user.get("email") or "",
+            "email_verified_at": user.get("email_verified_at") or None,
+            "session_version": int(user.get("session_version") or 1),
             "password_hash": user.get("password_hash") or "",
             "auth_source": user.get("auth_source") or "github",
             "github_token": user.get("github_token") or "",
-            "github_email": user.get("github_email") or user.get("email") or "",
+            "github_email": user.get("github_email") or "",
             "github_refresh_interval_seconds": int(
                 user.get("github_refresh_interval_seconds") or 3600
             ),
@@ -1134,8 +1725,9 @@ class InMemoryMarketStore:
             "email_notify_unlist": coerce_bool(user.get("email_notify_unlist"), True),
             "github_name": user.get("github_name")
             or user.get("name")
-            or user.get("github_login")
-            or user.get("internal_username")
+            or github_login
+            or public_username
+            or internal_username
             or user.get("login")
             or "",
             "muted_until": user.get("muted_until") or None,
@@ -1145,6 +1737,9 @@ class InMemoryMarketStore:
     def _normalize_plugin(self, plugin: dict[str, Any]) -> dict[str, Any]:
         return {
             **plugin,
+            "owner_username": str(
+                plugin.get("owner_username") or plugin.get("owner_github_login") or ""
+            ),
             "tags": plugin.get("tags") if isinstance(plugin.get("tags"), list) else [],
             "stars": int(plugin.get("stars") or 0),
             "likes": int(plugin.get("likes") or 0),
@@ -1163,8 +1758,15 @@ class InMemoryMarketStore:
         return {
             **deepcopy(comment),
             "likes": int(comment.get("likes") or 0),
+            "public_username": user.get("public_username")
+            or user.get("github_login")
+            or user.get("internal_username")
+            or "",
             "github_login": user.get("github_login") or "",
-            "github_name": user.get("github_name") or user.get("internal_username") or "",
+            "github_name": user.get("github_name")
+            or user.get("public_username")
+            or user.get("internal_username")
+            or "",
             "avatar_url": user.get("avatar_url") or "",
             "role": normalize_role(user.get("role")).value,
         }
@@ -1239,12 +1841,17 @@ class LocalFileMarketStore(InMemoryMarketStore):
             "announcements": list(data.get("announcements", [])),
             "notifications": list(data.get("notifications", [])),
             "apiKeys": list(data.get("apiKeys", [])),
+            "oauthIdentities": list(data.get("oauthIdentities", [])),
+            "emailChallenges": dict(data.get("emailChallenges", {})),
+            "rateLimits": dict(data.get("rateLimits", {})),
+            "cooldowns": dict(data.get("cooldowns", {})),
             "options": {
                 str(key): str(value) for key, value in dict(data.get("options", {})).items()
             },
             "sessions": list(data.get("sessions", [])),
             "nextNumericId": max(1, int(data.get("nextNumericId") or 1)),
         }
+        self._backfill_seeded_identities()
 
     def _prune_expired_sessions_locked(self) -> bool:
         cutoff = datetime.now(UTC) - timedelta(seconds=self.session_ttl_seconds)
@@ -1313,9 +1920,90 @@ class LocalFileMarketStore(InMemoryMarketStore):
         username: str,
         password_hash: str,
         role: str = Role.USER.value,
+        email: str = "",
     ) -> dict[str, Any]:
         with self._persist():
-            return super().create_internal_user(username, password_hash, role)
+            return super().create_internal_user(username, password_hash, role, email=email)
+
+    def create_email_user(
+        self,
+        *,
+        username: str,
+        email: str,
+        password_hash: str,
+        email_verified_at: str | None = None,
+        role: str = Role.USER.value,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().create_email_user(
+                username=username,
+                email=email,
+                password_hash=password_hash,
+                email_verified_at=email_verified_at,
+                role=role,
+            )
+
+    def set_user_password(
+        self,
+        user_id: str,
+        password_hash: str,
+        *,
+        bump_session_version: bool = True,
+        verify_email_at: str | None = None,
+        email: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().set_user_password(
+                user_id,
+                password_hash,
+                bump_session_version=bump_session_version,
+                verify_email_at=verify_email_at,
+                email=email,
+            )
+
+    def update_user_email(
+        self,
+        user_id: str,
+        new_email: str,
+        *,
+        email_verified_at: str | None,
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().update_user_email(
+                user_id, new_email, email_verified_at=email_verified_at
+            )
+
+    def upsert_oauth_identity(
+        self,
+        user_id: str,
+        *,
+        provider: str,
+        instance_url: str,
+        provider_user_id: str,
+        provider_login: str,
+        provider_email: str = "",
+        avatar_url: str = "",
+        scopes: str = "",
+        credential_ref: str = "",
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().upsert_oauth_identity(
+                user_id,
+                provider=provider,
+                instance_url=instance_url,
+                provider_user_id=provider_user_id,
+                provider_login=provider_login,
+                provider_email=provider_email,
+                avatar_url=avatar_url,
+                scopes=scopes,
+                credential_ref=credential_ref,
+                expires_at=expires_at,
+            )
+
+    def revoke_oauth_identity(self, user_id: str, identity_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            return super().revoke_oauth_identity(user_id, identity_id)
 
     def upsert_options(self, values: dict[str, str]) -> dict[str, str]:
         with self._persist():
@@ -1507,18 +2195,77 @@ class LocalFileMarketStore(InMemoryMarketStore):
             if seen is None or seen < cutoff:
                 self.revoke_session(token)
                 return None
+            user = self.get_user_by_id(session["user_id"])
+            if not user:
+                return None
+            expected_version = int(user.get("session_version") or 1)
+            if int(session.get("session_version") or 1) != expected_version:
+                self.revoke_session(token)
+                return None
             session["last_seen_at"] = utc_now()
             now_mono = time.monotonic()
             if now_mono - self._session_persisted_at.get(token, 0.0) >= 60.0:
                 self._session_persisted_at[token] = now_mono
                 self._save_locked()
-            user = self.get_user_by_id(session["user_id"])
-            return deepcopy(user) if user else None
+            return deepcopy(user)
 
     def revoke_session(self, token: str) -> bool:
         with self._persist():
             self._session_persisted_at.pop(token, None)
             return super().revoke_session(token)
+
+    def revoke_all_user_sessions(self, user_id: str) -> int:
+        with self._persist():
+            for session in list(self.state["sessions"]):
+                if session.get("user_id") == user_id:
+                    self._session_persisted_at.pop(str(session.get("token") or ""), None)
+            return super().revoke_all_user_sessions(user_id)
+
+    def save_email_challenge(
+        self, challenge_id: str, record: dict[str, Any], ttl_seconds: int
+    ) -> None:
+        with self._persist():
+            super().save_email_challenge(challenge_id, record, ttl_seconds)
+
+    def get_email_challenge_salt(self, challenge_id: str) -> str | None:
+        with self._lock:
+            return super().get_email_challenge_salt(challenge_id)
+
+    def reserve_email_challenge(
+        self,
+        challenge_id: str,
+        purpose: str,
+        expected_digest: str,
+        max_attempts: int,
+    ) -> tuple[str, dict[str, Any] | None]:
+        with self._persist():
+            return super().reserve_email_challenge(
+                challenge_id, purpose, expected_digest, max_attempts
+            )
+
+    def release_email_challenge(self, challenge_id: str) -> None:
+        with self._persist():
+            super().release_email_challenge(challenge_id)
+
+    def delete_email_challenge(self, challenge_id: str) -> None:
+        with self._persist():
+            super().delete_email_challenge(challenge_id)
+
+    def get_rate_limit_count(self, key: str) -> int:
+        with self._lock:
+            return super().get_rate_limit_count(key)
+
+    def increment_rate_limit(self, key: str, ttl_seconds: int) -> int:
+        with self._persist():
+            return super().increment_rate_limit(key, ttl_seconds)
+
+    def check_and_set_cooldown(self, key: str, ttl_seconds: int) -> int:
+        with self._persist():
+            return super().check_and_set_cooldown(key, ttl_seconds)
+
+    def clear_cooldown(self, key: str) -> None:
+        with self._persist():
+            super().clear_cooldown(key)
 
 
 PLUGIN_COLUMN_KEYS = {
@@ -1531,6 +2278,7 @@ PLUGIN_COLUMN_KEYS = {
     "social_link",
     "owner_user_id",
     "owner_github_login",
+    "owner_username",
     "status",
     "stars",
     "likes",
@@ -1899,6 +2647,110 @@ class PgRedisMarketStore(InMemoryMarketStore):
             migration_key,
         )
 
+    async def _allocate_pg_public_username(
+        self,
+        connection: asyncpg.Connection,
+        preferred: str,
+        *,
+        exclude_user_id: str = "",
+    ) -> str:
+        base = str(preferred or "").strip() or f"user_{secrets.token_hex(4)}"
+        for suffix in ("", "_gh", *(f"_{i}" for i in range(1, 100))):
+            candidate = f"{base}{suffix}"
+            exists = await connection.fetchval(
+                """
+                SELECT 1
+                  FROM market_users
+                 WHERE lower(btrim(public_username)) = lower($1)
+                   AND id <> $2
+                """,
+                candidate,
+                exclude_user_id,
+            )
+            if not exists:
+                return candidate
+        return f"{base}_{secrets.token_hex(4)}"
+
+    async def _upsert_pg_oauth_identity(
+        self,
+        connection: asyncpg.Connection,
+        user_id: str,
+        *,
+        provider: str,
+        instance_url: str,
+        provider_user_id: str,
+        provider_login: str,
+        provider_email: str = "",
+        avatar_url: str = "",
+        scopes: str = "",
+        credential_ref: str = "",
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        norm_provider = str(provider or "").strip().lower()
+        norm_instance = str(instance_url or "").strip()
+        uid = str(provider_user_id or "").strip()
+        existing = await connection.fetchrow(
+            """
+            SELECT *
+              FROM market_oauth_identities
+             WHERE lower(provider) = lower($1)
+               AND lower(instance_url) = lower($2)
+               AND provider_user_id = $3
+               AND revoked_at IS NULL
+            """,
+            norm_provider,
+            norm_instance,
+            uid,
+        )
+        if existing:
+            if existing["user_id"] != user_id:
+                raise GithubIdentityConflict("该 OAuth 账号已绑定到其他市场账号")
+            row = await connection.fetchrow(
+                """
+                UPDATE market_oauth_identities
+                   SET provider_login = $2,
+                       provider_email = COALESCE(NULLIF($3, ''), provider_email),
+                       avatar_url = COALESCE(NULLIF($4, ''), avatar_url),
+                       scopes = COALESCE(NULLIF($5, ''), scopes),
+                       credential_ref = COALESCE(NULLIF($6, ''), credential_ref),
+                       expires_at = COALESCE($7::timestamptz, expires_at),
+                       updated_at = now()
+                 WHERE id = $1
+             RETURNING *
+                """,
+                existing["id"],
+                str(provider_login or ""),
+                str(provider_email or ""),
+                str(avatar_url or ""),
+                str(scopes or ""),
+                str(credential_ref or ""),
+                expires_at,
+            )
+            return serialize_value(dict(row))
+        row = await connection.fetchrow(
+            """
+            INSERT INTO market_oauth_identities (
+                id, user_id, provider, instance_url, provider_user_id,
+                provider_login, provider_email, avatar_url, scopes,
+                credential_ref, expires_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz)
+            RETURNING *
+            """,
+            new_id("oauth"),
+            user_id,
+            norm_provider,
+            norm_instance,
+            uid,
+            str(provider_login or ""),
+            str(provider_email or ""),
+            str(avatar_url or ""),
+            str(scopes or ""),
+            str(credential_ref or ""),
+            expires_at,
+        )
+        return serialize_value(dict(row))
+
     async def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
         login = profile.get("login") or profile.get("github_login")
         if not login:
@@ -1918,23 +2770,64 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     and str(login_owner["github_id"] or login_owner["id"]) != github_id
                 ):
                     raise GithubIdentityConflict("GitHub 用户名已关联其他身份，请联系管理员核对")
-                existing = (
-                    await connection.fetchrow(
-                        "SELECT * FROM market_users WHERE github_id = $1 OR (github_id IS NULL AND id = $1)",
+                identity_owner = None
+                if github_id:
+                    identity_row = await connection.fetchrow(
+                        """
+                        SELECT user_id
+                          FROM market_oauth_identities
+                         WHERE lower(provider) = 'github'
+                           AND lower(instance_url) = 'https://github.com'
+                           AND provider_user_id = $1
+                           AND revoked_at IS NULL
+                        """,
                         github_id,
+                    )
+                    if identity_row:
+                        identity_owner = await connection.fetchrow(
+                            "SELECT * FROM market_users WHERE id = $1",
+                            identity_row["user_id"],
+                        )
+                existing = (
+                    identity_owner
+                    or (
+                        await connection.fetchrow(
+                            "SELECT * FROM market_users WHERE github_id = $1 OR (github_id IS NULL AND auth_source = 'github' AND id = $1)",
+                            github_id,
+                        )
+                        if github_id
+                        else None
                     )
                     or login_owner
                 )
+                github_email = str(profile.get("github_email") or profile.get("email") or "")
+                avatar_url = str(profile.get("avatar_url") or "")
                 if existing:
+                    is_github_origin = existing["auth_source"] == "github"
+                    public_username = existing["public_username"] or (
+                        await self._allocate_pg_public_username(
+                            connection, str(login), exclude_user_id=existing["id"]
+                        )
+                    )
+                    next_name = (
+                        profile.get("name") or login
+                        if is_github_origin or not existing["github_name"]
+                        else existing["github_name"]
+                    )
+                    next_avatar = (
+                        avatar_url or existing["avatar_url"]
+                        if is_github_origin or not existing["avatar_url"]
+                        else existing["avatar_url"]
+                    )
                     row = await connection.fetchrow(
                         """
                         UPDATE market_users
                            SET github_id = COALESCE($2, github_id),
                                github_login = $3,
-                               auth_source = 'github',
-                               github_name = $4,
-                               avatar_url = $5,
-                               github_email = COALESCE(NULLIF($6, ''), github_email),
+                               public_username = $4,
+                               github_name = $5,
+                               avatar_url = $6,
+                               github_email = COALESCE(NULLIF($7, ''), github_email),
                                updated_at = now()
                          WHERE id = $1
                      RETURNING *
@@ -1942,28 +2835,53 @@ class PgRedisMarketStore(InMemoryMarketStore):
                         existing["id"],
                         str(profile.get("id")) if profile.get("id") else None,
                         str(login),
-                        profile.get("name") or login,
-                        profile.get("avatar_url") or "",
-                        profile.get("github_email") or profile.get("email") or "",
+                        public_username,
+                        next_name,
+                        next_avatar,
+                        github_email,
+                    )
+                    await self._upsert_pg_oauth_identity(
+                        connection,
+                        existing["id"],
+                        provider="github",
+                        instance_url="https://github.com",
+                        provider_user_id=str(row["github_id"] or row["id"]),
+                        provider_login=str(login),
+                        provider_email=github_email,
+                        avatar_url=avatar_url,
                     )
                     return self._user_from_record(row)
 
+                user_id = str(profile.get("id") or new_id("user"))
+                public_username = await self._allocate_pg_public_username(connection, str(login))
                 row = await connection.fetchrow(
                     """
                     INSERT INTO market_users (
-                        id, github_id, github_login, internal_username, password_hash,
+                        id, github_id, github_login, internal_username, public_username,
+                        email, email_verified_at, session_version, password_hash,
                         auth_source, github_name, github_email, avatar_url, role
                     )
-                    VALUES ($1, $2, $3, '', '', 'github', $4, $5, $6, $7)
+                    VALUES ($1, $2, $3, '', $4, '', NULL, 1, '', 'github', $5, $6, $7, $8)
                     RETURNING *
                     """,
-                    str(profile.get("id") or new_id("user")),
+                    user_id,
                     str(profile.get("id")) if profile.get("id") else None,
                     str(login),
+                    public_username,
                     profile.get("name") or login,
-                    profile.get("github_email") or profile.get("email") or "",
-                    profile.get("avatar_url") or "",
+                    github_email,
+                    avatar_url,
                     Role.USER.value,
+                )
+                await self._upsert_pg_oauth_identity(
+                    connection,
+                    row["id"],
+                    provider="github",
+                    instance_url="https://github.com",
+                    provider_user_id=str(row["github_id"] or row["id"]),
+                    provider_login=str(login),
+                    provider_email=github_email,
+                    avatar_url=avatar_url,
                 )
                 return self._user_from_record(row)
 
@@ -1976,11 +2894,17 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     username,
                 )
                 if existing:
+                    public_username = existing["public_username"] or (
+                        await self._allocate_pg_public_username(
+                            connection, username, exclude_user_id=existing["id"]
+                        )
+                    )
                     row = await connection.fetchrow(
                         """
                         UPDATE market_users
                            SET password_hash = $2,
                                role = $3,
+                               public_username = $4,
                                updated_at = now()
                          WHERE id = $1
                      RETURNING *
@@ -1988,20 +2912,24 @@ class PgRedisMarketStore(InMemoryMarketStore):
                         existing["id"],
                         password_hash,
                         Role.CORE_ADMIN.value,
+                        public_username,
                     )
                     return self._user_from_record(row)
 
+                public_username = await self._allocate_pg_public_username(connection, username)
                 row = await connection.fetchrow(
                     """
                     INSERT INTO market_users (
-                        id, github_id, github_login, internal_username, password_hash,
+                        id, github_id, github_login, internal_username, public_username,
+                        email, email_verified_at, session_version, password_hash,
                         auth_source, github_name, avatar_url, role
                     )
-                    VALUES ($1, NULL, '', $2, $3, 'internal', $2, '', $4)
+                    VALUES ($1, NULL, '', $2, $3, '', NULL, 1, $4, 'internal', $2, '', $5)
                     RETURNING *
                     """,
                     new_id("user"),
                     username,
+                    public_username,
                     password_hash,
                     Role.CORE_ADMIN.value,
                 )
@@ -2012,30 +2940,139 @@ class PgRedisMarketStore(InMemoryMarketStore):
         username: str,
         password_hash: str,
         role: str = Role.USER.value,
+        email: str = "",
     ) -> dict[str, Any]:
-        row = await self._pool().fetchrow(
-            """
-            INSERT INTO market_users (
-                id, github_id, github_login, internal_username, password_hash,
-                auth_source, github_name, avatar_url, role
+        clean_username = str(username or "").strip()
+        clean_email = str(email or "").strip()
+        try:
+            row = await self._pool().fetchrow(
+                """
+                INSERT INTO market_users (
+                    id, github_id, github_login, internal_username, public_username,
+                    email, email_verified_at, session_version, password_hash,
+                    auth_source, github_name, avatar_url, role
+                )
+                VALUES ($1, NULL, '', $2, $2, $3, NULL, 1, $4, 'internal', $2, '', $5)
+                RETURNING *
+                """,
+                new_id("user"),
+                clean_username,
+                clean_email,
+                password_hash,
+                normalize_role(role).value,
             )
-            VALUES ($1, NULL, '', $2, $3, 'internal', $2, '', $4)
-            RETURNING *
-            """,
-            new_id("user"),
-            username,
-            password_hash,
-            normalize_role(role).value,
-        )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "market_users_email_lower_idx":
+                raise UserIdentityConflict("邮箱已被注册", "email_already_exists") from exc
+            if exc.constraint_name in {
+                "market_users_internal_username_lower_idx",
+                "market_users_public_username_lower_idx",
+            }:
+                raise UserIdentityConflict("用户名已被占用", "username_already_exists") from exc
+            raise
+        return self._user_from_record(row)
+
+    async def create_email_user(
+        self,
+        *,
+        username: str,
+        email: str,
+        password_hash: str,
+        email_verified_at: str | None = None,
+        role: str = Role.USER.value,
+    ) -> dict[str, Any]:
+        clean_username = str(username or "").strip()
+        clean_email = str(email or "").strip()
+        try:
+            row = await self._pool().fetchrow(
+                """
+                INSERT INTO market_users (
+                    id, github_id, github_login, internal_username, public_username,
+                    email, email_verified_at, session_version, password_hash,
+                    auth_source, github_name, avatar_url, role
+                )
+                VALUES ($1, NULL, '', $2, $2, $3, $4::timestamptz, 1, $5, 'email', $2, '', $6)
+                RETURNING *
+                """,
+                new_id("user"),
+                clean_username,
+                clean_email,
+                email_verified_at,
+                password_hash,
+                normalize_role(role).value,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "market_users_email_lower_idx":
+                raise UserIdentityConflict("邮箱已被注册", "email_already_exists") from exc
+            if exc.constraint_name in {
+                "market_users_internal_username_lower_idx",
+                "market_users_public_username_lower_idx",
+            }:
+                raise UserIdentityConflict("用户名已被占用", "username_already_exists") from exc
+            raise
         return self._user_from_record(row)
 
     async def get_user_by_id(self, user_id: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow("SELECT * FROM market_users WHERE id = $1", user_id)
         return self._user_from_record(row) if row else None
 
+    async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        clean = str(email or "").strip()
+        if not clean:
+            return None
+        row = await self._pool().fetchrow(
+            "SELECT * FROM market_users WHERE lower(btrim(email)) = lower($1)",
+            clean,
+        )
+        return self._user_from_record(row) if row else None
+
+    async def get_user_by_public_username(self, username: str) -> dict[str, Any] | None:
+        clean = str(username or "").strip()
+        if not clean:
+            return None
+        row = await self._pool().fetchrow(
+            "SELECT * FROM market_users WHERE lower(btrim(public_username)) = lower($1)",
+            clean,
+        )
+        return self._user_from_record(row) if row else None
+
+    async def get_user_by_login_identifier(self, identifier: str) -> dict[str, Any] | None:
+        clean = str(identifier or "").strip()
+        if not clean:
+            return None
+        if "@" in clean:
+            return await self.get_user_by_email(clean)
+        row = await self._pool().fetchrow(
+            """
+            SELECT *
+              FROM market_users
+             WHERE lower(btrim(internal_username)) = lower($1)
+                OR lower(btrim(public_username)) = lower($1)
+             LIMIT 1
+            """,
+            clean,
+        )
+        return self._user_from_record(row) if row else None
+
     async def get_user_by_github_id(self, github_id: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow(
-            "SELECT * FROM market_users WHERE github_id = $1 OR (github_id IS NULL AND id = $1)",
+            """
+            SELECT u.*
+              FROM market_users u
+              JOIN market_oauth_identities oi
+                ON oi.user_id = u.id
+               AND lower(oi.provider) = 'github'
+               AND lower(oi.instance_url) = 'https://github.com'
+               AND oi.provider_user_id = $1
+               AND oi.revoked_at IS NULL
+             LIMIT 1
+            """,
+            github_id,
+        )
+        if row:
+            return self._user_from_record(row)
+        row = await self._pool().fetchrow(
+            "SELECT * FROM market_users WHERE github_id = $1 OR (github_id IS NULL AND auth_source = 'github' AND id = $1)",
             github_id,
         )
         return self._user_from_record(row) if row else None
@@ -2053,6 +3090,188 @@ class PgRedisMarketStore(InMemoryMarketStore):
             username,
         )
         return self._user_from_record(row) if row else None
+
+    async def set_user_password(
+        self,
+        user_id: str,
+        password_hash: str,
+        *,
+        bump_session_version: bool = True,
+        verify_email_at: str | None = None,
+        email: str | None = None,
+    ) -> dict[str, Any] | None:
+        clean_email = str(email).strip() if email is not None else None
+        try:
+            row = await self._pool().fetchrow(
+                """
+                UPDATE market_users
+                   SET password_hash = $2,
+                       email = COALESCE(NULLIF($3, ''), email),
+                       email_verified_at = COALESCE($4::timestamptz, email_verified_at),
+                       session_version = CASE
+                           WHEN $5 THEN session_version + 1
+                           ELSE session_version
+                       END,
+                       updated_at = now()
+                 WHERE id = $1
+             RETURNING *
+                """,
+                user_id,
+                password_hash,
+                clean_email or "",
+                verify_email_at,
+                bump_session_version,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "market_users_email_lower_idx":
+                raise UserIdentityConflict(
+                    "该邮箱已被其他账号使用", "email_already_exists"
+                ) from exc
+            raise
+        if row and bump_session_version:
+            await self._redis().delete(f"astrbot_market:github_oauth_user:{user_id}")
+        return self._user_from_record(row) if row else None
+
+    async def update_user_email(
+        self,
+        user_id: str,
+        new_email: str,
+        *,
+        email_verified_at: str | None,
+    ) -> dict[str, Any] | None:
+        clean_email = str(new_email or "").strip()
+        try:
+            row = await self._pool().fetchrow(
+                """
+                UPDATE market_users
+                   SET email = $2,
+                       email_verified_at = $3::timestamptz,
+                       updated_at = now()
+                 WHERE id = $1
+             RETURNING *
+                """,
+                user_id,
+                clean_email,
+                email_verified_at,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "market_users_email_lower_idx":
+                raise UserIdentityConflict(
+                    "该邮箱已被其他账号使用", "email_already_exists"
+                ) from exc
+            raise
+        return self._user_from_record(row) if row else None
+
+    async def list_oauth_identities(
+        self,
+        user_id: str,
+        include_revoked: bool = False,
+    ) -> list[dict[str, Any]]:
+        if include_revoked:
+            rows = await self._pool().fetch(
+                "SELECT * FROM market_oauth_identities WHERE user_id = $1 ORDER BY created_at ASC",
+                user_id,
+            )
+        else:
+            rows = await self._pool().fetch(
+                """
+                SELECT *
+                  FROM market_oauth_identities
+                 WHERE user_id = $1
+                   AND revoked_at IS NULL
+              ORDER BY created_at ASC
+                """,
+                user_id,
+            )
+        return [serialize_value(dict(row)) for row in rows]
+
+    async def get_oauth_identity_by_provider_user(
+        self,
+        provider: str,
+        instance_url: str,
+        provider_user_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            SELECT *
+              FROM market_oauth_identities
+             WHERE lower(provider) = lower($1)
+               AND lower(instance_url) = lower($2)
+               AND provider_user_id = $3
+               AND revoked_at IS NULL
+            """,
+            provider,
+            instance_url,
+            provider_user_id,
+        )
+        return serialize_value(dict(row)) if row else None
+
+    async def upsert_oauth_identity(
+        self,
+        user_id: str,
+        *,
+        provider: str,
+        instance_url: str,
+        provider_user_id: str,
+        provider_login: str,
+        provider_email: str = "",
+        avatar_url: str = "",
+        scopes: str = "",
+        credential_ref: str = "",
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                return await self._upsert_pg_oauth_identity(
+                    connection,
+                    user_id,
+                    provider=provider,
+                    instance_url=instance_url,
+                    provider_user_id=provider_user_id,
+                    provider_login=provider_login,
+                    provider_email=provider_email,
+                    avatar_url=avatar_url,
+                    scopes=scopes,
+                    credential_ref=credential_ref,
+                    expires_at=expires_at,
+                )
+
+    async def revoke_oauth_identity(self, user_id: str, identity_id: str) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    UPDATE market_oauth_identities
+                       SET revoked_at = now(),
+                           updated_at = now()
+                     WHERE id = $1
+                       AND user_id = $2
+                       AND revoked_at IS NULL
+                 RETURNING *
+                    """,
+                    identity_id,
+                    user_id,
+                )
+                if not row:
+                    return None
+                if row["provider"] == "github":
+                    await connection.execute(
+                        """
+                        UPDATE market_users
+                           SET github_id = NULL,
+                               github_login = '',
+                               github_email = '',
+                               updated_at = now()
+                         WHERE id = $1
+                        """,
+                        user_id,
+                    )
+        if row["provider"] == "github":
+            latest_ref = await self.get_latest_github_authorization(user_id)
+            if latest_ref:
+                await self.delete_github_authorization(latest_ref)
+            await self._redis().delete(f"astrbot_market:github_oauth_user:{user_id}")
+        return serialize_value(dict(row))
 
     async def list_users(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch("SELECT * FROM market_users ORDER BY created_at ASC")
@@ -2090,13 +3309,27 @@ class PgRedisMarketStore(InMemoryMarketStore):
             """
             SELECT *
               FROM market_plugins
-             WHERE lower(owner_github_login) = lower($1)
+             WHERE lower(COALESCE(NULLIF(owner_username, ''), owner_github_login)) = lower($1)
                AND status = 'listed'
              ORDER BY updated_at DESC
             """,
             username,
         )
         return [self._plugin_from_record(row) for row in rows]
+
+    async def has_active_plugins(self, user_id: str) -> bool:
+        return bool(
+            await self._pool().fetchval(
+                """
+                SELECT 1
+                  FROM market_plugins
+                 WHERE owner_user_id = $1
+                   AND status IN ('listed', 'pending')
+                 LIMIT 1
+                """,
+                user_id,
+            )
+        )
 
     async def list_plugins(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch("SELECT * FROM market_plugins ORDER BY updated_at DESC")
@@ -2120,7 +3353,12 @@ class PgRedisMarketStore(InMemoryMarketStore):
 
     async def get_plugin_by_author(self, username: str, name: str) -> dict[str, Any] | None:
         row = await self._pool().fetchrow(
-            "SELECT * FROM market_plugins WHERE lower(owner_github_login) = lower($1) AND lower(name) = lower($2)",
+            """
+            SELECT *
+              FROM market_plugins
+             WHERE lower(COALESCE(NULLIF(owner_username, ''), owner_github_login)) = lower($1)
+               AND lower(name) = lower($2)
+            """,
             username,
             name,
         )
@@ -2169,6 +3407,12 @@ class PgRedisMarketStore(InMemoryMarketStore):
     @plugin_identity_write
     async def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         metadata = plugin_metadata_from_payload(payload)
+        owner_username = str(
+            user.get("public_username")
+            or user.get("github_login")
+            or user.get("internal_username")
+            or ""
+        )
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 plugin_id = await self._plugin_registration_id(connection, user, payload)
@@ -2176,11 +3420,11 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     """
                     INSERT INTO market_plugins (
                         id, name, display_name, desc_text, author, repo, tags, social_link,
-                        owner_user_id, owner_github_login, status, stars, likes, comments_count,
-                        metadata, repo_version
+                        owner_user_id, owner_github_login, owner_username, status, stars, likes,
+                        comments_count, metadata, repo_version
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
-                            'pending', 0, 0, 0, $11::jsonb, $12)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11,
+                            'pending', 0, 0, 0, $12::jsonb, $13)
                     ON CONFLICT (id) DO UPDATE
                        SET name = EXCLUDED.name,
                            display_name = EXCLUDED.display_name,
@@ -2215,7 +3459,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     payload.get("tags", []),
                     payload.get("social_link", ""),
                     user["id"],
-                    user["github_login"],
+                    user.get("github_login", ""),
+                    owner_username,
                     metadata,
                     payload.get("repo_version") or payload.get("version") or "",
                 )
@@ -2238,6 +3483,12 @@ class PgRedisMarketStore(InMemoryMarketStore):
         self, user: dict[str, Any], payload: dict[str, Any]
     ) -> dict[str, Any]:
         metadata = plugin_metadata_from_payload(payload)
+        owner_username = str(
+            user.get("public_username")
+            or user.get("github_login")
+            or user.get("internal_username")
+            or ""
+        )
         async with self._pool().acquire() as connection:
             async with connection.transaction():
                 plugin_id = await self._plugin_registration_id(connection, user, payload)
@@ -2245,11 +3496,11 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     """
                     INSERT INTO market_plugins (
                         id, name, display_name, desc_text, author, repo, tags, social_link,
-                        owner_user_id, owner_github_login, status, stars, likes, comments_count,
-                        metadata, category, category_source, repo_version
+                        owner_user_id, owner_github_login, owner_username, status, stars, likes,
+                        comments_count, metadata, category, category_source, repo_version
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10,
-                            'pending', 0, 0, 0, $11::jsonb, $12, 'user', $13)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11,
+                            'pending', 0, 0, 0, $12::jsonb, $13, 'user', $14)
                     ON CONFLICT (id) DO UPDATE SET id = market_plugins.id
                       WHERE market_plugins.owner_user_id = EXCLUDED.owner_user_id
                     RETURNING *
@@ -2264,6 +3515,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     payload.get("social_link", ""),
                     user["id"],
                     user.get("github_login", ""),
+                    owner_username,
                     metadata,
                     payload.get("category", "other"),
                     payload.get("version", ""),
@@ -2444,24 +3696,25 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    social_link = $8,
                    owner_user_id = $9,
                    owner_github_login = $10,
-                   status = $11,
-                   stars = $12,
-                   likes = $13,
-                   comments_count = $14,
-                   moderated_by = $15,
-                   repo_version = $16,
+                   owner_username = $11,
+                   status = $12,
+                   stars = $13,
+                   likes = $14,
+                   comments_count = $15,
+                   moderated_by = $16,
+                   repo_version = $17,
                    version_updated_at = CASE
-                       WHEN NULLIF($16, '') IS NOT NULL
-                            AND market_plugins.repo_version IS DISTINCT FROM $16
+                       WHEN NULLIF($17, '') IS NOT NULL
+                            AND market_plugins.repo_version IS DISTINCT FROM $17
                        THEN now()
                        ELSE market_plugins.version_updated_at
                    END,
-                   category = $17,
-                   category_source = $18,
-                   suggested_category = $19,
-                   category_confidence = $20,
-                   category_reason = $21,
-                   metadata = $22::jsonb,
+                   category = $18,
+                   category_source = $19,
+                   suggested_category = $20,
+                   category_confidence = $21,
+                   category_reason = $22,
+                   metadata = $23::jsonb,
                    updated_at = now()
              WHERE id = $1
          RETURNING *
@@ -2476,6 +3729,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
             updated.get("social_link", ""),
             updated["owner_user_id"],
             updated["owner_github_login"],
+            updated.get("owner_username") or updated.get("owner_github_login") or "",
             updated["status"],
             int(updated.get("stars") or 0),
             int(updated.get("likes") or 0),
@@ -2878,6 +4132,15 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 )
                 await connection.execute(
                     """
+                    UPDATE market_oauth_identities
+                       SET user_id = $2, updated_at = now()
+                     WHERE user_id = $1
+                    """,
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    """
                     INSERT INTO market_plugin_likes (plugin_id, user_id, created_at)
                     SELECT plugin_id, $2, min(created_at)
                       FROM market_plugin_likes
@@ -3164,10 +4427,47 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 )
         return await self.list_options()
 
+    _RESERVE_CHALLENGE_LUA = """
+    local key = KEYS[1]
+    local expected_purpose = ARGV[1]
+    local expected_digest = ARGV[2]
+    local max_attempts = tonumber(ARGV[3])
+    if redis.call('EXISTS', key) == 0 then
+        return {'not_found', ''}
+    end
+    local purpose = redis.call('HGET', key, 'purpose')
+    if purpose ~= expected_purpose then
+        return {'wrong_purpose', ''}
+    end
+    local state = redis.call('HGET', key, 'state')
+    if state ~= 'pending' then
+        return {'in_progress', ''}
+    end
+    local attempts = tonumber(redis.call('HGET', key, 'attempts') or '0')
+    if attempts >= max_attempts then
+        redis.call('DEL', key)
+        return {'too_many_attempts', ''}
+    end
+    local actual_digest = redis.call('HGET', key, 'code_digest')
+    if actual_digest ~= expected_digest then
+        attempts = redis.call('HINCRBY', key, 'attempts', 1)
+        if attempts >= max_attempts then
+            redis.call('DEL', key)
+            return {'too_many_attempts', ''}
+        end
+        return {'invalid_code', ''}
+    end
+    redis.call('HSET', key, 'state', 'in_progress')
+    local payload = redis.call('HGET', key, 'payload')
+    return {'ok', payload or '{}'}
+    """
+
     async def create_session(self, user_id: str, token: str | None = None) -> dict[str, Any]:
+        user = await self.get_user_by_id(user_id)
         session = {
             "token": token or f"sess_{secrets.token_urlsafe(24)}",
             "user_id": user_id,
+            "session_version": int((user or {}).get("session_version") or 1),
             "created_at": utc_now(),
             "last_seen_at": utc_now(),
         }
@@ -3183,17 +4483,124 @@ class PgRedisMarketStore(InMemoryMarketStore):
         if not payload:
             return None
         session = parse_json(payload)
+        user = await self.get_user_by_id(session["user_id"])
+        if not user:
+            return None
+        expected_version = int(user.get("session_version") or 1)
+        if int(session.get("session_version") or 1) != expected_version:
+            await self.revoke_session(token)
+            return None
         session["last_seen_at"] = utc_now()
         await self._redis().set(
             self._session_key(token),
             serialize_json(session),
             ex=self.session_ttl_seconds,
         )
-        return await self.get_user_by_id(session["user_id"])
+        return user
 
     async def revoke_session(self, token: str) -> bool:
         await self.delete_github_authorization(hashlib.sha256(token.encode()).hexdigest())
         return bool(await self._redis().delete(self._session_key(token)))
+
+    async def revoke_all_user_sessions(self, user_id: str) -> int:
+        await self._pool().execute(
+            """
+            UPDATE market_users
+               SET session_version = session_version + 1,
+                   updated_at = now()
+             WHERE id = $1
+            """,
+            user_id,
+        )
+        latest_ref = await self.get_latest_github_authorization(user_id)
+        if latest_ref:
+            await self.delete_github_authorization(latest_ref)
+        await self._redis().delete(f"astrbot_market:github_oauth_user:{user_id}")
+        return 1
+
+    async def save_email_challenge(
+        self, challenge_id: str, record: dict[str, Any], ttl_seconds: int
+    ) -> None:
+        key = f"astrbot_market:email_challenge:{challenge_id}"
+        mapping = {
+            "purpose": str(record["purpose"]),
+            "email": str(record.get("email") or ""),
+            "salt": str(record["salt"]),
+            "code_digest": str(record["code_digest"]),
+            "state": str(record.get("state") or "pending"),
+            "attempts": str(int(record.get("attempts") or 0)),
+            "payload": serialize_json(record.get("payload") or {}),
+        }
+        pipe = self._redis().pipeline()
+        pipe.hset(key, mapping=mapping)
+        pipe.expire(key, max(1, int(ttl_seconds)))
+        await pipe.execute()
+
+    async def get_email_challenge_salt(self, challenge_id: str) -> str | None:
+        key = f"astrbot_market:email_challenge:{challenge_id}"
+        value = await self._redis().hget(key, "salt")
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        return str(value) if value else None
+
+    async def reserve_email_challenge(
+        self,
+        challenge_id: str,
+        purpose: str,
+        expected_digest: str,
+        max_attempts: int,
+    ) -> tuple[str, dict[str, Any] | None]:
+        key = f"astrbot_market:email_challenge:{challenge_id}"
+        result = await self._redis().eval(
+            self._RESERVE_CHALLENGE_LUA,
+            1,
+            key,
+            purpose,
+            expected_digest,
+            str(int(max_attempts)),
+        )
+        status = result[0].decode("utf-8") if isinstance(result[0], bytes) else str(result[0])
+        raw_payload = (
+            result[1].decode("utf-8") if isinstance(result[1], bytes) else str(result[1] or "")
+        )
+        if status == "ok":
+            return ("ok", parse_json(raw_payload) if raw_payload else {})
+        return (status, None)
+
+    async def release_email_challenge(self, challenge_id: str) -> None:
+        key = f"astrbot_market:email_challenge:{challenge_id}"
+        if await self._redis().hget(key, "state") == "in_progress":
+            await self._redis().hset(key, "state", "pending")
+
+    async def delete_email_challenge(self, challenge_id: str) -> None:
+        await self._redis().delete(f"astrbot_market:email_challenge:{challenge_id}")
+
+    async def get_rate_limit_count(self, key: str) -> int:
+        value = await self._redis().get(f"astrbot_market:rl:{key}")
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def increment_rate_limit(self, key: str, ttl_seconds: int) -> int:
+        redis_key = f"astrbot_market:rl:{key}"
+        count = int(await self._redis().incr(redis_key))
+        if count == 1:
+            await self._redis().expire(redis_key, max(1, int(ttl_seconds)))
+        return count
+
+    async def check_and_set_cooldown(self, key: str, ttl_seconds: int) -> int:
+        redis_key = f"astrbot_market:cd:{key}"
+        acquired = await self._redis().set(redis_key, "1", ex=max(1, int(ttl_seconds)), nx=True)
+        if acquired:
+            return 0
+        ttl = int(await self._redis().ttl(redis_key) or 1)
+        return max(1, ttl)
+
+    async def clear_cooldown(self, key: str) -> None:
+        await self._redis().delete(f"astrbot_market:cd:{key}")
 
     async def set_github_authorization(
         self, reference: str, ciphertext: str, ttl_seconds: int
@@ -3224,6 +4631,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
         rows = await self._pool().fetch(
             """
             SELECT c.*,
+                   u.public_username,
                    u.github_login,
                    u.github_name,
                    u.avatar_url,

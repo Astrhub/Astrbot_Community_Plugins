@@ -1913,6 +1913,9 @@ def test_public_site_config_uses_settings() -> None:
         "auth": {
             "github_login_enabled": False,
             "public_login_enabled": True,
+            "email_registration_enabled": False,
+            "email_verification_required": True,
+            "email_service_enabled": False,
             "login_agreement_enabled": False,
             "login_agreement_text": "",
             "service_terms_enabled": False,

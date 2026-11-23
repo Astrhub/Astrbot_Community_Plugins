@@ -17,18 +17,20 @@ const payload = await response.json();
 const pluginRoutes = (payload.items || [])
   .filter((plugin) => !plugin.status || plugin.status === "listed")
   .filter((plugin) => plugin.id)
-  .map(
-    (plugin) =>
+  .map((plugin) => {
+    const ownerHandle = plugin.owner_username || plugin.owner_github_login;
+    return (
       plugin.canonical_path ||
-      (plugin.owner_github_login
-        ? `/plugin/${encodeURIComponent(plugin.owner_github_login)}/${encodeURIComponent(plugin.name || plugin.id)}`
-        : `/plugin/${encodeURIComponent(plugin.id)}`),
-  );
+      (ownerHandle
+        ? `/plugin/${encodeURIComponent(ownerHandle)}/${encodeURIComponent(plugin.name || plugin.id)}`
+        : `/plugin/${encodeURIComponent(plugin.id)}`)
+    );
+  });
 const authorRoutes = [
   ...new Set(
     (payload.items || [])
       .filter((plugin) => !plugin.status || plugin.status === "listed")
-      .map((plugin) => plugin.owner_github_login)
+      .map((plugin) => plugin.owner_username || plugin.owner_github_login)
       .filter(Boolean)
       .map((username) => `/author/${encodeURIComponent(username)}`),
   ),

@@ -275,6 +275,9 @@ docker compose build
 | `ARTIFACT_MAX_UPLOAD_BYTES` / `...UNPACKED...` / `...MAX_FILES` | `32 MiB` / `128 MiB` / `2000` | 插件包流式上传与解压预检硬限制 |
 | `ARTIFACT_SUBMISSION_RPM` | `6` | Artifact 提交按用户和 IP 的每分钟限流，`0` 表示关闭 |
 | `EMAIL_PROVIDER` | `disabled` | 邮件通道：`disabled`、`smtp` 或 `cloudflare` |
+| `EMAIL_REGISTRATION_ENABLED` | `false` | 是否开放普通用户邮箱注册 |
+| `EMAIL_VERIFICATION_REQUIRED` | `true` | 邮箱注册与换绑是否需要邮件验证码校验 |
+| `EMAIL_DAILY_LIMIT` / `EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER` | `0` / `5` | 全站每日邮件总额度（0 不限）与单邮箱每日验证码上限 |
 | `SESSION_MAX_AGE_SECONDS` | `604800` | 登录会话有效期（默认 7 天） |
 | `COOKIE_SECURE` / `COOKIE_SAME_SITE` | `false` / `Lax` | Cookie 安全属性 |
 | `ENABLE_DEV_AUTH` | `false` | 开发调试登录头开关（`apps/api/.env.example` 为便于本地开发设为 `true`，生产必须 `false`） |
@@ -315,16 +318,17 @@ EMAIL_PROVIDER=disabled
 | `VITE_API_BASE_URL` | 后端 API 基础地址（优先级最高）。前后端分端口本地开发时配置，同源部署通常留空 |
 | `VITE_COMMUNITY_REPO_URL` | 页脚展示的社区仓库链接（留空时自动读取当前 Git 仓库地址） |
 
-## 身份与角色
+## 身份与五级角色
 
-| 角色 | 能力范围 |
-| --- | --- |
-| **核心管理员（`core_admin`）** | 首次向导或环境引导创建的内部账号；管理系统设置、管理员队伍、内部用户、公告与任意插件 CDN |
-| **普通管理员（`admin`）** | 审核上架/下架插件、处理包审查、删除评论、禁言用户、刷新任意插件元数据 |
-| **插件所有者** | 经 GitHub 仓库权限验证后，编辑自有插件元数据、配置自有插件 CDN、申请上架、自主下架与手动刷新 |
-| **普通用户（`user`）** | 浏览、提交插件、评论、点赞，管理个人 API Key 与通知偏好 |
+| 身份层级 | 推导条件 | 能力范围 |
+| --- | --- | --- |
+| **核心管理员（`core_admin`）** | 首次向导或环境引导创建 | 管理系统设置、认证/验证开关、管理员队伍、本地用户、公告与任意插件 CDN |
+| **普通管理员（`admin`）** | 核心管理员任命或命中 `GITHUB_ADMIN_ORG` | 审核上架/下架插件、处理包审查、删除评论、禁言用户、刷新任意插件元数据 |
+| **开发者（`developer`）** | 绑定至少一个 OAuth 账号或名下存在上架/待审插件 | 包含注册用户全部能力；有有效 OAuth 绑定时可提交与上架插件、配置 CDN、上传制品及创建写入权限（`market:write`）个人 API Key |
+| **注册用户（`user`）** | 通过邮箱注册或本地创建且无有效 OAuth 绑定与存量插件 | 浏览、评论、点赞、站内信通知、管理个人资料与只读（`market:read`）个人 API Key |
+| **游客（`guest`）** | 未登录 | 浏览公开插件、详情、作者页、公告与 AstrBot 插件源 |
 
-GitHub 用户不会自动成为核心管理员；受信任组织成员（`GITHUB_ADMIN_ORG`）登录后可自动提权为 `admin`。已登录的内部管理员可在个人设置绑定 GitHub，绑定时会自动合并该 GitHub 账号名下的插件、评论与提交记录。权限实现位于 [apps/api/app/auth.py](apps/api/app/auth.py)，完整安全模型见 [docs/security.md](docs/security.md)。
+邮箱注册账号与 GitHub OAuth 身份解耦，OAuth 绑定记录保存在通用 `market_oauth_identities` 表中。OAuth 用户不会自动成为核心管理员；受信任组织成员（`GITHUB_ADMIN_ORG`）登录后可自动提权为 `admin`。权限实现位于 [apps/api/app/auth.py](apps/api/app/auth.py) 与 [apps/api/app/oauth_identities.py](apps/api/app/oauth_identities.py)，完整安全模型见 [docs/security.md](docs/security.md)。
 
 ## AstrBot 集成
 

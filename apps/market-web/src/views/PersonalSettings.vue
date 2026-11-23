@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, shallowRef } from "vue";
 import { useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import {
+  NAlert,
   NButton,
   NIcon,
   NLayoutHeader,
@@ -18,7 +19,7 @@ import NotificationPreferencesSection from "@/components/settings/NotificationPr
 import PersonalPluginManager from "@/components/settings/PersonalPluginManager.vue";
 import ProfileAccountSection from "@/components/settings/ProfileAccountSection.vue";
 import { usePluginStore } from "@/stores/plugins";
-import type { Plugin } from "@/types";
+import type { OAuthIdentity, Plugin } from "@/types";
 
 const router = useRouter();
 const message = useMessage();
@@ -31,15 +32,23 @@ const {
   loadCurrentUser,
   loadMyApiKeys,
   loadMyPlugins,
+  loginWithGithub,
+  requestEmailChange,
   requestPluginListing,
+  unbindMyOAuthIdentity,
   unlistOwnPlugin,
+  updateMyPassword,
   updatePluginMetadata,
   updatePluginCdn,
   updateProfile,
+  verifyEmailChange,
 } = store;
 
 const loading = shallowRef(true);
 const savingProfile = shallowRef(false);
+const savingPassword = shallowRef(false);
+const savingEmail = shallowRef(false);
+const oauthBusyId = shallowRef("");
 const savingNotifications = shallowRef(false);
 const loadingPlugins = shallowRef(false);
 const loadingAccessKeys = shallowRef(false);
@@ -71,6 +80,16 @@ const maxPluginTags = computed(() => Number(siteConfig.value.market?.max_plugin_
 const isAdminUser = computed(() =>
   ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
 );
+const isDeveloper = computed(() => {
+  if (typeof currentUser.value?.is_developer === "boolean") return currentUser.value.is_developer;
+  return Boolean(currentUser.value?.github_login || isAdminUser.value);
+});
+const fallbackNotificationEmail = computed(() => {
+  if (currentUser.value?.email_verified && currentUser.value?.email) {
+    return currentUser.value.email;
+  }
+  return currentUser.value?.github_email || "";
+});
 
 function applyCurrentUser() {
   formData.github_name = currentUser.value?.github_name || "";
@@ -278,6 +297,81 @@ async function requestListPlugin(plugin) {
   }
 }
 
+async function handleUpdatePassword(payload: {
+  current_password?: string;
+  new_password: string;
+  email?: string;
+}) {
+  savingPassword.value = true;
+  try {
+    await updateMyPassword(payload);
+    message.success("登录密码已更新");
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "更新密码失败");
+  } finally {
+    savingPassword.value = false;
+  }
+}
+
+async function handleRequestEmailChange(payload: {
+  current_password: string;
+  new_email: string;
+  onPending?: (changeId: string) => void;
+  onCompleted?: () => void;
+}) {
+  savingEmail.value = true;
+  try {
+    const result = await requestEmailChange({
+      current_password: payload.current_password,
+      new_email: payload.new_email,
+    });
+    if (result.completed || result.verification_required === false) {
+      message.success("登录邮箱已更新");
+      payload.onCompleted?.();
+    } else if (result.change_id) {
+      message.success("验证码已发送至新邮箱，请查收");
+      payload.onPending?.(result.change_id);
+    }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "修改邮箱失败");
+  } finally {
+    savingEmail.value = false;
+  }
+}
+
+async function handleVerifyEmailChange(payload: {
+  change_id: string;
+  code: string;
+  onCompleted?: () => void;
+}) {
+  savingEmail.value = true;
+  try {
+    await verifyEmailChange({ change_id: payload.change_id, code: payload.code });
+    message.success("登录邮箱已验证并更新");
+    payload.onCompleted?.();
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "验证新邮箱失败");
+  } finally {
+    savingEmail.value = false;
+  }
+}
+
+function handleConnectGithub() {
+  loginWithGithub("/settings/personal");
+}
+
+async function handleUnbindOAuth(identity: OAuthIdentity) {
+  oauthBusyId.value = identity.id;
+  try {
+    await unbindMyOAuthIdentity(identity.id);
+    message.success("OAuth 账号已解绑");
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "解绑失败");
+  } finally {
+    oauthBusyId.value = "";
+  }
+}
+
 function goBack() {
   router.back();
 }
@@ -323,8 +417,17 @@ onMounted(async () => {
                 v-model:github-token="formData.github_token"
                 v-model:refresh-interval="formData.github_refresh_interval_seconds"
                 :current-user="currentUser"
+                :auth-config="siteConfig.auth"
                 :saving="savingProfile"
+                :password-saving="savingPassword"
+                :email-saving="savingEmail"
+                :oauth-busy-id="oauthBusyId"
                 @save="saveProfile"
+                @connect-github="handleConnectGithub"
+                @unbind-oauth="handleUnbindOAuth"
+                @update-password="handleUpdatePassword"
+                @request-email-change="handleRequestEmailChange"
+                @verify-email-change="handleVerifyEmailChange"
               />
             </div>
           </NTabPane>
@@ -344,7 +447,7 @@ onMounted(async () => {
                 v-model:email-notify-replies="formData.email_notify_replies"
                 v-model:email-notify-likes="formData.email_notify_likes"
                 v-model:email-notify-unlist="formData.email_notify_unlist"
-                :fallback-email="currentUser?.github_email || ''"
+                :fallback-email="fallbackNotificationEmail"
                 :show-pending-review-email="isAdminUser"
                 :saving="savingNotifications"
                 @save="saveNotificationPreferences"
@@ -354,6 +457,19 @@ onMounted(async () => {
 
           <NTabPane name="plugins" tab="我的插件" display-directive="show">
             <div class="profile-tab-content">
+              <NAlert v-if="!isDeveloper && !myPlugins.length" type="info" :bordered="false">
+                当前账号为注册用户，绑定至少一个 OAuth 账号成为开发者后即可提交与上架插件。
+                <template v-if="siteConfig.auth.github_login_enabled">
+                  <NButton
+                    size="small"
+                    type="primary"
+                    style="margin-left: 10px"
+                    @click="handleConnectGithub"
+                  >
+                    绑定 GitHub 成为开发者
+                  </NButton>
+                </template>
+              </NAlert>
               <PersonalPluginManager
                 :plugins="myPlugins"
                 :loading="loadingPlugins"
@@ -376,6 +492,7 @@ onMounted(async () => {
                 :creating="creatingAccessKey"
                 :busy-ids="accessKeyBusyIds"
                 :new-key="newAccessKey"
+                :can-create-write-key="isDeveloper"
                 @refresh="refreshAccessKeys"
                 @create="createAccessKey"
                 @delete="deleteAccessKey"

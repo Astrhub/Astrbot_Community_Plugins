@@ -101,7 +101,8 @@ const isCoreAdmin = computed(() => String(currentUser.value?.role || "") === "co
 const currentNickname = computed(
   () =>
     String(
-      currentUser.value?.github_login ||
+      currentUser.value?.public_username ||
+        currentUser.value?.github_login ||
         currentUser.value?.username ||
         currentUser.value?.internal_username ||
         "",

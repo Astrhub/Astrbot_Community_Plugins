@@ -45,7 +45,10 @@
           <p v-else-if="isLocalMode">
             当前为本地自用模式，管理员登录后可直接填写公开 GitHub 仓库地址并自动读取元数据。
           </p>
-          <p v-else>提交插件需要使用 GitHub OAuth 登录，用于校验仓库归属。</p>
+          <p v-else>
+            普通邮箱注册用户可先浏览、点赞与评论；提交或上架插件前需绑定至少一个 OAuth
+            账号成为开发者，用于校验仓库归属。
+          </p>
           <ul>
             <li>仓库必须是公开 GitHub 仓库。</li>
             <li>插件名必须使用 `astrbot_plugin_` 前缀。</li>
@@ -67,7 +70,10 @@
               <h2>插件信息</h2>
               <n-tag v-if="currentUser" type="success" :bordered="false">
                 已登录：{{
-                  currentUser.github_login || currentUser.internal_username || currentUser.login
+                  currentUser.public_username ||
+                  currentUser.github_login ||
+                  currentUser.internal_username ||
+                  currentUser.login
                 }}
               </n-tag>
               <n-tag v-else-if="isLocalMode" type="warning" :bordered="false">
@@ -79,7 +85,7 @@
                 :bordered="false"
                 >GitHub 登录未开启</n-tag
               >
-              <n-tag v-else type="warning" :bordered="false">需要 GitHub 登录</n-tag>
+              <n-tag v-else type="warning" :bordered="false">需要开发者登录</n-tag>
             </div>
           </template>
 
@@ -125,7 +131,9 @@
                           :value="selectedRepositoryId"
                           :options="repositoryOptions"
                           :loading="repositoriesLoading"
-                          :disabled="!currentUser || needsGithubConnection || submitting"
+                          :disabled="
+                            !currentUser || needsOAuthBinding || needsGithubConnection || submitting
+                          "
                           filterable
                           placeholder="搜索或选择 astrbot_plugin_ 开头的仓库"
                           aria-label="选择 GitHub 插件仓库"
@@ -133,7 +141,27 @@
                           @update:show="refreshRepositoriesOnOpen"
                         />
                       </div>
-                      <n-alert v-if="needsGithubConnection" type="info" :bordered="false">
+                      <n-alert v-if="needsOAuthBinding" type="warning" :bordered="false">
+                        当前账号尚未绑定 OAuth 身份。绑定至少一个 OAuth
+                        账号成为开发者后即可提交与上架插件。
+                        <div class="connect-actions">
+                          <n-button
+                            v-if="siteConfig.auth.github_login_enabled"
+                            class="connect-github"
+                            type="primary"
+                            @click="connectGithub"
+                            >连接 GitHub</n-button
+                          >
+                          <n-button
+                            class="connect-github"
+                            tertiary
+                            tag="a"
+                            href="/settings/personal"
+                            >前往个人设置</n-button
+                          >
+                        </div>
+                      </n-alert>
+                      <n-alert v-else-if="needsGithubConnection" type="info" :bordered="false">
                         连接 GitHub 后即可选择个人或组织仓库，无需填写访问令牌。
                         <n-button class="connect-github" type="primary" @click="connectGithub"
                           >连接 GitHub</n-button
@@ -327,6 +355,7 @@
                   (isLocalAdminDirectSubmit && !formData.repo.trim()) ||
                   metadataLoading ||
                   repositoriesLoading ||
+                  (!isLocalAdminDirectSubmit && needsOAuthBinding) ||
                   (!isLocalAdminDirectSubmit && needsGithubConnection) ||
                   !siteConfig.market.submissions_enabled
                 "
@@ -447,6 +476,13 @@ const repositoriesRefreshing = shallowRef(false);
 const repositoryMenuOpen = shallowRef(false);
 const repositoriesError = shallowRef("");
 const needsGithubConnection = shallowRef(false);
+const oauthBindingBlocked = shallowRef(false);
+const needsOAuthBinding = computed(
+  () =>
+    Boolean(currentUser.value) &&
+    !isLocalAdminDirectSubmit.value &&
+    (currentUser.value?.has_oauth_binding === false || oauthBindingBlocked.value),
+);
 const nextRepositoryPage = shallowRef<number | null>(null);
 const selectedRepositoryId = shallowRef<string | null>(null);
 const repositoryOptions = computed(() =>
@@ -479,6 +515,7 @@ function refreshRepositoriesAutomatically(): void {
   if (
     document.visibilityState === "hidden" ||
     !currentUser.value ||
+    needsOAuthBinding.value ||
     needsGithubConnection.value ||
     repositoriesLoading.value ||
     repositoriesRefreshing.value ||
@@ -496,8 +533,13 @@ function refreshRepositoriesOnOpen(show: boolean): void {
   if (!show) refreshRepositoriesAutomatically();
 }
 watch(
-  [() => currentUser.value?.id, isLocalAdminDirectSubmit],
+  [
+    () => currentUser.value?.id,
+    () => currentUser.value?.has_oauth_binding,
+    isLocalAdminDirectSubmit,
+  ],
   () => {
+    oauthBindingBlocked.value = false;
     void loadRepositories(false);
   },
   { immediate: true },
@@ -505,7 +547,7 @@ watch(
 
 async function loadRepositories(append: boolean, silent = false): Promise<void> {
   const requestId = ++repositoryRequestId;
-  if (!currentUser.value || isLocalAdminDirectSubmit.value) {
+  if (!currentUser.value || isLocalAdminDirectSubmit.value || needsOAuthBinding.value) {
     repositories.value = [];
     repositoriesLoading.value = false;
     repositoriesRefreshing.value = false;
@@ -551,9 +593,10 @@ async function loadRepositories(append: boolean, silent = false): Promise<void> 
   } catch (error) {
     if (requestId !== repositoryRequestId) return;
     const code = (error as { code?: string }).code;
+    if (code === "oauth_binding_required") oauthBindingBlocked.value = true;
     needsGithubConnection.value =
       code === "github_authorization_required" || code === "github_authorization_denied";
-    if (!silent || needsGithubConnection.value)
+    if (!silent || needsGithubConnection.value || oauthBindingBlocked.value)
       repositoriesError.value = errorMessage(error, "仓库列表加载失败");
   } finally {
     if (requestId === repositoryRequestId) {
@@ -568,7 +611,9 @@ async function selectRepository(id: string): Promise<void> {
   if (!repo) return;
   metadataRequestId++;
   selectedRepositoryId.value = id;
-  const defaultAuthorPage = `https://plugins.eloina.cn/author/${encodeURIComponent(repo.owner)}`;
+  const ownerHandle =
+    currentUser.value?.public_username || currentUser.value?.github_login || repo.owner;
+  const defaultAuthorPage = `${window.location.origin}/author/${encodeURIComponent(ownerHandle)}`;
   Object.assign(formData, {
     repository_id: id,
     repo: repo.repo,
@@ -759,8 +804,9 @@ async function fetchMetadataFromRepo(strict = false) {
           : "元数据中没有可填充的新字段，缺失字段保持为空";
   } catch (error) {
     if (requestId !== metadataRequestId) return;
-    if ((error as { code?: string }).code === "github_authorization_required")
-      needsGithubConnection.value = true;
+    const code = (error as { code?: string }).code;
+    if (code === "oauth_binding_required") oauthBindingBlocked.value = true;
+    if (code === "github_authorization_required") needsGithubConnection.value = true;
     metadataStatus.type = "error";
     metadataStatus.text = metadataErrorMessage(error);
     message.error(metadataStatus.text);
@@ -792,8 +838,9 @@ const handleSubmit = () => {
       );
       router.push("/");
     } catch (error) {
-      if ((error as { code?: string }).code === "github_authorization_required")
-        needsGithubConnection.value = true;
+      const code = (error as { code?: string }).code;
+      if (code === "oauth_binding_required") oauthBindingBlocked.value = true;
+      if (code === "github_authorization_required") needsGithubConnection.value = true;
       message.error(errorMessage(error, "提交失败"));
     } finally {
       submitting.value = false;
@@ -820,6 +867,12 @@ const handleSubmit = () => {
   color: var(--text-secondary);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.connect-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .connect-github {

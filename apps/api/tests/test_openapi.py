@@ -13,6 +13,14 @@ def _client_with_store() -> tuple[TestClient, InMemoryMarketStore]:
     store = InMemoryMarketStore()
     store.create_internal_admin("coreadmin", hash_password("testpass123"))
     store.create_internal_user("regularuser", hash_password("userpass123"), "user")
+    dev_user = store.create_internal_user("devuser", hash_password("devpass123"), "user")
+    store.upsert_oauth_identity(
+        user_id=dev_user["id"],
+        provider="github",
+        instance_url="https://github.com",
+        provider_user_id="9001",
+        provider_login="devuser_gh",
+    )
     store.create_internal_user("adminuser", hash_password("adminpass123"), "admin")
     app = create_app(store=store)
     return TestClient(app, follow_redirects=False), store
@@ -53,10 +61,30 @@ def test_openapi_logged_in_includes_user():
     resp = client.get("/openapi.json")
     assert resp.status_code == 200
     paths = resp.json().get("paths", {})
-    # user routes appear
+    # registered user routes appear
+    assert "/v1/me" in paths
+    assert "/v1/me/oauth-identities" in paths
+    assert "/v1/me/password" in paths
+    # developer & admin routes stay hidden for ordinary registered user
+    assert "/v1/me/plugins" not in paths
+    assert "/v1/me/github/repositories" not in paths
+    assert "/v1/plugins/submissions" not in paths
+    assert "/v1/artifacts/{artifact_id}" not in paths
+    assert "/v1/admin/users" not in paths
+    assert "/v1/core/users" not in paths
+
+
+def test_openapi_developer_includes_developer_and_submission_routes():
+    client, _ = _client_with_store()
+    _login(client, "devuser", "devpass123")
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    paths = resp.json().get("paths", {})
     assert "/v1/me" in paths
     assert "/v1/me/plugins" in paths
-    # admin still hidden
+    assert "/v1/me/github/repositories" in paths
+    assert "/v1/plugins/submissions" in paths
+    assert "/v1/artifacts/{artifact_id}" in paths
     assert "/v1/admin/users" not in paths
     assert "/v1/core/users" not in paths
 
@@ -77,7 +105,7 @@ def test_openapi_admin_includes_admin_routes():
 
 def test_artifact_report_openapi_is_typed_and_role_filtered():
     client, _ = _client_with_store()
-    _login(client, "regularuser", "userpass123")
+    _login(client, "devuser", "devpass123")
     user_schema = client.get("/openapi.json").json()
     assert "/v1/artifacts/{artifact_id}" in user_schema["paths"]
     assert "/v1/artifacts/{artifact_id}/files" in user_schema["paths"]
@@ -267,7 +295,19 @@ def test_llms_txt_logged_in_includes_personal():
     _login(client, "regularuser", "userpass123")
     resp = client.get("/llms.txt")
     content = resp.text
+    assert "GET /v1/me" in content
+    assert "GET /v1/me/oauth-identities" in content
+    assert "GET /v1/me/plugins" not in content
+    assert "/v1/admin/" not in content
+
+
+def test_llms_txt_developer_includes_developer_section():
+    client, _ = _client_with_store()
+    _login(client, "devuser", "devpass123")
+    resp = client.get("/llms.txt")
+    content = resp.text
     assert "GET /v1/me/plugins" in content
+    assert "POST /v1/plugins/submissions" in content
     assert "/v1/admin/" not in content
 
 

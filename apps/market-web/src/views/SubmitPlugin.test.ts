@@ -395,4 +395,25 @@ describe("SubmitPlugin repository selection", () => {
     );
     wrapper.unmount();
   });
+
+  it("prompts registered email users without OAuth binding to connect OAuth before submitting", async () => {
+    const context = setup();
+    context.store.siteConfig.auth.github_login_enabled = true;
+    context.store.currentUser = {
+      id: "email-user-1",
+      public_username: "email_only",
+      role: "user",
+      account_tier: "user",
+      has_oauth_binding: false,
+    } as never;
+
+    const wrapper = context.mount();
+    await flushPromises();
+
+    expect(context.store.loadGithubRepositories).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("当前账号尚未绑定 OAuth 身份");
+    const submitButton = wrapper.findAll("button").find((button) => button.text() === "提交审核")!;
+    expect(submitButton.attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
 });

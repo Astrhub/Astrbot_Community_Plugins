@@ -154,12 +154,13 @@ class RoleUpdatePayload(BaseModel):
 class InternalUserCreate(BaseModel):
     username: str
     password: str
+    email: str = ""
     role: str = "user"
 
-    @field_validator("username", "password", "role")
+    @field_validator("username", "password", "email", "role", mode="before")
     @classmethod
-    def strip_internal_user_fields(cls, value: str) -> str:
-        return value.strip()
+    def strip_internal_user_fields(cls, value: str | None) -> str:
+        return str(value or "").strip()
 
 
 class InternalLoginPayload(BaseModel):
@@ -170,6 +171,89 @@ class InternalLoginPayload(BaseModel):
     @classmethod
     def strip_required_text(cls, value: str) -> str:
         return value.strip()
+
+
+class EmailRegisterPayload(BaseModel):
+    username: str
+    email: str
+    password: str
+
+    @field_validator("username", "email", "password", mode="before")
+    @classmethod
+    def strip_fields(cls, value: str | None) -> str:
+        return str(value or "").strip()
+
+
+class EmailRegisterRequestPayload(BaseModel):
+    username: str
+    email: str
+    password: str
+
+    @field_validator("username", "email", "password", mode="before")
+    @classmethod
+    def strip_fields(cls, value: str | None) -> str:
+        return str(value or "").strip()
+
+
+class EmailRegisterVerifyPayload(BaseModel):
+    registration_id: str
+    code: str
+
+    @field_validator("registration_id", "code", mode="before")
+    @classmethod
+    def strip_fields(cls, value: str | None) -> str:
+        return str(value or "").strip()
+
+
+class PasswordResetRequestPayload(BaseModel):
+    email: str
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def strip_email(cls, value: str | None) -> str:
+        return str(value or "").strip()
+
+
+class PasswordResetVerifyPayload(BaseModel):
+    reset_id: str
+    code: str
+    new_password: str
+
+    @field_validator("reset_id", "code", "new_password", mode="before")
+    @classmethod
+    def strip_fields(cls, value: str | None) -> str:
+        return str(value or "").strip()
+
+
+class PasswordChangePayload(BaseModel):
+    current_password: str = ""
+    new_password: str
+    email: str = ""
+
+    @field_validator("current_password", "new_password", "email", mode="before")
+    @classmethod
+    def strip_fields(cls, value: str | None) -> str:
+        return str(value or "").strip()
+
+
+class EmailChangeRequestPayload(BaseModel):
+    current_password: str
+    new_email: str
+
+    @field_validator("current_password", "new_email", mode="before")
+    @classmethod
+    def strip_fields(cls, value: str | None) -> str:
+        return str(value or "").strip()
+
+
+class EmailChangeVerifyPayload(BaseModel):
+    change_id: str
+    code: str
+
+    @field_validator("change_id", "code", mode="before")
+    @classmethod
+    def strip_fields(cls, value: str | None) -> str:
+        return str(value or "").strip()
 
 
 class AnnouncementCreate(BaseModel):
@@ -266,6 +350,8 @@ class AdminSetupConfig(BaseModel):
 class AuthSetupConfig(BaseModel):
     github_login_enabled: bool = False
     public_login_enabled: bool = True
+    email_registration_enabled: bool = False
+    email_verification_required: bool = True
     login_agreement_enabled: bool = False
     login_agreement_text: str = ""
     service_terms_enabled: bool = False

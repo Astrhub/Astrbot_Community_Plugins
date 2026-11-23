@@ -65,7 +65,7 @@ const emit = defineEmits(["save"]);
         <div class="preference-copy">
           <strong>通知邮箱</strong>
           <span>
-            留空使用 OAuth 邮箱
+            留空使用已验证邮箱或 OAuth 邮箱
             <template v-if="fallbackEmail">：{{ fallbackEmail }}</template>
           </span>
         </div>

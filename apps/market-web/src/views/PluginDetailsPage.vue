@@ -73,16 +73,16 @@ const jsonLd = computed(() => {
 });
 
 useSeo({
-  title: computed(() =>
-    plugin.value?.owner_github_login
-      ? `${displayName.value} · ${plugin.value.owner_github_login}`
-      : displayName.value,
-  ),
-  description: computed(() =>
-    plugin.value?.owner_github_login
-      ? `${plugin.value.owner_github_login} 发布的 ${displayName.value}。${description.value}`
-      : description.value,
-  ),
+  title: computed(() => {
+    const ownerHandle = plugin.value?.owner_username || plugin.value?.owner_github_login;
+    return ownerHandle ? `${displayName.value} · ${ownerHandle}` : displayName.value;
+  }),
+  description: computed(() => {
+    const ownerHandle = plugin.value?.owner_username || plugin.value?.owner_github_login;
+    return ownerHandle
+      ? `${ownerHandle} 发布的 ${displayName.value}。${description.value}`
+      : description.value;
+  }),
   path: canonicalPath,
   image: DEFAULT_OG_IMAGE,
   type: "article",
@@ -193,7 +193,9 @@ function updatePlugin(updated: PluginDetail): void {
               <div class="plugin-intro__copy">
                 <p class="plugin-kicker">AstrBot 社区插件</p>
                 <h1 id="plugin-title">{{ displayName }}</h1>
-                <p class="plugin-id">{{ plugin.owner_github_login }} / {{ plugin.name }}</p>
+                <p class="plugin-id">
+                  {{ plugin.owner_username || plugin.owner_github_login }} / {{ plugin.name }}
+                </p>
               </div>
             </div>
             <p class="plugin-description">{{ description }}</p>
@@ -220,11 +222,11 @@ function updatePlugin(updated: PluginDetail): void {
                 <dt>作者</dt>
                 <dd>
                   <router-link
-                    v-if="plugin.owner_github_login"
+                    v-if="plugin.owner_username || plugin.owner_github_login"
                     class="author-profile-link"
-                    :to="`/author/${encodeURIComponent(plugin.owner_github_login)}`"
+                    :to="`/author/${encodeURIComponent(plugin.owner_username || plugin.owner_github_login || '')}`"
                   >
-                    {{ plugin.author || plugin.owner_github_login }}
+                    {{ plugin.author || plugin.owner_username || plugin.owner_github_login }}
                   </router-link>
                   <template v-else>{{ plugin.author || "社区开发者" }}</template>
                 </dd>

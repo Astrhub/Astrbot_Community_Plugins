@@ -40,8 +40,10 @@ from .artifacts.github_source import (
 )
 from .auth import (
     Role,
+    authenticate_api_key,
     can_configure_plugin_cdn,
     can_edit_plugin,
+    can_issue_write_api_key,
     can_manage_admins,
     can_manage_plugin_submission,
     can_moderate_community,
@@ -62,6 +64,12 @@ from .config import (
     normalize_smtp_auth_method,
     normalize_smtp_encryption,
 )
+from .email_account_routes import build_email_account_router
+from .email_challenges import (
+    EmailChallengeError,
+    enforce_site_email_daily_limit,
+    record_site_email_sent,
+)
 from .env_file import write_env_file
 from .github_authorization import (
     access_for_request,
@@ -70,6 +78,15 @@ from .github_authorization import (
     verify_publication_access,
 )
 from .llms_txt import build_llms_txt
+from .oauth_identities import (
+    GITHUB_INSTANCE_URL,
+    GITHUB_PROVIDER,
+    author_oauth_profiles,
+    has_bound_oauth_identity,
+    list_active_oauth_identities,
+    resolve_account_tier,
+    user_tier_context,
+)
 from .openapi_filter import filter_openapi_by_role, role_for_openapi
 from .plugin_identity import PluginIdentityConflict, plugin_canonical_path
 from .schemas import (
@@ -97,6 +114,7 @@ from .store import GithubIdentityConflict
 from .store import InMemoryMarketStore
 from .store import LocalFileMarketStore
 from .store import PgRedisMarketStore
+from .store import UserIdentityConflict
 
 GITHUB_REPO_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+?)(?:\.git)?/?$"
@@ -175,7 +193,9 @@ SYSTEM_OPTION_KEYS = {
     "CLOUDFLARE_EMAIL_FROM_NAME",
     "EMAIL_DAILY_LIMIT",
     "EMAIL_PROVIDER",
+    "EMAIL_REGISTRATION_ENABLED",
     "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER",
+    "EMAIL_VERIFICATION_REQUIRED",
     "GITHUB_ADMIN_ORG",
     "GITHUB_API_TOKEN",
     "GITHUB_API_TOKEN_STATUS",
@@ -213,7 +233,7 @@ SYSTEM_OPTION_KEYS = {
     "SMTP_VALIDATE_CERTS",
     "WEB_URL",
 }
-PRIVATE_USER_FIELDS = {"github_email", "notification_email"}
+PRIVATE_USER_FIELDS = {"email", "github_email", "notification_email"}
 LOGGER = logging.getLogger(__name__)
 SUBMISSION_METADATA_PREVIEW_RPM = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
@@ -253,6 +273,7 @@ def create_app(
         openapi_tags=[
             {"name": "plugins", "description": "插件浏览与详情"},
             {"name": "submissions", "description": "插件提交与管理"},
+            {"name": "developer", "description": "开发者插件与代码平台"},
             {"name": "artifacts", "description": "插件包与自动审查结果"},
             {"name": "reviews", "description": "插件包人工复核与发布"},
             {"name": "comments", "description": "评论与点赞"},
@@ -302,10 +323,26 @@ def create_app(
     app.add_exception_handler(HTTPException, http_exception_handler)
     app.add_exception_handler(PluginIdentityConflict, plugin_identity_conflict_handler)
     app.add_exception_handler(GithubIdentityConflict, github_identity_conflict_handler)
+    app.add_exception_handler(UserIdentityConflict, user_identity_conflict_handler)
     register_routes(app)
     app.include_router(build_artifact_router())
+    app.include_router(
+        build_email_account_router(
+            runtime_settings_for_app=runtime_settings_for_app,
+            call_store=call_store,
+            require_user=require_user,
+            enrich_private_user=enrich_private_user,
+            set_cookie=set_cookie,
+            is_valid_email=is_valid_email,
+            send_email=send_email,
+        )
+    )
     register_market_web_routes(app)
     return app
+
+
+async def user_identity_conflict_handler(_: Request, exc: UserIdentityConflict) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"error": str(exc), "code": exc.code})
 
 
 async def github_identity_conflict_handler(_: Request, exc: GithubIdentityConflict) -> JSONResponse:
@@ -744,7 +781,7 @@ def register_routes(app: FastAPI) -> None:
                         "Failed to verify organization admin membership for user %s", user_id
                     )
                 user = await call_store(request, "get_user_by_id", user_id) or user
-        return private_user(user)
+        return await enrich_private_user(request, user)
 
     @app.patch(
         "/v1/me/profile",
@@ -777,7 +814,7 @@ def register_routes(app: FastAPI) -> None:
         updated = await call_store(request, "update_user_profile", user["id"], profile)
         if not updated:
             raise error(404, "User not found")
-        return private_user(updated)
+        return await enrich_private_user(request, updated)
 
     @app.get(
         "/v1/me/notifications",
@@ -884,7 +921,7 @@ def register_routes(app: FastAPI) -> None:
 
     @app.get(
         "/v1/me/plugins",
-        tags=["user"],
+        tags=["developer"],
         summary="获取我提交的插件",
         description="返回当前用户提交的所有插件（包括未上架的）。",
         responses={401: {"description": "未登录"}},
@@ -917,14 +954,28 @@ def register_routes(app: FastAPI) -> None:
         status_code=201,
         tags=["user"],
         summary="创建 API Key",
-        description="为当前用户创建一个新的 API Key，支持指定名称和权限范围。",
-        responses={401: {"description": "未登录"}, 201: {"description": "创建成功"}},
+        description="为当前用户创建一个新的 API Key。注册用户仅可创建只读权限，开发者及以上可创建写入权限。",
+        responses={
+            401: {"description": "未登录"},
+            403: {"description": "权限不足"},
+            201: {"description": "创建成功"},
+        },
     )
     async def issue_my_api_key(request: Request, payload: ApiKeyCreate) -> dict[str, Any]:
         user = await require_user(request)
-        api_key = await call_store(
-            request, "issue_api_key", payload.name, user["id"], payload.scopes
-        )
+        tier = await resolve_account_tier(get_store(request), user)
+        scopes = list(payload.scopes)
+        if "scopes" not in payload.model_fields_set and not can_issue_write_api_key(tier):
+            scopes = ["market:read"]
+        if "market:write" in scopes and not can_issue_write_api_key(tier):
+            raise HTTPException(
+                403,
+                {
+                    "code": "developer_required",
+                    "error": "仅开发者及以上身份可创建包含写入权限的 API Key，请先绑定 OAuth 账号",
+                },
+            )
+        api_key = await call_store(request, "issue_api_key", payload.name, user["id"], scopes)
         return public_api_key(api_key, include_key=True)
 
     @app.delete(
@@ -941,8 +992,8 @@ def register_routes(app: FastAPI) -> None:
     @app.post(
         "/v1/auth/internal/login",
         tags=["auth"],
-        summary="用户名密码登录",
-        description="使用用户名和密码进行内部登录。如果站点关闭了公开登录，仅核心管理员可登录。",
+        summary="用户名或邮箱密码登录",
+        description="使用用户名或邮箱与密码登录。如果站点关闭了公开登录，仅核心管理员可登录。",
         responses={
             200: {"description": "登录成功"},
             401: {"description": "用户名或密码错误"},
@@ -951,13 +1002,15 @@ def register_routes(app: FastAPI) -> None:
     )
     async def internal_login(request: Request, payload: InternalLoginPayload) -> Response:
         settings = await runtime_settings_for_app(request.app)
-        user = await call_store(request, "get_user_by_internal_username", payload.username)
+        user = await call_store(request, "get_user_by_login_identifier", payload.username)
         if not user or not verify_password(payload.password, user.get("password_hash", "")):
             raise error(401, "Invalid username or password")
         if not settings.public_login_enabled and not is_core_admin(user):
             raise error(403, "Login is closed")
         session = await call_store(request, "create_session", user["id"])
-        response = JSONResponse({"user": private_user(user), "session": session})
+        response = JSONResponse(
+            {"user": await enrich_private_user(request, user), "session": session}
+        )
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         return response
 
@@ -1049,7 +1102,9 @@ def register_routes(app: FastAPI) -> None:
         response.delete_cookie("github_oauth_return_to", path="/")
         return response
 
-    @app.get("/v1/me/github/repositories", tags=["user"], summary="选择可管理的 GitHub 插件仓库")
+    @app.get(
+        "/v1/me/github/repositories", tags=["developer"], summary="选择可管理的 GitHub 插件仓库"
+    )
     async def github_plugin_repositories(
         request: Request, page: int = Query(1, ge=1, le=10000)
     ) -> dict[str, Any]:
@@ -1105,7 +1160,9 @@ def register_routes(app: FastAPI) -> None:
             request, "upsert_github_user", {"login": login.strip(), "name": login.strip()}
         )
         session = await call_store(request, "create_session", user["id"])
-        response = JSONResponse({"user": private_user(user), "session": session})
+        response = JSONResponse(
+            {"user": await enrich_private_user(request, user), "session": session}
+        )
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         return response
 
@@ -1117,7 +1174,10 @@ def register_routes(app: FastAPI) -> None:
         responses={200: {"description": "已登录"}, 401: {"description": "未登录"}},
     )
     async def auth_session(request: Request) -> dict[str, Any]:
-        return {"authenticated": True, "user": private_user(await require_user(request))}
+        return {
+            "authenticated": True,
+            "user": await enrich_private_user(request, await require_user(request)),
+        }
 
     @app.get(
         "/v1/admin/check",
@@ -1140,12 +1200,20 @@ def register_routes(app: FastAPI) -> None:
         "/v1/permissions",
         tags=["user"],
         summary="获取当前权限",
-        description="返回当前用户可执行的操作列表。",
+        description="返回当前用户的五级身份分层与可执行的操作列表。",
         responses={401: {"description": "未登录"}},
     )
-    async def permissions(request: Request) -> dict[str, bool]:
+    async def permissions(request: Request) -> dict[str, Any]:
         user = await require_user(request)
+        settings = await runtime_settings_for_app(request.app)
+        tier_ctx = await user_tier_context(get_store(request), user)
         return {
+            "account_tier": tier_ctx["account_tier"],
+            "is_developer": tier_ctx["is_developer"],
+            "has_oauth_binding": tier_ctx["has_oauth_binding"],
+            "can_submit_plugin": tier_ctx["has_oauth_binding"]
+            or allow_local_admin_repo_override(settings, user),
+            "can_create_write_api_key": can_issue_write_api_key(tier_ctx["account_tier"]),
             "can_edit_any_plugin": is_admin(user),
             "can_moderate_plugins": can_moderate_plugins(user),
             "can_moderate_community": can_moderate_community(user),
@@ -1168,14 +1236,49 @@ def register_routes(app: FastAPI) -> None:
         "/v1/authors/{username}/plugins",
         tags=["plugins"],
         summary="获取作者已上架插件",
-        description="返回指定 GitHub 作者已上架的插件列表。无需登录。",
-        responses={200: {"description": "插件列表"}},
+        description="返回指定作者的公开主页信息及已上架插件列表。无需登录。",
+        responses={200: {"description": "插件列表"}, 404: {"description": "作者不存在"}},
     )
     async def list_author_plugins(request: Request, username: str) -> dict[str, Any]:
+        author = await call_store(request, "get_user_by_public_username", username)
+        if not author:
+            author = await call_store(request, "get_user_by_github_login", username)
         plugins = await call_store(request, "list_author_plugins", username)
+        if not author and not plugins:
+            raise error(404, "Author not found")
+        identities = (
+            await list_active_oauth_identities(get_store(request), str(author["id"]))
+            if author and author.get("id")
+            else []
+        )
+        oauth_profiles = author_oauth_profiles(identities)
+        github_profile = next(
+            (item for item in oauth_profiles if item.get("provider") == GITHUB_PROVIDER),
+            None,
+        )
+        github_url = github_profile["url"] if github_profile else ""
+        if not github_url and not author:
+            fallback_login = next(
+                (
+                    str(item.get("owner_github_login") or "").strip()
+                    for item in plugins
+                    if item.get("owner_github_login")
+                ),
+                "",
+            )
+            if fallback_login:
+                github_url = f"https://github.com/{quote(fallback_login, safe='')}"
+        canonical_username = (
+            str(author.get("public_username") or author.get("github_login") or username).strip()
+            if author
+            else username
+        )
         return {
-            "username": username,
-            "github_url": f"https://github.com/{username}",
+            "username": canonical_username,
+            "display_name": user_display_name(author) if author else username,
+            "avatar_url": str(author.get("avatar_url") or "") if author else "",
+            "github_url": github_url,
+            "oauth_profiles": oauth_profiles,
             "items": [public_market_plugin(plugin) for plugin in plugins],
         }
 
@@ -1253,11 +1356,13 @@ def register_routes(app: FastAPI) -> None:
         settings = await runtime_settings_for_app(request.app)
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
+        local_override = allow_local_admin_repo_override(settings, user)
+        await require_submission_oauth_gate(request, user, allow_override=local_override)
         proof = await require_repository_access(
             request,
             user,
             payload.repo,
-            admin_override=allow_local_admin_repo_override(settings, user),
+            admin_override=local_override,
             expected_repository_id=payload.repository_id,
         )
         try:
@@ -1280,7 +1385,7 @@ def register_routes(app: FastAPI) -> None:
         responses={
             201: {"description": "提交成功"},
             401: {"description": "未登录"},
-            403: {"description": "插件提交已关闭"},
+            403: {"description": "插件提交已关闭或未绑定 OAuth"},
             400: {"description": "参数校验失败"},
         },
     )
@@ -1300,6 +1405,7 @@ def register_routes(app: FastAPI) -> None:
             user,
             cdn_enabled_flag=data["cdn_enabled"],
         )
+        await require_submission_oauth_gate(request, user, allow_override=local_admin_override)
         proof = await require_repository_access(
             request,
             user,
@@ -1381,6 +1487,7 @@ def register_routes(app: FastAPI) -> None:
             return plugin
         proof = None
         if payload.enabled:
+            await require_submission_oauth_gate(request, user, allow_override=is_core_admin(user))
             runtime = request.app.state.artifact_runtime
             if not runtime.available or runtime.service is None:
                 raise HTTPException(
@@ -1475,6 +1582,8 @@ def register_routes(app: FastAPI) -> None:
         if not can_edit_plugin(user, plugin):
             raise error(403, "Forbidden")
         patch = payload.model_dump(exclude_unset=True)
+        if "repo" in patch:
+            await require_submission_oauth_gate(request, user, allow_override=is_admin(user))
         await require_repository_access(request, user, plugin["repo"], admin_override=True)
         if "name" in patch:
             validate_plugin_name(patch["name"])
@@ -1510,6 +1619,9 @@ def register_routes(app: FastAPI) -> None:
                 **patch,
                 "owner_user_id": plugin["owner_user_id"],
                 "owner_github_login": plugin["owner_github_login"],
+                "owner_username": plugin.get("owner_username")
+                or plugin.get("owner_github_login")
+                or "",
             },
         )
         return updated or {}
@@ -1531,6 +1643,7 @@ def register_routes(app: FastAPI) -> None:
         plugin = await get_plugin_or_404(request, plugin_id)
         if not can_edit_plugin(user, plugin):
             raise error(403, "Forbidden")
+        await require_submission_oauth_gate(request, user, allow_override=is_admin(user))
         await require_repository_access(request, user, plugin["repo"], admin_override=True)
         if plugin.get("status") == "listed":
             return plugin
@@ -1543,7 +1656,7 @@ def register_routes(app: FastAPI) -> None:
         "/v1/plugins/{plugin_id}/unlist",
         tags=["submissions"],
         summary="作者下架插件",
-        description="插件作者下架自己的插件。可附下架原因。",
+        description="插件作者下架自己的插件。可附下架原因，无需有效 OAuth 会话。",
         responses={
             200: {"description": "下架成功"},
             401: {"description": "未登录"},
@@ -1560,7 +1673,6 @@ def register_routes(app: FastAPI) -> None:
         plugin = await get_plugin_or_404(request, plugin_id)
         if not can_edit_plugin(user, plugin):
             raise error(403, "Forbidden")
-        await require_repository_access(request, user, plugin["repo"], admin_override=True)
         reason = (payload.reason if payload else "").strip() or "作者主动下架"
         updated = await call_store(request, "unlist_plugin", plugin_id, user["id"], reason)
         if not updated:
@@ -1772,13 +1884,13 @@ def register_routes(app: FastAPI) -> None:
         "/v1/admin/users",
         tags=["admin"],
         summary="获取所有用户",
-        description="返回所有用户的公开信息。仅管理员可用。",
+        description="返回所有用户的管理视图信息（含五级分层与邮箱验证状态）。仅管理员可用。",
         responses={401: {"description": "未登录"}, 403: {"description": "需要管理员权限"}},
     )
     async def admin_users(request: Request) -> dict[str, list[dict[str, Any]]]:
         await require_admin(request)
         users = await call_store(request, "list_users")
-        return {"items": [public_user(user) for user in users]}
+        return {"items": [await enrich_admin_user(request, user) for user in users]}
 
     @app.get(
         "/v1/admin/plugins",
@@ -1948,7 +2060,7 @@ def register_routes(app: FastAPI) -> None:
         )
         if not muted:
             raise error(404, "User not found")
-        return public_user(muted)
+        return await enrich_admin_user(request, muted)
 
     @app.post(
         "/v1/admin/users/{user_id}/unmute",
@@ -1969,20 +2081,20 @@ def register_routes(app: FastAPI) -> None:
         unmuted = await call_store(request, "unmute_user", user_id)
         if not unmuted:
             raise error(404, "User not found")
-        return public_user(unmuted)
+        return await enrich_admin_user(request, unmuted)
 
     @app.post(
         "/v1/core/users",
         status_code=201,
         tags=["core-admin"],
-        summary="创建内部用户",
-        description="创建一个新的内部用户账号（非 GitHub 登录）。仅核心管理员可用。",
+        summary="创建本地用户",
+        description="创建一个新的本地账号（可选绑定邮箱）。仅核心管理员可用。",
         responses={
             201: {"description": "创建成功"},
             401: {"description": "未登录"},
             403: {"description": "需要核心管理员权限"},
             400: {"description": "参数校验失败"},
-            409: {"description": "用户名已存在"},
+            409: {"description": "用户名或邮箱已存在"},
         },
     )
     async def create_internal_user(
@@ -1994,23 +2106,33 @@ def register_routes(app: FastAPI) -> None:
             raise error(403, "Forbidden")
         username = payload.username.strip()
         password = payload.password
+        email = payload.email.strip()
         role = normalize_role(payload.role)
         if role == Role.CORE_ADMIN:
             raise error(400, "Cannot create core admin from user management")
         if len(username) < 3:
             raise error(400, "Username must be at least 3 characters")
+        if "@" in username or "/" in username:
+            raise error(400, "Username cannot contain '@' or '/'")
         if len(password) < 8:
             raise error(400, "Password must be at least 8 characters")
-        if await call_store(request, "get_user_by_internal_username", username):
+        if email and not is_valid_email(email):
+            raise error(400, "Invalid email address")
+        if await call_store(request, "get_user_by_internal_username", username) or await call_store(
+            request, "get_user_by_public_username", username
+        ):
             raise error(409, "Username already exists")
+        if email and await call_store(request, "get_user_by_email", email):
+            raise error(409, "Email already exists")
         created = await call_store(
             request,
             "create_internal_user",
             username,
             hash_password(password),
             role.value,
+            email,
         )
-        return public_user(created)
+        return await enrich_admin_user(request, created)
 
     @app.delete(
         "/v1/core/users/{user_id}",
@@ -2066,7 +2188,7 @@ def register_routes(app: FastAPI) -> None:
         updated = await call_store(
             request, "update_user_role", user_id, "admin" if payload.role == "admin" else "user"
         )
-        return public_user(updated) if updated else {}
+        return await enrich_admin_user(request, updated) if updated else {}
 
     @app.post(
         "/v1/core/announcements",
@@ -2131,8 +2253,11 @@ def register_routes(app: FastAPI) -> None:
     )
     async def api_keys(request: Request) -> dict[str, list[dict[str, Any]]]:
         keys = await all_api_keys(request)
-        ok, status, message = require_api_key(
-            request.headers.get("authorization"), keys, "market:read"
+        ok, status, message = await verify_api_key_access(
+            get_store(request),
+            request.headers.get("authorization"),
+            keys,
+            "market:read",
         )
         if not ok:
             raise error(status, message)
@@ -2141,7 +2266,8 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/openapi.json", include_in_schema=False)
     async def custom_openapi(request: Request) -> JSONResponse:
         user = await current_user(request)
-        role = role_for_openapi(user)
+        tier = await resolve_account_tier(get_store(request), user)
+        role = role_for_openapi(user, tier.value)
         if not hasattr(request.app.state, "_openapi_schema_cache"):
             base = get_openapi(
                 title=request.app.title,
@@ -2157,7 +2283,8 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/llms.txt", include_in_schema=False)
     async def llms_txt(request: Request) -> PlainTextResponse:
         user = await current_user(request)
-        role = role_for_openapi(user)
+        tier = await resolve_account_tier(get_store(request), user)
+        role = role_for_openapi(user, tier.value)
         return PlainTextResponse(build_llms_txt(role), media_type="text/plain; charset=utf-8")
 
 
@@ -2187,6 +2314,21 @@ def register_market_web_routes(app: FastAPI) -> None:
                     status_code=301,
                     headers={"Cache-Control": "public, max-age=0, must-revalidate"},
                 )
+        if full_path.startswith("author/"):
+            segments = full_path.strip("/").split("/")
+            if len(segments) != 2 or not segments[1]:
+                return FileResponse(MARKET_WEB_DIST / "index.html", status_code=404)
+            username = unquote(segments[1])
+            author = await call_store(request, "get_user_by_public_username", username)
+            if not author:
+                author = await call_store(request, "get_user_by_github_login", username)
+            plugins = await call_store(request, "list_author_plugins", username)
+            if not author and not plugins:
+                return FileResponse(MARKET_WEB_DIST / "index.html", status_code=404)
+            requested_file = resolve_market_web_file(full_path)
+            if requested_file:
+                return FileResponse(requested_file)
+            return FileResponse(MARKET_WEB_DIST / "index.html", status_code=200)
         return serve_market_web_file(full_path)
 
 
@@ -2309,6 +2451,14 @@ def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, s
             runtime_config.get("PUBLIC_LOGIN_ENABLED"),
             settings.public_login_enabled,
         ),
+        email_registration_enabled=parse_bool(
+            runtime_config.get("EMAIL_REGISTRATION_ENABLED"),
+            settings.email_registration_enabled,
+        ),
+        email_verification_required=parse_bool(
+            runtime_config.get("EMAIL_VERIFICATION_REQUIRED"),
+            settings.email_verification_required,
+        ),
         login_agreement_enabled=parse_bool(
             runtime_config.get("LOGIN_AGREEMENT_ENABLED"),
             settings.login_agreement_enabled,
@@ -2411,9 +2561,9 @@ def allow_local_admin_repo_override(
     return settings.is_local_storage() and is_admin(user) and not cdn_enabled_flag
 
 
-async def call_store(request: Request, method_name: str, *args: Any) -> Any:
+async def call_store(request: Request, method_name: str, *args: Any, **kwargs: Any) -> Any:
     method = getattr(get_store(request), method_name)
-    result = method(*args)
+    result = method(*args, **kwargs)
     if inspect.isawaitable(result):
         return await result
     return result
@@ -2461,19 +2611,96 @@ async def require_user(request: Request) -> dict[str, Any]:
 
 
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
+    public_username = str(
+        user.get("public_username")
+        or user.get("github_login")
+        or user.get("internal_username")
+        or ""
+    ).strip()
     return {
-        key: value
-        for key, value in {**user, "has_github_token": bool(user.get("github_token"))}.items()
-        if key not in {"password_hash", "github_token", *PRIVATE_USER_FIELDS}
+        **{
+            key: value
+            for key, value in {
+                **user,
+                "public_username": public_username,
+                "has_github_token": bool(user.get("github_token")),
+                "email_verified": bool(user.get("email_verified_at")),
+                "has_password": bool(str(user.get("password_hash") or "").strip()),
+            }.items()
+            if key not in {"password_hash", "github_token", *PRIVATE_USER_FIELDS}
+        },
     }
 
 
 def private_user(user: dict[str, Any]) -> dict[str, Any]:
     return {
         **public_user(user),
+        "email": user.get("email") or "",
+        "email_verified_at": user.get("email_verified_at"),
         "github_email": user.get("github_email") or "",
         "notification_email": user.get("notification_email") or "",
     }
+
+
+async def enrich_private_user(request: Request, user: dict[str, Any]) -> dict[str, Any]:
+    tier_ctx = await user_tier_context(get_store(request), user)
+    return {**private_user(user), **tier_ctx}
+
+
+async def enrich_admin_user(request: Request, user: dict[str, Any]) -> dict[str, Any]:
+    tier_ctx = await user_tier_context(get_store(request), user)
+    return {
+        **public_user(user),
+        "email": user.get("email") or "",
+        "email_verified_at": user.get("email_verified_at"),
+        "account_tier": tier_ctx["account_tier"],
+        "is_developer": tier_ctx["is_developer"],
+        "has_oauth_binding": tier_ctx["has_oauth_binding"],
+        "has_active_plugins": tier_ctx["has_active_plugins"],
+        "oauth_providers": tier_ctx["oauth_providers"],
+    }
+
+
+async def require_submission_oauth_gate(
+    request: Request,
+    user: dict[str, Any],
+    *,
+    allow_override: bool = False,
+) -> None:
+    if allow_override:
+        return
+    if await has_bound_oauth_identity(get_store(request), user):
+        return
+    raise HTTPException(
+        403,
+        {
+            "code": "oauth_binding_required",
+            "error": "请先绑定至少一个 OAuth 账号成为开发者后再提交或上架插件",
+        },
+    )
+
+
+async def verify_api_key_access(
+    store: Any,
+    auth_header: str | None,
+    api_keys: list[ApiKey | Mapping[str, Any]],
+    scope: str,
+) -> tuple[bool, int, str]:
+    ok, status, message = require_api_key(auth_header, api_keys, scope)
+    if not ok:
+        return (ok, status, message)
+    if scope != "market:write":
+        return (True, 200, "")
+    matched = authenticate_api_key(auth_header, api_keys)
+    user_id = matched.get("user_id") if isinstance(matched, Mapping) else None
+    if not user_id:
+        return (True, 200, "")
+    owner_lookup = getattr(store, "get_user_by_id", None)
+    owner = await resolve_optional_awaitable(owner_lookup(str(user_id))) if owner_lookup else None
+    tier = await resolve_account_tier(store, owner)
+    if not can_issue_write_api_key(tier):
+        return (False, 403, "API key owner lacks developer permission for market:write")
+    return (True, 200, "")
 
 
 async def require_admin(request: Request) -> dict[str, Any]:
@@ -2596,6 +2823,7 @@ def notification_preference_enabled(user: dict[str, Any] | None, key: str) -> bo
 def user_display_name(user: dict[str, Any]) -> str:
     return (
         user.get("github_name")
+        or user.get("public_username")
         or user.get("github_login")
         or user.get("internal_username")
         or "用户"
@@ -2616,7 +2844,12 @@ def notification_excerpt(value: str, limit: int = 80) -> str:
 
 
 def notification_email_address(user: dict[str, Any]) -> str:
-    return str(user.get("notification_email") or user.get("github_email") or "").strip()
+    explicit = str(user.get("notification_email") or "").strip()
+    if explicit:
+        return explicit
+    if user.get("email_verified_at") and str(user.get("email") or "").strip():
+        return str(user["email"]).strip()
+    return str(user.get("github_email") or "").strip()
 
 
 def notification_email_footer() -> str:
@@ -2957,6 +3190,10 @@ def is_plugin_author_comment(
     if not plugin:
         return False
     if plugin.get("owner_user_id") and comment.get("user_id") == plugin.get("owner_user_id"):
+        return True
+    plugin_handle = str(plugin.get("owner_username") or plugin.get("owner_github_login") or "")
+    comment_handle = str(comment.get("public_username") or comment.get("github_login") or "")
+    if plugin_handle and comment_handle and plugin_handle.lower() == comment_handle.lower():
         return True
     return bool(
         plugin.get("owner_github_login")
@@ -4476,11 +4713,18 @@ def get_public_auth_config(
         else {
             "github_login_enabled": settings.github_login_enabled,
             "public_login_enabled": settings.public_login_enabled,
+            "email_registration_enabled": settings.email_registration_enabled,
+            "email_verification_required": settings.email_verification_required,
             "login_agreement_enabled": settings.login_agreement_enabled,
             "login_agreement_text": settings.login_agreement_text,
             "service_terms_enabled": settings.service_terms_enabled,
             "service_terms_text": settings.service_terms_text,
         }
+    )
+    effective_email_provider = normalize_email_provider(
+        runtime_config.get("EMAIL_PROVIDER", settings.email_provider)
+        if runtime_config is not None
+        else settings.email_provider
     )
     effective_settings = settings.with_updates(
         login_agreement_enabled=auth["login_agreement_enabled"],
@@ -4488,7 +4732,11 @@ def get_public_auth_config(
         service_terms_enabled=auth["service_terms_enabled"],
         service_terms_text=auth["service_terms_text"],
     )
-    return {**auth, "terms_revision": digest_terms(effective_settings)}
+    return {
+        **auth,
+        "email_service_enabled": effective_email_provider != "disabled",
+        "terms_revision": digest_terms(effective_settings),
+    }
 
 
 def get_public_market_config(
@@ -4534,9 +4782,11 @@ def settings_config_values(settings: Settings) -> dict[str, str]:
         "DATABASE_URL": settings.database_url,
         "EMAIL_DAILY_LIMIT": str(settings.email_daily_limit),
         "EMAIL_PROVIDER": settings.email_provider,
+        "EMAIL_REGISTRATION_ENABLED": serialize_bool(settings.email_registration_enabled),
         "EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER": str(
             settings.email_verification_daily_limit_per_user
         ),
+        "EMAIL_VERIFICATION_REQUIRED": serialize_bool(settings.email_verification_required),
         "GITHUB_ADMIN_ORG": settings.github_admin_org,
         "GITHUB_API_TOKEN": settings.github_api_token,
         "GITHUB_CALLBACK_URL": settings.github_callback_url,
@@ -4737,6 +4987,14 @@ def build_auth_settings(settings: Settings, runtime_config: dict[str, str]) -> d
         ),
         "public_login_enabled": parse_bool(
             runtime_config.get("PUBLIC_LOGIN_ENABLED"), settings.public_login_enabled
+        ),
+        "email_registration_enabled": parse_bool(
+            runtime_config.get("EMAIL_REGISTRATION_ENABLED"),
+            settings.email_registration_enabled,
+        ),
+        "email_verification_required": parse_bool(
+            runtime_config.get("EMAIL_VERIFICATION_REQUIRED"),
+            settings.email_verification_required,
         ),
         "login_agreement_enabled": parse_bool(
             runtime_config.get("LOGIN_AGREEMENT_ENABLED"),
@@ -5002,6 +5260,8 @@ def runtime_values_from_system_settings(
         "SITE_NAME": payload.site.name,
         "SITE_SUBTITLE": payload.site.subtitle,
         "WEB_URL": payload.site.web_url,
+        "EMAIL_REGISTRATION_ENABLED": serialize_bool(payload.auth.email_registration_enabled),
+        "EMAIL_VERIFICATION_REQUIRED": serialize_bool(payload.auth.email_verification_required),
         "GITHUB_LOGIN_ENABLED": serialize_bool(payload.auth.github_login_enabled),
         "LOGIN_AGREEMENT_ENABLED": serialize_bool(payload.auth.login_agreement_enabled),
         "LOGIN_AGREEMENT_TEXT": payload.auth.login_agreement_text,
@@ -5147,6 +5407,8 @@ def settings_from_system_settings(
         site_docs_url=payload.site.docs_url,
         github_login_enabled=payload.auth.github_login_enabled,
         public_login_enabled=payload.auth.public_login_enabled,
+        email_registration_enabled=payload.auth.email_registration_enabled,
+        email_verification_required=payload.auth.email_verification_required,
         login_agreement_enabled=payload.auth.login_agreement_enabled,
         login_agreement_text=payload.auth.login_agreement_text,
         service_terms_enabled=payload.auth.service_terms_enabled,
@@ -5341,23 +5603,51 @@ async def link_github_profile_to_user(
     login_owner = await call_store(request, "get_user_by_github_login", profile["login"])
     if login_owner and str(login_owner.get("github_id") or login_owner["id"]) != profile["id"]:
         raise GithubIdentityConflict("GitHub 用户名已关联其他身份，请联系管理员核对")
-    existing = await call_store(request, "get_user_by_github_id", profile["id"])
+    existing_identity = await call_store(
+        request,
+        "get_oauth_identity_by_provider_user",
+        GITHUB_PROVIDER,
+        GITHUB_INSTANCE_URL,
+        profile["id"],
+    )
+    existing = (
+        await call_store(request, "get_user_by_id", existing_identity["user_id"])
+        if existing_identity
+        else None
+    )
+    if not existing:
+        existing = await call_store(request, "get_user_by_github_id", profile["id"])
     if existing and existing["id"] != user["id"]:
         if not can_merge_github_user(user, existing):
             raise error(409, "This GitHub account is already linked to another user")
         await transfer_user_owned_records(request, existing["id"], user["id"])
+    github_email = profile.get("github_email") or profile.get("email") or ""
+    avatar_url = profile.get("avatar_url") or ""
+    await call_store(
+        request,
+        "upsert_oauth_identity",
+        user["id"],
+        provider=GITHUB_PROVIDER,
+        instance_url=GITHUB_INSTANCE_URL,
+        provider_user_id=profile["id"],
+        provider_login=profile["login"],
+        provider_email=github_email,
+        avatar_url=avatar_url,
+    )
+    profile_patch: dict[str, Any] = {
+        "github_id": profile["id"],
+        "github_login": profile["login"],
+        "github_email": github_email,
+    }
+    if not str(user.get("avatar_url") or "").strip() and avatar_url:
+        profile_patch["avatar_url"] = avatar_url
+    if not str(user.get("github_name") or "").strip():
+        profile_patch["github_name"] = profile.get("name") or profile["login"]
     updated = await call_store(
         request,
         "update_user_profile",
         user["id"],
-        {
-            "auth_source": "github",
-            "avatar_url": profile.get("avatar_url") or "",
-            "github_id": profile["id"],
-            "github_login": profile["login"],
-            "github_name": profile.get("name") or profile["login"],
-            "github_email": profile.get("github_email") or profile.get("email") or "",
-        },
+        profile_patch,
     )
     if not updated:
         raise error(404, "User not found")
@@ -5368,6 +5658,7 @@ def can_merge_github_user(current: dict[str, Any], existing: dict[str, Any]) -> 
     return (
         not existing.get("internal_username")
         and not existing.get("password_hash")
+        and not existing.get("email")
         and normalize_role(existing.get("role")) == Role.USER
         and normalize_role(current.get("role")) in {Role.CORE_ADMIN, Role.ADMIN}
     )
@@ -5405,13 +5696,26 @@ async def send_email(
 ) -> None:
     if settings.email_provider == "disabled":
         raise error(400, "Email service is disabled")
-    check_email_daily_limit(app, settings)
+    store = getattr(app.state, "store", None)
+    if store is not None and hasattr(store, "get_rate_limit_count"):
+        try:
+            await enforce_site_email_daily_limit(store, settings)
+        except EmailChallengeError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "error": "Daily email limit exceeded"},
+                headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None,
+            ) from exc
+    else:
+        check_email_daily_limit(app, settings)
     if settings.email_provider == "cloudflare":
         await send_email_via_cloudflare(settings, receiver, subject, content)
     elif settings.email_provider == "smtp":
         await send_email_via_smtp(settings, receiver, subject, content)
     else:
         raise error(400, "Unsupported email provider")
+    if store is not None and hasattr(store, "increment_rate_limit"):
+        await record_site_email_sent(store, settings)
     increment_email_daily_count(app, settings)
 
 
@@ -5621,7 +5925,12 @@ def normalize_iso_timestamp(value: Any) -> str:
 
 
 def astrbot_plugin_key(plugin: Mapping[str, Any]) -> tuple[str, str, str] | None:
-    author = str(plugin.get("author") or plugin.get("owner_github_login") or "").strip()
+    author = str(
+        plugin.get("author")
+        or plugin.get("owner_username")
+        or plugin.get("owner_github_login")
+        or ""
+    ).strip()
     name = str(plugin.get("name") or "").strip()
     if (
         not name
@@ -5771,7 +6080,10 @@ def format_astrbot_plugin(
     resolved_author = str(
         author
         if author is not None
-        else plugin.get("author") or plugin.get("owner_github_login") or ""
+        else plugin.get("author")
+        or plugin.get("owner_username")
+        or plugin.get("owner_github_login")
+        or ""
     ).strip()
     feed_version = str(
         plugin.get("repo_version") or plugin.get("version") or plugin.get("published_version") or ""
