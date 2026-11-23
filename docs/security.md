@@ -63,7 +63,7 @@ Cookie 安全属性如下：
 | 管理员（`admin`） | `role = admin` | 审核上架/下架插件、处理包审查、删除评论、禁言用户、刷新任意插件元数据、颁发全局 API Key（`/v1/admin/*`） |
 | 核心管理员（`core_admin`） | `role = core_admin` | 管理系统设置、认证/验证开关、邮件、审查策略、管理员队伍、本地用户与全站公告（`/v1/core/*`、`/v1/admin/settings`）；可管理任意插件 CDN |
 
-权限检查函数集中在 `apps/api/app/auth.py` 与 `apps/api/app/oauth_identities.py`（包括 `resolve_account_tier()`、`can_issue_write_api_key()`、`can_edit_plugin()`、`can_configure_plugin_cdn()` 与 `can_manage_plugin_submission()`）。所有敏感接口均在后端路由层强制鉴权，个人 `market:write` API Key 在签发和使用时还会实时重检持有者的五级身份及有效 OAuth 绑定（管理员除外）；前端界面上的角色显隐仅用于交互展示，不作为安全边界。
+权限检查函数集中在 `apps/api/app/auth.py` 与 `apps/api/app/oauth_identities.py`（包括 `resolve_account_tier()`、`can_issue_write_api_key()`、`can_edit_plugin()`、`can_configure_plugin_cdn()` 与 `can_manage_plugin_submission()`）。所有敏感接口均在后端路由层强制鉴权，个人 `market:write` API Key 在签发及写权限校验时还会实时重检持有者的五级身份及有效 OAuth 绑定（管理员除外）；前端界面上的角色显隐仅用于交互展示，不作为安全边界。
 
 ## API Key
 
@@ -77,7 +77,7 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 
 主要安全属性：
 
-- **作用域隔离**：支持 `market:read` 与 `market:write` 权限位，接口按需校验。
+- **作用域隔离**：支持 `market:read` 与 `market:write` 权限位，接口按需校验。当前个人 Key 仅接入只读接口，会话写接口不接受个人 Key 代替登录。
 - **写权限 OAuth 约束**：普通开发者必须有有效 OAuth 绑定才能创建或使用 `market:write` 个人 Key；仅因历史插件保留开发者层级不会绕过该检查，管理员按角色授权。
 - **明文仅展示一次**：仅在创建响应中返回完整 Key，后续查询只返回名称、作用域和创建时间。
 - **即时撤销**：删除后立即失效，数据库 `key` 列具备唯一约束。

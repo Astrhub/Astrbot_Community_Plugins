@@ -84,6 +84,7 @@ from .oauth_identities import (
     GITHUB_PROVIDER,
     author_oauth_profiles,
     has_bound_oauth_identity,
+    is_developer_tier,
     list_active_oauth_identities,
     resolve_account_tier,
     user_tier_context,
@@ -925,10 +926,19 @@ def register_routes(app: FastAPI) -> None:
         tags=["developer"],
         summary="获取我提交的插件",
         description="返回当前用户提交的所有插件（包括未上架的）。",
-        responses={401: {"description": "未登录"}},
+        responses={401: {"description": "未登录"}, 403: {"description": "需要开发者权限"}},
     )
     async def my_plugins(request: Request) -> dict[str, list[dict[str, Any]]]:
         user = await require_user(request)
+        tier = await resolve_account_tier(get_store(request), user)
+        if not is_developer_tier(tier):
+            raise HTTPException(
+                403,
+                {
+                    "code": "developer_required",
+                    "error": "仅开发者及以上身份可查看自己的插件",
+                },
+            )
         return {
             "items": await call_store(
                 request,

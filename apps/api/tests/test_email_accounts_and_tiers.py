@@ -136,6 +136,10 @@ def test_direct_email_registration_and_login_by_username_or_email() -> None:
     assert user["is_developer"] is False
     assert user["has_oauth_binding"] is False
     assert user["has_password"] is True
+    assert reg.cookies.get(client.app.state.settings.session_cookie_name)
+    authenticated = client.get("/v1/me")
+    assert authenticated.status_code == 200
+    assert authenticated.json()["id"] == user["id"]
 
     # Case-insensitive email & username uniqueness returns 409
     dup_email = client.post(
@@ -303,14 +307,21 @@ def test_verification_max_attempts_and_send_failure_rollback(monkeypatch: Any) -
     assert after.json()["code"] == "challenge_expired"
 
 
-def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(monkeypatch: Any) -> None:
+def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(
+    monkeypatch: Any, tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
     client, store = _make_app(
         {
             "EMAIL_REGISTRATION_ENABLED": "true",
             "EMAIL_VERIFICATION_REQUIRED": "false",
             "PLUGIN_AUTO_APPROVE_ENABLED": "true",
+            "ARTIFACTS_ENABLED": "true",
+            "ARTIFACT_LOCAL_ROOT": str(tmp_path / "artifacts"),
+            "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
         }
     )
+    client.__enter__()
+    request.addfinalizer(lambda: client.__exit__(None, None, None))
 
     # 1. Guest submits -> 401
     assert (
@@ -344,6 +355,9 @@ def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(monkeypatch: A
     assert perms["has_oauth_binding"] is False
     assert perms["can_submit_plugin"] is False
     assert perms["can_create_write_api_key"] is False
+    my_plugins_blocked = client.get("/v1/me/plugins")
+    assert my_plugins_blocked.status_code == 403
+    assert my_plugins_blocked.json()["code"] == "developer_required"
 
     # User tier can create read-only API key, CANNOT create write API key
     read_key = client.post("/v1/me/api-keys", json={"name": "ReadOnly", "scopes": ["market:read"]})
@@ -411,6 +425,14 @@ def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(monkeypatch: A
     assert plugin["status"] == "listed"
     assert plugin["owner_username"] == "alice_local"
 
+    my_plugins = client.get("/v1/me/plugins")
+    assert my_plugins.status_code == 200
+    assert [item["id"] for item in my_plugins.json()["items"]] == [plugin["id"]]
+
+    cdn_on = client.patch(f"/v1/plugins/{plugin['id']}/cdn", json={"enabled": True})
+    assert cdn_on.status_code == 200, cdn_on.text
+    assert cdn_on.json()["cdn_enabled"] is True
+    assert store.get_plugin(plugin["id"])["cdn_enabled"] is True
     # 4. Unbind GitHub OAuth (allowed because user has local password)
     unbind = client.delete(f"/v1/me/oauth-identities/{identity_id}")
     assert unbind.status_code == 200
@@ -449,6 +471,7 @@ def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(monkeypatch: A
     # Can still self-unlist existing plugin AND disable CDN without OAuth token!
     cdn_off = client.patch(f"/v1/plugins/{plugin['id']}/cdn", json={"enabled": False})
     assert cdn_off.status_code == 200
+    assert store.get_plugin(plugin["id"])["cdn_enabled"] is False
     unlisted = client.post(f"/v1/plugins/{plugin['id']}/unlist", json={"reason": "暂停维护"})
     assert unlisted.status_code == 200
     assert unlisted.json()["status"] == "unlisted"
@@ -462,6 +485,7 @@ def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(monkeypatch: A
     me_downgraded = client.get("/v1/me").json()
     assert me_downgraded["account_tier"] == "user"
     assert me_downgraded["is_developer"] is False
+    assert client.get("/v1/me/plugins").status_code == 403
 
     # Previously issued write API key fails live market:write verification after downgrade
     all_keys = store.list_api_keys()

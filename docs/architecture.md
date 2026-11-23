@@ -158,6 +158,7 @@ create_app(settings, store)
 | `GET` | `/v1/plugins/by-author/{username}/{name}` | 按作者用户名与插件名获取已上架插件详情 |
 | `GET` | `/v1/plugins/{id}` | 按插件 ID 获取详情（含评论树与点赞状态） |
 | `GET` | `/v1/plugins/{id}/readme` | 获取插件 README 缓存或实时内容 |
+| `GET` | `/v1/authors` | 获取公开作者名及是否有已上架插件 |
 | `GET` | `/v1/authors/{username}/plugins` | 获取指定作者的已上架插件列表 |
 | `GET` | `/v1/announcements` | 公告列表 |
 | `GET` | `/plugins.json` · `/plugins-md5.json` | AstrBot 插件源 Feed 与 MD5 摘要 |

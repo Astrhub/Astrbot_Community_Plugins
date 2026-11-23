@@ -94,6 +94,14 @@ paths:
       responses:
         "200":
           description: 插件列表
+  /v1/authors:
+    get:
+      tags: [Public]
+      summary: 公开作者列表
+      description: 仅返回 username 与 has_listed_plugins，不含管理字段。
+      responses:
+        "200":
+          description: 公开作者列表
   /v1/plugins/{id}:
     get:
       tags: [Plugins]
@@ -393,6 +401,8 @@ paths:
           description: 当前用户拥有的插件
         "401":
           description: 未认证
+        "403":
+          description: 需要开发者权限
   /v1/me/api-keys:
     get:
       tags: [API Keys]
