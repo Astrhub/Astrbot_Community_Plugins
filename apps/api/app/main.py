@@ -2582,13 +2582,18 @@ async def _list_listed_plugins_for_author(
     plugins = list(await call_store(request, "list_author_plugins", canonical_username) or [])
     if not author:
         return plugins
+    author_id = str(author.get("id") or "").strip()
+    if not author_id:
+        return []
+    plugins = [
+        plugin for plugin in plugins if str(plugin.get("owner_user_id") or "").strip() == author_id
+    ]
     github_login = str(author.get("github_login") or "").strip()
     if not github_login or github_login.lower() == canonical_username.lower():
         return plugins
     legacy_plugins = list(await call_store(request, "list_author_plugins", github_login) or [])
     if not legacy_plugins:
         return plugins
-    author_id = str(author.get("id") or "").strip()
     merged: dict[str, dict[str, Any]] = {}
     for plugin in plugins:
         plugin_id = str(plugin.get("id") or "")
@@ -2599,7 +2604,7 @@ async def _list_listed_plugins_for_author(
         if not plugin_id or plugin_id in merged:
             continue
         plugin_owner_id = str(plugin.get("owner_user_id") or "").strip()
-        if not author_id or plugin_owner_id != author_id:
+        if plugin_owner_id != author_id:
             continue
         merged[plugin_id] = plugin
     return sorted(
@@ -6291,7 +6296,7 @@ def parse_redis_url(value: str) -> dict[str, Any]:
 
 def is_valid_site_icon_url(value: str) -> bool:
     text = str(value or "").strip()
-    if text.startswith("/") and not text.startswith("//"):
+    if text.startswith("/") and not text.startswith("//") and "\\" not in text:
         return not any(ch.isspace() for ch in text)
     return is_valid_public_url(text)
 

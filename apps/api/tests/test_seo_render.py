@@ -526,6 +526,7 @@ def test_malformed_urls_fallback_and_return_400_without_500(
         ("icon_url", "https://["),
         ("icon_url", "//["),
         ("icon_url", "//evil.example/icon.png"),
+        ("icon_url", "/\\evil.example/icon.png"),
     ):
         payload = client.get("/v1/admin/settings").json()
         payload["site"]["web_url"] = "https://market.example.org"
@@ -784,11 +785,22 @@ def test_author_page_and_api_include_legacy_github_login_plugins_without_duplica
             "repo": "https://github.com/AliceGH/astrbot_plugin_recycled_orphan",
         },
     )
+    primary_mismatched_owner = store.register_plugin(
+        other,
+        {
+            "name": "astrbot_plugin_primary_mismatch",
+            "display_name": "主查询错归属插件",
+            "desc": "Matches canonical username but belongs to another owner_user_id",
+            "author": "Other",
+            "repo": "https://github.com/other/astrbot_plugin_primary_mismatch",
+        },
+    )
 
     store.update_plugin_status(canonical_plugin["id"], "listed", None)
     store.update_plugin_status(legacy_plugin["id"], "listed", None)
     store.update_plugin_status(unrelated_plugin["id"], "listed", None)
     store.update_plugin_status(unowned_recycled["id"], "listed", None)
+    store.update_plugin_status(primary_mismatched_owner["id"], "listed", None)
 
     for item in store.state["plugins"]:
         if item["id"] == canonical_plugin["id"]:
@@ -810,6 +822,10 @@ def test_author_page_and_api_include_legacy_github_login_plugins_without_duplica
             item["owner_username"] = ""
             item["owner_github_login"] = "AliceGH"
             item["owner_user_id"] = ""
+        elif item["id"] == primary_mismatched_owner["id"]:
+            item["owner_username"] = "AlicePublic"
+            item["owner_github_login"] = ""
+            item["owner_user_id"] = other["id"]
 
     client, _ = _setup_client(tmp_path, monkeypatch, store=store)
 
@@ -836,6 +852,7 @@ def test_author_page_and_api_include_legacy_github_login_plugins_without_duplica
     assert "astrbot_plugin_legacy_unlisted" not in ssr_resp.text
     assert "astrbot_plugin_unrelated" not in ssr_resp.text
     assert "astrbot_plugin_recycled_orphan" not in ssr_resp.text
+    assert "astrbot_plugin_primary_mismatch" not in ssr_resp.text
     assert ssr_resp.text.index("astrbot_plugin_legacy_gh") < ssr_resp.text.index(
         "astrbot_plugin_canonical"
     )
