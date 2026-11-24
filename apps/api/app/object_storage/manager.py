@@ -43,6 +43,12 @@ from .service import (
     ObjectStorageService,
 )
 from .sqlite_driver import SqliteObjectStorageDriver, validate_sqlite_db_path
+from .webdav_driver import (
+    WebDavObjectStorageDriver,
+    validate_webdav_auth_type,
+    validate_webdav_base_url,
+    validate_webdav_root_path,
+)
 
 LOGGER = logging.getLogger("astrbot_market.object_storage")
 HEALTHCHECK_PREFIX = "__healthcheck__/"
@@ -70,6 +76,7 @@ class StorageManager:
         repository: ObjectStorageRepository | None = None,
         service: ObjectStorageService | None = None,
         s3_client_factory: Any | None = None,
+        webdav_client_factory: Any | None = None,
         pg_pool_override: Any | None = None,
     ) -> None:
         self.store = store
@@ -78,6 +85,7 @@ class StorageManager:
         self.service = service or ObjectStorageService(repository=self.repository)
         self.service.repository = self.repository
         self._s3_client_factory = s3_client_factory
+        self._webdav_client_factory = webdav_client_factory
         self._pg_pool_override = pg_pool_override
         self._initialized = False
         self._migration_lock = asyncio.Lock()
@@ -283,6 +291,7 @@ class StorageManager:
                 profile_id=existing.id,
                 ciphertext=ciphertext,
             )
+        config_changed = sanitized_config != dict(existing.config) or bool(cleaned_secret)
         updated = StorageProfile(
             id=existing.id,
             name=str(name).strip() if name is not None and str(name).strip() else existing.name,
@@ -291,9 +300,9 @@ class StorageManager:
             config=sanitized_config,
             secret_ref=secret_ref,
             legacy=existing.legacy,
-            health_status=existing.health_status,
-            health_message=existing.health_message,
-            last_checked_at=existing.last_checked_at,
+            health_status="unknown" if config_changed else existing.health_status,
+            health_message="" if config_changed else existing.health_message,
+            last_checked_at="" if config_changed else existing.last_checked_at,
             created_by=existing.created_by,
             updated_by=actor_id,
             created_at=existing.created_at,
@@ -315,60 +324,90 @@ class StorageManager:
                 "storage_profile_not_active", "Retired or removed profile cannot be tested"
             )
         driver = self.service.driver_for_profile(profile.id)
-        probe_key = f"{HEALTHCHECK_PREFIX}probe-{secrets.token_hex(8)}.txt"
-        probe_bytes = b"astrhub-storage-health-check-0123456789"
-        probe_sha = hashlib.sha256(probe_bytes).hexdigest()
-        checks: dict[str, bool] = {
-            "write": False,
-            "read": False,
-            "range": False,
-            "delete": False,
-            "public_url": False,
-        }
-        health_status = "healthy"
-        health_message = "连接与读写校验通过"
-        try:
-            stored = await driver.put_object(
-                probe_key,
-                probe_bytes,
-                content_type="text/plain; charset=utf-8",
-                expected_sha256=probe_sha,
-                if_absent=True,
+        updated_config = dict(profile.config)
+        if isinstance(driver, WebDavObjectStorageDriver):
+            probe = await driver.probe_capabilities(probe_prefix=HEALTHCHECK_PREFIX)
+            checks = {
+                "write": probe.write,
+                "read": probe.read,
+                "range": probe.range_read,
+                "conditional_create": probe.conditional_create,
+                "overwrite_protection": probe.overwrite_protection,
+                "delete": probe.delete,
+                "public_url": probe.public_url,
+            }
+            all_required_ok = all(
+                checks[key]
+                for key in (
+                    "write",
+                    "read",
+                    "range",
+                    "overwrite_protection",
+                    "delete",
+                    "public_url",
+                )
             )
-            checks["write"] = stored.sha256 == probe_sha and stored.size_bytes == len(probe_bytes)
-            read_back = await driver.read_object(probe_key, expected_sha256=probe_sha)
-            checks["read"] = read_back == probe_bytes
-            ranged = await driver.read_range(
-                probe_key,
-                start_byte=8,
-                max_bytes=7,
-                max_object_bytes=len(probe_bytes),
-                expected_size_bytes=len(probe_bytes),
-                expected_sha256=probe_sha,
-            )
-            checks["range"] = ranged.content == b"storage" and ranged.truncated is True
-            if driver.capabilities().public_read:
-                url = driver.public_url(probe_key)
-                checks["public_url"] = bool(url.startswith(("http://", "https://", "/")))
-            else:
-                checks["public_url"] = True
-        except Exception as exc:
-            health_status = "unhealthy"
-            health_message = str(exc) or exc.__class__.__name__
-        finally:
+            health_status = "healthy" if all_required_ok else "unhealthy"
+            health_message = probe.message
+            updated_config["conditional_create_supported"] = probe.conditional_create
+            updated_config["range_read_supported"] = probe.range_read
+        else:
+            probe_key = f"{HEALTHCHECK_PREFIX}probe-{secrets.token_hex(8)}.txt"
+            probe_bytes = b"astrhub-storage-health-check-0123456789"
+            probe_sha = hashlib.sha256(probe_bytes).hexdigest()
+            checks = {
+                "write": False,
+                "read": False,
+                "range": False,
+                "delete": False,
+                "public_url": False,
+            }
+            health_status = "healthy"
+            health_message = "连接与读写校验通过"
             try:
-                await driver.delete_object(probe_key)
-                checks["delete"] = await driver.stat_object(probe_key) is None
-            except Exception as cleanup_exc:
-                checks["delete"] = False
-                if health_status == "healthy":
-                    health_status = "unhealthy"
-                    health_message = f"测试对象清理失败：{cleanup_exc}"
+                stored = await driver.put_object(
+                    probe_key,
+                    probe_bytes,
+                    content_type="text/plain; charset=utf-8",
+                    expected_sha256=probe_sha,
+                    if_absent=True,
+                )
+                checks["write"] = stored.sha256 == probe_sha and stored.size_bytes == len(
+                    probe_bytes
+                )
+                read_back = await driver.read_object(probe_key, expected_sha256=probe_sha)
+                checks["read"] = read_back == probe_bytes
+                ranged = await driver.read_range(
+                    probe_key,
+                    start_byte=8,
+                    max_bytes=7,
+                    max_object_bytes=len(probe_bytes),
+                    expected_size_bytes=len(probe_bytes),
+                    expected_sha256=probe_sha,
+                )
+                checks["range"] = ranged.content == b"storage" and ranged.truncated is True
+                if driver.capabilities().public_read:
+                    url = driver.public_url(probe_key)
+                    checks["public_url"] = bool(url.startswith(("http://", "https://", "/")))
+                else:
+                    checks["public_url"] = True
+            except Exception as exc:
+                health_status = "unhealthy"
+                health_message = str(exc) or exc.__class__.__name__
+            finally:
+                try:
+                    await driver.delete_object(probe_key)
+                    checks["delete"] = await driver.stat_object(probe_key) is None
+                except Exception as cleanup_exc:
+                    checks["delete"] = False
+                    if health_status == "healthy":
+                        health_status = "unhealthy"
+                        health_message = f"测试对象清理失败：{cleanup_exc}"
 
-        if not all(checks.values()):
-            health_status = "unhealthy"
-            if health_message == "连接与读写校验通过":
-                health_message = "部分存储能力校验未通过"
+            if not all(checks.values()):
+                health_status = "unhealthy"
+                if health_message == "连接与读写校验通过":
+                    health_message = "部分存储能力校验未通过"
 
         checked_at = utc_now_iso()
         updated = StorageProfile(
@@ -376,7 +415,7 @@ class StorageManager:
             name=profile.name,
             backend=profile.backend,
             status=profile.status,
-            config=profile.config,
+            config=updated_config,
             secret_ref=profile.secret_ref,
             legacy=profile.legacy,
             health_status=health_status,
@@ -388,6 +427,7 @@ class StorageManager:
             updated_at=checked_at,
         )
         await self.repository.upsert_profile(updated)
+        self.service.register_profile(updated, driver)
         return {
             "ok": health_status == "healthy",
             "profile_id": profile.id,
@@ -445,6 +485,13 @@ class StorageManager:
                 "storage_backend_disallowed_for_purpose",
                 f"Backend {target.backend.value} cannot be bound to {purpose.value}",
             )
+        if target.backend == StorageBackend.WEBDAV and target.health_status != "healthy":
+            probe = await self.test_profile(target.id)
+            if not probe.get("ok"):
+                raise ObjectStorageError(
+                    "webdav_capability_check_failed",
+                    str(probe.get("health_message") or "WebDAV capability probe failed"),
+                )
 
         previous = await self.repository.get_binding(purpose)
         generation = (previous.generation + 1) if previous is not None else 1
@@ -1330,6 +1377,40 @@ class StorageManager:
                 client=client,
             )
 
+        if profile.backend == StorageBackend.WEBDAV:
+            allow_private = bool(cfg.get("allow_private_network", False))
+            base_url = validate_webdav_base_url(
+                cfg.get("base_url"),
+                allow_private_network=allow_private,
+            )
+            root_path = validate_webdav_root_path(cfg.get("root_path"))
+            auth_type = validate_webdav_auth_type(cfg.get("auth_type"))
+            public_base_url = str(cfg.get("public_base_url") or "").strip().rstrip("/")
+            verify_tls = bool(cfg.get("verify_tls", True))
+            conditional_create = bool(cfg.get("conditional_create_supported", True))
+            range_read = bool(cfg.get("range_read_supported", True))
+            secret = await self._load_secret(profile)
+            client = (
+                self._webdav_client_factory(profile, cfg)
+                if callable(self._webdav_client_factory)
+                else None
+            )
+            return WebDavObjectStorageDriver(
+                profile_id=profile.id,
+                base_url=base_url,
+                root_path=root_path,
+                auth_type=auth_type,
+                username=str(secret.get("username") or ""),
+                password=str(secret.get("password") or ""),
+                token=str(secret.get("token") or ""),
+                public_base_url=public_base_url,
+                allow_private_network=allow_private,
+                verify_tls=verify_tls,
+                conditional_create_supported=conditional_create,
+                range_read_supported=range_read,
+                client=client,
+            )
+
         raise ObjectStorageError(
             "storage_backend_not_yet_implemented",
             f"Storage backend {profile.backend.value} will be enabled in a later stage",
@@ -1444,6 +1525,53 @@ class StorageManager:
                 },
                 cleaned_secret,
             )
+
+        if backend == StorageBackend.WEBDAV:
+            allow_private = bool(config.get("allow_private_network", False))
+            base_url = validate_webdav_base_url(
+                config.get("base_url"),
+                allow_private_network=allow_private,
+            )
+            root_path = validate_webdav_root_path(config.get("root_path"))
+            auth_type = validate_webdav_auth_type(config.get("auth_type"))
+            verify_tls = bool(config.get("verify_tls", True))
+            cleaned_secret = {}
+            if auth_type == "basic":
+                username = str(secret.get("username") or "").strip()
+                password = str(secret.get("password") or "")
+                if username:
+                    cleaned_secret["username"] = username
+                if password:
+                    cleaned_secret["password"] = password
+                if not existing_secret_ref and (not username or not password):
+                    raise ObjectStorageError(
+                        "webdav_credentials_missing",
+                        "WebDAV basic auth requires username and password",
+                    )
+            elif auth_type == "bearer":
+                token = str(secret.get("token") or "").strip()
+                if token:
+                    cleaned_secret["token"] = token
+                if not existing_secret_ref and not token:
+                    raise ObjectStorageError(
+                        "webdav_credentials_missing",
+                        "WebDAV bearer auth requires a token",
+                    )
+            sanitized_webdav: dict[str, Any] = {
+                "base_url": base_url,
+                "root_path": root_path,
+                "auth_type": auth_type,
+                "allow_private_network": allow_private,
+                "verify_tls": verify_tls,
+                "public_base_url": public_base_url,
+            }
+            if "conditional_create_supported" in config:
+                sanitized_webdav["conditional_create_supported"] = bool(
+                    config["conditional_create_supported"]
+                )
+            if "range_read_supported" in config:
+                sanitized_webdav["range_read_supported"] = bool(config["range_read_supported"])
+            return sanitized_webdav, cleaned_secret
 
         raise ObjectStorageError(
             "storage_backend_not_yet_implemented",

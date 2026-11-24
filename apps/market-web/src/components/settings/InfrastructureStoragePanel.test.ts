@@ -296,4 +296,89 @@ describe("InfrastructureStoragePanel", () => {
     });
     wrapper.unmount();
   });
+
+  it("supports creating and editing WebDAV profiles while preserving blank credentials", async () => {
+    const webdavProfile: StorageProfileItem = {
+      id: "dav-nas",
+      name: "NAS WebDAV",
+      backend: "webdav",
+      status: "active",
+      config: {
+        base_url: "https://dav.example.com/dav",
+        root_path: "astrhub/pkg",
+        auth_type: "basic",
+        allow_private_network: false,
+        verify_tls: true,
+        public_base_url: "",
+      },
+      has_secret: true,
+      legacy: false,
+      health_status: "healthy",
+      health_message: "WebDAV 能力探测与读写校验通过",
+      last_checked_at: "2026-11-25T00:00:00Z",
+      created_by: "admin-1",
+      updated_by: "admin-1",
+      created_at: "2026-11-25T00:00:00Z",
+      updated_at: "2026-11-25T00:00:00Z",
+      bound_purposes: [],
+      active_object_count: 0,
+      pending_object_count: 0,
+      has_active_migrations: false,
+      capabilities: { conditional_create: true, range_read: true, public_read: false },
+    };
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method || "GET").toUpperCase();
+      if (url.endsWith("/v1/admin/storage/profiles") && method === "GET") {
+        return jsonResponse({ items: [webdavProfile] });
+      }
+      if (url.endsWith("/v1/admin/storage/bindings") && method === "GET") {
+        return jsonResponse({ items: sampleBindings() });
+      }
+      if (url.endsWith("/v1/admin/storage/migrations") && method === "GET") {
+        return jsonResponse({ items: [] });
+      }
+      if (url.endsWith("/v1/admin/storage/profiles/dav-nas") && method === "PATCH") {
+        return jsonResponse(webdavProfile);
+      }
+      return jsonResponse({ error: `Unhandled ${method} ${url}` }, 404);
+    });
+
+    const wrapper = mountPanel();
+    await flushPromises();
+    expect(wrapper.text()).toContain("WebDAV · https://dav.example.com/dav/astrhub/pkg");
+
+    const davCard = wrapper
+      .findAll(".profile-card")
+      .find((card) => card.text().includes("dav-nas"));
+    const editBtn = davCard!.findAll("button").find((btn) => btn.text().includes("编辑"));
+    await editBtn!.trigger("click");
+    await flushPromises();
+
+    const dialog = wrapper.get('[role="dialog"]');
+    expect(dialog.text()).toContain("编辑存储配置：dav-nas");
+    const saveBtn = dialog.findAll("button").find((btn) => btn.text().includes("保存修改"));
+    await saveBtn!.trigger("click");
+    await flushPromises();
+
+    const patchCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/v1/admin/storage/profiles/dav-nas") &&
+        (init as RequestInit)?.method === "PATCH",
+    );
+    expect(patchCall).toBeDefined();
+    const patchBody = (patchCall![1] as RequestInit).body;
+    expect(typeof patchBody).toBe("string");
+    const sent = JSON.parse(patchBody as string);
+    expect(sent).not.toHaveProperty("secret");
+    expect(sent.config).toEqual(
+      expect.objectContaining({
+        base_url: "https://dav.example.com/dav",
+        root_path: "astrhub/pkg",
+        auth_type: "basic",
+      }),
+    );
+    wrapper.unmount();
+  });
 });

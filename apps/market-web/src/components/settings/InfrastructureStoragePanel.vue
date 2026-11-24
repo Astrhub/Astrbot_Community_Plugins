@@ -375,6 +375,53 @@
           </n-form-item>
         </template>
 
+        <template v-if="profileForm.backend === 'webdav'">
+          <n-form-item label="WebDAV 服务地址">
+            <n-input
+              v-model:value="profileForm.webdavBaseUrl"
+              placeholder="https://dav.example.com/dav"
+            />
+          </n-form-item>
+          <n-form-item label="专用根目录（可选）">
+            <n-input v-model:value="profileForm.webdavRootPath" placeholder="astrhub/objects" />
+          </n-form-item>
+          <n-form-item label="认证方式">
+            <n-select v-model:value="profileForm.webdavAuthType" :options="webdavAuthOptions" />
+          </n-form-item>
+          <template v-if="profileForm.webdavAuthType === 'basic'">
+            <n-form-item label="用户名">
+              <n-input
+                v-model:value="profileForm.webdavUsername"
+                :placeholder="
+                  editingProfile?.has_secret ? '留空保留现有用户名' : '输入 WebDAV 用户名'
+                "
+              />
+            </n-form-item>
+            <n-form-item label="密码">
+              <n-input
+                v-model:value="profileForm.webdavPassword"
+                type="password"
+                show-password-on="click"
+                :placeholder="editingProfile?.has_secret ? '留空保留现有密码' : '输入 WebDAV 密码'"
+              />
+            </n-form-item>
+          </template>
+          <n-form-item v-if="profileForm.webdavAuthType === 'bearer'" label="Bearer Token">
+            <n-input
+              v-model:value="profileForm.webdavToken"
+              type="password"
+              show-password-on="click"
+              :placeholder="editingProfile?.has_secret ? '留空保留现有 Token' : '输入 Bearer Token'"
+            />
+          </n-form-item>
+          <n-form-item label="允许内网地址或明文 HTTP">
+            <n-switch v-model:value="profileForm.webdavAllowPrivateNetwork" />
+          </n-form-item>
+          <n-form-item label="校验证书（HTTPS）">
+            <n-switch v-model:value="profileForm.webdavVerifyTls" />
+          </n-form-item>
+        </template>
+
         <n-form-item label="公开访问基址（可选）">
           <n-input
             v-model:value="profileForm.publicBaseUrl"
@@ -545,6 +592,13 @@ const BACKEND_LABELS: Record<StorageBackend, string> = {
 const backendOptions = [
   { label: "本地文件系统 / SQLite / PostgreSQL", value: "local" },
   { label: "S3 / Cloudflare R2", value: "s3" },
+  { label: "WebDAV 服务器", value: "webdav" },
+];
+
+const webdavAuthOptions = [
+  { label: "Basic 账号密码", value: "basic" },
+  { label: "Bearer Token", value: "bearer" },
+  { label: "无认证", value: "none" },
 ];
 
 const localModeOptions = [
@@ -588,6 +642,14 @@ const profileForm = reactive({
   s3Bucket: "",
   s3AccessKeyId: "",
   s3SecretAccessKey: "",
+  webdavBaseUrl: "",
+  webdavRootPath: "",
+  webdavAuthType: "basic" as "basic" | "bearer" | "none",
+  webdavUsername: "",
+  webdavPassword: "",
+  webdavToken: "",
+  webdavAllowPrivateNetwork: false,
+  webdavVerifyTls: true,
   publicBaseUrl: "",
 });
 
@@ -627,6 +689,16 @@ const canSubmitProfileForm = computed(() => {
     if (!baseReady) return false;
     if (!editingProfile.value?.has_secret) {
       return Boolean(profileForm.s3AccessKeyId.trim() && profileForm.s3SecretAccessKey.trim());
+    }
+    return true;
+  }
+  if (profileForm.backend === "webdav") {
+    if (!profileForm.webdavBaseUrl.trim()) return false;
+    if (profileForm.webdavAuthType === "basic" && !editingProfile.value?.has_secret) {
+      return Boolean(profileForm.webdavUsername.trim() && profileForm.webdavPassword);
+    }
+    if (profileForm.webdavAuthType === "bearer" && !editingProfile.value?.has_secret) {
+      return Boolean(profileForm.webdavToken.trim());
     }
     return true;
   }
@@ -767,6 +839,11 @@ function summarizeProfileConfig(profile: StorageProfileItem): string {
   if (profile.backend === "s3") {
     return `Bucket=${String(cfg.bucket || "-")} · ${String(cfg.endpoint_url || "-")}`;
   }
+  if (profile.backend === "webdav") {
+    const root = String(cfg.root_path || "").trim();
+    const base = String(cfg.base_url || "-");
+    return root ? `WebDAV · ${base}/${root}` : `WebDAV · ${base}`;
+  }
   return profile.backend;
 }
 
@@ -801,6 +878,14 @@ function resetProfileForm() {
   profileForm.s3Bucket = "";
   profileForm.s3AccessKeyId = "";
   profileForm.s3SecretAccessKey = "";
+  profileForm.webdavBaseUrl = "";
+  profileForm.webdavRootPath = "";
+  profileForm.webdavAuthType = "basic";
+  profileForm.webdavUsername = "";
+  profileForm.webdavPassword = "";
+  profileForm.webdavToken = "";
+  profileForm.webdavAllowPrivateNetwork = false;
+  profileForm.webdavVerifyTls = true;
   profileForm.publicBaseUrl = "";
 }
 
@@ -828,6 +913,13 @@ function openEditModal(profile: StorageProfileItem) {
     profileForm.s3EndpointUrl = String(cfg.endpoint_url || "");
     profileForm.s3Region = String(cfg.region || "auto");
     profileForm.s3Bucket = String(cfg.bucket || "");
+  } else if (profile.backend === "webdav") {
+    profileForm.webdavBaseUrl = String(cfg.base_url || "");
+    profileForm.webdavRootPath = String(cfg.root_path || "");
+    const rawAuth = String(cfg.auth_type || "basic");
+    profileForm.webdavAuthType = rawAuth === "bearer" || rawAuth === "none" ? rawAuth : "basic";
+    profileForm.webdavAllowPrivateNetwork = Boolean(cfg.allow_private_network);
+    profileForm.webdavVerifyTls = cfg.verify_tls !== false;
   }
   profileModalOpen.value = true;
 }
@@ -862,6 +954,22 @@ function buildConfigAndSecret(): {
     }
     if (profileForm.s3SecretAccessKey.trim()) {
       secret.secret_access_key = profileForm.s3SecretAccessKey.trim();
+    }
+  } else if (profileForm.backend === "webdav") {
+    config.base_url = profileForm.webdavBaseUrl.trim();
+    config.root_path = profileForm.webdavRootPath.trim();
+    config.auth_type = profileForm.webdavAuthType;
+    config.allow_private_network = profileForm.webdavAllowPrivateNetwork;
+    config.verify_tls = profileForm.webdavVerifyTls;
+    if (profileForm.webdavAuthType === "basic") {
+      if (profileForm.webdavUsername.trim()) {
+        secret.username = profileForm.webdavUsername.trim();
+      }
+      if (profileForm.webdavPassword) {
+        secret.password = profileForm.webdavPassword;
+      }
+    } else if (profileForm.webdavAuthType === "bearer" && profileForm.webdavToken.trim()) {
+      secret.token = profileForm.webdavToken.trim();
     }
   }
   return { config, secret };

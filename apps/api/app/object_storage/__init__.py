@@ -54,6 +54,14 @@ from .service import (
     build_local_legacy_object_storage_service,
 )
 from .sqlite_driver import SqliteObjectStorageDriver, validate_sqlite_db_path
+from .webdav_driver import (
+    WebDavObjectStorageDriver,
+    WebDavProbeResult,
+    content_addressed_key,
+    validate_webdav_auth_type,
+    validate_webdav_base_url,
+    validate_webdav_root_path,
+)
 
 __all__ = [
     "InMemoryStorageSecretStore",
@@ -88,10 +96,13 @@ __all__ = [
     "StorageSecretStore",
     "StorageUrlAlias",
     "StoredObject",
+    "WebDavObjectStorageDriver",
+    "WebDavProbeResult",
     "build_legacy_object_storage_service",
     "build_local_legacy_object_storage_service",
     "build_object_storage_router",
     "build_public_url",
+    "content_addressed_key",
     "create_object_storage_repository",
     "decrypt_storage_secret",
     "derive_storage_credential_cipher",
@@ -105,4 +116,7 @@ __all__ = [
     "validate_pg_schema",
     "validate_profile_id",
     "validate_sqlite_db_path",
+    "validate_webdav_auth_type",
+    "validate_webdav_base_url",
+    "validate_webdav_root_path",
 ]
