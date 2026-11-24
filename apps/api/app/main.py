@@ -350,7 +350,9 @@ def create_app(
             {"name": "system", "description": "系统配置与安装"},
         ],
     )
-    app.state.settings = settings or load_settings()
+    initial_settings = settings or load_settings()
+    app.state.env_settings = initial_settings
+    app.state.settings = initial_settings
     app.state.store = store or create_store(app.state.settings)
     app.state.artifact_runtime = build_artifact_runtime(
         app.state.settings,
@@ -2508,7 +2510,8 @@ async def site_seo_context_for_request(request: Request) -> SiteSeoContext:
             request.method,
             request.url.path,
         )
-        return build_site_seo_context(settings)
+        env_settings = getattr(request.app.state, "env_settings", settings)
+        return build_site_seo_context(env_settings)
     return build_site_seo_context(settings, runtime_config)
 
 
@@ -2579,13 +2582,18 @@ async def _list_listed_plugins_for_author(
     plugins = list(await call_store(request, "list_author_plugins", canonical_username) or [])
     if not author:
         return plugins
+    author_id = str(author.get("id") or "").strip()
+    if not author_id:
+        return []
+    plugins = [
+        plugin for plugin in plugins if str(plugin.get("owner_user_id") or "").strip() == author_id
+    ]
     github_login = str(author.get("github_login") or "").strip()
     if not github_login or github_login.lower() == canonical_username.lower():
         return plugins
     legacy_plugins = list(await call_store(request, "list_author_plugins", github_login) or [])
     if not legacy_plugins:
         return plugins
-    author_id = str(author.get("id") or "").strip()
     merged: dict[str, dict[str, Any]] = {}
     for plugin in plugins:
         plugin_id = str(plugin.get("id") or "")
@@ -2596,10 +2604,7 @@ async def _list_listed_plugins_for_author(
         if not plugin_id or plugin_id in merged:
             continue
         plugin_owner_id = str(plugin.get("owner_user_id") or "").strip()
-        if author_id and plugin_owner_id:
-            if plugin_owner_id != author_id:
-                continue
-        elif str(plugin.get("owner_username") or "").strip():
+        if plugin_owner_id != author_id:
             continue
         merged[plugin_id] = plugin
     return sorted(
@@ -6290,9 +6295,10 @@ def parse_redis_url(value: str) -> dict[str, Any]:
 
 
 def is_valid_site_icon_url(value: str) -> bool:
-    if value.startswith("/"):
-        return True
-    return is_valid_public_url(value)
+    text = str(value or "").strip()
+    if text.startswith("/") and not text.startswith("//") and "\\" not in text:
+        return not any(ch.isspace() for ch in text)
+    return is_valid_public_url(text)
 
 
 def is_valid_public_url(value: str) -> bool:

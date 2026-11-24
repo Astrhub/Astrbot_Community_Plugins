@@ -524,6 +524,9 @@ def test_malformed_urls_fallback_and_return_400_without_500(
         ("web_url", "https://["),
         ("web_url", "https://example.com:badport"),
         ("icon_url", "https://["),
+        ("icon_url", "//["),
+        ("icon_url", "//evil.example/icon.png"),
+        ("icon_url", "/\\evil.example/icon.png"),
     ):
         payload = client.get("/v1/admin/settings").json()
         payload["site"]["web_url"] = "https://market.example.org"
@@ -552,6 +555,11 @@ def test_persisted_config_failure_falls_back_to_env_settings(
             return super().list_public_plugins()
 
     store = FailingOptionsStore()
+    store.create_internal_user(
+        username="coreadmin",
+        password_hash=hash_password("password123"),
+        role="core_admin",
+    )
     author = store.upsert_github_user({"id": "501", "login": "EnvAuthor"})
     plugin = store.register_plugin(
         author,
@@ -577,6 +585,19 @@ def test_persisted_config_failure_falls_back_to_env_settings(
     assert warm.status_code == 200
     assert "https://env.example.org/plugin/EnvAuthor/astrbot_plugin_cached" in warm.text
 
+    # Save different persisted site settings (which also mutates app.state.settings),
+    # then re-warm the environment-origin cache entry to verify fallback ignores saved state.
+    login = client.post(
+        "/v1/auth/internal/login",
+        json={"username": "coreadmin", "password": "password123"},
+    )
+    assert login.status_code == 200
+    saved_payload = client.get("/v1/admin/settings").json()
+    saved_payload["site"]["web_url"] = "https://saved-db.example.net"
+    saved_payload["site"]["name"] = "持久化市场名称"
+    saved = client.put("/v1/admin/settings", json=saved_payload)
+    assert saved.status_code == 200
+
     # Simulate DB failure for both site options and plugin listings.
     store.fail_options = True
     store.fail_plugins = True
@@ -585,6 +606,7 @@ def test_persisted_config_failure_falls_back_to_env_settings(
         robots = client.get("/robots.txt")
     assert robots.status_code == 200
     assert "Sitemap: https://env.example.org/sitemap.xml" in robots.text
+    assert "saved-db.example.net" not in robots.text
     assert any(
         "/robots.txt" in record.message and "options db unavailable" in (record.exc_text or "")
         for record in caplog.records
@@ -593,7 +615,15 @@ def test_persisted_config_failure_falls_back_to_env_settings(
     submit = client.get("/submit")
     assert submit.status_code == 200
     assert '<link rel="canonical" href="https://env.example.org/submit" />' in submit.text
+    assert "<title>提交插件 - 测试插件市场</title>" in submit.text
+    assert "持久化市场名称" not in submit.text
 
+    # Pre-populated sitemap cache matching the environment fallback origin still hits during outage.
+    main_module.set_cached_sitemap_xml(
+        client.app,
+        "https://env.example.org",
+        warm.text,
+    )
     cached_sitemap = client.get("/sitemap.xml")
     assert cached_sitemap.status_code == 200
     assert "https://env.example.org/plugin/EnvAuthor/astrbot_plugin_cached" in cached_sitemap.text
@@ -745,10 +775,32 @@ def test_author_page_and_api_include_legacy_github_login_plugins_without_duplica
             "repo": "https://github.com/other/astrbot_plugin_unrelated",
         },
     )
+    unowned_recycled = store.register_plugin(
+        {"id": "recycled-orphan"},
+        {
+            "name": "astrbot_plugin_recycled_orphan",
+            "display_name": "无主旧插件",
+            "desc": "Orphan without stable owner id",
+            "author": "OldOwner",
+            "repo": "https://github.com/AliceGH/astrbot_plugin_recycled_orphan",
+        },
+    )
+    primary_mismatched_owner = store.register_plugin(
+        other,
+        {
+            "name": "astrbot_plugin_primary_mismatch",
+            "display_name": "主查询错归属插件",
+            "desc": "Matches canonical username but belongs to another owner_user_id",
+            "author": "Other",
+            "repo": "https://github.com/other/astrbot_plugin_primary_mismatch",
+        },
+    )
 
     store.update_plugin_status(canonical_plugin["id"], "listed", None)
     store.update_plugin_status(legacy_plugin["id"], "listed", None)
     store.update_plugin_status(unrelated_plugin["id"], "listed", None)
+    store.update_plugin_status(unowned_recycled["id"], "listed", None)
+    store.update_plugin_status(primary_mismatched_owner["id"], "listed", None)
 
     for item in store.state["plugins"]:
         if item["id"] == canonical_plugin["id"]:
@@ -765,6 +817,14 @@ def test_author_page_and_api_include_legacy_github_login_plugins_without_duplica
         elif item["id"] == unrelated_plugin["id"]:
             item["owner_username"] = ""
             item["owner_github_login"] = "AliceGH"
+            item["owner_user_id"] = other["id"]
+        elif item["id"] == unowned_recycled["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = "AliceGH"
+            item["owner_user_id"] = ""
+        elif item["id"] == primary_mismatched_owner["id"]:
+            item["owner_username"] = "AlicePublic"
+            item["owner_github_login"] = ""
             item["owner_user_id"] = other["id"]
 
     client, _ = _setup_client(tmp_path, monkeypatch, store=store)
@@ -791,6 +851,8 @@ def test_author_page_and_api_include_legacy_github_login_plugins_without_duplica
     assert ssr_resp.text.count("astrbot_plugin_legacy_gh") == 1
     assert "astrbot_plugin_legacy_unlisted" not in ssr_resp.text
     assert "astrbot_plugin_unrelated" not in ssr_resp.text
+    assert "astrbot_plugin_recycled_orphan" not in ssr_resp.text
+    assert "astrbot_plugin_primary_mismatch" not in ssr_resp.text
     assert ssr_resp.text.index("astrbot_plugin_legacy_gh") < ssr_resp.text.index(
         "astrbot_plugin_canonical"
     )
