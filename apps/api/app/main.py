@@ -298,6 +298,42 @@ SYSTEM_OPTION_KEYS = {
     "WEB_URL",
 }
 PRIVATE_USER_FIELDS = {"email", "github_email", "notification_email"}
+PUBLIC_MARKET_PLUGIN_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "name",
+        "display_name",
+        "desc",
+        "short_desc",
+        "author",
+        "logo",
+        "repo",
+        "repo_provider",
+        "tags",
+        "version",
+        "repo_version",
+        "published_version",
+        "stars",
+        "likes",
+        "comments_count",
+        "category",
+        "support_platforms",
+        "social_link",
+        "astrbot_version",
+        "status",
+        "download_url",
+        "cdn_enabled",
+        "readme_url",
+        "changelog_url",
+        "i18n",
+        "owner_username",
+        "owner_github_login",
+        "created_at",
+        "updated_at",
+        "version_updated_at",
+        "listed_at",
+    }
+)
 LOGGER = logging.getLogger(__name__)
 SUBMISSION_METADATA_PREVIEW_RPM = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
@@ -1255,6 +1291,7 @@ def register_routes(app: FastAPI) -> None:
     @app.get(
         "/v1/auth/debug-login",
         tags=["auth"],
+        include_in_schema=False,
         summary="开发调试登录",
         description="仅供开发环境使用。通过 GitHub 用户名直接创建会话，无需 OAuth。需要启用开发认证模式。",
         responses={
@@ -3610,8 +3647,8 @@ async def plugin_with_interaction_state(
             await call_store(request, "list_liked_comment_ids", plugin["id"], user["id"])
         )
     return {
-        **plugin,
-        "canonical_path": plugin_canonical_path(plugin),
+        **public_market_plugin(plugin),
+        "can_manage": bool(user and can_edit_plugin(user, plugin)),
         "liked": plugin_liked,
         "comments": [
             with_comment_permissions(
@@ -6827,16 +6864,11 @@ async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str,
 
 
 def public_market_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
+    sanitized = {key: value for key, value in plugin.items() if key in PUBLIC_MARKET_PLUGIN_FIELDS}
     if not cdn_enabled(plugin):
-        plugin = {**plugin, "download_url": ""}
-    return {
-        **{
-            key: value
-            for key, value in plugin.items()
-            if not key.startswith("_artifact_") and key != "artifact_download_url"
-        },
-        "canonical_path": plugin_canonical_path(plugin),
-    }
+        sanitized["download_url"] = ""
+    sanitized["canonical_path"] = plugin_canonical_path(plugin)
+    return sanitized
 
 
 def format_astrbot_plugin(

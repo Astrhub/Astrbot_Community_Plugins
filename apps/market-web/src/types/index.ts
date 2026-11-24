@@ -109,6 +109,7 @@ export interface Plugin {
   owner_user_id?: number | string | null;
   owner_username?: string;
   owner_github_login?: string;
+  can_manage?: boolean;
   canonical_path?: string;
   status?: PluginStatus;
   submission_id?: number | string;
