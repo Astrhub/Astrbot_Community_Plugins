@@ -17,6 +17,7 @@ const plugin: Plugin = {
   logo: "",
   desc: "Plugin card fixture",
   author: "Alice",
+  owner_username: "Alice",
   repo: "https://github.com/alice/astrbot_plugin_new",
   tags: ["demo"],
   category: "utilities",
@@ -32,7 +33,12 @@ describe("PluginCard", () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
-        { path: "/plugin/:name", name: "PluginDetails", component: { template: "<div />" } },
+        { path: "/", component: { template: "<div />" } },
+        {
+          path: "/plugin/:username/:name",
+          name: "PluginDetails",
+          component: { template: "<div />" },
+        },
       ],
     });
     await router.push("/");

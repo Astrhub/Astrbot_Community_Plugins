@@ -288,14 +288,16 @@ def test_compose_files_remove_hardcoded_domain_and_provide_local_single_process_
     compose_raw = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "plugins.eloina.cn" not in compose_raw
     compose = yaml.safe_load(compose_raw)
-    assert compose["services"]["app"]["build"]["args"]["VITE_BASE_URL"] == (
-        "${VITE_BASE_URL:-${SITE_URL:-}}"
+    assert "VITE_BASE_URL" not in compose["services"]["app"]["build"]["args"]
+    assert compose["services"]["app"]["environment"]["WEB_URL"] == (
+        "${WEB_URL:-http://127.0.0.1:8787}"
     )
 
     local_compose = yaml.safe_load((ROOT / "docker-compose-local.yml").read_text(encoding="utf-8"))
     assert list(local_compose["services"].keys()) == ["app"]
     app_service = local_compose["services"]["app"]
-    assert app_service["build"]["args"]["VITE_BASE_URL"] == ""
+    assert "VITE_BASE_URL" not in app_service["build"]["args"]
+    assert app_service["environment"]["WEB_URL"] == "${WEB_URL:-http://127.0.0.1:8787}"
     assert app_service["environment"]["MARKET_STORAGE_MODE"] == "local"
     assert app_service["environment"]["ARTIFACTS_ENABLED"] == "false"
     assert app_service["environment"]["LOCAL_DATA_PATH"] == (

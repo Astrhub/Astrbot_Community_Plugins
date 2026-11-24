@@ -24,7 +24,7 @@ Use small, single-purpose modules and prefer existing local patterns. Python cod
 
 Backend tests use pytest and FastAPI `TestClient`; name files `apps/api/tests/test_*.py`. Cover role checks, GitHub login and session handling, plugin submission, ownership checks, moderation actions, OpenAPI filtering, and failure paths. Frontend tests use Vitest with `*.test.ts` naming, as in `src/utils/github.test.ts`. Run API tests after backend changes and `npm run build:web` after visible UI or routing changes.
 
-After route, navigation, head metadata, sitemap, prerender, or cache-header changes, verify a unique title, description, canonical and absolute Open Graph image; exactly one H1; crawlable `<a href>` navigation; query-backed search and pagination; listed plugin URLs in sitemap and prerender output; `noindex,nofollow` on private routes; a real 404 for unknown paths; and the expected Cache-Control class for HTML, assets, APIs, plugin feeds, and crawler files.
+After route, navigation, head metadata, sitemap, runtime HTML injection, or cache-header changes, verify a unique title, description, canonical and absolute Open Graph image; exactly one H1; crawlable `<a href>` navigation; query-backed search and pagination; listed plugin and active author URLs in `/sitemap.xml` and runtime-injected HTML; `noindex,nofollow` on private routes; a real 404 for unknown paths; and the expected Cache-Control class for HTML, fingerprinted assets, public static assets, APIs, plugin feeds, and crawler files.
 
 ## AGENTS.md Maintenance
 
@@ -39,14 +39,14 @@ SEO requirements are merge-blocking for public UI changes.
 - Every public page must use `@unhead/vue` `useHead` through the local SEO helper to set a unique Chinese `{页面名} - {品牌名}` title, description, self-referencing canonical URL, and Open Graph metadata. Plugin details require `SoftwareApplication` JSON-LD; the homepage requires `WebSite` plus `SearchAction`.
 - `og:image` must be an absolute URL to a 1200x630 PNG. Relative URLs and SVG Open Graph images are forbidden.
 - Every page must contain exactly one H1: the homepage positioning statement or the plugin display name. Images require descriptive alt text.
-- The sitemap must be generated at build time from `/v1/plugins`. Production builds must inject `VITE_BASE_URL=https://plugins.eloina.cn`; otherwise sitemap and prerender output silently degrade.
-- Unknown paths must return an actual HTTP 404. A blanket SPA fallback with status 200 is forbidden.
-- Public content pages must pass the prerender snapshot flow. Add every new public route to both sitemap and prerender route lists.
-- Head metadata has one source of truth: `index.html` provides defaults, route-level `useHead` owns runtime metadata, site configuration must not overwrite it, backend brand defaults must match the static title, and favicon MIME type must match its file.
+- `/sitemap.xml` and `/robots.txt` are generated dynamically by FastAPI at runtime from listed plugins and the configured runtime `WEB_URL` (never from untrusted `Host` / `X-Forwarded-Host` headers). Production deployments must configure `WEB_URL` to the public origin so canonical URLs, Open Graph tags, JSON-LD, sitemap, and robots stay accurate.
+- Unknown paths (including legacy 2-segment `/plugin/{id}` paths) must return an actual HTTP 404. A blanket SPA fallback with status 200 is forbidden.
+- Public content pages are served through FastAPI runtime HTML injection (`apps/api/app/seo_render.py`) using `<!-- SSR_HEAD_START -->`, `<!-- SSR_HEAD_END -->`, and `<!-- SSR_BODY -->` markers in `index.html`. Register every new public route in both runtime HTML rendering and dynamic `/sitemap.xml`.
+- Head metadata has one source of truth: FastAPI runtime injection renders initial `<head>` metadata from runtime site config (`WEB_URL`, `SITE_NAME`, `SITE_DESCRIPTION`), client-side `@unhead/vue` `useHead` via `useSeo.ts` owns runtime updates from `siteConfig`, `applySiteConfig()` must not manipulate `<head>` directly, backend brand defaults must match the static fallback title, and favicon MIME type must match its file.
 
 ## Cache Requirements
 
-The origin must explicitly classify every response with Cache-Control; CDN behavior is fallback only and must not override origin policy. Fingerprinted `/assets/*` files use `public, max-age=31536000, immutable`; HTML uses `public, max-age=0, must-revalidate`; APIs default to `private, no-store` with explicitly reviewed public exceptions; plugin feeds use `public, max-age=300`; and sitemap/robots/llms files use `public, max-age=3600`. Every new endpoint or static directory must be assigned a class and covered by a response-header test.
+The origin must explicitly classify every response with Cache-Control; CDN behavior is fallback only and must not override origin policy. Fingerprinted `/assets/*` files use `public, max-age=31536000, immutable`; HTML uses `public, max-age=0, must-revalidate`; non-fingerprinted public static assets in `dist/` (such as `/og-cover.png`, `/logo.webp`, `/font/*`) use `public, max-age=3600`; APIs default to `private, no-store` with explicitly reviewed public exceptions; plugin feeds use `public, max-age=300`; and sitemap/robots/llms files use `public, max-age=3600`. Every new endpoint or static directory must be assigned a class and covered by a response-header test.
 
 ## Commit & Pull Request Guidelines
 

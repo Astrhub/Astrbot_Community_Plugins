@@ -7,15 +7,10 @@ declare module "*.vue" {
 }
 
 interface ImportMetaEnv {
-  readonly VITE_BASE_URL?: string;
   readonly VITE_API_BASE_URL?: string;
   readonly VITE_COMMUNITY_REPO_URL?: string;
 }
 
 interface ImportMeta {
   readonly env: ImportMetaEnv;
-}
-
-interface Window {
-  __ASTRHUB_PRERENDER__?: boolean;
 }

@@ -40,18 +40,6 @@ function setup() {
 describe("AnnouncementButton", () => {
   beforeEach(() => {
     localStorage.clear();
-    delete window.__ASTRHUB_PRERENDER__;
-  });
-
-  it("does not capture a visitor announcement dialog during prerendering", async () => {
-    window.__ASTRHUB_PRERENDER__ = true;
-    const { wrapper, store } = setup();
-    store.announcements = [announcement];
-    await flushPromises();
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
-    expect(wrapper.find('button[aria-label="查看站点公告"]').exists()).toBe(true);
-    wrapper.unmount();
-    delete window.__ASTRHUB_PRERENDER__;
   });
 
   it("opens when announcements arrive and remembers them across visits while allowing manual reopening", async () => {

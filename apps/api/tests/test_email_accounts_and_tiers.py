@@ -666,7 +666,14 @@ def test_author_page_api_and_web_404_and_notification_email_fallback(
 ) -> None:
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir()
-    (dist_dir / "index.html").write_text("<html><body>SPA</body></html>", encoding="utf-8")
+    (dist_dir / "index.html").write_text(
+        (
+            "<!doctype html><html><head><!-- SSR_HEAD_START --><title>SPA</title>"
+            '<!-- SSR_HEAD_END --></head><body><div id="app"><!-- SSR_BODY --></div>'
+            "</body></html>"
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(main_module, "MARKET_WEB_DIST", dist_dir)
 
     client, store = _make_app(

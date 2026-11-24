@@ -14,7 +14,7 @@ import {
 import { PLUGIN_CATEGORY_LABELS, usePluginStore } from "../stores/plugins";
 import type { PluginDetail } from "../types";
 import { resolvePluginLogoUrl, setDefaultPluginLogo } from "../utils/github";
-import { DEFAULT_OG_IMAGE, useSeo } from "../composables/useSeo";
+import { useSeo, useSeoContext } from "../composables/useSeo";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
 import AppFooter from "../components/AppFooter.vue";
 import AppHeader from "../components/AppHeader.vue";
@@ -44,6 +44,7 @@ const categoryLabel = computed(() =>
   plugin.value ? PLUGIN_CATEGORY_LABELS[plugin.value.category] || "其他" : "其他",
 );
 const likesEnabled = computed(() => Boolean(siteConfig.value.market?.likes_enabled));
+const { absoluteSiteUrl } = useSeoContext();
 const jsonLd = computed(() => {
   if (!plugin.value) return null;
   return {
@@ -56,7 +57,7 @@ const jsonLd = computed(() => {
     softwareVersion: plugin.value.version || undefined,
     description: description.value,
     dateModified: plugin.value.updated_at || plugin.value.created_at || undefined,
-    url: `https://plugins.eloina.cn${canonicalPath.value}`,
+    url: absoluteSiteUrl(canonicalPath.value),
     interactionStatistic: [
       {
         "@type": "InteractionCounter",
@@ -84,7 +85,6 @@ useSeo({
       : description.value;
   }),
   path: canonicalPath,
-  image: DEFAULT_OG_IMAGE,
   type: "article",
   robots: computed(() => (notFound.value ? "noindex,nofollow" : "index,follow")),
   jsonLdId: "software-application-jsonld",
@@ -99,10 +99,13 @@ watch(
     loading.value = true;
     notFound.value = false;
     plugin.value = null;
+    if (!username || !name) {
+      notFound.value = true;
+      loading.value = false;
+      return;
+    }
     try {
-      const detail = username
-        ? await store.loadPluginByAuthor(username, name)
-        : await store.loadPluginDetail(name);
+      const detail = await store.loadPluginByAuthor(username, name);
       if (request !== detailRequest) return;
       plugin.value = detail;
       const path = pluginDetailPath(detail);
