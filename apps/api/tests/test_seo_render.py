@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -17,6 +19,7 @@ from app.seo_render import (
     PRIVATE_ROUTE_TITLES,
     TemplateMarkerError,
     clear_template_cache,
+    get_cached_sitemap_xml,
     load_index_template,
     resolve_site_origin,
     safe_external_http_url,
@@ -580,3 +583,87 @@ def test_persisted_config_failure_falls_back_to_env_settings(
     client.app.state._seo_sitemap_cache.clear()
     with pytest.raises(RuntimeError, match="plugins db unavailable"):
         client.get("/sitemap.xml")
+
+
+def test_concurrent_invalidation_prevents_stale_sitemap_cache_write(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    async def scenario() -> None:
+        read_started = asyncio.Event()
+        allow_resume = asyncio.Event()
+
+        class CoordinatedStore(InMemoryMarketStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pause_first_read = True
+
+            async def list_public_plugins(self) -> list[dict[str, Any]]:
+                snapshot = super().list_public_plugins()
+                if self.pause_first_read:
+                    self.pause_first_read = False
+                    read_started.set()
+                    await allow_resume.wait()
+                return snapshot
+
+        store = CoordinatedStore()
+        store.create_internal_user(
+            username="coreadmin",
+            password_hash=hash_password("password123"),
+            role="core_admin",
+        )
+        author = store.upsert_github_user({"id": "601", "login": "RaceAuthor"})
+        plugin = store.register_plugin(
+            author,
+            {
+                "name": "astrbot_plugin_race",
+                "display_name": "Race Plugin",
+                "desc": "Race condition plugin",
+                "author": "RaceAuthor",
+                "repo": "https://github.com/RaceAuthor/astrbot_plugin_race",
+            },
+        )
+
+        dist = tmp_path / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text(TEMPLATE_HTML, encoding="utf-8")
+        monkeypatch.setattr(main_module, "MARKET_WEB_DIST", dist)
+        clear_template_cache()
+        settings = load_settings(
+            {
+                "WEB_URL": "https://market.example.org",
+                "SITE_NAME": "测试插件市场",
+                "SITE_DESCRIPTION": "自定义市场描述",
+                "ENABLE_DEV_AUTH": "false",
+            }
+        )
+        app = main_module.create_app(settings=settings, store=store)
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            task_a = asyncio.create_task(client.get("/sitemap.xml"))
+            await asyncio.wait_for(read_started.wait(), timeout=2.0)
+
+            login = await client.post(
+                "/v1/auth/internal/login",
+                json={"username": "coreadmin", "password": "password123"},
+            )
+            assert login.status_code == 200
+            approve = await client.post(f"/v1/admin/plugins/{plugin['id']}/list")
+            assert approve.status_code == 200
+
+            allow_resume.set()
+            resp_a = await asyncio.wait_for(task_a, timeout=2.0)
+            assert resp_a.status_code == 200
+            assert "/plugin/RaceAuthor/astrbot_plugin_race" not in resp_a.text
+
+            # Request A must not repopulate the cache with stale XML after invalidation.
+            assert get_cached_sitemap_xml(app, "https://market.example.org") is None
+
+            resp_c = await client.get("/sitemap.xml")
+            assert resp_c.status_code == 200
+            assert "https://market.example.org/plugin/RaceAuthor/astrbot_plugin_race" in resp_c.text
+            cached = get_cached_sitemap_xml(app, "https://market.example.org")
+            assert cached is not None
+            assert "https://market.example.org/plugin/RaceAuthor/astrbot_plugin_race" in cached
+
+    asyncio.run(scenario())

@@ -128,6 +128,7 @@ from .seo_render import (
     build_text_response,
     canonical_author_username,
     get_cached_sitemap_xml,
+    get_sitemap_cache_generation,
     invalidate_seo_caches,
     plugin_owner_handle,
     plugin_public_path,
@@ -359,6 +360,7 @@ def create_app(
     app.state.email_daily_counter = {"date": "", "count": 0}
     app.state.github_api_token_index = 0
     app.state.rate_limit_counters = {}
+    app.state._seo_sitemap_cache_generation = 0
 
     app.add_middleware(
         CORSMiddleware,
@@ -2572,12 +2574,19 @@ async def _resolve_listed_plugin_for_web(
 def register_market_web_routes(app: FastAPI) -> None:
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"], include_in_schema=False)
     async def dynamic_sitemap(request: Request) -> Response:
+        generation = get_sitemap_cache_generation(request.app)
         ctx = await site_seo_context_for_request(request)
         xml = get_cached_sitemap_xml(request.app, ctx.origin)
         if xml is None:
             plugins = await call_store(request, "list_public_plugins")
             xml = build_sitemap_xml(ctx.origin, plugins)
-            set_cached_sitemap_xml(request.app, ctx.origin, xml)
+            if get_sitemap_cache_generation(request.app) == generation:
+                set_cached_sitemap_xml(
+                    request.app,
+                    ctx.origin,
+                    xml,
+                    expected_generation=generation,
+                )
         return build_text_response(
             request,
             xml,
