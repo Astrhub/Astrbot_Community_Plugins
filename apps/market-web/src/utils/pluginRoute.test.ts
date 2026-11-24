@@ -18,6 +18,25 @@ describe("pluginDetailPath", () => {
         owner_github_login: "Alice",
       }),
     ).toBe("/plugin/Alice/astrbot_plugin_same");
-    expect(pluginDetailPath({ id: "astrbot_plugin_legacy" })).toBe("/plugin/astrbot_plugin_legacy");
+    expect(pluginDetailPath({ id: "astrbot_plugin_legacy" })).toBeNull();
+    expect(
+      pluginDetailPath({
+        id: "astrbot_plugin_legacy",
+        name: "astrbot_plugin_legacy",
+        canonical_path: "",
+      }),
+    ).toBeNull();
+    expect(
+      pluginDetailPath({
+        id: "astrbot_plugin_legacy",
+        canonical_path: "/plugin/astrbot_plugin_legacy",
+      }),
+    ).toBeNull();
+    expect(
+      pluginDetailPath({
+        id: "plugin_opaque",
+        canonical_path: "/plugin/AlicePublic/astrbot_plugin_same",
+      }),
+    ).toBe("/plugin/AlicePublic/astrbot_plugin_same");
   });
 });

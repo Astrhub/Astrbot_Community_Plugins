@@ -94,6 +94,13 @@ const tagOptions = computed(() => {
     .map((tag) => ({ label: tag, value: tag }));
 });
 
+const pluginRows = computed(() =>
+  props.plugins.map((plugin) => ({
+    plugin,
+    detailPath: pluginDetailPath(plugin),
+  })),
+);
+
 watch(
   () => props.plugins,
   (plugins) => {
@@ -204,7 +211,7 @@ function savePlugin(plugin: Plugin): void {
       <n-empty v-if="plugins.length === 0" description="你还没有可管理的插件" />
 
       <div v-else class="plugin-list">
-        <article v-for="plugin in plugins" :key="plugin.id" class="pm-row">
+        <article v-for="{ plugin, detailPath } in pluginRows" :key="plugin.id" class="pm-row">
           <div class="pm-head">
             <img
               :src="resolvePluginLogoUrl(plugin, props.apiBaseUrl)"
@@ -248,7 +255,7 @@ function savePlugin(plugin: Plugin): void {
             </div>
 
             <div class="pm-actions">
-              <router-link class="pm-action-link" :to="pluginDetailPath(plugin)">
+              <router-link v-if="detailPath" class="pm-action-link" :to="detailPath">
                 查看
               </router-link>
               <n-button

@@ -42,6 +42,7 @@ const isUnlisting = shallowRef(false);
 const showUnlistModal = shallowRef(false);
 const unlistReason = shallowRef("");
 const displayName = computed(() => props.plugin.display_name || props.plugin.name);
+const detailPath = computed(() => pluginDetailPath(props.plugin));
 const formattedVersion = computed(() => {
   const version = String(props.plugin.version || "1.0.0");
   return version.startsWith("v") ? version : `v${version}`;
@@ -123,8 +124,9 @@ async function unlistPlugin(): Promise<void> {
     :aria-label="`插件：${displayName}`"
   >
     <router-link
+      v-if="detailPath"
       class="plugin-card__detail-link"
-      :to="pluginDetailPath(plugin)"
+      :to="detailPath"
       :aria-label="`查看 ${displayName} 插件详情`"
     />
 

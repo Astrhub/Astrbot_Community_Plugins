@@ -779,3 +779,60 @@ def test_author_page_and_api_include_legacy_github_login_plugins_without_duplica
     alias_redirect = client.get("/author/AliceGH", follow_redirects=False)
     assert alias_redirect.status_code == 301
     assert alias_redirect.headers["location"] == "/author/AlicePublic"
+
+
+def test_ownerless_plugin_omits_two_segment_canonical_path_and_links(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    store = InMemoryMarketStore()
+    alice = store.upsert_github_user({"id": "711", "login": "ValidOwner"})
+    owned = store.register_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_owned",
+            "display_name": "Owned Plugin",
+            "desc": "Owned plugin",
+            "author": "ValidOwner",
+            "repo": "https://github.com/ValidOwner/astrbot_plugin_owned",
+        },
+    )
+    orphan = store.register_plugin(
+        {"id": "orphan-owner-id"},
+        {
+            "name": "astrbot_plugin_ownerless",
+            "display_name": "Ownerless Plugin",
+            "desc": "Abnormal record without owner handle",
+            "author": "nobody",
+            "repo": "https://github.com/nobody/astrbot_plugin_ownerless",
+        },
+    )
+    for item in store.state["plugins"]:
+        if item["id"] == orphan["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = ""
+            break
+    store.update_plugin_status(owned["id"], "listed", None)
+    store.update_plugin_status(orphan["id"], "listed", None)
+
+    client, _ = _setup_client(tmp_path, monkeypatch, store=store)
+
+    listed_api = client.get("/v1/plugins")
+    assert listed_api.status_code == 200
+    by_name = {item["name"]: item for item in listed_api.json()["items"]}
+    assert by_name["astrbot_plugin_owned"]["canonical_path"] == (
+        "/plugin/ValidOwner/astrbot_plugin_owned"
+    )
+    assert by_name["astrbot_plugin_ownerless"]["canonical_path"] == ""
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert '<a href="/plugin/ValidOwner/astrbot_plugin_owned">' in home.text
+    assert "astrbot_plugin_ownerless" not in home.text
+
+    sitemap = client.get("/sitemap.xml")
+    assert sitemap.status_code == 200
+    assert "https://market.example.org/plugin/ValidOwner/astrbot_plugin_owned" in sitemap.text
+    assert "astrbot_plugin_ownerless" not in sitemap.text
+
+    legacy_404 = client.get(f"/plugin/{orphan['id']}", follow_redirects=False)
+    assert legacy_404.status_code == 404
