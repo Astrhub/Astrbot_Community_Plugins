@@ -16,7 +16,6 @@ from app.config import load_settings
 from app.seo_render import (
     EXTERNAL_SITEMAPS,
     FALLBACK_SITE_ORIGIN,
-    PRIVATE_ROUTE_TITLES,
     TemplateMarkerError,
     clear_template_cache,
     get_cached_sitemap_xml,
@@ -215,7 +214,17 @@ def test_public_private_and_error_route_seo_matrix(tmp_path: Path, monkeypatch: 
         assert '<meta name="robots" content="index,follow" />' in resp.text
 
     # Exact private routes return 200 with noindex,nofollow and unique H1
-    for path, heading in PRIVATE_ROUTE_TITLES.items():
+    expected_private_routes = (
+        ("/setup", "安装向导"),
+        ("/settings", "系统设置"),
+        ("/settings/personal", "账号与插件"),
+        ("/notifications", "消息中心"),
+        ("/admin", "后台登录"),
+        ("/admin/settings", "系统设置"),
+        ("/admin/plugins", "插件审查工作台"),
+        ("/plugin-workbench", "插件审查工作台"),
+    )
+    for path, heading in expected_private_routes:
         resp = client.get(path)
         assert resp.status_code == 200, path
         assert _count_h1(resp.text) == 1
@@ -377,6 +386,16 @@ def test_dynamic_sitemap_only_lists_authors_with_listed_plugins_and_invalidates_
     assert "https://market.example.org/plugin/Alice/astrbot_plugin_alpha" in listed_sitemap.text
     assert "https://market.example.org/author/Alice" in listed_sitemap.text
     assert "/author/empty_user" not in listed_sitemap.text
+    assert get_cached_sitemap_xml(client.app, "https://market.example.org") is not None
+
+    # Saving non-origin settings under the same WEB_URL must still invalidate the cached sitemap.
+    same_origin_settings = client.get("/v1/admin/settings").json()
+    same_origin_settings["site"]["name"] = "更新后的插件市场"
+    same_origin_saved = client.put("/v1/admin/settings", json=same_origin_settings)
+    assert same_origin_saved.status_code == 200
+    assert get_cached_sitemap_xml(client.app, "https://market.example.org") is None
+    updated_home = client.get("/")
+    assert "<title>AstrBot 社区插件 - 更新后的插件市场</title>" in updated_home.text
 
     # Admin updates WEB_URL via settings -> sitemap immediately reflects new origin.
     current_settings = client.get("/v1/admin/settings").json()
