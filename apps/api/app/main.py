@@ -1400,7 +1400,7 @@ def register_routes(app: FastAPI) -> None:
             if author
             else username
         )
-        plugins = await call_store(request, "list_author_plugins", canonical_username)
+        plugins = await _list_listed_plugins_for_author(request, author, canonical_username)
         if not author and not plugins:
             raise error(404, "Author not found")
         identities = (
@@ -2571,6 +2571,47 @@ async def _resolve_listed_plugin_for_web(
     return plugin
 
 
+async def _list_listed_plugins_for_author(
+    request: Request,
+    author: dict[str, Any] | None,
+    canonical_username: str,
+) -> list[dict[str, Any]]:
+    plugins = list(await call_store(request, "list_author_plugins", canonical_username) or [])
+    if not author:
+        return plugins
+    github_login = str(author.get("github_login") or "").strip()
+    if not github_login or github_login.lower() == canonical_username.lower():
+        return plugins
+    legacy_plugins = list(await call_store(request, "list_author_plugins", github_login) or [])
+    if not legacy_plugins:
+        return plugins
+    author_id = str(author.get("id") or "").strip()
+    merged: dict[str, dict[str, Any]] = {}
+    for plugin in plugins:
+        plugin_id = str(plugin.get("id") or "")
+        if plugin_id:
+            merged[plugin_id] = plugin
+    for plugin in legacy_plugins:
+        plugin_id = str(plugin.get("id") or "")
+        if not plugin_id or plugin_id in merged:
+            continue
+        plugin_owner_id = str(plugin.get("owner_user_id") or "").strip()
+        if author_id and plugin_owner_id:
+            if plugin_owner_id != author_id:
+                continue
+        elif str(plugin.get("owner_username") or "").strip():
+            continue
+        merged[plugin_id] = plugin
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            str(item.get("updated_at") or item.get("created_at") or ""),
+            str(item.get("id") or ""),
+        ),
+        reverse=True,
+    )
+
+
 def register_market_web_routes(app: FastAPI) -> None:
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"], include_in_schema=False)
     async def dynamic_sitemap(request: Request) -> Response:
@@ -2673,7 +2714,7 @@ def register_market_web_routes(app: FastAPI) -> None:
             if not author:
                 author = await call_store(request, "get_user_by_github_login", username)
             canonical_username = canonical_author_username(author, fallback=username)
-            plugins = await call_store(request, "list_author_plugins", canonical_username)
+            plugins = await _list_listed_plugins_for_author(request, author, canonical_username)
             if not author and not plugins:
                 return render_market_web_page(
                     request, ctx, build_not_found_page(ctx), status_code=404

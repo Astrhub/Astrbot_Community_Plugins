@@ -67,6 +67,80 @@ def test_list_author_plugins_returns_only_listed_plugins_for_author():
         assert data["items"][0]["name"] == "astrbot_plugin_listed"
 
 
+def test_list_author_plugins_merges_legacy_github_login_and_avoids_extra_query_when_same():
+    with make_client() as client:
+        store = client.app.state.store
+        calls: list[str] = []
+        original_list_author_plugins = store.list_author_plugins
+
+        def tracked_list_author_plugins(username: str):
+            calls.append(username)
+            return original_list_author_plugins(username)
+
+        store.list_author_plugins = tracked_list_author_plugins
+
+        same_user = store.upsert_github_user({"id": "801", "login": "same_name", "name": "Same"})
+        same_plugin = store.register_plugin(
+            same_user,
+            {
+                "name": "astrbot_plugin_same_name",
+                "desc": "Same name",
+                "author": "Same",
+                "repo": "https://github.com/same_name/astrbot_plugin_same_name",
+            },
+        )
+        store.update_plugin_status(same_plugin["id"], "listed", same_user["id"])
+
+        same_resp = client.get("/v1/authors/same_name/plugins")
+        assert same_resp.status_code == 200
+        assert calls == ["same_name"]
+
+        calls.clear()
+        renamed = store.upsert_github_user({"id": "802", "login": "LegacyGH", "name": "Renamed"})
+        for stored_user in store.state["users"]:
+            if stored_user["id"] == renamed["id"]:
+                stored_user["public_username"] = "PublicName"
+                renamed = dict(stored_user)
+                break
+        newer = store.register_plugin(
+            renamed,
+            {
+                "name": "astrbot_plugin_newer",
+                "desc": "Newer canonical",
+                "author": "Renamed",
+                "repo": "https://github.com/LegacyGH/astrbot_plugin_newer",
+            },
+        )
+        older_legacy = store.register_plugin(
+            renamed,
+            {
+                "name": "astrbot_plugin_older_legacy",
+                "desc": "Older legacy",
+                "author": "Renamed",
+                "repo": "https://github.com/LegacyGH/astrbot_plugin_older_legacy",
+            },
+        )
+        store.update_plugin_status(newer["id"], "listed", renamed["id"])
+        store.update_plugin_status(older_legacy["id"], "listed", renamed["id"])
+        for item in store.state["plugins"]:
+            if item["id"] == newer["id"]:
+                item["owner_username"] = "PublicName"
+                item["owner_github_login"] = "LegacyGH"
+                item["updated_at"] = "2026-11-24T12:00:00Z"
+            elif item["id"] == older_legacy["id"]:
+                item["owner_username"] = ""
+                item["owner_github_login"] = "LegacyGH"
+                item["updated_at"] = "2026-11-23T12:00:00Z"
+
+        merged_resp = client.get("/v1/authors/PublicName/plugins")
+        assert merged_resp.status_code == 200
+        assert calls == ["PublicName", "LegacyGH"]
+        assert [item["name"] for item in merged_resp.json()["items"]] == [
+            "astrbot_plugin_newer",
+            "astrbot_plugin_older_legacy",
+        ]
+
+
 def test_metadata_preview_strict_validation_rejects_missing_required_fields(monkeypatch):
     async def mock_fetch_metadata(*args, **kwargs):
         return {"name": "astrbot_plugin_test"}

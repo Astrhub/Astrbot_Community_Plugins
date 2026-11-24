@@ -667,3 +667,115 @@ def test_concurrent_invalidation_prevents_stale_sitemap_cache_write(
             assert "https://market.example.org/plugin/RaceAuthor/astrbot_plugin_race" in cached
 
     asyncio.run(scenario())
+
+
+def test_author_page_and_api_include_legacy_github_login_plugins_without_duplicates(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    store = InMemoryMarketStore()
+    alice = store.upsert_github_user({"id": "701", "login": "AliceGH", "name": "Alice Public"})
+    for stored_user in store.state["users"]:
+        if stored_user["id"] == alice["id"]:
+            stored_user["public_username"] = "AlicePublic"
+            alice = dict(stored_user)
+            break
+
+    other = store.create_email_user(
+        username="other_user",
+        email="other@example.com",
+        password_hash=hash_password("password123"),
+    )
+
+    canonical_plugin = store.register_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_canonical",
+            "display_name": "规范插件",
+            "desc": "Canonical plugin",
+            "author": "Alice Public",
+            "repo": "https://github.com/AliceGH/astrbot_plugin_canonical",
+        },
+    )
+    legacy_plugin = store.register_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_legacy_gh",
+            "display_name": "旧身份插件",
+            "desc": "Legacy plugin",
+            "author": "Alice Public",
+            "repo": "https://github.com/AliceGH/astrbot_plugin_legacy_gh",
+        },
+    )
+    unlisted_legacy = store.register_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_legacy_unlisted",
+            "display_name": "未上架旧插件",
+            "desc": "Unlisted legacy plugin",
+            "author": "Alice Public",
+            "repo": "https://github.com/AliceGH/astrbot_plugin_legacy_unlisted",
+        },
+    )
+    unrelated_plugin = store.register_plugin(
+        other,
+        {
+            "name": "astrbot_plugin_unrelated",
+            "display_name": "他人插件",
+            "desc": "Belongs to another user",
+            "author": "Other",
+            "repo": "https://github.com/other/astrbot_plugin_unrelated",
+        },
+    )
+
+    store.update_plugin_status(canonical_plugin["id"], "listed", None)
+    store.update_plugin_status(legacy_plugin["id"], "listed", None)
+    store.update_plugin_status(unrelated_plugin["id"], "listed", None)
+
+    for item in store.state["plugins"]:
+        if item["id"] == canonical_plugin["id"]:
+            item["owner_username"] = "AlicePublic"
+            item["owner_github_login"] = "AliceGH"
+            item["updated_at"] = "2026-11-20T10:00:00Z"
+        elif item["id"] == legacy_plugin["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = "AliceGH"
+            item["updated_at"] = "2026-11-22T10:00:00Z"
+        elif item["id"] == unlisted_legacy["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = "AliceGH"
+        elif item["id"] == unrelated_plugin["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = "AliceGH"
+            item["owner_user_id"] = other["id"]
+
+    client, _ = _setup_client(tmp_path, monkeypatch, store=store)
+
+    api_resp = client.get("/v1/authors/AlicePublic/plugins")
+    assert api_resp.status_code == 200
+    api_items = api_resp.json()["items"]
+    assert [item["name"] for item in api_items] == [
+        "astrbot_plugin_legacy_gh",
+        "astrbot_plugin_canonical",
+    ]
+
+    alias_api_resp = client.get("/v1/authors/AliceGH/plugins")
+    assert alias_api_resp.status_code == 200
+    assert alias_api_resp.json()["username"] == "AlicePublic"
+    assert [item["name"] for item in alias_api_resp.json()["items"]] == [
+        "astrbot_plugin_legacy_gh",
+        "astrbot_plugin_canonical",
+    ]
+
+    ssr_resp = client.get("/author/AlicePublic")
+    assert ssr_resp.status_code == 200
+    assert ssr_resp.text.count("astrbot_plugin_canonical") == 1
+    assert ssr_resp.text.count("astrbot_plugin_legacy_gh") == 1
+    assert "astrbot_plugin_legacy_unlisted" not in ssr_resp.text
+    assert "astrbot_plugin_unrelated" not in ssr_resp.text
+    assert ssr_resp.text.index("astrbot_plugin_legacy_gh") < ssr_resp.text.index(
+        "astrbot_plugin_canonical"
+    )
+
+    alias_redirect = client.get("/author/AliceGH", follow_redirects=False)
+    assert alias_redirect.status_code == 301
+    assert alias_redirect.headers["location"] == "/author/AlicePublic"

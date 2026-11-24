@@ -971,6 +971,29 @@ def test_author_namespace_uses_public_username_for_aliases_and_legacy_plugins() 
     assert len(by_github_login.json()["items"]) == 1
     assert len(client.get("/v1/authors/alice_local/plugins").json()["items"]) == 1
 
+    legacy_plugin = store.submit_plugin(
+        user,
+        {
+            "name": "astrbot_plugin_legacy_owner",
+            "desc": "Legacy GitHub login record",
+            "author": "alice_local",
+            "repo": "https://github.com/alice/astrbot_plugin_legacy_owner",
+        },
+    )
+    store.update_plugin_status(legacy_plugin["id"], "listed", None)
+    for stored_plugin in store.state["plugins"]:
+        if stored_plugin["id"] == legacy_plugin["id"]:
+            stored_plugin["owner_username"] = ""
+            stored_plugin["owner_github_login"] = "alice_gh"
+            break
+    merged_names = {
+        item["name"] for item in client.get("/v1/authors/alice_local/plugins").json()["items"]
+    }
+    assert merged_names == {"astrbot_plugin_demo", "astrbot_plugin_legacy_owner"}
+    assert {
+        item["name"] for item in client.get("/v1/authors/alice_gh/plugins").json()["items"]
+    } == merged_names
+
     seeded = InMemoryMarketStore(
         {
             "users": [
