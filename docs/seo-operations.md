@@ -7,9 +7,10 @@
 - 前端构建（`npm run build:web`）只需执行 `vp build`，不再需要 Chromium、`VITE_BASE_URL` 或在插件变更后重新构建前端。
 - `/sitemap.xml` 自动汇总静态公开页（`/`、`/submit`、`/docs/rest`）、全部已上架插件的规范 3 段路径 `/plugin/{owner}/{name}`，以及拥有已上架插件的作者页 `/author/{owner}`，并在插件上架、下架、元数据更新、GitHub 同步和系统设置保存后立即失效内存缓存（默认 60 秒短缓存）。
 - 站点规范域名严格取自运行期配置 `WEB_URL`（环境变量或核心管理员后台系统设置），不信任请求头 `Host` 或 `X-Forwarded-Host`，避免 Host Header 投毒污染索引与 CDN 缓存。
+- 当数据库等持久化配置读取失败时，运行时 SEO 上下文会记录包含请求路径的异常日志，并回退到进程环境变量配置（`WEB_URL`、`SITE_NAME`、`SITE_SUBTITLE`、`SITE_DESCRIPTION`），不会使用过期的内存配置副本。此时 `/robots.txt`、不查询插件数据库的公开/私有页面以及与环境 `WEB_URL` 相同 origin 的已命中 `/sitemap.xml` 缓存仍可继续响应；若 `/sitemap.xml` 缓存未命中，重建过程仍依赖插件数据库。
 
 > [!IMPORTANT]
-> 公网部署时必须在运行期配置合法的 `WEB_URL`（例如 `WEB_URL=https://your-domain`）；若 `WEB_URL` 为空或非法，服务端会记录告警并回退到 `http://127.0.0.1:8787`。
+> 公网部署时必须在运行期配置正确的环境级 `WEB_URL`（例如 `WEB_URL=https://your-domain`）；若环境变量中的 `WEB_URL` 与后台持久化配置不一致，数据库故障回退后会切换到环境 origin 对应的缓存键，无法命中此前按持久化 origin 生成的 sitemap 缓存。若 `WEB_URL` 为空或非法，服务端会记录告警并回退到 `http://127.0.0.1:8787`。
 
 ## Cloudflare 手动检查清单
 

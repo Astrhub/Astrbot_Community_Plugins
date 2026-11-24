@@ -508,3 +508,75 @@ def test_malformed_urls_fallback_and_return_400_without_500(
         payload["site"][field] = bad_value
         resp = client.put("/v1/admin/settings", json=payload)
         assert resp.status_code == 400, (field, bad_value, resp.text)
+
+
+def test_persisted_config_failure_falls_back_to_env_settings(
+    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    class FailingOptionsStore(InMemoryMarketStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_options = False
+            self.fail_plugins = False
+
+        def list_options(self) -> dict[str, str]:
+            if self.fail_options:
+                raise RuntimeError("options db unavailable")
+            return super().list_options()
+
+        def list_public_plugins(self) -> list[dict[str, Any]]:
+            if self.fail_plugins:
+                raise RuntimeError("plugins db unavailable")
+            return super().list_public_plugins()
+
+    store = FailingOptionsStore()
+    author = store.upsert_github_user({"id": "501", "login": "EnvAuthor"})
+    plugin = store.register_plugin(
+        author,
+        {
+            "name": "astrbot_plugin_cached",
+            "display_name": "Cached",
+            "desc": "Cached plugin",
+            "author": "EnvAuthor",
+            "repo": "https://github.com/EnvAuthor/astrbot_plugin_cached",
+        },
+    )
+    store.update_plugin_status(plugin["id"], "listed", None)
+
+    client, _ = _setup_client(
+        tmp_path,
+        monkeypatch,
+        env={"WEB_URL": "https://env.example.org"},
+        store=store,
+    )
+
+    # Pre-populate sitemap cache for the environment origin while DB is healthy.
+    warm = client.get("/sitemap.xml")
+    assert warm.status_code == 200
+    assert "https://env.example.org/plugin/EnvAuthor/astrbot_plugin_cached" in warm.text
+
+    # Simulate DB failure for both site options and plugin listings.
+    store.fail_options = True
+    store.fail_plugins = True
+
+    with caplog.at_level("ERROR", logger="app.main"):
+        robots = client.get("/robots.txt")
+    assert robots.status_code == 200
+    assert "Sitemap: https://env.example.org/sitemap.xml" in robots.text
+    assert any(
+        "/robots.txt" in record.message and "options db unavailable" in (record.exc_text or "")
+        for record in caplog.records
+    )
+
+    submit = client.get("/submit")
+    assert submit.status_code == 200
+    assert '<link rel="canonical" href="https://env.example.org/submit" />' in submit.text
+
+    cached_sitemap = client.get("/sitemap.xml")
+    assert cached_sitemap.status_code == 200
+    assert "https://env.example.org/plugin/EnvAuthor/astrbot_plugin_cached" in cached_sitemap.text
+
+    # On sitemap cache miss, plugin DB query errors must still propagate.
+    client.app.state._seo_sitemap_cache.clear()
+    with pytest.raises(RuntimeError, match="plugins db unavailable"):
+        client.get("/sitemap.xml")

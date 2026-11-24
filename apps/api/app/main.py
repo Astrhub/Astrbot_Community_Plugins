@@ -2497,7 +2497,16 @@ def register_routes(app: FastAPI) -> None:
 
 async def site_seo_context_for_request(request: Request) -> SiteSeoContext:
     settings = get_settings(request)
-    runtime_config = await effective_runtime_config(request)
+    try:
+        runtime_config = await effective_runtime_config(request)
+    except Exception:
+        LOGGER.exception(
+            "Failed to load persisted runtime site config for %s %s; "
+            "falling back to environment settings",
+            request.method,
+            request.url.path,
+        )
+        return build_site_seo_context(settings)
     return build_site_seo_context(settings, runtime_config)
 
 
