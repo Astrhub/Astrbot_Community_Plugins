@@ -61,6 +61,7 @@ class ArtifactRuntime:
     generation: int = 0
     repository: Any | None = None
     storage: Any | None = None
+    object_storage: Any | None = None
     service: Any | None = None
     job_runner: Any | None = None
     _component_errors: list[str] = field(default_factory=list)
@@ -100,7 +101,10 @@ class ArtifactRuntime:
                     if hasattr(store, "_pool")
                     else InMemoryArtifactRepository(store)
                 )
-                storage = create_artifact_storage(self.config)
+                storage = create_artifact_storage(
+                    self.config,
+                    master_key=self.settings.oauth_credential_key,
+                )
                 service = ArtifactService(
                     repository=repository,
                     storage=storage,
@@ -211,9 +215,15 @@ class ArtifactRuntime:
         storage: Any,
         service: Any,
         job_runner: Any,
+        object_storage: Any | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
+        self.object_storage = (
+            object_storage
+            if object_storage is not None
+            else getattr(storage, "object_storage", None)
+        )
         self.service = service
         self.job_runner = job_runner
         self._component_errors.clear()

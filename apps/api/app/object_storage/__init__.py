@@ -1,0 +1,77 @@
+"""Unified object storage package for artifacts, avatars, and multi-profile backends."""
+
+from .credentials import (
+    InMemoryStorageSecretStore,
+    StorageSecretStore,
+    decrypt_storage_secret,
+    derive_storage_credential_cipher,
+    encrypt_storage_secret,
+    require_storage_credential_key,
+)
+from .driver import ObjectStorageDriver
+from .local_fs import LocalFilesystemDriver
+from .models import (
+    PURPOSE_ALLOWED_BACKENDS,
+    ObjectListingEntry,
+    ObjectRange,
+    ObjectStorageError,
+    StorageBackend,
+    StorageBinding,
+    StorageCapabilities,
+    StorageObjectRecord,
+    StorageObjectStatus,
+    StorageProfile,
+    StorageProfileStatus,
+    StoragePurpose,
+    StoredObject,
+    build_public_url,
+    guess_content_type,
+    validate_namespace,
+    validate_object_key,
+    validate_path_segment,
+    validate_profile_id,
+)
+from .s3 import S3ObjectStorageDriver
+from .service import (
+    LEGACY_PUBLISHED_PROFILE_ID,
+    LEGACY_QUARANTINE_PROFILE_ID,
+    ObjectStorageService,
+    build_legacy_object_storage_service,
+    build_local_legacy_object_storage_service,
+)
+
+__all__ = [
+    "InMemoryStorageSecretStore",
+    "LEGACY_PUBLISHED_PROFILE_ID",
+    "LEGACY_QUARANTINE_PROFILE_ID",
+    "LocalFilesystemDriver",
+    "ObjectListingEntry",
+    "ObjectRange",
+    "ObjectStorageDriver",
+    "ObjectStorageError",
+    "ObjectStorageService",
+    "PURPOSE_ALLOWED_BACKENDS",
+    "S3ObjectStorageDriver",
+    "StorageBackend",
+    "StorageBinding",
+    "StorageCapabilities",
+    "StorageObjectRecord",
+    "StorageObjectStatus",
+    "StorageProfile",
+    "StorageProfileStatus",
+    "StoragePurpose",
+    "StorageSecretStore",
+    "StoredObject",
+    "build_legacy_object_storage_service",
+    "build_local_legacy_object_storage_service",
+    "build_public_url",
+    "decrypt_storage_secret",
+    "derive_storage_credential_cipher",
+    "encrypt_storage_secret",
+    "guess_content_type",
+    "require_storage_credential_key",
+    "validate_namespace",
+    "validate_object_key",
+    "validate_path_segment",
+    "validate_profile_id",
+]
