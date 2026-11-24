@@ -187,19 +187,20 @@ def filter_openapi_by_role(schema: dict[str, Any], role: str) -> dict[str, Any]:
     for path, path_item in schema.get("paths", {}).items():
         if not isinstance(path_item, dict):
             continue
-        ops: dict[str, Any] = {}
+        path_meta: dict[str, Any] = {}
+        visible_ops: dict[str, Any] = {}
         for method, operation in path_item.items():
             if method not in _HTTP_METHODS:
-                ops[method] = operation
+                path_meta[method] = operation
                 continue
             if not isinstance(operation, dict):
-                ops[method] = operation
+                visible_ops[method] = operation
                 continue
             op_tags = set(operation.get("tags") or [])
             if op_tags & allowed:
-                ops[method] = operation
-        if ops:
-            filtered_paths[path] = ops
+                visible_ops[method] = operation
+        if visible_ops:
+            filtered_paths[path] = {**path_meta, **visible_ops}
 
     filtered_tags = [tag for tag in schema.get("tags", []) if tag.get("name") in allowed]
 

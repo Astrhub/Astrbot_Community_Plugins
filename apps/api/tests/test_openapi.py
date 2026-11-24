@@ -513,10 +513,58 @@ def test_openapi_filter_prunes_transitive_and_discriminator_refs_without_mutatin
 
     empty_filtered = filter_openapi_by_role(
         {
-            "paths": {"/only-core": {"get": {"tags": ["core-admin"]}}},
+            "paths": {
+                "/only-core": {
+                    "parameters": [{"$ref": "#/components/parameters/AdminTraceId"}],
+                    "get": {"tags": ["core-admin"]},
+                }
+            },
             "tags": [],
-            "components": {"schemas": {"SetupConfig": {"type": "object"}}},
+            "components": {
+                "parameters": {
+                    "AdminTraceId": {
+                        "name": "X-Admin-Trace",
+                        "in": "header",
+                        "schema": {"$ref": "#/components/schemas/AdminTraceSchema"},
+                    }
+                },
+                "schemas": {
+                    "SetupConfig": {"type": "object"},
+                    "AdminTraceSchema": {"type": "string"},
+                },
+            },
         },
         "public",
     )
+    assert empty_filtered["paths"] == {}
     assert "components" not in empty_filtered
+
+    kept_meta_filtered = filter_openapi_by_role(
+        {
+            "paths": {
+                "/visible": {
+                    "parameters": [{"$ref": "#/components/parameters/PublicLocale"}],
+                    "get": {"tags": ["plugins"]},
+                    "delete": {"tags": ["core-admin"]},
+                }
+            },
+            "tags": [],
+            "components": {
+                "parameters": {
+                    "PublicLocale": {
+                        "name": "locale",
+                        "in": "query",
+                        "schema": {"$ref": "#/components/schemas/LocaleSchema"},
+                    }
+                },
+                "schemas": {
+                    "LocaleSchema": {"type": "string"},
+                    "UnusedSecretSchema": {"type": "object"},
+                },
+            },
+        },
+        "public",
+    )
+    assert set(kept_meta_filtered["paths"]["/visible"]) == {"parameters", "get"}
+    assert set(kept_meta_filtered["components"]["parameters"]) == {"PublicLocale"}
+    assert set(kept_meta_filtered["components"]["schemas"]) == {"LocaleSchema"}

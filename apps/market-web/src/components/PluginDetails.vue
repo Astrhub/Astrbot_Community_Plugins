@@ -356,7 +356,7 @@ const canManagePlugin = computed(() => {
   const plugin = activePlugin.value;
   if (!user || !plugin?.id) return false;
   if (["core_admin", "admin"].includes(user.role)) return true;
-  if (plugin.can_manage === true) return true;
+  if (typeof plugin.can_manage === "boolean") return plugin.can_manage;
   const pluginOwnerUsername = String(plugin.owner_username || "")
     .trim()
     .toLowerCase();
@@ -374,6 +374,15 @@ const canManagePlugin = computed(() => {
     (pluginGithubLogin && userGithubLogin && pluginGithubLogin === userGithubLogin),
   );
 });
+
+watch(
+  () => currentUser.value?.id,
+  (nextId, prevId) => {
+    if (nextId !== prevId && (show.value || props.embedded) && props.plugin?.id) {
+      void fetchDetail();
+    }
+  },
+);
 
 watch(
   () => props.show,
