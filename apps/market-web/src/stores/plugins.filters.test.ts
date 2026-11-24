@@ -51,4 +51,28 @@ describe("multi-tag filtering", () => {
     store.setSelectedTags([]);
     expect(store.filteredPlugins).toHaveLength(4);
   });
+  it("does not match internal owner_user_id during public plugin search", () => {
+    setActivePinia(createPinia());
+    const store = usePluginStore();
+    store.plugins = [
+      {
+        id: "p1",
+        name: "astrbot_plugin_weather",
+        display_name: "天气查询",
+        author: "Alice",
+        owner_username: "alice",
+        owner_user_id: "usr_internal_secret_999",
+        tags: ["工具"],
+        category: "utilities",
+        stars: 0,
+        likes: 0,
+        comments_count: 0,
+        list_index: 0,
+      } as Plugin,
+    ];
+    store.searchQuery = "usr_internal_secret_999";
+    expect(store.filteredPlugins).toHaveLength(0);
+    store.searchQuery = "alice";
+    expect(store.filteredPlugins).toHaveLength(1);
+  });
 });

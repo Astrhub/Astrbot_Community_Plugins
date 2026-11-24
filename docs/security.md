@@ -66,6 +66,11 @@ Cookie 安全属性如下：
 
 权限检查函数集中在 `apps/api/app/auth.py` 与 `apps/api/app/oauth_identities.py`（包括 `resolve_account_tier()`、`can_issue_write_api_key()`、`can_edit_plugin()`、`can_configure_plugin_cdn()` 与 `can_manage_plugin_submission()`）。所有敏感接口均在后端路由层强制鉴权，个人 `market:write` API Key 在签发及写权限校验时还会实时重检持有者的五级身份及有效 OAuth 绑定（管理员除外）；前端界面上的角色显隐仅用于交互展示，不作为安全边界。
 
+### 接口文档裁剪与公开字段白名单
+
+- **OpenAPI 引用闭包裁剪**：`GET /openapi.json` 在按五级角色过滤 `paths` 与 `tags` 后，还会对 `components` 执行 `$ref` 可达性闭包裁剪，只保留当前角色可见路由实际引用的 schema 与组件。匿名、注册用户、开发者与普通管理员视图不会暴露 `SetupConfig`、数据库／Redis／SMTP／OAuth 配置与 `SystemSettingsPayload` 等系统配置模型；开发调试路由 `GET /v1/auth/debug-login` 通过 `include_in_schema=False` 排除在所有角色的 OpenAPI 文档之外。
+- **公开插件响应白名单**：`GET /v1/plugins`、`GET /v1/authors/{username}/plugins`、`GET /v1/plugins/{plugin_id}`、`GET /v1/plugins/by-author/{username}/{name}` 及点赞／取消点赞响应统一通过 `public_market_plugin()` 白名单塑形，剥离 `owner_user_id`、`moderated_by`、`github_sync_*`、`unlist_*`、`current_artifact_id`、`repo_external_id`、`normalized_repo`、`cdn_generation`、`cdn_whitelist` 及内部 AI 分类元数据；详情接口以布尔字段 `can_manage` 替代向公开响应透传 `owner_user_id`。审核与同步等内部字段仅在需鉴权的 `/v1/me/plugins`、`/v1/admin/plugins` 等所有者／管理员接口返回。
+
 ## API Key
 
 API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer <key>` 鉴权，分为三种来源：
@@ -180,4 +185,5 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 - `/v1/setup` 失败不写 `.env`、初始化完成后自动关闭以及进程内存储热切换。
 - GitHub OAuth `state` 校验、本地回环回调拒绝、短期加密授权凭据吊销与发布前仓库身份复核。
 - 插件命名空间冲突、评论软删除、点赞唯一约束、分类白名单与标签数量上限。
+- OpenAPI 分级文档的 `components` 引用闭包裁剪、`/v1/auth/debug-login` 文档隐藏，以及公开插件接口的字段白名单过滤。
 - Docker Compose 与 systemd 部署模板的最小权限边界和 fail-closed 默认值。

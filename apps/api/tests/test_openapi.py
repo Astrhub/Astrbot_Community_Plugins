@@ -319,3 +319,252 @@ def test_llms_txt_admin_includes_admin_section():
     assert "GET /v1/admin/plugins" in content
     assert "/v1/core/" not in content
     assert "/v1/core-admin/" not in content
+
+
+def _collect_all_component_refs(node: object, refs: set[str]) -> None:
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/"):
+            refs.add(ref)
+        for value in node.values():
+            _collect_all_component_refs(value, refs)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_all_component_refs(item, refs)
+
+
+def test_openapi_non_core_roles_exclude_setup_and_settings_schemas():
+    sensitive_schemas = {
+        "SetupConfig",
+        "PostgresSetupConfig",
+        "RedisSetupConfig",
+        "AdminSetupConfig",
+        "AuthSetupConfig",
+        "SiteSetupConfig",
+        "MarketSetupConfig",
+        "GithubSetupConfig",
+        "OAuthProviderSetupConfig",
+        "SmtpSetupConfig",
+        "EmailSetupConfig",
+        "CloudflareEmailSetupConfig",
+        "SystemSettingsPayload",
+        "TestEmailPayload",
+    }
+
+    for account in (
+        None,
+        ("regularuser", "userpass123"),
+        ("devuser", "devpass123"),
+        ("adminuser", "adminpass123"),
+    ):
+        client, _ = _client_with_store()
+        if account is not None:
+            _login(client, *account)
+        schema = client.get("/openapi.json").json()
+        schema_names = set(schema.get("components", {}).get("schemas", {}))
+        assert sensitive_schemas.isdisjoint(schema_names), (
+            f"Unexpected setup schemas leaked for {account}: {sensitive_schemas & schema_names}"
+        )
+        if account in (None, ("regularuser", "userpass123")):
+            assert "PluginGithubRefreshPayload" not in schema_names
+        else:
+            assert "PluginGithubRefreshPayload" in schema_names
+
+    core_client, _ = _client_with_store()
+    _login(core_client, "coreadmin", "testpass123")
+    core_schema_names = set(
+        core_client.get("/openapi.json").json().get("components", {}).get("schemas", {})
+    )
+    assert sensitive_schemas <= core_schema_names
+
+
+def test_openapi_excludes_debug_login_for_every_role():
+    for account in (
+        None,
+        ("regularuser", "userpass123"),
+        ("devuser", "devpass123"),
+        ("adminuser", "adminpass123"),
+        ("coreadmin", "testpass123"),
+    ):
+        client, _ = _client_with_store()
+        if account is not None:
+            _login(client, *account)
+        paths = client.get("/openapi.json").json().get("paths", {})
+        assert "/v1/auth/debug-login" not in paths
+
+
+def test_openapi_components_are_self_contained_and_reachable_for_every_role():
+    for account in (
+        None,
+        ("regularuser", "userpass123"),
+        ("devuser", "devpass123"),
+        ("adminuser", "adminpass123"),
+        ("coreadmin", "testpass123"),
+    ):
+        client, _ = _client_with_store()
+        if account is not None:
+            _login(client, *account)
+        doc = client.get("/openapi.json").json()
+        components = doc.get("components", {})
+        all_refs: set[str] = set()
+        _collect_all_component_refs(doc.get("paths", {}), all_refs)
+        _collect_all_component_refs(components, all_refs)
+        for ref in all_refs:
+            parts = ref.split("/")
+            assert len(parts) >= 4 and parts[0] == "#" and parts[1] == "components"
+            section, name = parts[2], parts[3].replace("~1", "/").replace("~0", "~")
+            assert name in components.get(section, {}), f"Dangling ref {ref} for {account}"
+
+        path_refs: set[str] = set()
+        _collect_all_component_refs(doc.get("paths", {}), path_refs)
+        seen: set[tuple[str, str]] = set()
+        pending = {
+            (r.split("/")[2], r.split("/")[3].replace("~1", "/").replace("~0", "~"))
+            for r in path_refs
+        }
+        while pending:
+            section, name = pending.pop()
+            if (section, name) in seen:
+                continue
+            seen.add((section, name))
+            nested: set[str] = set()
+            _collect_all_component_refs(components[section][name], nested)
+            for ref in nested:
+                parts = ref.split("/")
+                pending.add((parts[2], parts[3].replace("~1", "/").replace("~0", "~")))
+
+        kept_schemas = set(components.get("schemas", {}))
+        reachable_schemas = {name for section, name in seen if section == "schemas"}
+        assert kept_schemas == reachable_schemas
+
+
+def test_openapi_filter_prunes_transitive_and_discriminator_refs_without_mutating_source():
+    from copy import deepcopy
+
+    from app.openapi_filter import filter_openapi_by_role
+
+    source = {
+        "paths": {
+            "/public": {
+                "get": {
+                    "tags": ["plugins"],
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/PublicEnvelope"}
+                                }
+                            }
+                        }
+                    },
+                }
+            },
+            "/secret": {
+                "post": {
+                    "tags": ["core-admin"],
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/SetupConfig"}
+                            }
+                        }
+                    },
+                }
+            },
+        },
+        "tags": [{"name": "plugins"}, {"name": "core-admin"}],
+        "components": {
+            "securitySchemes": {"BearerAuth": {"type": "http", "scheme": "bearer"}},
+            "schemas": {
+                "PublicEnvelope": {
+                    "type": "object",
+                    "properties": {"item": {"$ref": "#/components/schemas/PublicItem"}},
+                    "discriminator": {
+                        "propertyName": "kind",
+                        "mapping": {
+                            "a": "#/components/schemas/VariantA",
+                            "b": "VariantB",
+                        },
+                    },
+                },
+                "PublicItem": {"type": "object"},
+                "VariantA": {"type": "object"},
+                "VariantB": {"type": "object"},
+                "SetupConfig": {
+                    "type": "object",
+                    "properties": {"db": {"$ref": "#/components/schemas/PostgresSetupConfig"}},
+                },
+                "PostgresSetupConfig": {"type": "object"},
+            },
+        },
+    }
+    snapshot = deepcopy(source)
+
+    filtered = filter_openapi_by_role(source, "public")
+
+    assert source == snapshot
+    assert set(filtered["components"]["schemas"]) == {
+        "PublicEnvelope",
+        "PublicItem",
+        "VariantA",
+        "VariantB",
+    }
+    assert filtered["components"]["securitySchemes"] == source["components"]["securitySchemes"]
+
+    empty_filtered = filter_openapi_by_role(
+        {
+            "paths": {
+                "/only-core": {
+                    "parameters": [{"$ref": "#/components/parameters/AdminTraceId"}],
+                    "get": {"tags": ["core-admin"]},
+                }
+            },
+            "tags": [],
+            "components": {
+                "parameters": {
+                    "AdminTraceId": {
+                        "name": "X-Admin-Trace",
+                        "in": "header",
+                        "schema": {"$ref": "#/components/schemas/AdminTraceSchema"},
+                    }
+                },
+                "schemas": {
+                    "SetupConfig": {"type": "object"},
+                    "AdminTraceSchema": {"type": "string"},
+                },
+            },
+        },
+        "public",
+    )
+    assert empty_filtered["paths"] == {}
+    assert "components" not in empty_filtered
+
+    kept_meta_filtered = filter_openapi_by_role(
+        {
+            "paths": {
+                "/visible": {
+                    "parameters": [{"$ref": "#/components/parameters/PublicLocale"}],
+                    "get": {"tags": ["plugins"]},
+                    "delete": {"tags": ["core-admin"]},
+                }
+            },
+            "tags": [],
+            "components": {
+                "parameters": {
+                    "PublicLocale": {
+                        "name": "locale",
+                        "in": "query",
+                        "schema": {"$ref": "#/components/schemas/LocaleSchema"},
+                    }
+                },
+                "schemas": {
+                    "LocaleSchema": {"type": "string"},
+                    "UnusedSecretSchema": {"type": "object"},
+                },
+            },
+        },
+        "public",
+    )
+    assert set(kept_meta_filtered["paths"]["/visible"]) == {"parameters", "get"}
+    assert set(kept_meta_filtered["components"]["parameters"]) == {"PublicLocale"}
+    assert set(kept_meta_filtered["components"]["schemas"]) == {"LocaleSchema"}

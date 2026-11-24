@@ -356,14 +356,33 @@ const canManagePlugin = computed(() => {
   const plugin = activePlugin.value;
   if (!user || !plugin?.id) return false;
   if (["core_admin", "admin"].includes(user.role)) return true;
+  if (typeof plugin.can_manage === "boolean") return plugin.can_manage;
+  const pluginOwnerUsername = String(plugin.owner_username || "")
+    .trim()
+    .toLowerCase();
+  const userPublicUsername = String(user.public_username || "")
+    .trim()
+    .toLowerCase();
+  const pluginGithubLogin = String(plugin.owner_github_login || "")
+    .trim()
+    .toLowerCase();
+  const userGithubLogin = String(user.github_login || "")
+    .trim()
+    .toLowerCase();
   return Boolean(
-    plugin.owner_user_id === user.id ||
-    (plugin.owner_username &&
-      user.public_username &&
-      plugin.owner_username === user.public_username) ||
-    (plugin.owner_github_login && plugin.owner_github_login === user.github_login),
+    (pluginOwnerUsername && userPublicUsername && pluginOwnerUsername === userPublicUsername) ||
+    (pluginGithubLogin && userGithubLogin && pluginGithubLogin === userGithubLogin),
   );
 });
+
+watch(
+  () => currentUser.value?.id,
+  (nextId, prevId) => {
+    if (nextId !== prevId && (show.value || props.embedded) && props.plugin?.id) {
+      void fetchDetail();
+    }
+  },
+);
 
 watch(
   () => props.show,

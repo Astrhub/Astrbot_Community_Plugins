@@ -3328,3 +3328,168 @@ async def run_pg_redis_store_round_trip(database_url: str, redis_url: str) -> No
         assert await store.get_user_by_session(session["token"]) is None
     finally:
         await store.close()
+
+
+def test_public_plugin_endpoints_strip_internal_fields_and_preserve_owner_admin_views() -> None:
+    client = make_client()
+    store = client.app.state.store
+
+    admin_login = client.get("/v1/auth/debug-login?login=moderator").json()["user"]
+    store.update_user_role(admin_login["id"], Role.ADMIN.value)
+
+    owner_login = client.get("/v1/auth/debug-login?login=alice").json()["user"]
+    submission = client.post(
+        "/v1/plugins/submissions",
+        json={
+            **plugin_payload(
+                name="astrbot_plugin_public_clean",
+                repo="https://github.com/alice/astrbot_plugin_public_clean",
+            ),
+            "display_name": "Clean Public Plugin",
+        },
+    )
+    assert submission.status_code == 201, submission.text
+    plugin_id = submission.json()["id"]
+
+    store.update_plugin_metadata(
+        plugin_id,
+        {
+            "short_desc": "简短简介",
+            "version": "1.2.3",
+            "repo_version": "1.2.3",
+            "astrbot_version": ">=4.0.0",
+            "support_platforms": ["aiocqhttp"],
+            "readme_url": "https://raw.githubusercontent.com/alice/astrbot_plugin_public_clean/main/README.md",
+            "changelog_url": "https://raw.githubusercontent.com/alice/astrbot_plugin_public_clean/main/CHANGELOG.md",
+            "i18n": {"en": {"display_name": "Clean Plugin"}},
+            "repo_external_id": "998877",
+            "normalized_repo": "https://github.com/alice/astrbot_plugin_public_clean",
+            "current_artifact_id": "artifact-internal-1",
+            "cdn_enabled": False,
+            "cdn_generation": 3,
+            "cdn_whitelist": True,
+            "category_source": "ai",
+            "category_explicit": False,
+            "suggested_category": "utilities",
+            "category_confidence": 0.91,
+            "category_reason": "Internal classifier reason",
+            "github_sync_status": "error",
+            "github_sync_error": "GitHub API rate limit exceeded on token #1",
+            "github_synced_at": "2026-11-24T00:00:00Z",
+            "github_next_sync_at": "2026-11-24T01:00:00Z",
+            "github_refresh_interval_seconds": 3600,
+            "unlist_reason": "历史下架内部原因",
+            "unlisted_at": "2026-11-23T00:00:00Z",
+            "unlisted_by": admin_login["id"],
+            "download_url": "https://cdn.example.com/should-be-cleared.zip",
+        },
+    )
+    store.update_plugin_status(plugin_id, "listed", admin_login["id"])
+    # Restore unlist_* keys after listing to ensure even stale internal fields are never leaked.
+    store.update_plugin_metadata(
+        plugin_id,
+        {
+            "unlist_reason": "stale internal reason",
+            "unlisted_at": "2026-11-23T00:00:00Z",
+            "unlisted_by": admin_login["id"],
+        },
+    )
+
+    comment_resp = client.post(f"/v1/plugins/{plugin_id}/comments", json={"body": "Author note"})
+    assert comment_resp.status_code == 201
+
+    forbidden_public_keys = {
+        "owner_user_id",
+        "moderated_by",
+        "github_sync_error",
+        "github_sync_status",
+        "github_synced_at",
+        "github_next_sync_at",
+        "github_refresh_interval_seconds",
+        "unlist_reason",
+        "unlisted_at",
+        "unlisted_by",
+        "current_artifact_id",
+        "artifact_publication_status",
+        "artifact_download_url",
+        "repo_external_id",
+        "normalized_repo",
+        "cdn_generation",
+        "cdn_whitelist",
+        "category_source",
+        "category_explicit",
+        "suggested_category",
+        "category_confidence",
+        "category_reason",
+    }
+    expected_public_keys = {
+        "id",
+        "name",
+        "display_name",
+        "desc",
+        "short_desc",
+        "author",
+        "repo",
+        "repo_provider",
+        "tags",
+        "version",
+        "repo_version",
+        "astrbot_version",
+        "support_platforms",
+        "category",
+        "status",
+        "cdn_enabled",
+        "download_url",
+        "readme_url",
+        "changelog_url",
+        "i18n",
+        "owner_username",
+        "owner_github_login",
+        "canonical_path",
+    }
+
+    client.post("/v1/auth/logout")
+
+    listed_item = client.get("/v1/plugins").json()["items"][0]
+    author_item = client.get("/v1/authors/alice/plugins").json()["items"][0]
+    detail_by_id = client.get(f"/v1/plugins/{plugin_id}").json()
+    detail_by_author = client.get("/v1/plugins/by-author/alice/astrbot_plugin_public_clean").json()
+
+    for payload in (listed_item, author_item, detail_by_id, detail_by_author):
+        assert forbidden_public_keys.isdisjoint(payload.keys()), (
+            f"Leaked internal keys: {forbidden_public_keys & set(payload.keys())}"
+        )
+        assert expected_public_keys <= set(payload.keys())
+        assert payload["download_url"] == ""
+        assert payload["canonical_path"] == "/plugin/alice/astrbot_plugin_public_clean"
+
+    assert detail_by_id["can_manage"] is False
+    assert detail_by_author["can_manage"] is False
+    assert detail_by_id["comments"][0]["is_plugin_author"] is True
+
+    client.get("/v1/auth/debug-login?login=bob")
+    liked = client.post(f"/v1/plugins/{plugin_id}/like").json()
+    unliked = client.post(f"/v1/plugins/{plugin_id}/unlike").json()
+    for payload in (liked, unliked):
+        assert forbidden_public_keys.isdisjoint(payload.keys())
+        assert payload["can_manage"] is False
+
+    client.get("/v1/auth/debug-login?login=alice")
+    owner_detail = client.get(f"/v1/plugins/{plugin_id}").json()
+    assert forbidden_public_keys.isdisjoint(owner_detail.keys())
+    assert owner_detail["can_manage"] is True
+
+    my_plugins_item = client.get("/v1/me/plugins").json()["items"][0]
+    assert my_plugins_item["owner_user_id"] == owner_login["id"]
+    assert my_plugins_item["github_sync_status"] == "error"
+    assert my_plugins_item["cdn_whitelist"] is True
+
+    client.get("/v1/auth/debug-login?login=moderator")
+    admin_detail = client.get(f"/v1/plugins/{plugin_id}").json()
+    assert forbidden_public_keys.isdisjoint(admin_detail.keys())
+    assert admin_detail["can_manage"] is True
+
+    admin_plugins_item = client.get("/v1/admin/plugins").json()["items"][0]
+    assert admin_plugins_item["owner_user_id"] == owner_login["id"]
+    assert admin_plugins_item["moderated_by"] == admin_login["id"]
+    assert admin_plugins_item["github_sync_status"] == "error"

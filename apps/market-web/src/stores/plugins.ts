@@ -424,7 +424,6 @@ export const usePluginStore = defineStore("plugins", () => {
       plugin.author,
       plugin.owner_username,
       plugin.owner_github_login,
-      plugin.owner_user_id,
       plugin.repo,
       plugin.category,
       getPluginCategoryLabel(plugin.category),
