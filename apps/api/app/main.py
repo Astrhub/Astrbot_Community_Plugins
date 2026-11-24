@@ -31,7 +31,7 @@ from redis.exceptions import RedisError
 from .artifacts import build_artifact_runtime
 from .artifacts.archive import PrecheckError, parse_plugin_metadata_bytes
 from .artifacts.routes import build_artifact_router
-from .cdn import CdnSubscriptions, cdn_enabled, process_cdn_reviews
+from .cdn import CdnSubscriptions, cdn_enabled, cdn_whitelist, process_cdn_reviews
 from .artifacts.github_source import (
     COMMIT_PATTERN,
     ResolvedGithubSource,
@@ -72,6 +72,22 @@ from .email_challenges import (
     reserve_site_email_daily_limit,
 )
 from .env_file import write_env_file
+from .git_sources.credentials import require_oauth_credential_key
+from .git_sources.models import (
+    ATOMGIT_DEFAULT_API_BASE,
+    PROVIDER_LABELS,
+    THIRD_PARTY_PROVIDERS,
+    GitSourceError,
+    RepositoryRef,
+    normalize_atomgit_api_base,
+    parse_repository_ref,
+)
+from .git_sources.registry import (
+    ensure_valid_provider_token,
+    get_provider_adapter,
+    public_oauth_providers_config,
+)
+from .git_sources.routes import build_git_provider_router
 from .github_authorization import (
     access_for_request,
     require_repository_access,
@@ -79,6 +95,7 @@ from .github_authorization import (
     verify_publication_access,
 )
 from .llms_txt import build_llms_txt
+from .media_proxy import build_media_proxy_router
 from .oauth_identities import (
     GITHUB_INSTANCE_URL,
     GITHUB_PROVIDER,
@@ -234,6 +251,23 @@ SYSTEM_OPTION_KEYS = {
     "GITHUB_METADATA_SYNC_ENABLED",
     "GITHUB_METADATA_SYNC_INTERVAL_SECONDS",
     "GITHUB_SCOPE",
+    "GITLAB_CALLBACK_URL",
+    "GITLAB_CLIENT_ID",
+    "GITLAB_LOGIN_ENABLED",
+    "GITLAB_SCOPE",
+    "GITEE_CALLBACK_URL",
+    "GITEE_CLIENT_ID",
+    "GITEE_LOGIN_ENABLED",
+    "GITEE_SCOPE",
+    "ATOMGIT_API_BASE_URL",
+    "ATOMGIT_CALLBACK_URL",
+    "ATOMGIT_CLIENT_ID",
+    "ATOMGIT_LOGIN_ENABLED",
+    "ATOMGIT_SCOPE",
+    "GITEA_CALLBACK_URL",
+    "GITEA_CLIENT_ID",
+    "GITEA_LOGIN_ENABLED",
+    "GITEA_SCOPE",
     "LOGIN_AGREEMENT_ENABLED",
     "LOGIN_AGREEMENT_TEXT",
     "MARKET_COMMENTS_ENABLED",
@@ -350,6 +384,7 @@ def create_app(
         return response
 
     app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(GitSourceError, git_source_error_handler)
     app.add_exception_handler(PluginIdentityConflict, plugin_identity_conflict_handler)
     app.add_exception_handler(GithubIdentityConflict, github_identity_conflict_handler)
     app.add_exception_handler(UserIdentityConflict, user_identity_conflict_handler)
@@ -366,8 +401,33 @@ def create_app(
             send_email=send_email,
         )
     )
+    app.include_router(
+        build_git_provider_router(
+            runtime_settings_for_app=runtime_settings_for_app,
+            call_store=call_store,
+            current_user=current_user,
+            require_user=require_user,
+            set_cookie=set_cookie,
+            enforce_user_rpm_limit=enforce_user_rpm_limit,
+            github_list_repositories=lambda request, user, page: access_for_request(
+                request, user
+            ).list_repositories(page),
+        )
+    )
+    app.include_router(
+        build_media_proxy_router(
+            current_user_fn=current_user,
+            runtime_settings_fn=runtime_settings_for_app,
+        )
+    )
     register_market_web_routes(app)
     return app
+
+
+async def git_source_error_handler(_: Request, exc: GitSourceError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code, content={"error": exc.message, "code": exc.code}
+    )
 
 
 async def user_identity_conflict_handler(_: Request, exc: UserIdentityConflict) -> JSONResponse:
@@ -1085,6 +1145,7 @@ def register_routes(app: FastAPI) -> None:
                     "next": "Set GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET and GITHUB_CALLBACK_URL",
                 },
             )
+        require_oauth_credential_key(settings.oauth_credential_key)
 
         state = str(uuid.uuid4())
         params = urlencode(
@@ -1117,6 +1178,7 @@ def register_routes(app: FastAPI) -> None:
         request: Request, code: str | None = None, state: str | None = None
     ) -> Response:
         settings = await runtime_settings_for_app(request.app)
+        require_oauth_credential_key(settings.oauth_credential_key)
         expected_state = request.cookies.get(settings.oauth_state_cookie_name)
         if not code or not state or not expected_state or state != expected_state:
             raise error(400, "Invalid OAuth callback")
@@ -1131,16 +1193,15 @@ def register_routes(app: FastAPI) -> None:
             user = await call_store(request, "upsert_github_user", profile_payload)
         await promote_org_admin_if_needed(request, user, access_token)
         session = await call_store(request, "create_session", user["id"])
-        if settings.github_client_secret:
-            await save_authorization(
-                request.app.state.store,
-                settings,
-                session["token"],
-                user["id"],
-                str(profile["id"]),
-                profile["login"],
-                access_token,
-            )
+        await save_authorization(
+            request.app.state.store,
+            settings,
+            session["token"],
+            user["id"],
+            str(profile["id"]),
+            profile["login"],
+            access_token,
+        )
         destination = request.cookies.get("github_oauth_return_to", "/")
         if destination not in {"/submit", "/settings/personal", "/plugin-workbench"}:
             destination = ""
@@ -1461,6 +1522,7 @@ def register_routes(app: FastAPI) -> None:
                 user,
                 store=request.app.state.store,
                 strict=bool(payload.strict),
+                app=request.app,
             )
         except GithubMetadataError as exc:
             raise error(exc.status_code, exc.message) from exc
@@ -1487,6 +1549,12 @@ def register_routes(app: FastAPI) -> None:
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
         data = payload.model_dump()
+        cdn_whitelist_flag = bool(data.pop("cdn_whitelist", False))
+        if cdn_whitelist_flag and not is_admin(user):
+            raise HTTPException(
+                403,
+                {"code": "cdn_whitelist_admin_only", "error": "CDN 白名单直发仅限管理员使用"},
+            )
         data["category_explicit"] = "category" in payload.model_fields_set
         validate_plugin_submission(data, settings)
         local_admin_override = allow_local_admin_repo_override(
@@ -1503,6 +1571,13 @@ def register_routes(app: FastAPI) -> None:
             expected_repository_id=data.pop("repository_id", ""),
         )
         data["repo"] = proof["repo"]
+        data["repo_provider"] = str(
+            proof.get("provider") or parse_repository_ref(proof["repo"]).provider
+        )
+        data["repo_external_id"] = str(proof.get("repo_external_id") or proof.get("id") or "")
+        data["normalized_repo"] = str(
+            proof.get("normalized_repo") or parse_repository_ref(proof["repo"]).normalized_repo
+        )
         existing = await call_store(request, "get_owned_plugin_by_name", user["id"], data["name"])
         if existing:
             if not can_edit_plugin(user, existing):
@@ -1522,6 +1597,7 @@ def register_routes(app: FastAPI) -> None:
                 settings,
                 user,
                 store=request.app.state.store,
+                app=request.app,
             )
         )
         artifact_runtime = request.app.state.artifact_runtime
@@ -1536,7 +1612,11 @@ def register_routes(app: FastAPI) -> None:
                 )
             plugin = await call_store(request, "register_plugin", user, data)
             if existing:
-                metadata = {key: value for key, value in data.items() if key != "cdn_enabled"}
+                metadata = {
+                    key: value
+                    for key, value in data.items()
+                    if key not in {"cdn_enabled", "cdn_whitelist"}
+                }
                 metadata["repo_version"] = data.get("version") or plugin.get("repo_version") or ""
                 plugin = await call_store(request, "update_plugin_metadata", plugin["id"], metadata)
                 invalidate_seo_caches(request.app)
@@ -1545,6 +1625,7 @@ def register_routes(app: FastAPI) -> None:
                 enabled=True,
                 actor=user,
                 authorization=proof,
+                whitelist=cdn_whitelist_flag,
             )
             queued = await CdnSubscriptions(request.app.state.store).get(plugin["id"])
             return {**plugin, "cdn_review_pending": queued["state"] != "submitted"}
@@ -1553,6 +1634,7 @@ def register_routes(app: FastAPI) -> None:
             plugin["id"],
             enabled=False,
             actor=user,
+            whitelist=False,
         )
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
@@ -1574,10 +1656,30 @@ def register_routes(app: FastAPI) -> None:
         if not can_configure_plugin_cdn(user, plugin):
             raise error(403, "Forbidden")
         subscriptions = CdnSubscriptions(request.app.state.store)
-        if cdn_enabled(plugin) == payload.enabled and await subscriptions.get(plugin_id):
+        existing_sub = await subscriptions.get(plugin_id)
+        whitelist_unchanged = payload.whitelist is None or bool(payload.whitelist) == cdn_whitelist(
+            plugin
+        )
+        if cdn_enabled(plugin) == payload.enabled and existing_sub and whitelist_unchanged:
             return plugin
+        if payload.whitelist is True:
+            if not is_admin(user):
+                raise HTTPException(
+                    403,
+                    {"code": "cdn_whitelist_admin_only", "error": "CDN 白名单直发仅限管理员使用"},
+                )
+            owner_id = str(plugin.get("owner_user_id") or "")
+            owner = await call_store(request, "get_user_by_id", owner_id) if owner_id else None
+            if not owner or not is_admin(owner):
+                raise HTTPException(
+                    403,
+                    {
+                        "code": "cdn_whitelist_admin_owner_required",
+                        "error": "CDN 白名单直发仅支持管理员本人名下的插件",
+                    },
+                )
         proof = None
-        if payload.enabled:
+        if payload.enabled and (not cdn_enabled(plugin) or not existing_sub):
             await require_submission_oauth_gate(request, user, allow_override=is_core_admin(user))
             runtime = request.app.state.artifact_runtime
             if not runtime.available or runtime.service is None:
@@ -1590,6 +1692,7 @@ def register_routes(app: FastAPI) -> None:
             enabled=payload.enabled,
             actor=user,
             authorization=proof,
+            whitelist=payload.whitelist,
         )
 
     @app.get(
@@ -1681,16 +1784,25 @@ def register_routes(app: FastAPI) -> None:
         if "author" in patch:
             patch["author"] = validate_plugin_author(patch["author"])
         if "repo" in patch:
-            validate_github_repo(patch["repo"])
+            validate_git_repo(patch["repo"])
             proof = await require_repository_access(
                 request, user, patch["repo"], admin_override=True
             )
             patch["repo"] = proof["repo"]
+            patch["repo_provider"] = str(
+                proof.get("provider") or parse_repository_ref(proof["repo"]).provider
+            )
+            patch["repo_external_id"] = str(proof.get("repo_external_id") or proof.get("id") or "")
+            patch["normalized_repo"] = str(
+                proof.get("normalized_repo") or parse_repository_ref(proof["repo"]).normalized_repo
+            )
             patch.update(
                 await safe_fetch_plugin_github_metadata(
                     patch["repo"],
                     await runtime_settings_for_app(request.app),
                     user,
+                    store=request.app.state.store,
+                    app=request.app,
                 )
             )
         if "tags" in patch:
@@ -2626,6 +2738,10 @@ def cache_control_for_path(path: str, content_type: str = "") -> str:
         return "public, max-age=3600"
     if normalized in {"/v1/plugins", "/v1/site", "/v1/authors"}:
         return "public, max-age=60"
+    if re.fullmatch(r"/v1/plugins/[^/]+/(?:logo|readme-asset)", normalized) or re.fullmatch(
+        r"/v1/authors/[^/]+/avatar", normalized
+    ):
+        return "public, max-age=3600"
     if normalized.startswith("/v1/"):
         return "private, no-store"
     if "text/html" in content_type:
@@ -2701,6 +2817,44 @@ def settings_with_runtime_config(settings: Settings, runtime_config: dict[str, s
             runtime_config.get("GITHUB_LOGIN_ENABLED"),
             settings.github_login_enabled,
         ),
+        gitlab_login_enabled=parse_bool(
+            runtime_config.get("GITLAB_LOGIN_ENABLED"),
+            settings.gitlab_login_enabled,
+        ),
+        gitlab_client_id=runtime_config.get("GITLAB_CLIENT_ID", settings.gitlab_client_id),
+        gitlab_client_secret=settings.gitlab_client_secret,
+        gitlab_callback_url=runtime_config.get("GITLAB_CALLBACK_URL", settings.gitlab_callback_url),
+        gitlab_scope=runtime_config.get("GITLAB_SCOPE", settings.gitlab_scope),
+        gitee_login_enabled=parse_bool(
+            runtime_config.get("GITEE_LOGIN_ENABLED"),
+            settings.gitee_login_enabled,
+        ),
+        gitee_client_id=runtime_config.get("GITEE_CLIENT_ID", settings.gitee_client_id),
+        gitee_client_secret=settings.gitee_client_secret,
+        gitee_callback_url=runtime_config.get("GITEE_CALLBACK_URL", settings.gitee_callback_url),
+        gitee_scope=runtime_config.get("GITEE_SCOPE", settings.gitee_scope),
+        atomgit_login_enabled=parse_bool(
+            runtime_config.get("ATOMGIT_LOGIN_ENABLED"),
+            settings.atomgit_login_enabled,
+        ),
+        atomgit_client_id=runtime_config.get("ATOMGIT_CLIENT_ID", settings.atomgit_client_id),
+        atomgit_client_secret=settings.atomgit_client_secret,
+        atomgit_callback_url=runtime_config.get(
+            "ATOMGIT_CALLBACK_URL", settings.atomgit_callback_url
+        ),
+        atomgit_scope=runtime_config.get("ATOMGIT_SCOPE", settings.atomgit_scope),
+        atomgit_api_base_url=runtime_config.get(
+            "ATOMGIT_API_BASE_URL", settings.atomgit_api_base_url
+        ),
+        gitea_login_enabled=parse_bool(
+            runtime_config.get("GITEA_LOGIN_ENABLED"),
+            settings.gitea_login_enabled,
+        ),
+        gitea_client_id=runtime_config.get("GITEA_CLIENT_ID", settings.gitea_client_id),
+        gitea_client_secret=settings.gitea_client_secret,
+        gitea_callback_url=runtime_config.get("GITEA_CALLBACK_URL", settings.gitea_callback_url),
+        gitea_scope=runtime_config.get("GITEA_SCOPE", settings.gitea_scope),
+        oauth_credential_key=settings.oauth_credential_key,
         public_login_enabled=parse_bool(
             runtime_config.get("PUBLIC_LOGIN_ENABLED"),
             settings.public_login_enabled,
@@ -3467,7 +3621,7 @@ def validate_plugin_submission(payload: dict[str, Any], settings: Settings | Non
             raise error(400, "Missing required plugin fields")
     validate_plugin_name(payload["name"])
     payload["author"] = validate_plugin_author(payload["author"])
-    validate_github_repo(payload["repo"])
+    validate_git_repo(payload["repo"])
     payload["category"] = validate_plugin_category(payload.get("category", ""))
     validate_plugin_tag_count(payload.get("tags") or [], settings)
 
@@ -3511,6 +3665,13 @@ def validate_plugin_author(author: Any) -> str:
 def validate_plugin_name(name: str) -> None:
     if not PLUGIN_NAME_PATTERN.match(name or ""):
         raise error(400, "Plugin name must use astrbot_plugin_ prefix")
+
+
+def validate_git_repo(repo: str) -> RepositoryRef:
+    try:
+        return parse_repository_ref(repo)
+    except GitSourceError as exc:
+        raise error(exc.status_code, exc.message) from exc
 
 
 def validate_github_repo(repo: str) -> re.Match[str]:
@@ -3751,7 +3912,8 @@ async def refresh_plugin_github_metadata_for_plugin(
             settings,
             user,
             token=token,
-            store=app.state.store if token else None,
+            store=app.state.store,
+            app=app,
         )
     except GithubMetadataError as exc:
         await update_plugin_github_sync_failure(app.state.store, plugin, settings, exc.message)
@@ -3789,11 +3951,42 @@ async def safe_fetch_plugin_github_metadata(
     *,
     token: str = "",
     store: Any | None = None,
+    app: FastAPI | None = None,
 ) -> dict[str, Any]:
     try:
-        return await fetch_plugin_github_metadata(repo, settings, user, token=token, store=store)
+        return await fetch_plugin_github_metadata(
+            repo, settings, user, token=token, store=store, app=app
+        )
     except GithubMetadataError:
         return {}
+
+
+def _git_adapter_for(app: FastAPI | None, settings: Settings, provider: str) -> Any:
+    if app is not None:
+        factory = getattr(app.state, "git_provider_adapter_factory", None)
+        if factory is not None:
+            return factory(settings, provider)
+    return get_provider_adapter(settings, provider)
+
+
+async def _optional_provider_access_token(
+    store: Any | None,
+    settings: Settings,
+    user: Mapping[str, Any] | None,
+    provider: str,
+    adapter: Any,
+) -> str:
+    if not store or not user or not user.get("id"):
+        return ""
+    if len(str(settings.oauth_credential_key or "").strip()) < 16:
+        return ""
+    try:
+        _, token_set = await ensure_valid_provider_token(
+            store, settings, user, provider, adapter=adapter
+        )
+        return token_set.access_token
+    except HTTPException:
+        return ""
 
 
 async def fetch_publication_repository(app: FastAPI, repo: str) -> dict[str, Any]:
@@ -3910,12 +4103,24 @@ async def fetch_plugin_readme_document(
     plugin: dict[str, Any],
     path: str,
 ) -> dict[str, Any] | None:
-    match = GITHUB_REPO_PATTERN.fullmatch(str(plugin.get("repo") or "").strip())
+    raw_repo = str(plugin.get("repo") or "").strip()
+    try:
+        ref = parse_repository_ref(raw_repo)
+    except GitSourceError:
+        return None
+    settings = await runtime_settings_for_app(app)
+    if ref.provider in THIRD_PARTY_PROVIDERS:
+        adapter = _git_adapter_for(app, settings, ref.provider)
+        try:
+            return await adapter.fetch_readme_document(ref, path=path)
+        except GitSourceError as exc:
+            raise GithubMetadataError(exc.message, exc.status_code) from exc
+
+    match = GITHUB_REPO_PATTERN.fullmatch(ref.repo_url)
     if not match:
         return None
     owner = match.group("owner")
     repo_name = match.group("repo")
-    settings = await runtime_settings_for_app(app)
     runtime_config = await load_system_options(app.state.store)
     token_statuses = parse_github_api_token_statuses(
         runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
@@ -4028,10 +4233,49 @@ async def fetch_plugin_submission_metadata_preview(
     user: dict[str, Any],
     store: Any | None = None,
     strict: bool = False,
+    app: FastAPI | None = None,
 ) -> dict[str, Any]:
-    match = validate_github_repo(repo)
-    owner = match.group("owner")
-    repo_name = match.group("repo")
+    ref = validate_git_repo(repo)
+    if ref.provider in THIRD_PARTY_PROVIDERS:
+        preview = build_plugin_submission_metadata_preview(
+            ref.owner,
+            ref.repo_name,
+            settings=settings,
+            repo_url=ref.repo_url,
+        )
+        if settings.github_metadata_sync_enabled:
+            adapter = _git_adapter_for(app, settings, ref.provider)
+            access_token = await _optional_provider_access_token(
+                store, settings, user, ref.provider, adapter
+            )
+            try:
+                metadata = await adapter.fetch_repository_metadata(ref, access_token=access_token)
+            except GitSourceError as exc:
+                raise GithubMetadataError(exc.message, exc.status_code) from exc
+            preview = build_plugin_submission_metadata_preview(
+                ref.owner,
+                ref.repo_name,
+                metadata=metadata,
+                settings=settings,
+                repo_url=ref.repo_url,
+            )
+        if strict:
+            required_fields = {
+                "name": "插件名",
+                "desc": "插件简介",
+                "author": "作者",
+                "repo": "仓库地址",
+            }
+            missing = [label for field, label in required_fields.items() if not preview.get(field)]
+            if missing:
+                raise GithubMetadataError(
+                    f"元数据缺少必填字段：{'、'.join(missing)}，请完善 metadata.yaml 后重试",
+                    400,
+                )
+        return preview
+
+    owner = ref.owner
+    repo_name = ref.repo_name
     preview = build_plugin_submission_metadata_preview(owner, repo_name, settings=settings)
     if settings.github_metadata_sync_enabled:
         runtime_config = await load_system_options(store) if store else {}
@@ -4078,19 +4322,48 @@ async def fetch_plugin_github_metadata(
     *,
     token: str = "",
     store: Any | None = None,
+    app: FastAPI | None = None,
 ) -> dict[str, Any]:
     if not settings.github_metadata_sync_enabled:
         return {}
-    match = validate_github_repo(repo)
-    owner = match.group("owner")
-    repo_name = match.group("repo")
+    ref = validate_git_repo(repo)
+    if ref.provider in THIRD_PARTY_PROVIDERS:
+        adapter = _git_adapter_for(app, settings, ref.provider)
+        access_token = await _optional_provider_access_token(
+            store, settings, user, ref.provider, adapter
+        )
+        try:
+            raw_meta = await adapter.fetch_repository_metadata(ref, access_token=access_token)
+        except GitSourceError as exc:
+            raise GithubMetadataError(exc.message, exc.status_code) from exc
+        if not raw_meta:
+            return {}
+        payload: dict[str, Any] = {
+            "stars": int(raw_meta.get("stars") or 0),
+            "updated_at": str(raw_meta.get("updated_at") or ""),
+            "repo_provider": ref.provider,
+            "normalized_repo": ref.normalized_repo,
+        }
+        if raw_meta.get("repo_external_id"):
+            payload["repo_external_id"] = str(raw_meta["repo_external_id"])
+        for field in PLUGIN_METADATA_SYNC_FIELDS:
+            value = normalize_plugin_metadata_field(field, raw_meta.get(field))
+            if has_metadata_value(value):
+                payload[field] = value
+        for extra_key in ("logo", "readme_url", "changelog_url", "i18n"):
+            if extra_key in raw_meta:
+                payload[extra_key] = raw_meta[extra_key]
+        return payload
+
+    owner = ref.owner
+    repo_name = ref.repo_name
     runtime_config = await load_system_options(store) if store else {}
     token_statuses = parse_github_api_token_statuses(
         runtime_config.get("GITHUB_API_TOKEN_STATUS", "")
     )
     headers = github_api_headers(user, settings, token, token_statuses)
     uses_system_token = bool(headers.get("authorization")) and not (user or {}).get("github_token")
-    status_store = store if uses_system_token else None
+    status_store = store if (uses_system_token and (token or store)) else None
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             repository = await fetch_github_repository(
@@ -4563,10 +4836,11 @@ def build_plugin_submission_metadata_preview(
     *,
     metadata: dict[str, Any] | None = None,
     settings: Settings | None = None,
+    repo_url: str = "",
 ) -> dict[str, Any]:
     metadata = metadata or {}
     # Repository identity comes from OAuth selection; editable metadata comes only from the file.
-    payload: dict[str, Any] = {"repo": f"https://github.com/{owner}/{repo_name}"}
+    payload: dict[str, Any] = {"repo": repo_url or f"https://github.com/{owner}/{repo_name}"}
     for field in (
         "name",
         "display_name",
@@ -4913,6 +5187,40 @@ def validate_system_settings_payload(
                 400,
                 "GitHub OAuth client secret must be configured in the deployment environment",
             )
+        if len(str(settings.oauth_credential_key or "").strip()) < 16:
+            raise error(
+                400,
+                "OAUTH_CREDENTIAL_KEY (>= 16 chars) must be configured in the deployment environment",
+            )
+    if payload.atomgit.api_base_url:
+        try:
+            normalize_atomgit_api_base(payload.atomgit.api_base_url)
+        except GitSourceError as exc:
+            raise error(400, exc.message) from exc
+    for provider in THIRD_PARTY_PROVIDERS:
+        enabled = bool(getattr(payload.auth, f"{provider}_login_enabled", False))
+        if not enabled:
+            continue
+        provider_cfg = getattr(payload, provider)
+        label = PROVIDER_LABELS[provider]
+        if not provider_cfg.client_id:
+            raise error(400, f"{label} OAuth client ID is required when {label} login is enabled")
+        if not provider_cfg.callback_url or not is_valid_public_url(provider_cfg.callback_url):
+            raise error(400, f"{label} callback URL must be http(s)")
+        if is_local_url(provider_cfg.callback_url):
+            raise error(400, f"{label} callback URL must use a public host")
+        if is_local_url(payload.site.web_url):
+            raise error(400, f"Web URL must use a public host when {label} login is enabled")
+        if not settings or not getattr(settings, f"{provider}_client_secret", ""):
+            raise error(
+                400,
+                f"{label} OAuth client secret must be configured in the deployment environment",
+            )
+        if len(str(settings.oauth_credential_key or "").strip()) < 16:
+            raise error(
+                400,
+                "OAUTH_CREDENTIAL_KEY (>= 16 chars) must be configured in the deployment environment",
+            )
     if payload.email.provider == "smtp":
         if not payload.email.smtp.host:
             raise error(400, "SMTP host is required when SMTP email is enabled")
@@ -4972,6 +5280,10 @@ def get_public_auth_config(
         if runtime_config is not None
         else {
             "github_login_enabled": settings.github_login_enabled,
+            "gitlab_login_enabled": settings.gitlab_login_enabled,
+            "gitee_login_enabled": settings.gitee_login_enabled,
+            "atomgit_login_enabled": settings.atomgit_login_enabled,
+            "gitea_login_enabled": settings.gitea_login_enabled,
             "public_login_enabled": settings.public_login_enabled,
             "email_registration_enabled": settings.email_registration_enabled,
             "email_verification_required": settings.email_verification_required,
@@ -4981,6 +5293,7 @@ def get_public_auth_config(
             "service_terms_text": settings.service_terms_text,
         }
     )
+    auth.pop("oauth_credential_key_configured", None)
     effective_email_provider = normalize_email_provider(
         runtime_config.get("EMAIL_PROVIDER", settings.email_provider)
         if runtime_config is not None
@@ -4994,6 +5307,7 @@ def get_public_auth_config(
     )
     return {
         **auth,
+        "oauth_providers": public_oauth_providers_config(settings, runtime_config),
         "email_service_enabled": effective_email_provider != "disabled",
         "terms_revision": digest_terms(effective_settings),
     }
@@ -5058,6 +5372,23 @@ def settings_config_values(settings: Settings) -> dict[str, str]:
             settings.github_metadata_sync_interval_seconds
         ),
         "GITHUB_SCOPE": settings.github_scope,
+        "GITLAB_CALLBACK_URL": settings.gitlab_callback_url,
+        "GITLAB_CLIENT_ID": settings.gitlab_client_id,
+        "GITLAB_LOGIN_ENABLED": serialize_bool(settings.gitlab_login_enabled),
+        "GITLAB_SCOPE": settings.gitlab_scope,
+        "GITEE_CALLBACK_URL": settings.gitee_callback_url,
+        "GITEE_CLIENT_ID": settings.gitee_client_id,
+        "GITEE_LOGIN_ENABLED": serialize_bool(settings.gitee_login_enabled),
+        "GITEE_SCOPE": settings.gitee_scope,
+        "ATOMGIT_API_BASE_URL": settings.atomgit_api_base_url,
+        "ATOMGIT_CALLBACK_URL": settings.atomgit_callback_url,
+        "ATOMGIT_CLIENT_ID": settings.atomgit_client_id,
+        "ATOMGIT_LOGIN_ENABLED": serialize_bool(settings.atomgit_login_enabled),
+        "ATOMGIT_SCOPE": settings.atomgit_scope,
+        "GITEA_CALLBACK_URL": settings.gitea_callback_url,
+        "GITEA_CLIENT_ID": settings.gitea_client_id,
+        "GITEA_LOGIN_ENABLED": serialize_bool(settings.gitea_login_enabled),
+        "GITEA_SCOPE": settings.gitea_scope,
         "LOGIN_AGREEMENT_ENABLED": serialize_bool(settings.login_agreement_enabled),
         "LOGIN_AGREEMENT_TEXT": settings.login_agreement_text,
         "MARKET_COMMENTS_ENABLED": serialize_bool(settings.market_comments_enabled),
@@ -5201,6 +5532,10 @@ def redact_setup_infrastructure(config: dict[str, Any]) -> dict[str, Any]:
         "site": {**config["site"]},
         "auth": {**config["auth"]},
         "github": redact_github_settings(config.get("github", {})),
+        "gitlab": redact_github_settings(config.get("gitlab", {})),
+        "gitee": redact_github_settings(config.get("gitee", {})),
+        "atomgit": redact_github_settings(config.get("atomgit", {})),
+        "gitea": redact_github_settings(config.get("gitea", {})),
         "market": redact_market_settings(config.get("market", {})),
         "email": redact_email_settings(config.get("email", {})),
     }
@@ -5217,12 +5552,18 @@ def build_system_settings(
         "site": build_site_settings(settings, runtime_config),
         "auth": build_auth_settings(settings, runtime_config),
         "github": build_github_settings(settings, runtime_config),
+        "gitlab": build_oauth_provider_settings(settings, runtime_config, "gitlab"),
+        "gitee": build_oauth_provider_settings(settings, runtime_config, "gitee"),
+        "atomgit": build_oauth_provider_settings(settings, runtime_config, "atomgit"),
+        "gitea": build_oauth_provider_settings(settings, runtime_config, "gitea"),
         "market": build_market_settings(settings, runtime_config),
         "email": build_email_settings(settings, runtime_config),
     }
     if include_secrets:
         return config
     config["github"] = redact_github_settings(config["github"])
+    for provider in THIRD_PARTY_PROVIDERS:
+        config[provider] = redact_github_settings(config[provider])
     config["market"] = redact_market_settings(config["market"])
     config["email"] = redact_email_settings(config["email"])
     return config
@@ -5245,6 +5586,20 @@ def build_auth_settings(settings: Settings, runtime_config: dict[str, str]) -> d
         "github_login_enabled": parse_bool(
             runtime_config.get("GITHUB_LOGIN_ENABLED"), settings.github_login_enabled
         ),
+        "gitlab_login_enabled": parse_bool(
+            runtime_config.get("GITLAB_LOGIN_ENABLED"), settings.gitlab_login_enabled
+        ),
+        "gitee_login_enabled": parse_bool(
+            runtime_config.get("GITEE_LOGIN_ENABLED"), settings.gitee_login_enabled
+        ),
+        "atomgit_login_enabled": parse_bool(
+            runtime_config.get("ATOMGIT_LOGIN_ENABLED"), settings.atomgit_login_enabled
+        ),
+        "gitea_login_enabled": parse_bool(
+            runtime_config.get("GITEA_LOGIN_ENABLED"), settings.gitea_login_enabled
+        ),
+        "oauth_credential_key_configured": len(str(settings.oauth_credential_key or "").strip())
+        >= 16,
         "public_login_enabled": parse_bool(
             runtime_config.get("PUBLIC_LOGIN_ENABLED"), settings.public_login_enabled
         ),
@@ -5273,6 +5628,30 @@ def build_auth_settings(settings: Settings, runtime_config: dict[str, str]) -> d
             settings.service_terms_text,
         ),
     }
+
+
+def build_oauth_provider_settings(
+    settings: Settings,
+    runtime_config: dict[str, str],
+    provider: str,
+) -> dict[str, Any]:
+    prefix = provider.upper()
+    result: dict[str, Any] = {
+        "client_id": runtime_config.get(
+            f"{prefix}_CLIENT_ID", getattr(settings, f"{provider}_client_id", "")
+        ),
+        "client_secret": getattr(settings, f"{provider}_client_secret", ""),
+        "callback_url": runtime_config.get(
+            f"{prefix}_CALLBACK_URL", getattr(settings, f"{provider}_callback_url", "")
+        ),
+        "scope": runtime_config.get(f"{prefix}_SCOPE", getattr(settings, f"{provider}_scope", "")),
+    }
+    if provider == "atomgit":
+        result["api_base_url"] = runtime_config.get(
+            "ATOMGIT_API_BASE_URL",
+            getattr(settings, "atomgit_api_base_url", ATOMGIT_DEFAULT_API_BASE),
+        )
+    return result
 
 
 def build_github_settings(settings: Settings, runtime_config: dict[str, str]) -> dict[str, Any]:
@@ -5523,6 +5902,10 @@ def runtime_values_from_system_settings(
         "EMAIL_REGISTRATION_ENABLED": serialize_bool(payload.auth.email_registration_enabled),
         "EMAIL_VERIFICATION_REQUIRED": serialize_bool(payload.auth.email_verification_required),
         "GITHUB_LOGIN_ENABLED": serialize_bool(payload.auth.github_login_enabled),
+        "GITLAB_LOGIN_ENABLED": serialize_bool(payload.auth.gitlab_login_enabled),
+        "GITEE_LOGIN_ENABLED": serialize_bool(payload.auth.gitee_login_enabled),
+        "ATOMGIT_LOGIN_ENABLED": serialize_bool(payload.auth.atomgit_login_enabled),
+        "GITEA_LOGIN_ENABLED": serialize_bool(payload.auth.gitea_login_enabled),
         "LOGIN_AGREEMENT_ENABLED": serialize_bool(payload.auth.login_agreement_enabled),
         "LOGIN_AGREEMENT_TEXT": payload.auth.login_agreement_text,
         "PUBLIC_LOGIN_ENABLED": serialize_bool(payload.auth.public_login_enabled),
@@ -5532,6 +5915,19 @@ def runtime_values_from_system_settings(
         "GITHUB_CALLBACK_URL": payload.github.callback_url,
         "GITHUB_CLIENT_ID": payload.github.client_id,
         "GITHUB_SCOPE": payload.github.scope,
+        "GITLAB_CALLBACK_URL": payload.gitlab.callback_url,
+        "GITLAB_CLIENT_ID": payload.gitlab.client_id,
+        "GITLAB_SCOPE": payload.gitlab.scope,
+        "GITEE_CALLBACK_URL": payload.gitee.callback_url,
+        "GITEE_CLIENT_ID": payload.gitee.client_id,
+        "GITEE_SCOPE": payload.gitee.scope,
+        "ATOMGIT_API_BASE_URL": normalize_atomgit_api_base(payload.atomgit.api_base_url),
+        "ATOMGIT_CALLBACK_URL": payload.atomgit.callback_url,
+        "ATOMGIT_CLIENT_ID": payload.atomgit.client_id,
+        "ATOMGIT_SCOPE": payload.atomgit.scope,
+        "GITEA_CALLBACK_URL": payload.gitea.callback_url,
+        "GITEA_CLIENT_ID": payload.gitea.client_id,
+        "GITEA_SCOPE": payload.gitea.scope,
         **runtime_values_from_market_settings(
             payload.market,
             runtime_config,
@@ -5666,6 +6062,10 @@ def settings_from_system_settings(
         site_contact_email=payload.site.contact_email,
         site_docs_url=payload.site.docs_url,
         github_login_enabled=payload.auth.github_login_enabled,
+        gitlab_login_enabled=payload.auth.gitlab_login_enabled,
+        gitee_login_enabled=payload.auth.gitee_login_enabled,
+        atomgit_login_enabled=payload.auth.atomgit_login_enabled,
+        gitea_login_enabled=payload.auth.gitea_login_enabled,
         public_login_enabled=payload.auth.public_login_enabled,
         email_registration_enabled=payload.auth.email_registration_enabled,
         email_verification_required=payload.auth.email_verification_required,
@@ -5678,6 +6078,24 @@ def settings_from_system_settings(
         github_callback_url=payload.github.callback_url,
         github_scope=payload.github.scope,
         github_admin_org=payload.github.admin_org,
+        gitlab_client_id=payload.gitlab.client_id,
+        gitlab_client_secret=current.gitlab_client_secret,
+        gitlab_callback_url=payload.gitlab.callback_url,
+        gitlab_scope=payload.gitlab.scope,
+        gitee_client_id=payload.gitee.client_id,
+        gitee_client_secret=current.gitee_client_secret,
+        gitee_callback_url=payload.gitee.callback_url,
+        gitee_scope=payload.gitee.scope,
+        atomgit_client_id=payload.atomgit.client_id,
+        atomgit_client_secret=current.atomgit_client_secret,
+        atomgit_callback_url=payload.atomgit.callback_url,
+        atomgit_scope=payload.atomgit.scope,
+        atomgit_api_base_url=normalize_atomgit_api_base(payload.atomgit.api_base_url),
+        gitea_client_id=payload.gitea.client_id,
+        gitea_client_secret=current.gitea_client_secret,
+        gitea_callback_url=payload.gitea.callback_url,
+        gitea_scope=payload.gitea.scope,
+        oauth_credential_key=current.oauth_credential_key,
         github_api_token=merge_github_api_token_pool(
             runtime_config.get("GITHUB_API_TOKEN") or current.github_api_token,
             system_github_api_token_payload(payload.market, payload.github.api_token),
@@ -5929,9 +6347,16 @@ async def transfer_user_owned_records(
     from_user_id: str,
     to_user_id: str,
 ) -> None:
-    transfer = getattr(get_store(request), "merge_user_into_user", None)
+    store = get_store(request)
+    transfer = getattr(store, "merge_user_into_user", None)
     if transfer:
         await resolve_optional_awaitable(transfer(from_user_id, to_user_id))
+    from .git_sources.credentials import CredentialStore
+
+    settings = getattr(request.app.state, "settings", None)
+    await CredentialStore(
+        store, getattr(settings, "oauth_credential_key", "")
+    ).rebind_user_credentials(from_user_id=from_user_id, to_user_id=to_user_id)
 
 
 def normalize_email_provider(value: str) -> str:

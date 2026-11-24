@@ -9,6 +9,7 @@ import type {
   Comment,
   HelpSection,
   MarketConfig,
+  OAuthProviderKey,
   PageOptions,
   PaginatedResult,
   Plugin,
@@ -120,6 +121,11 @@ const DEFAULT_SITE_CONFIG: SiteConfig = Object.freeze({
   docs_url: "https://docs.astrbot.app/dev/star/plugin-new.html",
   auth: {
     github_login_enabled: false,
+    gitlab_login_enabled: false,
+    gitee_login_enabled: false,
+    atomgit_login_enabled: false,
+    gitea_login_enabled: false,
+    oauth_providers: [],
     public_login_enabled: true,
     email_registration_enabled: false,
     email_verification_required: true,
@@ -176,6 +182,35 @@ const createDefaultSetupConfig = (): SetupConfig => ({
     callback_url: `${BASE_URL}/v1/auth/github/callback`,
     scope: "read:user user:email read:org",
     admin_org: "",
+  },
+  gitlab: {
+    client_id: "",
+    client_secret: "",
+    client_secret_configured: false,
+    callback_url: `${BASE_URL}/v1/auth/oauth/gitlab/callback`,
+    scope: "read_user read_api",
+  },
+  gitee: {
+    client_id: "",
+    client_secret: "",
+    client_secret_configured: false,
+    callback_url: `${BASE_URL}/v1/auth/oauth/gitee/callback`,
+    scope: "user_info projects",
+  },
+  atomgit: {
+    client_id: "",
+    client_secret: "",
+    client_secret_configured: false,
+    callback_url: `${BASE_URL}/v1/auth/oauth/atomgit/callback`,
+    scope: "read_user read_repository",
+    api_base_url: "https://api.atomgit.com",
+  },
+  gitea: {
+    client_id: "",
+    client_secret: "",
+    client_secret_configured: false,
+    callback_url: `${BASE_URL}/v1/auth/oauth/gitea/callback`,
+    scope: "read:user read:repository read:organization",
   },
   market: {
     submissions_enabled: true,
@@ -663,6 +698,10 @@ export const usePluginStore = defineStore("plugins", () => {
       admin: { ...defaults.admin, ...value.admin },
       auth: { ...defaults.auth, ...value.auth },
       github: { ...defaults.github, ...value.github },
+      gitlab: { ...defaults.gitlab!, ...value.gitlab },
+      gitee: { ...defaults.gitee!, ...value.gitee },
+      atomgit: { ...defaults.atomgit!, ...value.atomgit },
+      gitea: { ...defaults.gitea!, ...value.gitea },
       market: { ...defaults.market, ...value.market } as SetupConfig["market"],
       email: {
         ...defaults.email,
@@ -869,14 +908,18 @@ export const usePluginStore = defineStore("plugins", () => {
     return normalizePluginItem(data, 0);
   }
 
-  async function updatePluginCdn(pluginId: number | string, enabled: boolean): Promise<Plugin> {
+  async function updatePluginCdn(
+    pluginId: number | string,
+    enabled: boolean,
+    whitelist?: boolean,
+  ): Promise<Plugin> {
     const response = await fetch(
       `${apiBaseUrl}/v1/plugins/${encodeURIComponent(String(pluginId))}/cdn`,
       {
         method: "PATCH",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify(whitelist === undefined ? { enabled } : { enabled, whitelist }),
       },
     );
     const data = await response.json().catch(() => ({}));
@@ -1278,9 +1321,17 @@ export const usePluginStore = defineStore("plugins", () => {
     }
   }
 
-  function loginWithGithub(destination?: unknown): void {
+  function loginWithOAuth(provider: OAuthProviderKey, destination?: unknown): void {
     const next = typeof destination === "string" ? `?next=${encodeURIComponent(destination)}` : "";
-    window.location.href = `${apiBaseUrl}/v1/auth/github/login${next}`;
+    if (provider === "github") {
+      window.location.href = `${apiBaseUrl}/v1/auth/github/login${next}`;
+      return;
+    }
+    window.location.href = `${apiBaseUrl}/v1/auth/oauth/${encodeURIComponent(provider)}/login${next}`;
+  }
+
+  function loginWithGithub(destination?: unknown): void {
+    loginWithOAuth("github", destination);
   }
 
   async function loginWithPassword(payload: { username: string; password: string }): Promise<User> {
@@ -1566,6 +1617,28 @@ export const usePluginStore = defineStore("plugins", () => {
     return data;
   }
 
+  async function loadProviderRepositories(
+    provider: OAuthProviderKey,
+    page = 1,
+  ): Promise<{ items: GithubPluginRepository[]; next_page: number | null }> {
+    if (provider === "github") {
+      return loadGithubRepositories(page);
+    }
+    const response = await fetch(
+      `${apiBaseUrl}/v1/me/git/${encodeURIComponent(provider)}/repositories?page=${page}`,
+      {
+        credentials: "include",
+        cache: "no-store",
+      },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "仓库列表加载失败")), {
+        code: data.code,
+      });
+    return data;
+  }
+
   function setSearchQuery(query: string): void {
     searchQuery.value = query;
   }
@@ -1671,6 +1744,7 @@ export const usePluginStore = defineStore("plugins", () => {
     loadPlugins,
     loadCurrentUser,
     loginWithGithub,
+    loginWithOAuth,
     loginWithPassword,
     registerWithEmailDirect,
     requestEmailRegisterCode,
@@ -1726,6 +1800,7 @@ export const usePluginStore = defineStore("plugins", () => {
     submitPlugin,
     fetchPluginSubmissionMetadata,
     loadGithubRepositories,
+    loadProviderRepositories,
     setSearchQuery,
     setSelectedTag,
     setSelectedTags,

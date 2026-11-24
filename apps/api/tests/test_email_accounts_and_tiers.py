@@ -37,6 +37,7 @@ def _make_app(
         "GITHUB_LOGIN_ENABLED": "true",
         "GITHUB_CLIENT_ID": "gh-client",
         "GITHUB_CLIENT_SECRET": "gh-secret-value",
+        "OAUTH_CREDENTIAL_KEY": "test-oauth-credential-master-key-01",
         "EMAIL_REGISTRATION_ENABLED": "true",
         "EMAIL_VERIFICATION_REQUIRED": "true",
         "EMAIL_PROVIDER": "smtp",

@@ -49,7 +49,7 @@
             :loading="refreshing"
             @click="openRefreshModal"
           >
-            刷新 GitHub
+            {{ isGithubRepo ? "刷新 GitHub" : "刷新元数据" }}
           </n-button>
           <span v-if="!likesEnabled" class="muted-text">点赞已关闭</span>
         </div>
@@ -136,9 +136,9 @@
         <n-space justify="end" :size="12">
           <n-button secondary type="primary" @click="openUrl(plugin?.repo)">
             <template #icon>
-              <n-icon><logo-github /></n-icon>
+              <git-provider-icon :provider="repoProvider" :size="16" />
             </template>
-            查看仓库
+            查看 {{ repoProviderLabel }} 仓库
           </n-button>
           <n-button type="primary" @click="show = false"> 关闭 </n-button>
         </n-space>
@@ -224,7 +224,14 @@ import { storeToRefs } from "pinia";
 import { usePluginStore } from "../stores/plugins";
 import PluginComment from "./PluginComment.vue";
 import FieldHint from "./FieldHint.vue";
-import { githubRawUrl } from "../utils/github";
+import GitProviderIcon from "./GitProviderIcon.vue";
+import {
+  detectGitProvider,
+  getGitProviderLabel,
+  githubRawUrl,
+  isGithubRepoUrl,
+  isOverseasProxyProvider,
+} from "../utils/github";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
 import { buildReadmeBrowserUrl, usePluginReadme } from "../composables/usePluginReadme";
 import type { Plugin, PluginDetail } from "../types";
@@ -233,7 +240,6 @@ import {
   DocumentTextOutline,
   ExtensionPuzzleOutline,
   HeartOutline,
-  LogoGithub,
   RefreshOutline,
 } from "@vicons/ionicons5";
 
@@ -320,6 +326,12 @@ const MAX_INLINE_FILE_SIZE = 300000;
 const commentsEnabled = computed(() => Boolean(siteConfig.value.market?.comments_enabled));
 const likesEnabled = computed(() => Boolean(siteConfig.value.market?.likes_enabled));
 const activePlugin = computed(() => detail.value || props.plugin || {});
+const repoProvider = computed(
+  () =>
+    activePlugin.value?.repo_provider || detectGitProvider(activePlugin.value?.repo) || "github",
+);
+const isGithubRepo = computed(() => isGithubRepoUrl(activePlugin.value?.repo));
+const repoProviderLabel = computed(() => getGitProviderLabel(repoProvider.value));
 const canGoBackReadme = computed(() => readmeHistory.value.length > 0);
 const isViewingRepositoryFile = computed(() => readmeView.value.kind !== "readme");
 const readmeNavigationVisible = computed(
@@ -332,11 +344,11 @@ const readmeViewTitle = computed(() => {
 });
 const readmeSourceLabel = computed(() => {
   const source = readmeSource.value?.source_url;
-  if (!source) return "GitHub";
+  if (!source) return repoProviderLabel.value;
   try {
     return new URL(source).hostname;
   } catch {
-    return "GitHub";
+    return repoProviderLabel.value;
   }
 });
 const canManagePlugin = computed(() => {
@@ -417,7 +429,10 @@ async function fetchReadme(options: { refresh?: boolean } = {}) {
       view: {
         kind: "readme",
         path: readmeContext.path,
-        browserUrl: buildReadmeBrowserUrl(readmeContext),
+        browserUrl: buildReadmeBrowserUrl(
+          readmeContext,
+          source.source_url || activePlugin.value?.repo || "",
+        ),
       },
     });
     rootReadmeView.value = currentReadmeSnapshot();
@@ -475,6 +490,10 @@ function openRefreshModal() {
     save_token: false,
     refresh_interval_seconds: currentUser.value?.github_refresh_interval_seconds || 3600,
   };
+  if (!isGithubRepo.value) {
+    void confirmRefreshGithub();
+    return;
+  }
   showRefreshModal.value = true;
 }
 
@@ -492,9 +511,14 @@ async function confirmRefreshGithub() {
     await loadCurrentUser();
     await fetchDetail();
     showRefreshModal.value = false;
-    message.success("GitHub 数据已刷新");
+    message.success(`${repoProviderLabel.value} 元数据已刷新`);
   } catch (err) {
-    message.error(err.message || "刷新失败，请填写只读 GitHub Token 后重试");
+    message.error(
+      err.message ||
+        (isGithubRepo.value
+          ? "刷新失败，请填写只读 GitHub Token 后重试"
+          : "刷新失败，请确认对应平台授权仍有效"),
+    );
   } finally {
     refreshing.value = false;
   }
@@ -807,6 +831,7 @@ function renderReadmeHtml(markdown, context) {
   container.querySelectorAll("img[src]").forEach((image) => {
     image.src = resolveReadmeUrl(image.getAttribute("src"), context, basePath, true);
     image.loading = "lazy";
+    image.referrerPolicy = "no-referrer";
   });
 
   container.querySelectorAll("a[href]").forEach((link) => {
@@ -923,6 +948,7 @@ function renderImageFileHtml(imageUrl, path) {
 function buildReadmeLinkTarget(url, context, basePath) {
   if (!url || /^mailto:/i.test(url)) return null;
   if (url.startsWith("#")) return { kind: "anchor", hash: url };
+  if (!context?.owner || !context?.repo) return null;
   const absoluteTarget = githubUrlToReadmeTarget(url, context);
   if (absoluteTarget) return absoluteTarget;
   if (/^[a-z][a-z\d+.-]*:/i.test(url) || url.startsWith("//")) return null;
@@ -1080,10 +1106,62 @@ function countChars(value, char) {
   return [...value].filter((item) => item === char).length;
 }
 
+function extractOverseasRepoAssetPath(url) {
+  const repoUrl = String(activePlugin.value?.repo || "").replace(/\/+$/, "");
+  if (!repoUrl) return "";
+  try {
+    const parsed = new URL(url);
+    const repoParsed = new URL(repoUrl);
+    if (parsed.hostname.toLowerCase() !== repoParsed.hostname.toLowerCase()) return "";
+    const repoPrefix = repoParsed.pathname.replace(/\/+$/, "");
+    if (!parsed.pathname.startsWith(`${repoPrefix}/`)) return "";
+    const rest = parsed.pathname.slice(repoPrefix.length + 1);
+    const gitlabMatch = rest.match(/^-\/(?:raw|blob)\/[^/]+\/(.+)$/);
+    if (gitlabMatch?.[1]) return decodeURIComponent(gitlabMatch[1]);
+    const giteaMatch = rest.match(/^(?:raw|src)\/(?:branch|commit|tag)\/[^/]+\/(.+)$/);
+    if (giteaMatch?.[1]) return decodeURIComponent(giteaMatch[1]);
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function buildOverseasAssetProxyUrl(assetPath) {
+  const pluginId = activePlugin.value?.id;
+  if (!pluginId || !assetPath) return "";
+  if (!/\.(?:png|jpe?g|gif|webp|avif)$/i.test(assetPath)) return "";
+  return `${store.apiBaseUrl}/v1/plugins/${encodeURIComponent(String(pluginId))}/readme-asset?path=${encodeURIComponent(assetPath)}`;
+}
+
 function resolveReadmeUrl(url, context, basePath, raw) {
   if (!url || /^(mailto:|#)/i.test(url)) return url;
   const absoluteUrl = normalizeAbsoluteReadmeUrl(url, raw);
-  if (absoluteUrl) return absoluteUrl;
+  if (absoluteUrl) {
+    if (raw && isOverseasProxyProvider(repoProvider.value)) {
+      const sameRepoAsset = extractOverseasRepoAssetPath(absoluteUrl);
+      const proxied = buildOverseasAssetProxyUrl(sameRepoAsset);
+      if (proxied) return proxied;
+    }
+    return absoluteUrl;
+  }
+  if (!context?.owner || !context?.repo) {
+    const [path] = splitReadmeUrl(url);
+    if (raw && path && isOverseasProxyProvider(repoProvider.value)) {
+      const cleanPath = normalizeReadmePath(path.startsWith("/") ? "" : basePath, path);
+      const proxied = buildOverseasAssetProxyUrl(cleanPath);
+      if (proxied) return proxied;
+    }
+    const fallbackBase = readmeSource.value?.source_url || activePlugin.value?.repo || "";
+    if (!fallbackBase) return url;
+    try {
+      return new URL(
+        url,
+        fallbackBase.endsWith("/") ? fallbackBase : `${fallbackBase}/`,
+      ).toString();
+    } catch {
+      return fallbackBase;
+    }
+  }
   const [path, suffix = ""] = splitReadmeUrl(url);
   if (!path) return suffix || url;
   const cleanPath = normalizeReadmePath(path.startsWith("/") ? "" : basePath, path);

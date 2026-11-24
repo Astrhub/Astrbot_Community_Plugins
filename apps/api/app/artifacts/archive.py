@@ -314,8 +314,20 @@ def normalize_github_repo(value: str) -> str:
     return f"https://github.com/{owner.lower()}/{repo.lower()}"
 
 
+def normalize_supported_git_repo(value: str) -> str:
+    from ..git_sources.models import GitSourceError, parse_repository_ref
+
+    try:
+        return parse_repository_ref(value).normalized_repo
+    except GitSourceError as exc:
+        raise PrecheckError(
+            "repo_invalid",
+            "metadata repo 必须是受支持平台的公开 HTTPS 仓库地址",
+        ) from exc
+
+
 def github_repo_name(value: str) -> str:
-    return normalize_github_repo(value).rsplit("/", 1)[-1]
+    return normalize_supported_git_repo(value).rsplit("/", 1)[-1]
 
 
 def _normalize_member_path(value: str) -> str:
@@ -426,8 +438,8 @@ def _validate_metadata(metadata: dict[str, Any], *, expected_repo: str) -> tuple
     author = str(metadata["author"]).strip()
     if "/" in author or any(ord(ch) < 32 or ord(ch) == 127 for ch in author):
         raise PrecheckError("plugin_author_invalid", "metadata author 不能包含斜杠或控制字符")
-    actual_repo = normalize_github_repo(str(metadata["repo"]))
-    if actual_repo != normalize_github_repo(expected_repo):
+    actual_repo = normalize_supported_git_repo(str(metadata["repo"]))
+    if actual_repo != normalize_supported_git_repo(expected_repo):
         raise PrecheckError("metadata_repo_mismatch", "metadata repo 与登记仓库不一致")
     version = str(metadata["version"]).strip()
     if not re.fullmatch(r"[A-Za-z0-9._-]+", version):

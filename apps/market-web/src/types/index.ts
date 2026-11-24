@@ -34,6 +34,30 @@ export type UserRole = "core_admin" | "admin" | "user";
 /** 五级账号分层（实时推导：guest < user < developer < admin < core_admin）。 */
 export type AccountTier = "guest" | "user" | "developer" | "admin" | "core_admin";
 
+/** 受支持的 Git OAuth 平台标识。 */
+export type OAuthProviderKey = "github" | "gitlab" | "gitee" | "atomgit" | "gitea";
+
+/** 公开站点配置返回的 OAuth 平台元信息。 */
+export interface PublicOAuthProviderInfo {
+  provider: OAuthProviderKey;
+  label: string;
+  host: string;
+  instance_url: string;
+  enabled: boolean;
+  configured: boolean;
+  login_path: string;
+}
+
+/** 第三方 OAuth 平台系统设置项。 */
+export interface OAuthProviderConfig {
+  client_id: string;
+  client_secret: string;
+  client_secret_configured?: boolean;
+  callback_url: string;
+  scope: string;
+  api_base_url?: string;
+}
+
 /** 已绑定的 OAuth 身份记录。 */
 export interface OAuthIdentity {
   id: string;
@@ -44,6 +68,9 @@ export interface OAuthIdentity {
   provider_email?: string;
   avatar_url?: string;
   profile_url?: string;
+  rotation_status?: string;
+  expires_at?: string | null;
+  token_refreshed_at?: string | null;
   created_at?: string;
   updated_at?: string;
 }
@@ -69,6 +96,9 @@ export interface Plugin {
   short_desc?: string;
   author?: string;
   repo?: string;
+  repo_provider?: string;
+  repo_external_id?: string;
+  normalized_repo?: string;
   social_link?: string;
   tags: string[];
   category: PluginCategory;
@@ -84,6 +114,8 @@ export interface Plugin {
   submission_id?: number | string;
   download_url?: string;
   cdn_enabled?: boolean;
+  cdn_generation?: number;
+  cdn_whitelist?: boolean;
   astrbot_version?: string;
   support_platforms?: string[];
   updated_at?: string;
@@ -157,11 +189,12 @@ export interface AppNotification {
 /** 公告。 */
 export interface GithubPluginRepository {
   id: string;
+  provider?: OAuthProviderKey;
   name: string;
   full_name: string;
   repo: string;
   owner: string;
-  owner_type: "User" | "Organization";
+  owner_type: string;
   description: string;
   fork?: boolean;
   submitted?: boolean;
@@ -264,6 +297,12 @@ export interface PluginSubmissionMetadataPreview {
 /** 站点认证配置。 */
 export interface AuthConfig {
   github_login_enabled: boolean;
+  gitlab_login_enabled?: boolean;
+  gitee_login_enabled?: boolean;
+  atomgit_login_enabled?: boolean;
+  gitea_login_enabled?: boolean;
+  oauth_providers?: PublicOAuthProviderInfo[];
+  oauth_credential_key_configured?: boolean;
   public_login_enabled: boolean;
   email_registration_enabled: boolean;
   email_verification_required: boolean;
@@ -315,10 +354,15 @@ export interface SetupConfig {
   github: {
     client_id: string;
     client_secret: string;
+    client_secret_configured?: boolean;
     callback_url: string;
     scope: string;
     admin_org: string;
   };
+  gitlab?: OAuthProviderConfig;
+  gitee?: OAuthProviderConfig;
+  atomgit?: OAuthProviderConfig;
+  gitea?: OAuthProviderConfig;
   market: MarketConfig & {
     api_token: string;
     api_token_configured: boolean;

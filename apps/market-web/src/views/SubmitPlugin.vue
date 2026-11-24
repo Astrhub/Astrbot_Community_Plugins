@@ -14,9 +14,30 @@
           </div>
         </div>
         <div class="header-right">
+          <n-dropdown
+            v-if="!isLocalAdminDirectSubmit && availableProviders.length > 0"
+            trigger="click"
+            :options="providerDropdownOptions"
+            @select="handleSelectProvider"
+          >
+            <n-button
+              secondary
+              class="platform-switcher-btn"
+              :disabled="submitting"
+              aria-label="切换代码托管平台"
+            >
+              <template #icon>
+                <git-provider-icon :provider="selectedProvider" :size="16" />
+              </template>
+              <span class="platform-switcher-label">{{ selectedProviderLabel }}</span>
+              <n-icon class="platform-switcher-caret" :size="14">
+                <chevron-down-outline />
+              </n-icon>
+            </n-button>
+          </n-dropdown>
           <theme-mode-button circle />
           <n-button
-            v-if="!currentUser && isLocalMode && !siteConfig.auth.github_login_enabled"
+            v-if="!currentUser && isLocalMode && !hasEnabledOAuthLogin"
             tag="a"
             href="/admin"
             type="primary"
@@ -24,14 +45,14 @@
             管理员登录
           </n-button>
           <n-button
-            v-else-if="!currentUser && siteConfig.auth.github_login_enabled"
+            v-else-if="!currentUser && hasEnabledOAuthLogin"
             type="primary"
-            @click="connectGithub"
+            @click="connectSelectedProvider"
           >
             <template #icon>
-              <n-icon><logo-github /></n-icon>
+              <git-provider-icon :provider="selectedProvider" :size="16" />
             </template>
-            GitHub 登录
+            {{ selectedProviderLabel }} 登录
           </n-button>
         </div>
       </div>
@@ -43,21 +64,22 @@
           <h2>上架规则</h2>
           <p v-if="!siteConfig.market.submissions_enabled">当前站点已暂停插件提交。</p>
           <p v-else-if="isLocalMode">
-            当前为本地自用模式，管理员登录后可直接填写公开 GitHub 仓库地址并自动读取元数据。
+            当前为本地自用模式，管理员登录后可直接填写受支持平台的公开 Git
+            仓库地址并自动读取元数据。
           </p>
           <p v-else>
             普通邮箱注册用户可先浏览、点赞与评论；提交或上架插件前需绑定至少一个 OAuth
             账号成为开发者，用于校验仓库归属。
           </p>
           <ul>
-            <li>仓库必须是公开 GitHub 仓库。</li>
+            <li>仓库必须是 GitHub、GitLab、Gitee、AtomGit 或 Gitea 上的公开 HTTPS 仓库。</li>
             <li>插件名必须使用 `astrbot_plugin_` 前缀。</li>
           </ul>
           <p class="rule-tip">
             {{
               isLocalMode
                 ? "输入仓库地址后点击“读取信息”可自动填充插件字段，确认后即可提交。"
-                : "连接 GitHub 后选择你可管理的插件仓库，信息会自动填充，确认后即可提交。"
+                : "连接受支持的 Git 平台后选择你可管理的插件仓库，信息会自动填充，确认后即可提交。"
             }}
           </p>
         </n-card>
@@ -68,24 +90,37 @@
           <template #header>
             <div class="form-title">
               <h2>插件信息</h2>
-              <n-tag v-if="currentUser" type="success" :bordered="false">
-                已登录：{{
-                  currentUser.public_username ||
-                  currentUser.github_login ||
-                  currentUser.internal_username ||
-                  currentUser.login
-                }}
-              </n-tag>
-              <n-tag v-else-if="isLocalMode" type="warning" :bordered="false">
-                请先登录管理员账号
-              </n-tag>
-              <n-tag
-                v-else-if="!siteConfig.auth.github_login_enabled"
-                type="warning"
-                :bordered="false"
-                >GitHub 登录未开启</n-tag
-              >
-              <n-tag v-else type="warning" :bordered="false">需要开发者登录</n-tag>
+              <div class="form-title-actions">
+                <n-button
+                  v-if="showGithubOneClickImport"
+                  class="import-metadata-btn"
+                  size="small"
+                  type="primary"
+                  secondary
+                  :disabled="submitting"
+                  @click="openBatchImportModal"
+                >
+                  <template #icon>
+                    <git-provider-icon provider="github" :size="15" />
+                  </template>
+                  一键导入已有插件
+                </n-button>
+                <n-tag v-if="currentUser" type="success" :bordered="false">
+                  已登录：{{
+                    currentUser.public_username ||
+                    currentUser.github_login ||
+                    currentUser.internal_username ||
+                    currentUser.login
+                  }}
+                </n-tag>
+                <n-tag v-else-if="isLocalMode" type="warning" :bordered="false">
+                  请先登录管理员账号
+                </n-tag>
+                <n-tag v-else-if="!hasEnabledOAuthLogin" type="warning" :bordered="false"
+                  >OAuth 登录未开启</n-tag
+                >
+                <n-tag v-else type="warning" :bordered="false">需要开发者登录</n-tag>
+              </div>
             </div>
           </template>
 
@@ -93,14 +128,18 @@
             <n-grid :x-gap="16" :y-gap="10" :cols="2" responsive="screen">
               <n-grid-item span="2">
                 <n-form-item
-                  :label="isLocalAdminDirectSubmit ? 'GitHub 插件仓库地址' : '选择 GitHub 插件仓库'"
+                  :label="
+                    isLocalAdminDirectSubmit
+                      ? 'Git 插件仓库地址'
+                      : `选择 ${selectedProviderLabel} 插件仓库`
+                  "
                   path="repo"
                 >
                   <div class="repository-section">
                     <n-input-group v-if="isLocalAdminDirectSubmit">
                       <n-input
                         v-model:value="formData.repo"
-                        placeholder="https://github.com/owner/astrbot_plugin_example"
+                        placeholder="https://github.com/owner/astrbot_plugin_example 或 gitlab/gitee/atomgit/gitea"
                         :disabled="submitting"
                         :input-props="{
                           name: 'plugin-repo',
@@ -132,11 +171,14 @@
                           :options="repositoryOptions"
                           :loading="repositoriesLoading"
                           :disabled="
-                            !currentUser || needsOAuthBinding || needsGithubConnection || submitting
+                            !currentUser ||
+                            needsOAuthBinding ||
+                            needsProviderConnection ||
+                            submitting
                           "
                           filterable
                           placeholder="搜索或选择 astrbot_plugin_ 开头的仓库"
-                          aria-label="选择 GitHub 插件仓库"
+                          :aria-label="`选择 ${selectedProviderLabel} 插件仓库`"
                           @update:value="selectRepository"
                           @update:show="refreshRepositoriesOnOpen"
                         />
@@ -146,12 +188,21 @@
                         账号成为开发者后即可提交与上架插件。
                         <div class="connect-actions">
                           <n-button
-                            v-if="siteConfig.auth.github_login_enabled"
+                            v-for="item in enabledOAuthProviders"
+                            :key="item.provider"
                             class="connect-github"
-                            type="primary"
-                            @click="connectGithub"
-                            >连接 GitHub</n-button
+                            :type="
+                              item.provider === enabledOAuthProviders[0]?.provider
+                                ? 'primary'
+                                : 'default'
+                            "
+                            @click="connectProvider(item.provider)"
                           >
+                            <template #icon>
+                              <git-provider-icon :provider="item.provider" :size="15" />
+                            </template>
+                            连接 {{ item.label }}
+                          </n-button>
                           <n-button
                             class="connect-github"
                             tertiary
@@ -161,11 +212,20 @@
                           >
                         </div>
                       </n-alert>
-                      <n-alert v-else-if="needsGithubConnection" type="info" :bordered="false">
-                        连接 GitHub 后即可选择个人或组织仓库，无需填写访问令牌。
-                        <n-button class="connect-github" type="primary" @click="connectGithub"
-                          >连接 GitHub</n-button
+                      <n-alert v-else-if="needsProviderConnection" type="info" :bordered="false">
+                        连接
+                        {{ selectedProviderLabel }}
+                        后即可选择你可管理的公开插件仓库，无需填写访问令牌。
+                        <n-button
+                          class="connect-github"
+                          type="primary"
+                          @click="connectSelectedProvider"
                         >
+                          <template #icon>
+                            <git-provider-icon :provider="selectedProvider" :size="15" />
+                          </template>
+                          连接 {{ selectedProviderLabel }}
+                        </n-button>
                       </n-alert>
                       <p
                         v-else-if="repositoriesError"
@@ -178,8 +238,8 @@
                         v-else-if="currentUser && !repositoriesLoading && !repositories.length"
                         class="repository-hint"
                       >
-                        没有找到可管理的公开插件仓库。仓库名需以 astrbot_plugin_
-                        开头；组织仓库还需要允许此 GitHub 登录应用访问。
+                        没有找到可管理的公开 {{ selectedProviderLabel }} 插件仓库。仓库名需以
+                        astrbot_plugin_ 开头。
                       </p>
                       <n-button
                         v-if="nextRepositoryPage"
@@ -197,6 +257,15 @@
                       class="repository-url"
                       >{{ formData.repo }}</a
                     >
+                    <n-alert
+                      v-if="showNonGithubDirectCloneHint"
+                      type="info"
+                      :bordered="false"
+                      style="margin-top: 8px"
+                    >
+                      非 GitHub 仓库在未启用 CDN 时，AstrBot 端需升级至 v4.27.0
+                      及以上版本才能直接从仓库安装；如需兼容旧版 AstrBot，建议开启社区源 CDN。
+                    </n-alert>
                     <p v-if="metadataLoading" class="repository-hint" role="status">
                       正在读取插件信息…
                     </p>
@@ -208,21 +277,6 @@
                       size="small"
                       @click="() => fetchMetadataFromRepo()"
                       >重试读取信息</n-button
-                    >
-                    <n-button
-                      v-if="
-                        currentUser &&
-                        selectedRepositoryId &&
-                        !repositories.find((repo) => repo.id === selectedRepositoryId)?.fork &&
-                        !repositories.find((repo) => repo.id === selectedRepositoryId)?.submitted
-                      "
-                      class="import-metadata-btn"
-                      size="small"
-                      type="primary"
-                      secondary
-                      :loading="metadataLoading"
-                      @click="() => fetchMetadataFromRepo(true)"
-                      >一键导入已有插件</n-button
                     >
                   </div>
                 </n-form-item>
@@ -328,8 +382,21 @@
                     </n-checkbox>
                     <p class="repository-hint">
                       开启后自动跟踪新版本，每次版本更新都需要审查。通过前不提供该版本的 CDN
-                      资源链接，仍可通过 GitHub 安装。可在个人界面关闭 CDN。
+                      资源链接，仍可通过原 Git 仓库安装。可在个人界面关闭 CDN。
                     </p>
+                    <div v-if="isAdminUser && formData.cdn_enabled" class="cdn-whitelist-box">
+                      <n-checkbox
+                        v-model:checked="formData.cdn_whitelist"
+                        :disabled="submitting"
+                        class="cdn-whitelist-checkbox"
+                      >
+                        管理员白名单直发（跳过安全审查直接发布）
+                      </n-checkbox>
+                      <p class="repository-hint">
+                        仅管理员本人名下插件可用。开启后仍会校验压缩包结构与元数据，通过后写入管理员白名单审计决策并直接发布到
+                        CDN。
+                      </p>
+                    </div>
                     <p v-if="!formData.cdn_enabled" class="repository-hint">
                       {{
                         siteConfig.market.plugin_auto_approve_enabled
@@ -356,14 +423,16 @@
                   metadataLoading ||
                   repositoriesLoading ||
                   (!isLocalAdminDirectSubmit && needsOAuthBinding) ||
-                  (!isLocalAdminDirectSubmit && needsGithubConnection) ||
+                  (!isLocalAdminDirectSubmit && needsProviderConnection) ||
                   !siteConfig.market.submissions_enabled
                 "
                 @click="handleSubmit"
               >
                 {{
                   formData.cdn_enabled
-                    ? "提交 CDN 审查"
+                    ? isAdminUser && formData.cdn_whitelist
+                      ? "白名单直发 CDN"
+                      : "提交 CDN 审查"
                     : siteConfig.market.plugin_auto_approve_enabled
                       ? "提交并上架"
                       : "提交审核"
@@ -374,11 +443,182 @@
         </n-card>
       </section>
     </main>
+
+    <n-modal
+      v-model:show="showBatchImportModal"
+      preset="card"
+      title="一键导入已有 GitHub 插件"
+      class="batch-import-modal"
+      :mask-closable="!batchRunning"
+      :closable="!batchRunning"
+      :style="{ maxWidth: '680px', width: '92vw' }"
+    >
+      <div class="batch-import-body">
+        <p class="batch-import-intro">
+          仅列出当前 GitHub 账号下尚未提交的非 Fork
+          源仓库。可勾选单个或多个仓库批量读取元数据并提交，也可单选后填入当前表单再调整。
+        </p>
+
+        <div class="batch-import-toolbar">
+          <div class="batch-import-toolbar-left">
+            <n-button
+              size="small"
+              secondary
+              :disabled="batchRunning || !unsubmittedGithubSourceRepos.length"
+              @click="selectAllBatchRepos"
+              >全选</n-button
+            >
+            <n-button
+              size="small"
+              quaternary
+              :disabled="batchRunning || !batchSelectedIds.length"
+              @click="clearBatchRepoSelection"
+              >清空</n-button
+            >
+            <n-button
+              v-if="nextRepositoryPage"
+              size="small"
+              tertiary
+              :loading="repositoriesLoading"
+              :disabled="batchRunning"
+              @click="loadRepositories(true)"
+              >加载更多仓库</n-button
+            >
+          </div>
+          <span class="batch-import-count">
+            已选 {{ batchSelectedIds.length }} / {{ unsubmittedGithubSourceRepos.length }} 个仓库
+          </span>
+        </div>
+
+        <div v-if="unsubmittedGithubSourceRepos.length" class="batch-repo-list">
+          <div
+            v-for="repo in unsubmittedGithubSourceRepos"
+            :key="repo.id"
+            class="batch-repo-item"
+            :class="{ 'is-selected': batchSelectedIds.includes(repo.id) }"
+          >
+            <n-checkbox
+              :checked="batchSelectedIds.includes(repo.id)"
+              :disabled="batchRunning"
+              @update:checked="(checked) => toggleBatchRepoSelection(repo.id, checked)"
+            />
+            <div class="batch-repo-info">
+              <div class="batch-repo-head">
+                <span class="batch-repo-name">{{ repo.full_name }}</span>
+                <n-tag v-if="repo.owner_type === 'Organization'" size="small" :bordered="false">
+                  组织
+                </n-tag>
+                <n-tag
+                  v-if="batchStates[repo.id]?.status === 'ready'"
+                  size="small"
+                  type="info"
+                  :bordered="false"
+                >
+                  已读取
+                </n-tag>
+                <n-tag
+                  v-else-if="batchStates[repo.id]?.status === 'submitted'"
+                  size="small"
+                  type="success"
+                  :bordered="false"
+                >
+                  {{ batchStates[repo.id]?.message || "已提交" }}
+                </n-tag>
+                <n-tag
+                  v-else-if="batchStates[repo.id]?.status === 'error'"
+                  size="small"
+                  type="error"
+                  :bordered="false"
+                >
+                  失败
+                </n-tag>
+                <n-tag
+                  v-else-if="batchStates[repo.id]?.status === 'loading'"
+                  size="small"
+                  type="warning"
+                  :bordered="false"
+                >
+                  处理中…
+                </n-tag>
+              </div>
+              <p v-if="batchStates[repo.id]?.preview" class="batch-repo-preview">
+                {{
+                  batchStates[repo.id]?.preview?.display_name ||
+                  batchStates[repo.id]?.preview?.name ||
+                  repo.name
+                }}
+                <template v-if="batchStates[repo.id]?.preview?.desc">
+                  · {{ batchStates[repo.id]?.preview?.desc }}
+                </template>
+              </p>
+              <p v-else-if="repo.description" class="batch-repo-desc">{{ repo.description }}</p>
+              <p
+                v-if="batchStates[repo.id]?.status === 'error' && batchStates[repo.id]?.message"
+                class="batch-repo-error"
+                role="alert"
+              >
+                {{ batchStates[repo.id]?.message }}
+              </p>
+            </div>
+          </div>
+        </div>
+        <p v-else class="repository-hint">当前已加载的 GitHub 源仓库均已提交。</p>
+
+        <div v-if="!isLocalMode" class="batch-import-options">
+          <n-checkbox v-model:checked="batchCdnEnabled" :disabled="batchRunning">
+            为本次导入的插件开启社区源 CDN（需审查）
+          </n-checkbox>
+          <n-checkbox
+            v-if="isAdminUser && batchCdnEnabled"
+            v-model:checked="batchCdnWhitelist"
+            :disabled="batchRunning"
+          >
+            管理员白名单直发（跳过安全审查直接发布）
+          </n-checkbox>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="batch-import-footer">
+          <n-button quaternary :disabled="batchRunning" @click="showBatchImportModal = false">
+            关闭
+          </n-button>
+          <n-space :size="8">
+            <n-button
+              v-if="batchSelectedIds.length === 1"
+              secondary
+              :disabled="batchRunning"
+              @click="fillSingleRepoToForm"
+            >
+              填入当前表单
+            </n-button>
+            <n-button
+              secondary
+              :loading="batchPreviewing"
+              :disabled="batchRunning || !batchSelectedIds.length"
+              @click="previewSelectedBatchRepos"
+            >
+              读取元数据
+            </n-button>
+            <n-button
+              type="primary"
+              :loading="batchSubmitting"
+              :disabled="
+                batchRunning || !batchSelectedIds.length || !siteConfig.market.submissions_enabled
+              "
+              @click="submitSelectedBatchRepos"
+            >
+              一键导入并提交（{{ batchSelectedIds.length }}）
+            </n-button>
+          </n-space>
+        </div>
+      </template>
+    </n-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
+import { computed, h, onMounted, onUnmounted, reactive, ref, shallowRef, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
 import { useSeo, useSeoContext } from "../composables/useSeo";
@@ -387,6 +627,7 @@ import {
   NAlert,
   NCheckbox,
   NCard,
+  NDropdown,
   NDynamicTags,
   NForm,
   NFormItem,
@@ -396,16 +637,25 @@ import {
   NInput,
   NInputGroup,
   NLayoutHeader,
+  NModal,
   NSelect,
+  NSpace,
   NTag,
   useMessage,
 } from "naive-ui";
-import { ArrowBack, LogoGithub } from "@vicons/ionicons5";
+import { ArrowBack, ChevronDownOutline } from "@vicons/ionicons5";
 import { PLUGIN_CATEGORY_OPTIONS, usePluginStore } from "@/stores/plugins";
+import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import ThemeModeButton from "@/components/ThemeModeButton.vue";
-import type { GithubPluginRepository, PluginSubmissionMetadataPreview } from "@/types";
+import { getGitProviderLabel, isGithubRepoUrl, isSupportedGitRepoUrl } from "@/utils/github";
+import type {
+  GithubPluginRepository,
+  OAuthProviderKey,
+  PluginSubmissionMetadataPreview,
+} from "@/types";
 
 const router = useRouter();
+const goBack = () => router.back();
 const { brandName } = useSeoContext();
 useSeo({
   title: "提交插件",
@@ -415,23 +665,98 @@ useSeo({
 const message = useMessage();
 const store = usePluginStore();
 const { currentUser, siteConfig } = storeToRefs(store);
-const isLocalMode = computed(() => siteConfig.value.storage_mode === "local");
-const isLocalAdminDirectSubmit = computed(
-  () =>
-    isLocalMode.value &&
-    (currentUser.value?.role === "core_admin" || currentUser.value?.role === "admin"),
+const isAdminUser = computed(
+  () => currentUser.value?.role === "core_admin" || currentUser.value?.role === "admin",
 );
-const connectGithub = () => store.loginWithGithub("/submit");
+const isLocalMode = computed(() => siteConfig.value.storage_mode === "local");
+const isLocalAdminDirectSubmit = computed(() => isLocalMode.value && isAdminUser.value);
+const enabledOAuthProviders = computed(() => {
+  const configured = siteConfig.value.auth.oauth_providers;
+  if (Array.isArray(configured) && configured.length > 0) {
+    return configured.filter((item) => item.enabled);
+  }
+  const fallback: Array<{ provider: OAuthProviderKey; enabled: boolean }> = [
+    { provider: "github", enabled: Boolean(siteConfig.value.auth.github_login_enabled) },
+    { provider: "gitlab", enabled: Boolean(siteConfig.value.auth.gitlab_login_enabled) },
+    { provider: "gitee", enabled: Boolean(siteConfig.value.auth.gitee_login_enabled) },
+    { provider: "atomgit", enabled: Boolean(siteConfig.value.auth.atomgit_login_enabled) },
+    { provider: "gitea", enabled: Boolean(siteConfig.value.auth.gitea_login_enabled) },
+  ];
+  return fallback
+    .filter((item) => item.enabled)
+    .map((item) => ({
+      provider: item.provider,
+      label: getGitProviderLabel(item.provider),
+      enabled: true,
+      login_path:
+        item.provider === "github"
+          ? "/v1/auth/github/login"
+          : `/v1/auth/oauth/${item.provider}/login`,
+    }));
+});
+const hasEnabledOAuthLogin = computed(() => enabledOAuthProviders.value.length > 0);
+const availableProviders = computed(() =>
+  enabledOAuthProviders.value.length > 0
+    ? enabledOAuthProviders.value
+    : [
+        {
+          provider: "github" as OAuthProviderKey,
+          label: "GitHub",
+          enabled: true,
+          login_path: "/v1/auth/github/login",
+        },
+      ],
+);
+const selectedProvider = shallowRef<OAuthProviderKey>("github");
+const selectedProviderLabel = computed(() => getGitProviderLabel(selectedProvider.value));
+const boundProviders = computed(
+  () => new Set((currentUser.value?.oauth_identities || []).map((item) => item.provider)),
+);
+const providerDropdownOptions = computed(() =>
+  availableProviders.value.map((item) => {
+    const isBound =
+      boundProviders.value.has(item.provider) ||
+      (item.provider === "github" && Boolean(currentUser.value?.github_login));
+    const statusSuffix = currentUser.value ? (isBound ? " · 已绑定" : " · 未绑定") : "";
+    return {
+      key: item.provider,
+      label: `${item.label}${statusSuffix}`,
+      icon: () => h(GitProviderIcon, { provider: item.provider, size: 16 }),
+    };
+  }),
+);
+function handleSelectProvider(key: string | number): void {
+  const provider = String(key) as OAuthProviderKey;
+  if (availableProviders.value.some((item) => item.provider === provider)) {
+    switchProvider(provider);
+  }
+}
+const showNonGithubDirectCloneHint = computed(() => {
+  if (formData.cdn_enabled) return false;
+  const repo = formData.repo.trim();
+  if (repo) return isSupportedGitRepoUrl(repo) && !isGithubRepoUrl(repo);
+  return !isLocalAdminDirectSubmit.value && selectedProvider.value !== "github";
+});
+
+function connectProvider(provider: OAuthProviderKey): void {
+  if (provider === "github") {
+    store.loginWithGithub("/submit");
+    return;
+  }
+  store.loginWithOAuth(provider, "/submit");
+}
+const connectSelectedProvider = () => connectProvider(selectedProvider.value);
+
 const formRef = ref(null);
 const submitting = shallowRef(false);
 const metadataLoading = shallowRef(false);
 const lastPreviewRepo = shallowRef("");
 const maxPluginTags = computed(() => siteConfig.value.market?.max_plugin_tags || 8);
 const pluginCategoryOptions = PLUGIN_CATEGORY_OPTIONS;
-const githubRepoPattern = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(?:\.git)?\/?$/;
 
 type SubmissionFormData = {
   cdn_enabled: boolean;
+  cdn_whitelist: boolean;
   repository_id: string;
   name: string;
   display_name: string;
@@ -446,7 +771,7 @@ type SubmissionFormData = {
 
 type TextAutofillField = Exclude<
   keyof SubmissionFormData,
-  "repo" | "repository_id" | "tags" | "cdn_enabled"
+  "repo" | "repository_id" | "tags" | "cdn_enabled" | "cdn_whitelist"
 >;
 
 const metadataStatus = reactive({
@@ -456,6 +781,7 @@ const metadataStatus = reactive({
 
 const formData = reactive<SubmissionFormData>({
   cdn_enabled: false,
+  cdn_whitelist: false,
   repository_id: "",
   name: "",
   display_name: "",
@@ -468,6 +794,13 @@ const formData = reactive<SubmissionFormData>({
   social_link: "",
 });
 
+watch(
+  () => formData.cdn_enabled,
+  (enabled) => {
+    if (!enabled) formData.cdn_whitelist = false;
+  },
+);
+
 const autoFilledTextValues = reactive<Partial<Record<TextAutofillField, string>>>({});
 const autoFilledTags = shallowRef<string[]>([]);
 
@@ -476,7 +809,7 @@ const repositoriesLoading = shallowRef(false);
 const repositoriesRefreshing = shallowRef(false);
 const repositoryMenuOpen = shallowRef(false);
 const repositoriesError = shallowRef("");
-const needsGithubConnection = shallowRef(false);
+const needsProviderConnection = shallowRef(false);
 const oauthBindingBlocked = shallowRef(false);
 const needsOAuthBinding = computed(
   () =>
@@ -486,6 +819,20 @@ const needsOAuthBinding = computed(
 );
 const nextRepositoryPage = shallowRef<number | null>(null);
 const selectedRepositoryId = shallowRef<string | null>(null);
+const unsubmittedGithubSourceRepos = computed(() =>
+  selectedProvider.value === "github"
+    ? repositories.value.filter((repo) => !repo.fork && !repo.submitted)
+    : [],
+);
+const showGithubOneClickImport = computed(
+  () =>
+    Boolean(currentUser.value) &&
+    !isLocalAdminDirectSubmit.value &&
+    selectedProvider.value === "github" &&
+    !needsOAuthBinding.value &&
+    !needsProviderConnection.value &&
+    (unsubmittedGithubSourceRepos.value.length > 0 || Boolean(nextRepositoryPage.value)),
+);
 const repositoryOptions = computed(() =>
   repositories.value.map((repo) => ({
     label: `${repo.full_name}${repo.owner_type === "Organization" ? " · 组织" : ""}${repo.fork ? " · Fork" : ""}${repo.submitted ? " · 已提交" : ""}`,
@@ -493,6 +840,29 @@ const repositoryOptions = computed(() =>
     disabled: !!repo.submitted,
   })),
 );
+
+type BatchRepoState = {
+  status: "idle" | "loading" | "ready" | "submitted" | "error";
+  preview?: PluginSubmissionMetadataPreview;
+  message?: string;
+};
+const showBatchImportModal = shallowRef(false);
+const batchSelectedIds = ref<string[]>([]);
+const batchStates = reactive<Record<string, BatchRepoState>>({});
+const batchCdnEnabled = shallowRef(false);
+const batchCdnWhitelist = shallowRef(false);
+const batchPreviewing = shallowRef(false);
+const batchSubmitting = shallowRef(false);
+const batchRunning = computed(() => batchPreviewing.value || batchSubmitting.value);
+
+watch(batchCdnEnabled, (enabled) => {
+  if (!enabled) batchCdnWhitelist.value = false;
+});
+watch(unsubmittedGithubSourceRepos, (repos) => {
+  const validIds = new Set(repos.map((repo) => repo.id));
+  batchSelectedIds.value = batchSelectedIds.value.filter((id) => validIds.has(id));
+});
+
 let repositoryRequestId = 0;
 let lastRepositoryRefreshAt = 0;
 let repositoryRefreshTimer: number | undefined;
@@ -512,12 +882,39 @@ onUnmounted(() => {
   window.clearInterval(repositoryRefreshTimer);
 });
 
+function switchProvider(provider: OAuthProviderKey): void {
+  if (selectedProvider.value === provider) return;
+  selectedProvider.value = provider;
+  selectedRepositoryId.value = null;
+  repositories.value = [];
+  nextRepositoryPage.value = null;
+  showBatchImportModal.value = false;
+  batchSelectedIds.value = [];
+  formData.repo = "";
+  formData.repository_id = "";
+  metadataRequestId++;
+  metadataLoading.value = false;
+  clearMetadataStatus();
+  void loadRepositories(false);
+}
+
+function isProviderAuthErrorCode(code: string | undefined): boolean {
+  if (!code) return false;
+  return (
+    code === "github_authorization_required" ||
+    code === "github_authorization_denied" ||
+    code.endsWith("_authorization_required") ||
+    code.endsWith("_authorization_denied") ||
+    code.endsWith("_token_expired")
+  );
+}
+
 function refreshRepositoriesAutomatically(): void {
   if (
     document.visibilityState === "hidden" ||
     !currentUser.value ||
     needsOAuthBinding.value ||
-    needsGithubConnection.value ||
+    needsProviderConnection.value ||
     repositoriesLoading.value ||
     repositoriesRefreshing.value ||
     repositoryMenuOpen.value ||
@@ -537,10 +934,22 @@ watch(
   [
     () => currentUser.value?.id,
     () => currentUser.value?.has_oauth_binding,
+    () => currentUser.value?.oauth_identities,
     isLocalAdminDirectSubmit,
   ],
   () => {
     oauthBindingBlocked.value = false;
+    const identities = currentUser.value?.oauth_identities || [];
+    const allowed = new Set(availableProviders.value.map((item) => item.provider));
+    if (identities.length > 0) {
+      const boundSelected = identities.some((item) => item.provider === selectedProvider.value);
+      if (!boundSelected) {
+        const firstBound = identities.find((item) => allowed.has(item.provider));
+        if (firstBound) selectedProvider.value = firstBound.provider;
+      }
+    } else if (!allowed.has(selectedProvider.value) && availableProviders.value[0]) {
+      selectedProvider.value = availableProviders.value[0].provider;
+    }
     void loadRepositories(false);
   },
   { immediate: true },
@@ -552,7 +961,7 @@ async function loadRepositories(append: boolean, silent = false): Promise<void> 
     repositories.value = [];
     repositoriesLoading.value = false;
     repositoriesRefreshing.value = false;
-    needsGithubConnection.value = false;
+    needsProviderConnection.value = false;
     repositoriesError.value = "";
     return;
   }
@@ -561,14 +970,18 @@ async function loadRepositories(append: boolean, silent = false): Promise<void> 
   lastRepositoryRefreshAt = Date.now();
   if (!silent) {
     repositoriesError.value = "";
-    needsGithubConnection.value = false;
+    needsProviderConnection.value = false;
   }
   let page = append ? nextRepositoryPage.value : 1;
   const found = new Map((append ? repositories.value : []).map((repo) => [repo.id, repo]));
+  const provider = selectedProvider.value;
   try {
     // Keep each interaction bounded while retaining an explicit continuation for large accounts.
     for (let count = 0; page && count < 10; count++) {
-      const result = await store.loadGithubRepositories(page);
+      const result =
+        provider === "github"
+          ? await store.loadGithubRepositories(page)
+          : await store.loadProviderRepositories(provider, page);
       if (requestId !== repositoryRequestId) return;
       result.items.forEach((repo) => found.set(repo.id, repo));
       page = result.next_page;
@@ -595,9 +1008,8 @@ async function loadRepositories(append: boolean, silent = false): Promise<void> 
     if (requestId !== repositoryRequestId) return;
     const code = (error as { code?: string }).code;
     if (code === "oauth_binding_required") oauthBindingBlocked.value = true;
-    needsGithubConnection.value =
-      code === "github_authorization_required" || code === "github_authorization_denied";
-    if (!silent || needsGithubConnection.value || oauthBindingBlocked.value)
+    needsProviderConnection.value = isProviderAuthErrorCode(code);
+    if (!silent || needsProviderConnection.value || oauthBindingBlocked.value)
       repositoriesError.value = errorMessage(error, "仓库列表加载失败");
   } finally {
     if (requestId === repositoryRequestId) {
@@ -607,16 +1019,14 @@ async function loadRepositories(append: boolean, silent = false): Promise<void> 
   }
 }
 
-async function selectRepository(id: string): Promise<void> {
-  const repo = repositories.value.find((item) => item.id === id);
-  if (!repo) return;
+function resetFormForRepository(repo: GithubPluginRepository): void {
   metadataRequestId++;
-  selectedRepositoryId.value = id;
+  selectedRepositoryId.value = repo.id;
   const ownerHandle =
     currentUser.value?.public_username || currentUser.value?.github_login || repo.owner;
   const defaultAuthorPage = `${window.location.origin}/author/${encodeURIComponent(ownerHandle)}`;
   Object.assign(formData, {
-    repository_id: id,
+    repository_id: repo.id,
     repo: repo.repo,
     name: "",
     display_name: "",
@@ -637,10 +1047,199 @@ async function selectRepository(id: string): Promise<void> {
     "short_desc",
     "author",
     "social_link",
-  ] as const)
+  ] as const) {
     autoFilledTextValues[key] = formData[key];
+  }
   autoFilledTags.value = [];
+}
+
+async function selectRepository(id: string): Promise<void> {
+  const repo = repositories.value.find((item) => item.id === id);
+  if (!repo) return;
+  resetFormForRepository(repo);
   await fetchMetadataFromRepo();
+}
+
+function openBatchImportModal(): void {
+  const availableIds = unsubmittedGithubSourceRepos.value.map((repo) => repo.id);
+  if (selectedRepositoryId.value && availableIds.includes(selectedRepositoryId.value)) {
+    batchSelectedIds.value = [selectedRepositoryId.value];
+  } else {
+    batchSelectedIds.value = [...availableIds];
+  }
+  batchCdnEnabled.value = formData.cdn_enabled;
+  batchCdnWhitelist.value = isAdminUser.value && formData.cdn_enabled && formData.cdn_whitelist;
+  showBatchImportModal.value = true;
+}
+
+function selectAllBatchRepos(): void {
+  batchSelectedIds.value = unsubmittedGithubSourceRepos.value.map((repo) => repo.id);
+}
+
+function clearBatchRepoSelection(): void {
+  batchSelectedIds.value = [];
+}
+
+function toggleBatchRepoSelection(repoId: string, checked: boolean): void {
+  if (checked) {
+    if (!batchSelectedIds.value.includes(repoId)) {
+      batchSelectedIds.value = [...batchSelectedIds.value, repoId];
+    }
+    return;
+  }
+  batchSelectedIds.value = batchSelectedIds.value.filter((id) => id !== repoId);
+}
+
+async function fillSingleRepoToForm(): Promise<void> {
+  const targetId = batchSelectedIds.value[0];
+  if (!targetId) return;
+  const repo = repositories.value.find((item) => item.id === targetId);
+  if (!repo) return;
+  showBatchImportModal.value = false;
+  resetFormForRepository(repo);
+  await fetchMetadataFromRepo(true);
+}
+
+async function previewBatchRepo(
+  repo: GithubPluginRepository,
+): Promise<PluginSubmissionMetadataPreview | null> {
+  batchStates[repo.id] = { status: "loading" };
+  try {
+    const preview = await store.fetchPluginSubmissionMetadata(repo.repo, repo.id, true);
+    batchStates[repo.id] = { status: "ready", preview };
+    return preview;
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "oauth_binding_required") oauthBindingBlocked.value = true;
+    if (isProviderAuthErrorCode(code)) needsProviderConnection.value = true;
+    batchStates[repo.id] = {
+      status: "error",
+      message: metadataErrorMessage(error),
+    };
+    return null;
+  }
+}
+
+async function previewSelectedBatchRepos(): Promise<void> {
+  const targets = unsubmittedGithubSourceRepos.value.filter((repo) =>
+    batchSelectedIds.value.includes(repo.id),
+  );
+  if (!targets.length) return;
+  batchPreviewing.value = true;
+  try {
+    for (const repo of targets) {
+      await previewBatchRepo(repo);
+    }
+  } finally {
+    batchPreviewing.value = false;
+  }
+}
+
+async function submitSelectedBatchRepos(): Promise<void> {
+  if (!siteConfig.value.market?.submissions_enabled) {
+    message.warning("当前站点已暂停插件提交");
+    return;
+  }
+  const targets = unsubmittedGithubSourceRepos.value.filter((repo) =>
+    batchSelectedIds.value.includes(repo.id),
+  );
+  if (!targets.length) return;
+  batchSubmitting.value = true;
+  let succeeded = 0;
+  let failed = 0;
+  try {
+    for (const repo of targets) {
+      let preview = batchStates[repo.id]?.preview;
+      if (!preview) {
+        preview = (await previewBatchRepo(repo)) ?? undefined;
+      }
+      if (!preview) {
+        failed += 1;
+        continue;
+      }
+      const name = cleanText(preview.name);
+      const desc = cleanText(preview.desc);
+      const author = cleanText(preview.author);
+      if (!/^astrbot_plugin_[a-z0-9_-]+$/i.test(name) || !desc || !author) {
+        batchStates[repo.id] = {
+          status: "error",
+          preview,
+          message: "元数据缺少合法插件名、简介或作者，可单选后填入表单补充",
+        };
+        failed += 1;
+        continue;
+      }
+      if (Array.from(desc).length > 120) {
+        batchStates[repo.id] = {
+          status: "error",
+          preview,
+          message: "插件简介超过 120 字，请单选后填入表单精简",
+        };
+        failed += 1;
+        continue;
+      }
+      const ownerHandle =
+        currentUser.value?.public_username || currentUser.value?.github_login || repo.owner;
+      const defaultAuthorPage = `${window.location.origin}/author/${encodeURIComponent(ownerHandle)}`;
+      const rawCategory = cleanText(preview.category);
+      const validCategory = pluginCategoryOptions.some((option) => option.value === rawCategory)
+        ? rawCategory
+        : "";
+      const payload: Record<string, unknown> = {
+        cdn_enabled: batchCdnEnabled.value,
+        repository_id: repo.id,
+        name,
+        display_name: cleanText(preview.display_name),
+        desc,
+        short_desc: cleanText(preview.short_desc),
+        author,
+        repo: repo.repo,
+        category: validCategory,
+        tags: cleanTags(preview.tags),
+        social_link: cleanText(preview.social_link) || defaultAuthorPage,
+      };
+      if (isAdminUser.value && batchCdnEnabled.value && batchCdnWhitelist.value) {
+        payload.cdn_whitelist = true;
+      }
+      batchStates[repo.id] = { status: "loading", preview };
+      try {
+        const result = await store.submitPlugin(payload);
+        const outcomeLabel = result.cdn_enabled
+          ? result.cdn_whitelist
+            ? "已加入 CDN 白名单直发"
+            : "已加入 CDN 队列"
+          : result.status === "listed"
+            ? "已上架"
+            : "已提交审核";
+        batchStates[repo.id] = { status: "submitted", preview, message: outcomeLabel };
+        batchSelectedIds.value = batchSelectedIds.value.filter((id) => id !== repo.id);
+        succeeded += 1;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code === "oauth_binding_required") oauthBindingBlocked.value = true;
+        if (isProviderAuthErrorCode(code)) needsProviderConnection.value = true;
+        batchStates[repo.id] = {
+          status: "error",
+          preview,
+          message: errorMessage(error, "提交失败"),
+        };
+        failed += 1;
+      }
+    }
+  } finally {
+    batchSubmitting.value = false;
+  }
+
+  if (succeeded > 0) {
+    await loadRepositories(false, true);
+  }
+  if (succeeded > 0 && failed === 0) {
+    message.success(`已成功导入并提交 ${succeeded} 个 GitHub 插件`);
+  } else if (succeeded > 0 && failed > 0) {
+    message.warning(`已提交 ${succeeded} 个插件，另有 ${failed} 个失败，请查看失败原因`);
+  } else if (failed > 0) {
+    message.error(`${failed} 个插件导入失败，请查看详情`);
+  }
 }
 
 const metadataFeedbackClass = computed(() => ({
@@ -673,10 +1272,10 @@ const rules = {
     trigger: "blur",
   },
   repo: [
-    { required: true, message: "请输入 GitHub 仓库地址", trigger: "blur" },
+    { required: true, message: "请输入受支持平台的 Git 仓库地址", trigger: "blur" },
     {
-      pattern: githubRepoPattern,
-      message: "请输入有效的 GitHub 仓库地址",
+      validator: (_, value) => isSupportedGitRepoUrl(String(value || "").trim()),
+      message: "请输入有效的 GitHub / GitLab / Gitee / AtomGit / Gitea 公开 HTTPS 仓库地址",
       trigger: "blur",
     },
   ],
@@ -770,15 +1369,17 @@ function metadataErrorMessage(error: unknown): string {
 async function fetchMetadataFromRepo(strict = false) {
   const repo = formData.repo.trim();
   if (!repo) {
-    message.warning("请先填写 GitHub 仓库地址");
+    message.warning("请先填写 Git 仓库地址");
     return;
   }
-  if (!githubRepoPattern.test(repo)) {
-    message.warning("请输入有效的 GitHub 仓库地址");
+  if (!isSupportedGitRepoUrl(repo)) {
+    message.warning(
+      "请输入受支持平台（GitHub / GitLab / Gitee / AtomGit / Gitea）的 HTTPS 仓库地址",
+    );
     return;
   }
   if (!currentUser.value) {
-    message.warning("请先使用 GitHub 登录");
+    message.warning("请先登录后再读取仓库信息");
     return;
   }
   if (!siteConfig.value.market?.submissions_enabled) {
@@ -807,7 +1408,7 @@ async function fetchMetadataFromRepo(strict = false) {
     if (requestId !== metadataRequestId) return;
     const code = (error as { code?: string }).code;
     if (code === "oauth_binding_required") oauthBindingBlocked.value = true;
-    if (code === "github_authorization_required") needsGithubConnection.value = true;
+    if (isProviderAuthErrorCode(code)) needsProviderConnection.value = true;
     metadataStatus.type = "error";
     metadataStatus.text = metadataErrorMessage(error);
     message.error(metadataStatus.text);
@@ -829,10 +1430,16 @@ const handleSubmit = () => {
 
     submitting.value = true;
     try {
-      const result = await store.submitPlugin({ ...formData });
+      const payload: Record<string, unknown> = { ...formData };
+      if (!isAdminUser.value || !formData.cdn_enabled) {
+        delete payload.cdn_whitelist;
+      }
+      const result = await store.submitPlugin(payload);
       message.success(
         result.cdn_enabled
-          ? "已加入 CDN 审查队列，通过后提供资源链接"
+          ? result.cdn_whitelist
+            ? "已加入 CDN 白名单直发队列，预检通过后将直接发布"
+            : "已加入 CDN 审查队列，通过后提供资源链接"
           : result.status === "listed"
             ? "插件已上架"
             : "已提交上架审核",
@@ -841,7 +1448,7 @@ const handleSubmit = () => {
     } catch (error) {
       const code = (error as { code?: string }).code;
       if (code === "oauth_binding_required") oauthBindingBlocked.value = true;
-      if (code === "github_authorization_required") needsGithubConnection.value = true;
+      if (isProviderAuthErrorCode(code)) needsProviderConnection.value = true;
       message.error(errorMessage(error, "提交失败"));
     } finally {
       submitting.value = false;
@@ -859,6 +1466,138 @@ const handleSubmit = () => {
 .repository-picker {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+}
+
+.platform-switcher-btn {
+  font-weight: 500;
+}
+
+.platform-switcher-caret {
+  margin-left: 4px;
+  opacity: 0.72;
+}
+
+.form-title-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cdn-whitelist-box {
+  margin-top: 10px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-base);
+}
+
+.batch-import-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.batch-import-intro {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.batch-import-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.batch-import-toolbar-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.batch-import-count {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.batch-repo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.batch-repo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-base);
+  background: var(--bg-base);
+}
+
+.batch-repo-item.is-selected {
+  border-color: var(--primary-color, #2080f0);
+}
+
+.batch-repo-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.batch-repo-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.batch-repo-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.batch-repo-preview,
+.batch-repo-desc,
+.batch-repo-error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.batch-repo-preview,
+.batch-repo-desc {
+  color: var(--text-secondary);
+}
+
+.batch-repo-error {
+  color: var(--error-color);
+}
+
+.batch-import-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-base);
+}
+
+.batch-import-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .repository-hint,

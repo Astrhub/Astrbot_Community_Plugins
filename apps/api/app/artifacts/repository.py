@@ -10,7 +10,13 @@ from typing import Any, Protocol
 
 import asyncpg
 
-from ..cdn import publication_payload, check_publication_cdn, cdn_enabled, cdn_generation
+from ..cdn import (
+    cdn_enabled,
+    cdn_generation,
+    cdn_whitelist,
+    check_publication_cdn,
+    publication_payload,
+)
 from .manual_review import InMemoryManualReviewMixin, PgManualReviewMixin, REVIEW_JOB_TYPES
 from .advanced_repository import (
     InMemoryAdvancedReviewRepositoryMixin,
@@ -395,6 +401,18 @@ class ArtifactRepository(Protocol):
         risk_level: str,
     ) -> dict[str, Any] | None: ...
 
+    async def whitelist_approve_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reason: str,
+        expected_repo_version: str,
+        expected_normalized_version: str,
+        expected_version: str,
+        idempotency_key: str,
+        precheck_run_id: str,
+    ) -> dict[str, Any] | None: ...
+
     async def request_revoke_artifact(
         self,
         artifact_id: str,
@@ -533,12 +551,17 @@ class PgArtifactRepository(PgManualReviewMixin, PgAdvancedReviewRepositoryMixin)
                    p.repo_version,
                    COALESCE((p.metadata->>'cdn_enabled')::boolean, true) AS cdn_enabled,
                    COALESCE((p.metadata->>'cdn_generation')::integer, 0) AS cdn_generation,
+                   COALESCE((p.metadata->>'cdn_whitelist')::boolean, false) AS cdn_whitelist,
                    p.current_artifact_id,
                    p.owner_user_id,
                    p.owner_github_login,
+                   owner_user.role AS owner_role,
+                   submitter_user.role AS submitter_role,
                    current.version AS published_version
               FROM plugin_artifacts a
               JOIN market_plugins p ON p.id = a.plugin_id
+         LEFT JOIN market_users owner_user ON owner_user.id = p.owner_user_id
+         LEFT JOIN market_users submitter_user ON submitter_user.id = a.submitted_by
          LEFT JOIN plugin_artifacts current ON current.id = p.current_artifact_id
              WHERE a.id = $1
             """,
@@ -1796,6 +1819,137 @@ class PgArtifactRepository(PgManualReviewMixin, PgAdvancedReviewRepositoryMixin)
                     or str(publish_job["policy_version_id"] or "") != effective_policy_id
                 ):
                     raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+        return _record(approved)
+
+    async def whitelist_approve_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reason: str,
+        expected_repo_version: str,
+        expected_normalized_version: str,
+        expected_version: str,
+        idempotency_key: str,
+        precheck_run_id: str,
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                existing = await connection.fetchrow(
+                    "SELECT artifact_id FROM review_decisions WHERE idempotency_key = $1",
+                    idempotency_key,
+                )
+                if existing:
+                    if str(existing["artifact_id"]) != artifact_id:
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    row = await connection.fetchrow(
+                        "SELECT * FROM plugin_artifacts WHERE id = $1",
+                        artifact_id,
+                    )
+                    return _record(row) if row else None
+
+                current = await connection.fetchrow(
+                    """
+                    SELECT a.*, p.repo_version, p.metadata AS cdn_settings,
+                           owner_user.role AS owner_role,
+                           submitter_user.role AS submitter_role
+                      FROM plugin_artifacts a
+                      JOIN market_plugins p ON p.id = a.plugin_id
+                 LEFT JOIN market_users owner_user ON owner_user.id = p.owner_user_id
+                 LEFT JOIN market_users submitter_user ON submitter_user.id = a.submitted_by
+                     WHERE a.id = $1
+                     FOR UPDATE OF a, p
+                    """,
+                    artifact_id,
+                )
+                if not current:
+                    return None
+                if str(current["review_status"]) != ReviewStatus.PRECHECKING.value:
+                    raise ArtifactStateError(
+                        ArtifactErrorCode.ARTIFACT_ALREADY_DECIDED,
+                        str(current["review_status"]),
+                        ReviewStatus.APPROVED.value,
+                    )
+                cdn_settings = dict(current["cdn_settings"] or {})
+                if cdn_settings.get("cdn_enabled", True) is not True:
+                    raise ValueError("cdn_disabled_or_changed")
+                if cdn_settings.get("cdn_whitelist") is not True:
+                    raise ValueError("cdn_whitelist_ineligible")
+                if str(current["owner_role"] or "") not in {"admin", "core_admin"}:
+                    raise ValueError("cdn_whitelist_ineligible")
+                if str(current["submitter_role"] or "") not in {"admin", "core_admin"}:
+                    raise ValueError("cdn_whitelist_ineligible")
+                if str(current["repo_version"] or "") != expected_repo_version:
+                    raise ValueError("repo_version_changed")
+                if str(current["normalized_version"] or "") != expected_normalized_version:
+                    raise ValueError("artifact_version_changed")
+                if str(current["version"] or "") != expected_version:
+                    raise ValueError("artifact_version_changed")
+
+                effective_policy_id = str(current["policy_version_id"] or "") or None
+                effective_policy_version = "p1"
+                if effective_policy_id:
+                    policy_row = await connection.fetchrow(
+                        "SELECT version FROM review_policies WHERE id = $1",
+                        effective_policy_id,
+                    )
+                    if policy_row:
+                        effective_policy_version = str(policy_row["version"])
+
+                await connection.execute(
+                    """
+                    INSERT INTO review_decisions (
+                        id, artifact_id, action, from_status, to_status, reason,
+                        reviewer_user_id, reviewer_nickname, policy_version,
+                        idempotency_key, source, policy_version_id, input_run_ids,
+                        input_fingerprints, coverage_sha256, metadata
+                    )
+                    VALUES (
+                        $1, $2, 'auto_approve', $3, 'approved', $4,
+                        $5, '管理员白名单直发', $6, $7, 'admin', $8,
+                        $9::text[], ARRAY[]::text[], '', $10::jsonb
+                    )
+                    """,
+                    new_domain_id("decision"),
+                    artifact_id,
+                    current["review_status"],
+                    reason,
+                    current["submitted_by"],
+                    effective_policy_version,
+                    idempotency_key,
+                    effective_policy_id,
+                    [precheck_run_id] if precheck_run_id else [],
+                    {"cdn_whitelist": True},
+                )
+                approved = await connection.fetchrow(
+                    """
+                    UPDATE plugin_artifacts
+                       SET review_status = 'approved',
+                           risk_level = 'low',
+                           reviewed_at = now(),
+                           updated_at = now()
+                     WHERE id = $1
+                 RETURNING *
+                    """,
+                    artifact_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO artifact_jobs (
+                        id, artifact_id, type, payload, max_attempts, idempotency_key,
+                        policy_version_id
+                    )
+                    VALUES ($1, $2, 'publish', $3::jsonb, 5, $4, $5)
+                    ON CONFLICT (idempotency_key) DO NOTHING
+                    """,
+                    new_domain_id("job"),
+                    artifact_id,
+                    publication_payload(
+                        cdn_settings,
+                        {"expected_repo_version": expected_repo_version},
+                    ),
+                    f"publish:{artifact_id}",
+                    effective_policy_id,
+                )
         return _record(approved)
 
     async def request_revoke_artifact(
@@ -3422,6 +3576,107 @@ class InMemoryArtifactRepository(InMemoryManualReviewMixin, InMemoryAdvancedRevi
                 self.jobs[publish_job["id"]] = publish_job
             return deepcopy(artifact)
 
+    async def whitelist_approve_artifact(
+        self,
+        artifact_id: str,
+        *,
+        reason: str,
+        expected_repo_version: str,
+        expected_normalized_version: str,
+        expected_version: str,
+        idempotency_key: str,
+        precheck_run_id: str,
+    ) -> dict[str, Any] | None:
+        async with self._lock:
+            for decision in self.decisions.values():
+                if decision["idempotency_key"] == idempotency_key:
+                    if decision["artifact_id"] != artifact_id:
+                        raise ValueError(ArtifactErrorCode.IDEMPOTENCY_KEY_CONFLICT.value)
+                    artifact = self.artifacts.get(artifact_id)
+                    return deepcopy(artifact) if artifact else None
+            artifact = self.artifacts.get(artifact_id)
+            if not artifact:
+                return None
+            if artifact["review_status"] != ReviewStatus.PRECHECKING.value:
+                raise ArtifactStateError(
+                    ArtifactErrorCode.ARTIFACT_ALREADY_DECIDED,
+                    artifact["review_status"],
+                    ReviewStatus.APPROVED.value,
+                )
+            plugin = self._plugin(artifact["plugin_id"]) or {}
+            if not cdn_enabled(plugin):
+                raise ValueError("cdn_disabled_or_changed")
+            if not cdn_whitelist(plugin):
+                raise ValueError("cdn_whitelist_ineligible")
+            owner = self._user(str(plugin.get("owner_user_id") or ""))
+            submitter = self._user(str(artifact.get("submitted_by") or ""))
+            if str((owner or {}).get("role") or "") not in {"admin", "core_admin"}:
+                raise ValueError("cdn_whitelist_ineligible")
+            if str((submitter or {}).get("role") or "") not in {"admin", "core_admin"}:
+                raise ValueError("cdn_whitelist_ineligible")
+            if str(plugin.get("repo_version") or "") != expected_repo_version:
+                raise ValueError("repo_version_changed")
+            if artifact["normalized_version"] != expected_normalized_version:
+                raise ValueError("artifact_version_changed")
+            if artifact["version"] != expected_version:
+                raise ValueError("artifact_version_changed")
+            effective_policy_id = str(artifact.get("policy_version_id") or "") or None
+            effective_policy_version = "p1"
+            if effective_policy_id and effective_policy_id in self.policies:
+                effective_policy_version = str(self.policies[effective_policy_id]["version"])
+            now = _utc_now()
+            decision = {
+                "id": new_domain_id("decision"),
+                "artifact_id": artifact_id,
+                "action": "auto_approve",
+                "from_status": artifact["review_status"],
+                "to_status": ReviewStatus.APPROVED.value,
+                "reason": reason,
+                "reviewer_user_id": artifact.get("submitted_by"),
+                "reviewer_nickname": "管理员白名单直发",
+                "policy_version": effective_policy_version,
+                "policy_version_id": effective_policy_id,
+                "source": "admin",
+                "input_run_ids": [precheck_run_id] if precheck_run_id else [],
+                "input_fingerprints": [],
+                "coverage_sha256": "",
+                "metadata": {"cdn_whitelist": True},
+                "idempotency_key": idempotency_key,
+                "created_at": now,
+            }
+            self.decisions[decision["id"]] = decision
+            artifact["review_status"] = ReviewStatus.APPROVED.value
+            artifact["risk_level"] = "low"
+            artifact["reviewed_at"] = now
+            artifact["updated_at"] = now
+            publish_key = f"publish:{artifact_id}"
+            if not any(job["idempotency_key"] == publish_key for job in self.jobs.values()):
+                job = {
+                    "id": new_domain_id("job"),
+                    "artifact_id": artifact_id,
+                    "type": JobType.PUBLISH.value,
+                    "status": JobStatus.QUEUED.value,
+                    "payload": publication_payload(
+                        plugin, {"expected_repo_version": expected_repo_version}
+                    ),
+                    "attempts": 0,
+                    "max_attempts": 5,
+                    "available_at": now,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "idempotency_key": publish_key,
+                    "policy_version_id": effective_policy_id,
+                    "run_id": None,
+                    "stage_name": "publish",
+                    "last_error_code": "",
+                    "last_error": "",
+                    "created_at": now,
+                    "updated_at": now,
+                    "completed_at": None,
+                }
+                self.jobs[job["id"]] = job
+            return deepcopy(artifact)
+
     async def request_revoke_artifact(
         self,
         artifact_id: str,
@@ -3931,10 +4186,13 @@ class InMemoryArtifactRepository(InMemoryManualReviewMixin, InMemoryAdvancedRevi
     def _with_plugin(self, artifact: Mapping[str, Any]) -> dict[str, Any]:
         plugin = self._plugin(str(artifact["plugin_id"])) or {}
         current = self.artifacts.get(str(plugin.get("current_artifact_id") or "")) or {}
+        owner = self._user(str(plugin.get("owner_user_id") or ""))
+        submitter = self._user(str(artifact.get("submitted_by") or ""))
         return {
             **artifact,
             "cdn_enabled": cdn_enabled(plugin),
             "cdn_generation": cdn_generation(plugin),
+            "cdn_whitelist": cdn_whitelist(plugin),
             "plugin_name": plugin.get("name", artifact["plugin_id"]),
             "plugin_repo": plugin.get("repo", artifact.get("source_repo", "")),
             "repo_version": plugin.get("repo_version", ""),
@@ -3942,7 +4200,15 @@ class InMemoryArtifactRepository(InMemoryManualReviewMixin, InMemoryAdvancedRevi
             "published_version": current.get("version", ""),
             "owner_user_id": plugin.get("owner_user_id"),
             "owner_github_login": plugin.get("owner_github_login", ""),
+            "owner_role": (owner or {}).get("role", ""),
+            "submitter_role": (submitter or {}).get("role", ""),
         }
+
+    def _user(self, user_id: str) -> dict[str, Any] | None:
+        if not self.store or not user_id:
+            return None
+        finder = getattr(self.store, "get_user_by_id", None)
+        return finder(user_id) if finder else None
 
     def _plugin(self, plugin_id: str) -> dict[str, Any] | None:
         if not self.store:

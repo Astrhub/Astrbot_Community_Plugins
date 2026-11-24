@@ -15,11 +15,13 @@ import {
 } from "naive-ui";
 import { ArrowBack } from "@vicons/ionicons5";
 import AccessKeyManager from "@/components/settings/AccessKeyManager.vue";
+import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import NotificationPreferencesSection from "@/components/settings/NotificationPreferencesSection.vue";
 import PersonalPluginManager from "@/components/settings/PersonalPluginManager.vue";
 import ProfileAccountSection from "@/components/settings/ProfileAccountSection.vue";
 import { usePluginStore } from "@/stores/plugins";
-import type { OAuthIdentity, Plugin } from "@/types";
+import { getGitProviderLabel } from "@/utils/github";
+import type { OAuthIdentity, OAuthProviderKey, Plugin } from "@/types";
 
 const router = useRouter();
 const message = useMessage();
@@ -33,6 +35,7 @@ const {
   loadMyApiKeys,
   loadMyPlugins,
   loginWithGithub,
+  loginWithOAuth,
   requestEmailChange,
   requestPluginListing,
   unbindMyOAuthIdentity,
@@ -240,14 +243,32 @@ async function withPluginBusy(plugin, action, task) {
   }
 }
 
-async function togglePluginCdn({ plugin, enabled }: { plugin: Plugin; enabled: boolean }) {
+async function togglePluginCdn({
+  plugin,
+  enabled,
+  whitelist,
+}: {
+  plugin: Plugin;
+  enabled: boolean;
+  whitelist?: boolean;
+}) {
   if (pluginBusyIds[plugin.id]) return;
   try {
-    const updated = await withPluginBusy(plugin, "cdn", () => updatePluginCdn(plugin.id, enabled));
+    const updated = await withPluginBusy(plugin, "cdn", () =>
+      updatePluginCdn(plugin.id, enabled, whitelist),
+    );
+    if (whitelist !== undefined && updated.cdn_enabled) {
+      message.success(
+        updated.cdn_whitelist
+          ? "已开启管理员 CDN 白名单直发，后续发版将跳过审查直接发布"
+          : "已关闭管理员 CDN 白名单直发，后续发版将按正常流程审查",
+      );
+      return;
+    }
     message.success(
       updated.cdn_enabled
         ? "已开启 CDN，未审查的新版本会自动送审"
-        : "已关闭 CDN，插件仍可通过 GitHub 安装",
+        : "已关闭 CDN，插件仍可通过原 Git 仓库安装",
     );
   } catch (error) {
     message.error(error instanceof Error ? error.message : "更新 CDN 设置失败");
@@ -360,6 +381,27 @@ function handleConnectGithub() {
   loginWithGithub("/settings/personal");
 }
 
+function handleConnectOAuth(provider: OAuthProviderKey) {
+  loginWithOAuth(provider, "/settings/personal");
+}
+
+const enabledOAuthProviders = computed(() => {
+  const configured = siteConfig.value.auth.oauth_providers;
+  if (Array.isArray(configured) && configured.length > 0) {
+    return configured.filter((item) => item.enabled);
+  }
+  const fallback: Array<{ provider: OAuthProviderKey; enabled: boolean }> = [
+    { provider: "github", enabled: Boolean(siteConfig.value.auth.github_login_enabled) },
+    { provider: "gitlab", enabled: Boolean(siteConfig.value.auth.gitlab_login_enabled) },
+    { provider: "gitee", enabled: Boolean(siteConfig.value.auth.gitee_login_enabled) },
+    { provider: "atomgit", enabled: Boolean(siteConfig.value.auth.atomgit_login_enabled) },
+    { provider: "gitea", enabled: Boolean(siteConfig.value.auth.gitea_login_enabled) },
+  ];
+  return fallback
+    .filter((item) => item.enabled)
+    .map((item) => ({ provider: item.provider, label: getGitProviderLabel(item.provider) }));
+});
+
 async function handleUnbindOAuth(identity: OAuthIdentity) {
   oauthBusyId.value = identity.id;
   try {
@@ -423,7 +465,7 @@ onMounted(async () => {
                 :email-saving="savingEmail"
                 :oauth-busy-id="oauthBusyId"
                 @save="saveProfile"
-                @connect-github="handleConnectGithub"
+                @connect-oauth="handleConnectOAuth"
                 @unbind-oauth="handleUnbindOAuth"
                 @update-password="handleUpdatePassword"
                 @request-email-change="handleRequestEmailChange"
@@ -459,14 +501,21 @@ onMounted(async () => {
             <div class="profile-tab-content">
               <NAlert v-if="!isDeveloper && !myPlugins.length" type="info" :bordered="false">
                 当前账号为注册用户，绑定至少一个 OAuth 账号成为开发者后即可提交与上架插件。
-                <template v-if="siteConfig.auth.github_login_enabled">
+                <template v-if="enabledOAuthProviders.length">
                   <NButton
+                    v-for="item in enabledOAuthProviders"
+                    :key="item.provider"
                     size="small"
-                    type="primary"
-                    style="margin-left: 10px"
-                    @click="handleConnectGithub"
+                    :type="
+                      item.provider === enabledOAuthProviders[0]?.provider ? 'primary' : 'default'
+                    "
+                    style="margin-left: 8px; margin-top: 4px"
+                    @click="handleConnectOAuth(item.provider)"
                   >
-                    绑定 GitHub 成为开发者
+                    <template #icon>
+                      <GitProviderIcon :provider="item.provider" :size="14" />
+                    </template>
+                    绑定 {{ item.label }}
                   </NButton>
                 </template>
               </NAlert>
@@ -475,6 +524,8 @@ onMounted(async () => {
                 :loading="loadingPlugins"
                 :busy-ids="pluginBusyIds"
                 :max-tags="maxPluginTags"
+                :is-admin-user="isAdminUser"
+                :api-base-url="store.apiBaseUrl"
                 @refresh="refreshMyPlugins"
                 @save-plugin="savePluginMetadata"
                 @toggle-cdn="togglePluginCdn"

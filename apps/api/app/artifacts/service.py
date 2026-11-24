@@ -9,6 +9,7 @@ from ..auth import is_admin
 from .archive import (
     PrecheckError,
     normalize_github_repo,
+    normalize_supported_git_repo,
     normalize_version,
     validate_release_version,
 )
@@ -143,6 +144,46 @@ class ArtifactService:
             source_commit_sha=source.commit_sha,
             supersedes_artifact_id=supersedes_id,
             github_release=github_release,
+        )
+
+    async def submit_git(
+        self,
+        *,
+        plugin: Mapping[str, Any],
+        user: Mapping[str, Any],
+        source: Any,
+        archive_chunks: Any,
+        supersedes_artifact_id: str = "",
+    ) -> dict[str, Any]:
+        from ..git_sources.models import normalize_git_repo_key
+
+        await self._require_cdn_enabled(plugin)
+        supersedes_id = await self._validated_supersedes(
+            plugin,
+            user,
+            supersedes_artifact_id,
+        )
+        plugin_repo_key = normalize_git_repo_key(str(plugin.get("repo") or ""))
+        if normalize_git_repo_key(str(source.repo_url or "")) != plugin_repo_key:
+            raise ArtifactServiceError("git_repository_changed", "仓库来源不一致", status_code=409)
+        artifact_id = new_domain_id("artifact")
+        quarantine_key = build_quarantine_key(artifact_id)
+        stored = await self.storage.put_quarantine(
+            archive_chunks,
+            quarantine_key,
+            self.max_upload_bytes,
+        )
+        return await self._create_artifact(
+            artifact_id=artifact_id,
+            plugin=plugin,
+            user=user,
+            quarantine_key=quarantine_key,
+            archive_sha256=stored.sha256,
+            size_bytes=stored.size_bytes,
+            source_type="git",
+            source_ref=str(source.requested_ref or ""),
+            source_commit_sha=str(source.commit_sha or ""),
+            supersedes_artifact_id=supersedes_id,
         )
 
     async def artifact_detail(self, artifact_id: str) -> dict[str, Any] | None:
@@ -533,7 +574,7 @@ class ArtifactService:
                     "id": artifact_id,
                     "plugin_id": plugin["id"],
                     "source_type": source_type,
-                    "source_repo": normalize_github_repo(str(plugin.get("repo") or "")),
+                    "source_repo": normalize_supported_git_repo(str(plugin.get("repo") or "")),
                     "source_ref": source_ref,
                     "source_commit_sha": source_commit_sha,
                     "archive_sha256": archive_sha256,

@@ -27,6 +27,7 @@ def settings(tmp_path):
         {
             "APP_ENV_FILE": str(tmp_path / "missing.env"),
             "GITHUB_CLIENT_SECRET": "server-only-oauth-secret",
+            "OAUTH_CREDENTIAL_KEY": "test-oauth-credential-master-key-01",
         }
     )
 
@@ -136,7 +137,7 @@ def test_oauth_is_encrypted_revocable_and_expires_without_site_token_fallback(tm
         store.revoke_session(session["token"])
         assert store.get_github_authorization(access.reference) is None
         expired = (
-            oauth_cipher(cfg.github_client_secret)
+            oauth_cipher(cfg.oauth_credential_key)
             .encrypt_at_time(
                 json.dumps(
                     {"user_id": user["id"], "github_id": "1", "access_token": "expired"}

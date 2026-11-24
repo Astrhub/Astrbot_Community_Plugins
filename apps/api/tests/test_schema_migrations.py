@@ -156,6 +156,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20261008_009_plugin_listed_at",
         "20261122_010_plugin_author_name_identity",
         "20261124_011_email_accounts_and_oauth_identities",
+        "20261124_012_git_providers_and_oauth_credentials",
     ]
     sql = migrations[0].sql
     for table in (
@@ -234,6 +235,19 @@ def test_review_policy_snapshot_migration_adds_explicit_migration_audit_action()
     assert "review_decisions_policy_migration_idx" in sql
 
 
+def test_git_providers_migration_declares_credentials_bindings_and_git_source_type() -> None:
+    sql = discover_schema_migrations()[11].sql
+
+    assert "CREATE TABLE IF NOT EXISTS market_oauth_credentials" in sql
+    assert "CREATE TABLE IF NOT EXISTS market_git_repository_bindings" in sql
+    assert "market_git_repository_bindings_active_repo_idx" in sql
+    assert "market_plugins_normalized_repo_key" in sql
+    assert "ADD COLUMN IF NOT EXISTS repo_provider" in sql
+    assert "ADD COLUMN IF NOT EXISTS repo_external_id" in sql
+    assert "ADD COLUMN IF NOT EXISTS normalized_repo" in sql
+    assert "CHECK (source_type IN ('upload', 'github', 'git'))" in sql
+
+
 def test_artifact_migrations_against_postgres() -> None:
     database_url = os.getenv("ASTRBOT_TEST_DATABASE_URL", "")
     if not database_url:
@@ -265,6 +279,7 @@ async def run_artifact_migrations(database_url: str) -> None:
             "20261008_009_plugin_listed_at",
             "20261122_010_plugin_author_name_identity",
             "20261124_011_email_accounts_and_oauth_identities",
+            "20261124_012_git_providers_and_oauth_credentials",
         ]
         assert second == []
         table_names = await connection.fetch(

@@ -67,8 +67,10 @@ flowchart LR
 | `schemas.py` | Pydantic 2 请求体校验模型（提交、评论、安装向导、系统设置、邮件等） |
 | `auth.py` | `Role` 枚举、权限检查函数（`can_edit_plugin` / `can_manage_plugin_submission` / `can_configure_plugin_cdn` 等）、PBKDF2 密码哈希、API Key 鉴权 |
 | `store.py` | `InMemoryMarketStore`、`LocalFileMarketStore`、`PgRedisMarketStore` 与 PostgreSQL 基础建表 SQL |
-| `cdn.py` | 按插件可选 CDN 订阅状态、版本代次管理与自动送审队列 |
-| `github_authorization.py` | 用户 GitHub OAuth 仓库管理权限核验、Fernet 加密凭据读写与发布前仓库身份复核 |
+| `cdn.py` | 按插件可选 CDN 订阅状态、版本代次管理与多平台自动送审队列 |
+| `github_authorization.py` | 多平台 OAuth 仓库管理权限核验、独立主密钥 Fernet 加密凭据读写与发布前仓库身份/绑定复核 |
+| `git_sources/` | 已知 OAuth 第三方 Git 平台适配器（`GitLab.com`、`Gitee`、`AtomGit / GitCode`、`Gitea`）、严格 HTTPS 域名白名单、持久化加密 `CredentialStore`（令牌刷新轮转）与 OAuth / 仓库绑定路由 |
+| `media_proxy.py` | 海外平台（`GitLab.com` / `Gitea`）插件 Logo、README 仓库内图片与海外用户头像受限代理（白名单校验、栅格图片魔数嗅探、Redis/内存短缓存与弱 `ETag`/`304`） |
 | `plugin_identity.py` | 插件命名空间冲突异常与规范详情路径（`/plugin/{owner}/{name}`）生成 |
 | `openapi_filter.py` / `llms_txt.py` | 按当前登录角色过滤 `/openapi.json`（含 `components` 闭包）与生成 `/llms.txt` |
 | `env_file.py` | `.env` 文件解析与写回工具（供一次性 `/v1/setup` 使用） |
@@ -117,7 +119,7 @@ create_app(settings, store)
 | 表 | 主键 | 核心字段与约束 |
 | --- | --- | --- |
 | `market_users` | `id` | `github_id`（UNIQUE）、大小写不敏感 `github_login` / `internal_username` 唯一索引、`password_hash`、`auth_source`、`github_token`、`role`（`core_admin` / `admin` / `user`）、禁言字段 |
-| `market_plugins` | `id` | `repo`（UNIQUE）、`(owner_user_id, name)`、大小写不敏感 `(owner_github_login, name)` 与 `(author, name)` 唯一索引、`display_name`、`desc_text`、`tags`（`jsonb` + GIN 索引）、`status`（`pending` / `listed` / `unlisted`）、`stars`、`likes`、`comments_count`、`metadata`（`jsonb`） |
+| `market_plugins` | `id` | `repo`（UNIQUE）、`repo_provider`、`repo_external_id`、`normalized_repo`（UNIQUE）、`(owner_user_id, name)`、大小写不敏感 `(owner_github_login, name)` 与 `(author, name)` 唯一索引、`display_name`、`desc_text`、`tags`（`jsonb` + GIN 索引）、`status`（`pending` / `listed` / `unlisted`）、`stars`、`likes`、`comments_count`、`metadata`（`jsonb`） |
 | `market_submissions` | `id` | `plugin_id`（FK CASCADE）、`user_id`（FK CASCADE）、`payload`（`jsonb`）、`status` |
 | `market_comments` | `id` | `plugin_id`（FK）、`user_id`（FK）、`parent_id`（自引用 FK，支持嵌套）、`body`、`likes`、`deleted`、`deleted_by` / `deleted_at`；有效评论部分索引 `WHERE deleted = false` |
 | `market_plugin_likes` | `(plugin_id, user_id)` | 联合主键，保证每用户对同一插件仅能点赞一次 |
@@ -127,7 +129,7 @@ create_app(settings, store)
 | `market_api_keys` | `id` | `name`、`user_id`（FK）、`scopes`（`jsonb`）、`key`（UNIQUE） |
 | `market_options` | `option_key` | `option_value`，存储运行时站点、OAuth、市场策略与邮件配置 |
 
-版本化迁移另建插件包与审查体系表，包括 `plugin_artifacts`、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`review_comments`、`review_policies`、`plugin_cdn_subscriptions`、`artifact_jobs`、`outbox_events` 与 `market_schema_migrations`。`market_plugins.repo_version` 随仓库元数据更新，`current_artifact_id` 仅由发布或下架事务更新。历史迁移脚本的 checksum 一旦被篡改，服务将拒绝启动。
+版本化迁移另建账号扩展与插件包审查体系表，包括 `market_oauth_identities`、`market_oauth_credentials`（由 `OAUTH_CREDENTIAL_KEY` 加密保存各平台 OAuth 访问与刷新令牌）、`market_git_repository_bindings`（记录第三方仓库归属绑定、代次与撤销/转移审计）、`plugin_artifacts`（`source_type` 支持 `upload` / `github` / `git`）、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`review_comments`、`review_policies`、`plugin_cdn_subscriptions`、`artifact_jobs`、`outbox_events` 与 `market_schema_migrations`。`market_plugins.repo_version` 随仓库元数据更新，`current_artifact_id` 仅由发布或下架事务更新。历史迁移脚本的 checksum 一旦被篡改，服务将拒绝启动。
 
 关键不变式包括：`(plugin_id, archive_sha256)` 幂等、已发布 `(plugin_id, normalized_version)` 唯一、隔离与发布对象 key 唯一、人工决策与任务 `idempotency_key` 唯一。发布事务提交前会再次锁定插件与 artifact 记录，并校验仓库版本与 CDN 开关。
 
@@ -136,7 +138,7 @@ create_app(settings, store)
 仅在 `PgRedisMarketStore` 中使用，存储两类带 TTL 的短期数据：
 
 - **登录会话**：Key 为 `astrbot_market:session:{token}`，Value 为 JSON 序列化的 `{token, user_id, created_at, last_seen_at}`；TTL 由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天），读取时自动续期。
-- **加密短期 GitHub OAuth 授权凭据**：用于仓库管理权限校验，使用由 `GITHUB_CLIENT_SECRET` 经 HKDF 派生的 Fernet 密钥加密，TTL 不超过 8 小时，注销或会话失效时同步删除。
+- **加密短期 GitHub OAuth 授权凭据**：用于仓库管理权限校验，使用独立部署环境变量 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生的 Fernet 密钥加密（不再回退 `GITHUB_CLIENT_SECRET`），TTL 不超过 8 小时，注销或会话失效时同步删除；多平台 OAuth 持久化访问与刷新令牌则以同一独立主密钥加密保存于 `market_oauth_credentials`。
 
 ### 本地单文件与内存存储
 
@@ -158,8 +160,10 @@ create_app(settings, store)
 | `GET` | `/v1/plugins/by-author/{username}/{name}` | 按作者用户名与插件名获取已上架插件详情 |
 | `GET` | `/v1/plugins/{id}` | 按插件 ID 获取详情（含评论树与点赞状态） |
 | `GET` | `/v1/plugins/{id}/readme` | 获取插件 README 缓存或实时内容 |
+| `GET` | `/v1/plugins/{id}/logo` · `/v1/plugins/{id}/readme-asset` | 代理海外平台（`GitLab.com` / `Gitea`）插件 Logo 与 README 仓库内图片（`public, max-age=3600`） |
 | `GET` | `/v1/authors` | 获取公开作者名及是否有已上架插件 |
 | `GET` | `/v1/authors/{username}/plugins` | 获取指定作者的已上架插件列表 |
+| `GET` | `/v1/authors/{username}/avatar` | 代理海外来源公开作者头像（严格域名白名单与栅格图片校验，`public, max-age=3600`） |
 | `GET` | `/v1/announcements` | 公告列表 |
 | `GET` | `/plugins.json` · `/plugins-md5.json` | AstrBot 插件源 Feed 与 MD5 摘要 |
 | `GET` | `/v1/astrbot/plugins(.json\|-md5.json)` | 带 `v1` 前缀的等价 AstrBot 插件源端点 |
@@ -173,8 +177,8 @@ create_app(settings, store)
 | `POST` | `/v1/auth/email/register` | 邮箱一步直通注册（仅 `EMAIL_VERIFICATION_REQUIRED=false` 时开放） |
 | `POST` | `/v1/auth/email/register/request` · `verify` | 邮箱两步验证码注册（`EMAIL_VERIFICATION_REQUIRED=true` 时开放） |
 | `POST` | `/v1/auth/email/password-reset/request` · `verify` | 邮箱验证码找回与重置密码（成功后吊销旧会话） |
-| `GET` | `/v1/auth/github/login` | 跳转至 GitHub OAuth 授权页（支持游客登录/注册与已登录账号绑定） |
-| `GET` | `/v1/auth/github/callback` | OAuth 回调，创建会话并写入 `market_oauth_identities` 及短期仓库授权凭据 |
+| `GET` | `/v1/auth/github/login` · `/callback` | GitHub OAuth 登录、注册与账号绑定 |
+| `GET` | `/v1/auth/oauth/{provider}/login` · `/callback` | 第三方已知平台（`gitlab` / `gitee` / `atomgit` / `gitea`）OAuth 登录、注册与账号绑定 |
 | `POST` | `/v1/auth/logout` | 注销登录并清除服务端会话与短期 OAuth 凭据 |
 | `GET` | `/v1/auth/session` | 查询当前会话状态与五级身份信息 |
 | `GET` | `/v1/auth/debug-login` | 开发调试登录（仅 `ENABLE_DEV_AUTH=true` 时可用） |
@@ -184,11 +188,12 @@ create_app(settings, store)
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` / `PATCH` | `/v1/me` · `/v1/me/profile` | 获取当前用户信息（含 `account_tier`、OAuth 绑定列表）/ 更新资料与通知偏好 |
+| `GET` | `/v1/me/avatar` | 代理当前登录用户的海外 OAuth 头像（`private, no-store`） |
 | `POST` | `/v1/me/password` | 修改本地密码或 OAuth 用户首次设置本地密码 |
 | `POST` | `/v1/me/email/change/request` · `verify` | 修改或绑定登录邮箱（随 `EMAIL_VERIFICATION_REQUIRED` 开关决定是否需验证码） |
 | `GET` / `DELETE` | `/v1/me/oauth-identities[/{id}]` | 查看或解绑已绑定的 OAuth 身份（保留防锁死保护） |
 | `GET` | `/v1/me/plugins` | 我的插件列表（开发者及以上在 OpenAPI/llms 中可见） |
-| `GET` | `/v1/me/github/repositories` | 列出当前 OAuth 会话可管理的公开 `astrbot_plugin_*` 仓库 |
+| `GET` | `/v1/me/github/repositories` · `/v1/me/git/{provider}/repositories` | 列出当前 OAuth 授权下 GitHub 或第三方平台可管理的公开 `astrbot_plugin_*` 仓库 |
 | `GET` / `POST` / `DELETE` | `/v1/me/api-keys[/{id}]` | 个人 API Key 管理（注册用户仅只读，开发者及以上可创建写入 Key） |
 | `GET` / `POST` / `DELETE` | `/v1/me/notifications[/{id}]` | 通知分页查询、未读计数、标记已读与单条/批量/清空删除 |
 
@@ -199,7 +204,7 @@ create_app(settings, store)
 | `POST` | `/v1/plugins/submissions/metadata-preview` | 核验仓库权限后从 GitHub 预取 `metadata.yaml` |
 | `POST` | `/v1/plugins/submissions` | 提交新插件或更新已有插件 |
 | `PATCH` | `/v1/plugins/{id}` | 编辑插件元数据（所有者或管理员） |
-| `PATCH` | `/v1/plugins/{id}/cdn` | 开启或关闭插件社区源 CDN（核心管理员或所有者） |
+| `PATCH` | `/v1/plugins/{id}/cdn` | 开启或关闭插件社区源 CDN（核心管理员或所有者；管理员自有插件可切换白名单直发） |
 | `POST` | `/v1/plugins/{id}/request-list` · `unlist` | 申请上架 / 自主下架（所有者） |
 | `POST` | `/v1/plugins/{id}/refresh-github` · `readme/refresh` | 手动刷新仓库元数据或 README 缓存 |
 | `POST` | `/v1/plugins/{id}/like` · `unlike` | 插件点赞 / 取消点赞 |
@@ -216,6 +221,7 @@ create_app(settings, store)
 | `POST` | `/v1/admin/plugins/{id}/refresh-github` | 触发仓库元数据刷新 |
 | `DELETE` | `/v1/admin/comments/{id}` | 删除任意评论 |
 | `GET` / `POST` | `/v1/admin/users` · `/v1/admin/users/{id}/mute` · `unmute` | 查看用户列表 / 禁言与解禁 |
+| `GET` / `POST` | `/v1/admin/git-bindings` · `/v1/admin/git-bindings/{id}/revoke` · `transfer` | 查看、撤销或转移第三方仓库归属绑定（同步递增绑定代次并阻断旧代次 CDN 发布） |
 | `GET` / `POST` | `/v1/api-keys` | 列出或颁发全局 API Key |
 
 > [!NOTE]
@@ -257,7 +263,7 @@ create_app(settings, store)
 ### 登录与注册方式
 
 1. **邮箱注册与密码登录**：受 `EMAIL_REGISTRATION_ENABLED` 与 `EMAIL_VERIFICATION_REQUIRED` 控制，支持验证码两步注册与免验证直通注册；通过 `/v1/auth/internal/login` 支持用户名或邮箱配合 PBKDF2-SHA256 密码登录；忘记密码可通过邮件验证码重置并递增 `session_version` 吊销全部旧会话。
-2. **GitHub OAuth**：访问 `/v1/auth/github/login` 完成授权后回到 `/v1/auth/github/callback`，游客可直接登录/注册，已登录用户则非破坏性绑定到 `market_oauth_identities` 并升级为开发者；若用户属于 `GITHUB_ADMIN_ORG` 且当前非管理员，则自动提权为 `admin`。
+2. **多平台 OAuth**：支持 `GitHub`（`/v1/auth/github/login`）以及 `GitLab.com`、`Gitee`、`AtomGit / GitCode` 与 `Gitea (gitea.com)`（`/v1/auth/oauth/{provider}/login`）。游客可直接登录/注册，已登录用户则非破坏性绑定到 `market_oauth_identities` 并升级为开发者；仅当 GitHub 用户属于 `GITHUB_ADMIN_ORG` 且当前非管理员时自动提权为 `admin`。启用任意 OAuth 平台均要求配置独立主加密密钥 `OAUTH_CREDENTIAL_KEY`。
 3. **开发调试**：仅当 `ENABLE_DEV_AUTH=true` 时开放 `/v1/auth/debug-login`，通过 `X-Dev-GitHub-Login` 请求头快速模拟登录，生产环境必须关闭。
 
 会话基于 `HttpOnly` Cookie（`astrbot_market_session`，非 JWT），Token 格式为 `sess_{token_urlsafe(24)}`，可在服务端即时吊销。详细安全机制见 [security.md](security.md)。
@@ -325,7 +331,7 @@ create_app(settings, store)
 | `/` | `Home.vue` | 插件市场首页（支持分页与瀑布流切换、筛选与排序） |
 | `/plugin/:username/:name` | `PluginDetailsPage.vue` | 规范插件详情页（含运行时与客户端 SEO、JSON-LD、README 与评论；大小写或历史登录名别名 301 重定向） |
 | `/author/:username` | `AuthorPage.vue` | 作者公开插件页（大小写或历史登录名别名 301 重定向） |
-| `/submit` | `SubmitPlugin.vue` | 插件提交页（社区模式走 GitHub 仓库选择，本地模式支持管理员直填 URL） |
+| `/submit` | `SubmitPlugin.vue` | 插件提交页（社区模式顶部切换受支持 Git 平台，GitHub 侧支持持久批量一键导入已有插件；本地模式支持管理员直填 URL） |
 | `/setup` | `Setup.vue` | 首次安装向导（`noindex,nofollow`） |
 | `/admin` | `AdminLogin.vue` | 内部管理员登录页（`noindex,nofollow`） |
 | `/admin/settings` | `Settings.vue` | 核心管理员系统设置页（`/settings` 重定向至此，`noindex,nofollow`） |
@@ -339,7 +345,7 @@ create_app(settings, store)
 
 ### 关键组件
 
-- 公共与市场视图：`AppHeader`、`AppFooter`、`PluginCard`、`PluginDetails`（含站内 README 渲染与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`。
+- 公共与市场视图：`AppHeader`、`AppFooter`、`GitProviderIcon`、`PluginCard`、`PluginDetails`（含站内 README 渲染与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`。
 - 个人与后台设置（`components/settings/`）：`AccessKeyManager`、`AdminUserManagement`、`NotificationPreferencesSection`、`PersonalPluginManager`、`ProfileAccountSection`。
 - 审查工作台（`components/workbench/`）：`ArtifactSubmissionPanel`、`PluginReviewWorkspace`、`ReviewSummaryPanel`、`ReviewFileBrowser`、`ReviewDiffViewer`、`ReviewCommentThread`、`ReviewManualPanel`、`ReviewDecisionPanel`、`ReviewHistoryTimeline`、`ReviewPolicyPanel`。
 
@@ -370,4 +376,4 @@ GitHub Actions（`.github/workflows/ci.yml`）仅按变更代码路径运行质�
 
 ## AstrBot 集成
 
-AstrBot 客户端通过 `/plugins.json`（及等价 `/v1/astrbot/plugins(.json)` 与 `*-md5.json`）消费插件列表。Feed 遵循 AstrBot `2026-06-27` 规范（Schema Version 1），顶层包含 `$meta` 市场元数据并以 `${author}/${name}` 作为插件键，不输出客户端保留字段 `market_plugin_id`。条目保留仓库地址 `repo`，`version` 优先同步仓库的 `repo_version`（未同步时为空字符串，不虚构默认版本号），GitHub 同步还会采集根目录的 `logo.png`、README 与 CHANGELOG 的 HTTPS raw 地址（`readme_url`、`changelog_url`）以及 `.astrbot-plugin/i18n/<locale>.json` 中的 `metadata` 翻译。仅当当前已发布 artifact 的规范化版本与 `repo_version` 一致时才输出 HTTPS CDN `download_url`；否则省略 `download_url`，客户端仍可通过 GitHub 直连安装，旧的稳定 CDN 对象也不会被未过审的新版本覆盖或冒充。
+AstrBot 客户端通过 `/plugins.json`（及等价 `/v1/astrbot/plugins(.json)` 与 `*-md5.json`）消费插件列表。Feed 遵循 AstrBot `2026-06-27` 规范（Schema Version 1），顶层包含 `$meta` 市场元数据并以 `${author}/${name}` 作为插件键，不输出客户端保留字段 `market_plugin_id`。条目保留归一化后的公开 HTTPS 仓库地址 `repo`（`gitcode.com` 统一归一化为 `atomgit.com`），`version` 优先同步仓库的 `repo_version`（未同步时为空字符串，不虚构默认版本号），后台元数据同步还会采集根目录的 `logo.png`、README 与 CHANGELOG 的 HTTPS raw 地址（`readme_url`、`changelog_url`）以及 `.astrbot-plugin/i18n/<locale>.json` 中的 `metadata` 翻译。仅当当前已发布 artifact 的规范化版本与 `repo_version` 一致时才输出 HTTPS CDN `download_url`；否则省略 `download_url`，客户端仍可通过原仓库直连安装（非 GitHub 仓库关闭 CDN 直连安装需 AstrBot `v4.27.0` 及以上版本），旧的稳定 CDN 对象也不会被未过审的新版本覆盖或冒充。

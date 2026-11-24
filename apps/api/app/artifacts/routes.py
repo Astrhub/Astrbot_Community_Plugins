@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from ..auth import can_edit_plugin, is_admin, is_core_admin
 from ..github_authorization import require_repository_access
 from ..oauth_identities import has_bound_oauth_identity, is_developer_tier, resolve_account_tier
-from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
+from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_supported_git_repo
 from .comments import ReviewCommentError
 from .content import ArtifactContentError
 from .findings import StableRiskError
@@ -162,13 +162,16 @@ def build_artifact_router() -> APIRouter:
         data = payload.model_dump()
         data["category_explicit"] = "category" in payload.model_fields_set
         try:
-            canonical_repo = normalize_github_repo(data["repo"])
+            canonical_repo = normalize_supported_git_repo(data["repo"])
         except PrecheckError as exc:
             raise _http_error(400, exc.code, str(exc)) from exc
         if not PLUGIN_NAME_PATTERN.fullmatch(data["name"]):
             raise _http_error(400, "plugin_name_invalid", "插件名必须使用 astrbot_plugin_ 小写命名")
         proof = await require_repository_access(request, user, canonical_repo, admin_override=True)
         data["repo"] = proof["repo"]
+        data["repo_provider"] = str(proof.get("provider") or "")
+        data["repo_external_id"] = str(proof.get("repo_external_id") or proof.get("id") or "")
+        data["normalized_repo"] = str(proof.get("normalized_repo") or canonical_repo)
         try:
             plugin = await _call_store(request, "register_plugin", user, data)
             from ..cdn import CdnSubscriptions

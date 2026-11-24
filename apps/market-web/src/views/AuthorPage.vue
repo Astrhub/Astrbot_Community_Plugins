@@ -16,6 +16,7 @@
             :alt="`${authorDisplayName} 的头像`"
             width="64"
             height="64"
+            referrerpolicy="no-referrer"
             @error="avatarLoadFailed = true"
           />
           <span v-else class="author-avatar author-avatar--fallback" aria-hidden="true">
@@ -39,9 +40,8 @@
               target="_blank"
               rel="noopener noreferrer"
             >
-              <n-icon v-if="profile.provider === 'github'"><logo-github /></n-icon>
-              <n-icon v-else><link-outline /></n-icon>
-              {{ profile.provider === "github" ? "GitHub 主页" : `${profile.provider} 主页` }}
+              <git-provider-icon :provider="profile.provider" :size="16" />
+              {{ `${getGitProviderLabel(profile.provider)} 主页` }}
             </a>
           </div>
         </div>
@@ -96,19 +96,13 @@
 import { computed, onMounted, shallowRef, watch } from "vue";
 import { useRoute } from "vue-router";
 import { NIcon } from "naive-ui";
-import {
-  ArrowBack,
-  LogoGithub,
-  AlertCircleOutline,
-  FileTrayOutline,
-  LinkOutline,
-  PersonOutline,
-} from "@vicons/ionicons5";
+import { ArrowBack, AlertCircleOutline, FileTrayOutline, PersonOutline } from "@vicons/ionicons5";
 import AppHeader from "@/components/AppHeader.vue";
 import AppFooter from "@/components/AppFooter.vue";
+import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import PluginCard from "@/components/PluginCard.vue";
 import { useSeo, useSeoContext } from "@/composables/useSeo";
-import { githubRawUrl } from "@/utils/github";
+import { getGitProviderLabel, resolveAuthorAvatarUrl } from "@/utils/github";
 import { usePluginStore } from "@/stores/plugins";
 import type { AuthorOAuthProfile, Plugin } from "@/types";
 
@@ -130,7 +124,13 @@ const errorMessage = shallowRef("");
 const authorDisplayName = computed(
   () => displayName.value || canonicalUsername.value || username.value,
 );
-const authorAvatarUrl = computed(() => githubRawUrl(avatarUrl.value.trim()));
+const authorAvatarUrl = computed(() =>
+  resolveAuthorAvatarUrl(
+    avatarUrl.value,
+    canonicalUsername.value || username.value,
+    pluginStore.apiBaseUrl,
+  ),
+);
 const externalProfiles = computed<AuthorOAuthProfile[]>(() => {
   if (oauthProfiles.value.length) return oauthProfiles.value;
   if (githubUrl.value) {

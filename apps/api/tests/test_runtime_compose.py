@@ -105,6 +105,11 @@ def test_runtime_runner_configuration_excludes_control_plane_and_review_secrets(
         "ARTIFACT_S3_SECRET_ACCESS_KEY",
         "SMTP_PASSWORD",
         "GITHUB_CLIENT_SECRET",
+        "OAUTH_CREDENTIAL_KEY",
+        "GITLAB_CLIENT_SECRET",
+        "GITEE_CLIENT_SECRET",
+        "ATOMGIT_CLIENT_SECRET",
+        "GITEA_CLIENT_SECRET",
     ):
         assert forbidden not in serialized
     assert "artifact-data:/var/lib/astrbot-market/artifacts:ro" in serialized

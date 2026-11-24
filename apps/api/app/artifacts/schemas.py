@@ -67,7 +67,7 @@ class PublicArtifact(PublicResponseModel):
     normalized_version: str = ""
     repo_version: str = ""
     published_version: str = ""
-    source_type: Literal["upload", "github"]
+    source_type: Literal["upload", "github", "git"]
     source_repo: str = ""
     source_ref: str = ""
     source_commit_sha: str = ""
