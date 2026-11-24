@@ -28,8 +28,32 @@ export type SortDirection = "asc" | "desc";
 
 export type ThemeMode = "system" | "light" | "dark";
 
-/** 用户角色。 */
+/** 用户管理角色（数据库存储值）。 */
 export type UserRole = "core_admin" | "admin" | "user";
+
+/** 五级账号分层（实时推导：guest < user < developer < admin < core_admin）。 */
+export type AccountTier = "guest" | "user" | "developer" | "admin" | "core_admin";
+
+/** 已绑定的 OAuth 身份记录。 */
+export interface OAuthIdentity {
+  id: string;
+  provider: string;
+  instance_url: string;
+  provider_user_id: string;
+  provider_login: string;
+  provider_email?: string;
+  avatar_url?: string;
+  profile_url?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** 作者公开页外链条目。 */
+export interface AuthorOAuthProfile {
+  provider: string;
+  login: string;
+  url: string;
+}
 
 /** 插件状态。 */
 export type PluginStatus = "pending" | "listed" | "unlisted";
@@ -52,7 +76,8 @@ export interface Plugin {
   likes: number;
   comments_count: number;
   list_index: number;
-  owner_user_id?: number | null;
+  owner_user_id?: number | string | null;
+  owner_username?: string;
   owner_github_login?: string;
   canonical_path?: string;
   status?: PluginStatus;
@@ -78,6 +103,9 @@ export interface Comment {
   plugin_id?: number | string;
   user_id?: number | string;
   parent_id?: number | string | null;
+  public_username?: string;
+  github_login?: string;
+  github_name?: string;
   body: string;
   likes?: number;
   liked?: boolean;
@@ -153,10 +181,22 @@ export interface Announcement {
 export interface User {
   id: number | string;
   username?: string;
+  public_username?: string;
   internal_username?: string;
   github_login?: string;
+  github_name?: string;
   auth_source?: string;
   role?: UserRole;
+  account_tier?: AccountTier;
+  is_developer?: boolean;
+  has_oauth_binding?: boolean;
+  has_active_plugins?: boolean;
+  has_password?: boolean;
+  oauth_identities?: OAuthIdentity[];
+  oauth_providers?: string[];
+  email?: string;
+  email_verified?: boolean;
+  email_verified_at?: string | null;
   avatar?: string;
   avatar_url?: string;
   muted_until?: string | null;
@@ -225,6 +265,9 @@ export interface PluginSubmissionMetadataPreview {
 export interface AuthConfig {
   github_login_enabled: boolean;
   public_login_enabled: boolean;
+  email_registration_enabled: boolean;
+  email_verification_required: boolean;
+  email_service_enabled?: boolean;
   login_agreement_enabled: boolean;
   login_agreement_text: string;
   service_terms_enabled: boolean;

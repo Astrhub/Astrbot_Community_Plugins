@@ -18,8 +18,8 @@
           <h1>后台登录</h1>
         </div>
         <n-form :model="loginForm" label-placement="top">
-          <n-form-item label="内部账号">
-            <n-input v-model:value="loginForm.username" placeholder="admin" />
+          <n-form-item label="用户名或邮箱">
+            <n-input v-model:value="loginForm.username" placeholder="admin 或邮箱地址" />
           </n-form-item>
           <n-form-item label="密码">
             <n-input

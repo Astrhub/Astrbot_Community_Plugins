@@ -1,6 +1,7 @@
 import asyncio
 import os
 import uuid
+from datetime import UTC, datetime
 
 import asyncpg
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from app.auth import can_edit_plugin
 from app.main import build_astrbot_plugin_source
 from app.plugin_identity import PluginIdentityConflict, plugin_canonical_path
-from app.schema_migrations import apply_schema_migrations
+from app.schema_migrations import apply_schema_migrations, discover_schema_migrations
 from app.store import GithubIdentityConflict, InMemoryMarketStore, PgRedisMarketStore, SCHEMA_SQL
 
 
@@ -131,6 +132,111 @@ async def run_postgres_namespace(url):
         with pytest.raises(PluginIdentityConflict):
             await store.update_plugin_metadata(third["id"], {"name": first["name"]})
         assert (await store.get_plugin(third["id"]))["name"] == "astrbot_plugin_other"
+    finally:
+        if store.pool:
+            await store.pool.close()
+        await control.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        await control.close()
+
+
+def test_postgres_email_identity_migration_resolves_username_collisions():
+    url = os.getenv("ASTRBOT_TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("Set ASTRBOT_TEST_DATABASE_URL for PostgreSQL tests")
+    asyncio.run(run_postgres_email_identity_migration(url))
+
+
+async def run_postgres_email_identity_migration(url):
+    schema = "email_identity_test_" + uuid.uuid4().hex
+    control = await asyncpg.connect(url)
+    store = PgRedisMarketStore(url, "redis://127.0.0.1:6379/15", 3600)
+    try:
+        await control.execute(f"CREATE SCHEMA {schema}")
+        await control.execute(f"SET search_path TO {schema}")
+        await control.execute(SCHEMA_SQL)
+        users = [
+            ("user-1", "111", "name", "user1_internal", "github"),
+            ("user-2", None, "", "name", "internal"),
+            ("user-3", "333", "name_3d58ce", "user3_internal", "github"),
+            ("user-4", "444", "a_gh", "shared", "github"),
+            ("user-5", "555", "shared", "b_internal", "github"),
+        ]
+        for index, (user_id, github_id, github_login, internal_username, auth_source) in enumerate(
+            users
+        ):
+            created_at = datetime(2026, 1, index + 1, tzinfo=UTC)
+            await control.execute(
+                """
+                INSERT INTO market_users (
+                    id, github_id, github_login, internal_username,
+                    auth_source, role, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, 'user', $6, $6)
+                """,
+                user_id,
+                github_id,
+                github_login,
+                internal_username,
+                auth_source,
+                created_at,
+            )
+        await control.execute(
+            """
+            INSERT INTO market_plugins (
+                id, name, display_name, desc_text, author, repo, owner_user_id,
+                owner_github_login, status
+            ) VALUES
+                ('p1', 'astrbot_plugin_one', '', 'One', 'name',
+                 'https://example.com/one', 'user-1', 'name', 'listed'),
+                ('p4', 'astrbot_plugin_four', '', 'Four', 'a_gh',
+                 'https://example.com/four', 'user-4', 'shared', 'listed')
+            """
+        )
+        migration = next(
+            item
+            for item in discover_schema_migrations()
+            if item.version == "20261124_011_email_accounts_and_oauth_identities"
+        )
+        await apply_schema_migrations(control, [migration])
+
+        rows = await control.fetch(
+            "SELECT id, internal_username, public_username FROM market_users ORDER BY id"
+        )
+        by_id = {row["id"]: row for row in rows}
+        public_names = [row["public_username"].lower() for row in rows]
+        assert len(public_names) == len(set(public_names))
+        assert by_id["user-2"]["public_username"] == "name_3d58ce_2"
+        assert by_id["user-3"]["public_username"] == "name_3d58ce"
+        for row in rows:
+            for other in rows:
+                if row["id"] == other["id"] or not other["internal_username"]:
+                    continue
+                assert row["public_username"].lower() != other["internal_username"].lower()
+        p4_owner = await control.fetchval(
+            "SELECT owner_username FROM market_plugins WHERE id = 'p4'"
+        )
+        assert p4_owner == by_id["user-4"]["public_username"]
+
+        store.pool = await asyncpg.create_pool(
+            url,
+            min_size=1,
+            max_size=2,
+            server_settings={"search_path": schema},
+            init=store._init_connection,
+        )
+        first_identity = (await store.list_oauth_identities("user-4"))[0]
+        await store.upsert_oauth_identity(
+            "user-4",
+            provider="github",
+            instance_url="https://github.com",
+            provider_user_id="second-222",
+            provider_login="second_gh",
+            provider_email="second@example.com",
+        )
+        await store.revoke_oauth_identity("user-4", first_identity["id"])
+        remaining = await store.get_user_by_id("user-4")
+        assert remaining["github_id"] == "second-222"
+        assert remaining["github_login"] == "second_gh"
+        assert remaining["github_email"] == "second@example.com"
     finally:
         if store.pool:
             await store.pool.close()

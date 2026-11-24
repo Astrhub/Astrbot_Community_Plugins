@@ -1,7 +1,7 @@
-"""Role-based OpenAPI schema filtering.
+"""Role-based OpenAPI schema filtering across the 5-tier user hierarchy.
 
 Filters the full OpenAPI schema by tag visibility rules,
-so different user roles see different subsets of the API.
+so guest/user/developer/admin/core_admin see only their permitted API surface.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
     "public": frozenset(
         {
             "plugins",
-            "submissions",
             "comments",
             "integration",
             "announcements",
@@ -26,6 +25,17 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
     "user": frozenset(
         {
             "plugins",
+            "comments",
+            "integration",
+            "announcements",
+            "system",
+            "auth",
+            "user",
+        }
+    ),
+    "developer": frozenset(
+        {
+            "plugins",
             "submissions",
             "comments",
             "integration",
@@ -33,6 +43,7 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
             "system",
             "auth",
             "user",
+            "developer",
             "artifacts",
         }
     ),
@@ -46,6 +57,7 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
             "system",
             "auth",
             "user",
+            "developer",
             "admin",
             "artifacts",
             "reviews",
@@ -61,6 +73,7 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
             "system",
             "auth",
             "user",
+            "developer",
             "admin",
             "core-admin",
             "artifacts",
@@ -72,10 +85,22 @@ ROLE_VISIBLE_TAGS: dict[str, frozenset[str]] = {
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 
 
-def role_for_openapi(user: dict[str, Any] | None) -> str:
-    """Map a user object to an OpenAPI visibility role."""
+def role_for_openapi(
+    user: dict[str, Any] | None,
+    account_tier: str | None = None,
+) -> str:
+    """Map a user object or derived account tier to an OpenAPI visibility role."""
     if not user:
         return "public"
+    if account_tier:
+        normalized = str(account_tier)
+        if normalized == "guest":
+            return "public"
+        if normalized in ROLE_VISIBLE_TAGS:
+            return normalized
+    tier = str(user.get("account_tier") or "")
+    if tier in ROLE_VISIBLE_TAGS:
+        return tier
     if is_core_admin(user):
         return "core_admin"
     if is_admin(user):
@@ -94,7 +119,6 @@ def filter_openapi_by_role(schema: dict[str, Any], role: str) -> dict[str, Any]:
         ops: dict[str, Any] = {}
         for method, operation in path_item.items():
             if method not in _HTTP_METHODS:
-                # Keep non-method fields (e.g. parameters, summary at path level).
                 ops[method] = operation
                 continue
             if not isinstance(operation, dict):

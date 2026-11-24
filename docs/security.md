@@ -4,29 +4,38 @@
 
 ## 身份认证
 
-首次启动时通过初始化向导或环境变量创建内部核心管理员账号（用户名 + 密码），用于管理站点策略、GitHub OAuth 与管理员队伍。GitHub OAuth 作为普通用户与插件所有者的身份来源；GitHub 用户**不会**自动成为核心管理员，只能由核心管理员显式提升，或在命中 `GITHUB_ADMIN_ORG` 受信任组织配置时自动获得普通管理员权限。
+首次启动时通过初始化向导或环境变量创建核心管理员账号（用户名 + 密码），用于管理站点策略、认证开关、OAuth 与管理员队伍。普通社区成员可通过邮箱注册（受 `EMAIL_REGISTRATION_ENABLED` 与 `EMAIL_VERIFICATION_REQUIRED` 控制）或通过 GitHub OAuth 注册/登录；账号主体与 OAuth 身份解耦，OAuth 绑定关系存储在通用 `market_oauth_identities` 表中。OAuth 用户**不会**自动成为核心管理员，只能由核心管理员显式提升，或在命中 `GITHUB_ADMIN_ORG` 受信任组织配置时自动获得普通管理员权限。
 
-### 登录方式
+### 登录与注册方式
 
 | 方式 | 端点 | 启用条件 |
 | --- | --- | --- |
-| 内部账号 | `POST /v1/auth/internal/login` | 用户名 + 密码（核心管理员及内部用户） |
+| 用户名或邮箱密码登录 | `POST /v1/auth/internal/login` | `PUBLIC_LOGIN_ENABLED=true`（关闭时仅核心管理员可密码登录） |
+| 邮箱注册（免验证直通） | `POST /v1/auth/email/register` | `EMAIL_REGISTRATION_ENABLED=true` 且 `EMAIL_VERIFICATION_REQUIRED=false` |
+| 邮箱注册（验证码两步） | `POST /v1/auth/email/register/request` → `verify` | `EMAIL_REGISTRATION_ENABLED=true`、`EMAIL_VERIFICATION_REQUIRED=true` 且 `EMAIL_PROVIDER != disabled` |
+| 找回 / 重置密码 | `POST /v1/auth/email/password-reset/request` → `verify` | `EMAIL_PROVIDER != disabled` |
 | GitHub OAuth | `GET /v1/auth/github/login` → `/callback` | `GITHUB_LOGIN_ENABLED=true` |
 | 开发调试 | `GET /v1/auth/debug-login` | 仅限 `ENABLE_DEV_AUTH=true`（生产环境必须为 `false`） |
+
+公开用户名与另一账号的内部登录名发生冲突时，密码登录会返回 `409 login_identifier_ambiguous`，不会按查询顺序选择账号。迁移与本地种子数据回填会避开这类命名冲突。
 
 > [!CAUTION]
 > 开发调试登录允许通过 `X-Dev-GitHub-Login` 请求头直接伪造用户身份，生产环境必须保持 `ENABLE_DEV_AUTH=false`。
 
-### GitHub 身份绑定与账号合并
+### OAuth 绑定、解绑与账号合并
 
-已登录的内部管理员可在个人设置页绑定 GitHub 账号。如果该 GitHub 账号此前曾以普通用户身份登录过，系统会将其名下的插件、评论与提交记录自动合并到当前管理员账号，避免身份分裂。当 `PUBLIC_LOGIN_ENABLED=false` 时，内部账号登录仅对核心管理员开放，GitHub 登录仍由 `GITHUB_LOGIN_ENABLED` 独立控制。
+- **非破坏性绑定**：已登录的邮箱用户或本地管理员绑定 GitHub OAuth 时，系统将身份写入 `market_oauth_identities` 并同步兼容字段，不会覆盖原有 `auth_source`、`public_username` 以及已自定义的头像和显示名。若该 GitHub 账号此前仅以无密码、无邮箱的普通 OAuth 身份登录过，且当前操作者为管理员，则将其名下记录合并到当前管理员账号。
+- **防锁死解绑**：用户解绑 `market_oauth_identities` 中的身份时，必须已设置本地密码或至少保留另一条有效 OAuth 绑定，禁止解绑唯一登录方式。
+- **存量插件与权限回落**：解绑 OAuth 不会删除或自动下架已上架/审核中的插件或已发布 CDN 包；作者仍可直接自下架插件或关闭 CDN，但在重新绑定 OAuth 前不能提交新插件、重新申请上架、修改仓库地址或开启 CDN。
+- **按身份清理**：解绑多个 GitHub 身份之一时保留其他身份的兼容字段和仓库授权，仅删除被解绑身份对应的会话凭据；最后一个 GitHub 身份解绑后，旧凭据不能继续访问仓库。
 
 ## 会话与 Cookie
 
 系统采用服务端有状态 Cookie 会话（`astrbot_market_session`，非 JWT），支持随时在服务端吊销：
 
 - **Token 格式**：`sess_{token_urlsafe(24)}`（生成逻辑位于 `apps/api/app/store.py`）。
-- **存储方式**：完整模式下存入 Redis（键格式为 `astrbot_market:session:{token}`，值为 `{token, user_id, created_at, last_seen_at}`）；本地单进程模式（`MARKET_STORAGE_MODE=local`）存入本地持久化 JSON 文件并按 TTL 清理。
+- **存储方式**：完整模式下存入 Redis（键格式为 `astrbot_market:session:{token}`，值为 `{token, user_id, session_version, created_at, last_seen_at}`）；本地单进程模式（`MARKET_STORAGE_MODE=local`）存入本地持久化 JSON 文件并按 TTL 清理。
+- **会话版本吊销**：`market_users.session_version` 在密码重置时递增并同步清理该用户的所有已有会话；旧会话读取时若 `session_version` 不匹配会立即失效。重置码绑定申请时的邮箱，换绑邮箱后旧重置码不能修改密码或验证新邮箱。
 - **过期与续期**：有效期由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天）；每次 `get_user_by_session()` 校验会话时自动刷新活跃时间。
 - **注销**：`POST /v1/auth/logout` 同时清除浏览器 Cookie、服务端会话及关联的短期 GitHub 仓库授权凭据。
 
@@ -42,16 +51,19 @@ Cookie 安全属性如下：
 
 发起 GitHub OAuth 登录时，服务端通过 `uuid4()` 生成随机 `state` 并写入有效期 10 分钟的独立 Cookie（`astrbot_market_oauth_state`）；回调阶段严格比对请求参数与 Cookie 中的 `state`，不一致即拒绝登录。
 
-## 权限模型
+## 五级权限模型
 
-| 角色 | 能力范围 |
-| --- | --- |
-| 核心管理员（`core_admin`） | 管理系统设置、邮件、审查策略、管理员队伍、内部用户与全站公告（`/v1/core/*`、`/v1/admin/settings`）；可管理任意插件 CDN |
-| 普通管理员（`admin`） | 审核上架/下架插件、处理包审查、删除评论、禁言用户、刷新任意插件元数据、颁发全局 API Key（`/v1/admin/*`） |
-| 插件所有者 | 经 GitHub 仓库所有权验证后，可编辑自有插件元数据、申请上架、自主下架与手动刷新；可随时关闭自有 CDN，重新开启需再次验证仓库权限 |
-| 普通用户（`user`） | 浏览插件、提交插件、发表评论、点赞，管理个人 API Key 与通知偏好 |
+数据库 `market_users.role` 仅保留管理层级（`user` / `admin` / `core_admin`），对外响应与 OpenAPI / `/llms.txt` 统一按五级身份分层实时推导：
 
-权限检查函数集中在 `apps/api/app/auth.py`（包括 `can_edit_plugin()`、`can_configure_plugin_cdn()` 与 `can_manage_plugin_submission()`）。所有敏感接口均在后端路由层强制鉴权，CDN 配置变更在持久化事务内还会再次核验操作人身份；前端界面上的角色显隐仅用于交互展示，不作为安全边界。
+| 分层 | 推导条件 | 能力范围 |
+| --- | --- | --- |
+| 游客（`guest` / `public`） | 未登录 | 浏览插件、详情、作者页、公告与 AstrBot 插件源 |
+| 注册用户（`user`） | 已登录、`role = user`、无有效 OAuth 绑定且无上架/待审插件 | 评论、点赞、回复、站内信、个人资料与只读（`market:read`）个人 API Key；绑定 OAuth 后升级为开发者 |
+| 开发者（`developer`） | `role = user` 且存在至少一条有效 OAuth 绑定，或名下仍有上架/待审插件 | 包含注册用户全部能力；有有效 OAuth 绑定时可提交与上架插件、管理仓库/CDN、上传制品并创建写入（`market:write`）个人 API Key |
+| 管理员（`admin`） | `role = admin` | 审核上架/下架插件、处理包审查、删除评论、禁言用户、刷新任意插件元数据、颁发全局 API Key（`/v1/admin/*`） |
+| 核心管理员（`core_admin`） | `role = core_admin` | 管理系统设置、认证/验证开关、邮件、审查策略、管理员队伍、本地用户与全站公告（`/v1/core/*`、`/v1/admin/settings`）；可管理任意插件 CDN |
+
+权限检查函数集中在 `apps/api/app/auth.py` 与 `apps/api/app/oauth_identities.py`（包括 `resolve_account_tier()`、`can_issue_write_api_key()`、`can_edit_plugin()`、`can_configure_plugin_cdn()` 与 `can_manage_plugin_submission()`）。所有敏感接口均在后端路由层强制鉴权，个人 `market:write` API Key 在签发及写权限校验时还会实时重检持有者的五级身份及有效 OAuth 绑定（管理员除外）；前端界面上的角色显隐仅用于交互展示，不作为安全边界。
 
 ## API Key
 
@@ -65,7 +77,8 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 
 主要安全属性：
 
-- **作用域隔离**：支持 `market:read` 与 `market:write` 权限位，接口按需校验。
+- **作用域隔离**：支持 `market:read` 与 `market:write` 权限位，接口按需校验。当前个人 Key 仅接入只读接口，会话写接口不接受个人 Key 代替登录。
+- **写权限 OAuth 约束**：普通开发者必须有有效 OAuth 绑定才能创建或使用 `market:write` 个人 Key；仅因历史插件保留开发者层级不会绕过该检查，管理员按角色授权。
 - **明文仅展示一次**：仅在创建响应中返回完整 Key，后续查询只返回名称、作用域和创建时间。
 - **即时撤销**：删除后立即失效，数据库 `key` 列具备唯一约束。
 
@@ -132,7 +145,7 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 ## 速率限制与配额
 
 - **GitHub API**：通过多 Token 轮转分担额度，触达速率限制时显式返回状态。
-- **邮件限额**：`EMAIL_DAILY_LIMIT` 限制全站每日邮件发送上限（内存按日清零），`EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER` 限制单用户每日验证邮件次数。
+- **邮件与验证码限额**：全站每日邮件总额度 `EMAIL_DAILY_LIMIT` 与单邮箱每日验证码上限 `EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER` 均写入共享存储（完整模式存 Redis，本地模式存本地存储），与通知邮件共用日限额。发送前通过 Redis Lua 原子预留，发送失败或无需发送的早退会释放预留；验证码采用随机盐 HMAC-SHA256 摘要存储、10 分钟有效、最多尝试 5 次、60 秒重发冷却，并通过原子占位防止并发重放。免验证直通注册与验证码申请同时受来源 IP 窗口限流约束。
 - **上游错误脱敏**：Cloudflare Email 发送失败时，仅向管理员返回错误摘要，不暴露完整上游响应体。
 
 ## 首次初始化与配置优先级

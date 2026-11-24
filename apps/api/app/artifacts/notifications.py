@@ -363,7 +363,12 @@ class ArtifactNotificationDispatcher:
         )
         if settings.email_provider == "disabled" or user.get(email_preference) is False:
             return
-        receiver = str(user.get("notification_email") or user.get("github_email") or "").strip()
+        verified_email = (
+            str(user.get("email") or "").strip() if user.get("email_verified_at") else ""
+        )
+        receiver = str(
+            user.get("notification_email") or verified_email or user.get("github_email") or ""
+        ).strip()
         if not EMAIL_PATTERN.fullmatch(receiver):
             return
         await send_artifact_status_email(

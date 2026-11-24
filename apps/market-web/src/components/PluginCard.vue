@@ -147,12 +147,12 @@ async function unlistPlugin(): Promise<void> {
           <span>{{ formattedVersion }}</span>
           <span aria-hidden="true">·</span>
           <router-link
-            v-if="plugin.owner_github_login"
+            v-if="plugin.owner_username || plugin.owner_github_login"
             class="author-button"
-            :to="`/author/${encodeURIComponent(plugin.owner_github_login)}`"
+            :to="`/author/${encodeURIComponent(plugin.owner_username || plugin.owner_github_login || '')}`"
             @click.stop
           >
-            @{{ plugin.author || plugin.owner_github_login }}
+            @{{ plugin.author || plugin.owner_username || plugin.owner_github_login }}
           </router-link>
           <span v-else class="author-button">@{{ plugin.author || "community" }}</span>
         </p>

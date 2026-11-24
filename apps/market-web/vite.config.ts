@@ -80,6 +80,28 @@ function normalizeGitRemoteUrl(value: string): string {
   return remoteUrl || "https://github.com/Astrhub/Astrbot_Community_Plugins";
 }
 
+async function loadEmptyAuthorRoutes(origin: string): Promise<string[]> {
+  try {
+    const response = await fetch(`${origin.replace(/\/$/, "")}/v1/authors`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = (await response.json()) as {
+      items?: { username?: string; has_listed_plugins?: boolean }[];
+    };
+    return [
+      ...new Set(
+        (payload.items || [])
+          .filter((author) => !author.has_listed_plugins)
+          .map((author) => author.username)
+          .filter((username): username is string => Boolean(username))
+          .map((username) => `/author/${encodeURIComponent(username)}`),
+      ),
+    ];
+  } catch (error) {
+    console.warn(`[sitemap] Failed to load authors without plugins from ${origin}:`, error);
+    return [];
+  }
+}
+
 async function loadDynamicRoutes(origin?: string): Promise<string[]> {
   const fallback = ["/submit", "/docs/rest"];
   if (!origin) return fallback;
@@ -90,6 +112,7 @@ async function loadDynamicRoutes(origin?: string): Promise<string[]> {
       items?: {
         id?: string;
         name?: string;
+        owner_username?: string;
         owner_github_login?: string;
         canonical_path?: string;
         status?: string;
@@ -98,23 +121,30 @@ async function loadDynamicRoutes(origin?: string): Promise<string[]> {
     const pluginRoutes = (payload.items || [])
       .filter((plugin) => !plugin.status || plugin.status === "listed")
       .filter((plugin) => plugin.id)
-      .map(
-        (plugin) =>
+      .map((plugin) => {
+        const ownerHandle = plugin.owner_username || plugin.owner_github_login;
+        return (
           plugin.canonical_path ||
-          (plugin.owner_github_login
-            ? `/plugin/${encodeURIComponent(plugin.owner_github_login)}/${encodeURIComponent(plugin.name || plugin.id!)}`
-            : `/plugin/${encodeURIComponent(plugin.id!)}`),
-      );
+          (ownerHandle
+            ? `/plugin/${encodeURIComponent(ownerHandle)}/${encodeURIComponent(plugin.name || plugin.id!)}`
+            : `/plugin/${encodeURIComponent(plugin.id!)}`)
+        );
+      });
     const authorRoutes = [
       ...new Set(
         (payload.items || [])
           .filter((plugin) => !plugin.status || plugin.status === "listed")
-          .map((plugin) => plugin.owner_github_login)
+          .map((plugin) => plugin.owner_username || plugin.owner_github_login)
           .filter((username): username is string => Boolean(username))
           .map((username) => `/author/${encodeURIComponent(username)}`),
       ),
     ];
-    return [...fallback, ...pluginRoutes, ...authorRoutes];
+    return [
+      ...fallback,
+      ...pluginRoutes,
+      ...authorRoutes,
+      ...(await loadEmptyAuthorRoutes(origin)),
+    ];
   } catch (error) {
     console.warn(`[sitemap] Failed to load plugin routes from ${origin}:`, error);
     return fallback;

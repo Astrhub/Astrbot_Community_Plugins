@@ -151,7 +151,13 @@ const repliesByParent = computed(() =>
 );
 
 function displayUser(comment) {
-  return comment.github_login || comment.github_name || comment.user_id || "用户";
+  return (
+    comment.public_username ||
+    comment.github_login ||
+    comment.github_name ||
+    comment.user_id ||
+    "用户"
+  );
 }
 
 function formatTime(value) {

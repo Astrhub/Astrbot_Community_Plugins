@@ -66,6 +66,13 @@ def can_manage_plugin_submission(user: Mapping | None, plugin: Mapping | None) -
     return is_admin(user) or plugin.get("owner_user_id") == user.get("id")
 
 
+def can_issue_write_api_key(account_tier: str | None, has_oauth_binding: bool = False) -> bool:
+    tier = str(account_tier or "")
+    if tier in {"admin", "core_admin"}:
+        return True
+    return tier == "developer" and has_oauth_binding
+
+
 def authenticate_api_key(
     auth_header: str | None, api_keys: list[ApiKey | Mapping]
 ) -> ApiKey | Mapping | None:

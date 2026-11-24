@@ -158,6 +158,7 @@ create_app(settings, store)
 | `GET` | `/v1/plugins/by-author/{username}/{name}` | 按作者用户名与插件名获取已上架插件详情 |
 | `GET` | `/v1/plugins/{id}` | 按插件 ID 获取详情（含评论树与点赞状态） |
 | `GET` | `/v1/plugins/{id}/readme` | 获取插件 README 缓存或实时内容 |
+| `GET` | `/v1/authors` | 获取公开作者名及是否有已上架插件 |
 | `GET` | `/v1/authors/{username}/plugins` | 获取指定作者的已上架插件列表 |
 | `GET` | `/v1/announcements` | 公告列表 |
 | `GET` | `/plugins.json` · `/plugins-md5.json` | AstrBot 插件源 Feed 与 MD5 摘要 |
@@ -168,21 +169,27 @@ create_app(settings, store)
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/v1/auth/internal/login` | 内部账号登录（用户名 + 密码） |
-| `GET` | `/v1/auth/github/login` | 跳转至 GitHub OAuth 授权页 |
-| `GET` | `/v1/auth/github/callback` | OAuth 回调，创建会话并保存加密仓库授权凭据 |
+| `POST` | `/v1/auth/internal/login` | 用户名或邮箱 + 密码登录 |
+| `POST` | `/v1/auth/email/register` | 邮箱一步直通注册（仅 `EMAIL_VERIFICATION_REQUIRED=false` 时开放） |
+| `POST` | `/v1/auth/email/register/request` · `verify` | 邮箱两步验证码注册（`EMAIL_VERIFICATION_REQUIRED=true` 时开放） |
+| `POST` | `/v1/auth/email/password-reset/request` · `verify` | 邮箱验证码找回与重置密码（成功后吊销旧会话） |
+| `GET` | `/v1/auth/github/login` | 跳转至 GitHub OAuth 授权页（支持游客登录/注册与已登录账号绑定） |
+| `GET` | `/v1/auth/github/callback` | OAuth 回调，创建会话并写入 `market_oauth_identities` 及短期仓库授权凭据 |
 | `POST` | `/v1/auth/logout` | 注销登录并清除服务端会话与短期 OAuth 凭据 |
-| `GET` | `/v1/auth/session` | 查询当前会话状态 |
+| `GET` | `/v1/auth/session` | 查询当前会话状态与五级身份信息 |
 | `GET` | `/v1/auth/debug-login` | 开发调试登录（仅 `ENABLE_DEV_AUTH=true` 时可用） |
 
 ### 当前用户（需登录）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` / `PATCH` | `/v1/me` · `/v1/me/profile` | 获取当前用户信息 / 更新资料与通知偏好 |
-| `GET` | `/v1/me/plugins` | 我的插件列表 |
+| `GET` / `PATCH` | `/v1/me` · `/v1/me/profile` | 获取当前用户信息（含 `account_tier`、OAuth 绑定列表）/ 更新资料与通知偏好 |
+| `POST` | `/v1/me/password` | 修改本地密码或 OAuth 用户首次设置本地密码 |
+| `POST` | `/v1/me/email/change/request` · `verify` | 修改或绑定登录邮箱（随 `EMAIL_VERIFICATION_REQUIRED` 开关决定是否需验证码） |
+| `GET` / `DELETE` | `/v1/me/oauth-identities[/{id}]` | 查看或解绑已绑定的 OAuth 身份（保留防锁死保护） |
+| `GET` | `/v1/me/plugins` | 我的插件列表（开发者及以上在 OpenAPI/llms 中可见） |
 | `GET` | `/v1/me/github/repositories` | 列出当前 OAuth 会话可管理的公开 `astrbot_plugin_*` 仓库 |
-| `GET` / `POST` / `DELETE` | `/v1/me/api-keys[/{id}]` | 个人 API Key 管理 |
+| `GET` / `POST` / `DELETE` | `/v1/me/api-keys[/{id}]` | 个人 API Key 管理（注册用户仅只读，开发者及以上可创建写入 Key） |
 | `GET` / `POST` / `DELETE` | `/v1/me/notifications[/{id}]` | 通知分页查询、未读计数、标记已读与单条/批量/清空删除 |
 
 ### 插件提交与互动（需登录）
@@ -231,25 +238,26 @@ create_app(settings, store)
 
 ## 认证与权限模型
 
-### 角色与能力矩阵
+### 五级身份与能力矩阵
 
-| 能力 | `core_admin` | `admin` | `user` |
-| --- | :---: | :---: | :---: |
-| 管理系统设置、邮件与审查策略 | 支持 | — | — |
-| 管理管理员队伍、创建/删除内部用户 | 支持 | — | — |
-| 发布全站公告 | 支持 | — | — |
-| 管理任意插件 CDN | 支持 | 仅自有插件 | 仅自有插件 |
-| 审核上架/下架、审查插件包、刷新任意插件 | 支持 | 支持 | — |
-| 删除任意评论、禁言/解禁用户 | 支持 | 支持 | — |
-| 编辑插件元数据 | 任意插件 | 任意插件 | 仅自有插件 |
-| 提交插件、评论、点赞、管理个人 API Key | 支持 | 支持 | 支持 |
+数据库 `market_users.role` 仅保存管理层级（`user` / `admin` / `core_admin`），`developer` 按有效 OAuth 绑定或存量上架/待审插件实时推导：
 
-核心权限函数 `can_edit_plugin()`、`can_manage_plugin_submission()` 与 `can_configure_plugin_cdn()` 定义在 `apps/api/app/auth.py`。
+| 能力 | `core_admin` | `admin` | `developer` | `user` | `guest` |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| 管理系统设置、认证/验证开关、邮件与审查策略 | 支持 | — | — | — | — |
+| 管理管理员队伍、创建/删除本地用户、发布公告 | 支持 | — | — | — | — |
+| 审核上架/下架、审查插件包、删除任意评论、禁言用户 | 支持 | 支持 | — | — | — |
+| 管理任意插件 CDN | 支持 | 仅自有插件 | 仅自有插件 | — | — |
+| 提交插件、修改仓库、上传制品、创建 `market:write` API Key | 支持 | 支持 | 需有效 OAuth（存量自下架/关 CDN 除外） | — | — |
+| 评论、点赞、回复、站内信、创建 `market:read` API Key | 支持 | 支持 | 支持 | 支持 | — |
+| 浏览插件、详情、作者页与插件源 | 支持 | 支持 | 支持 | 支持 | 支持 |
 
-### 登录方式
+核心权限函数定义在 `apps/api/app/auth.py` 与 `apps/api/app/oauth_identities.py`。
 
-1. **GitHub OAuth**：访问 `/v1/auth/github/login` 完成授权后回到 `/v1/auth/github/callback`，由 `upsert_github_user` 创建或更新用户并签发会话；若用户属于 `GITHUB_ADMIN_ORG` 且当前非管理员，则自动提权为 `admin`。
-2. **内部账号**：通过 `/v1/auth/internal/login` 校验用户名与 PBKDF2-SHA256 密码哈希。
+### 登录与注册方式
+
+1. **邮箱注册与密码登录**：受 `EMAIL_REGISTRATION_ENABLED` 与 `EMAIL_VERIFICATION_REQUIRED` 控制，支持验证码两步注册与免验证直通注册；通过 `/v1/auth/internal/login` 支持用户名或邮箱配合 PBKDF2-SHA256 密码登录；忘记密码可通过邮件验证码重置并递增 `session_version` 吊销全部旧会话。
+2. **GitHub OAuth**：访问 `/v1/auth/github/login` 完成授权后回到 `/v1/auth/github/callback`，游客可直接登录/注册，已登录用户则非破坏性绑定到 `market_oauth_identities` 并升级为开发者；若用户属于 `GITHUB_ADMIN_ORG` 且当前非管理员，则自动提权为 `admin`。
 3. **开发调试**：仅当 `ENABLE_DEV_AUTH=true` 时开放 `/v1/auth/debug-login`，通过 `X-Dev-GitHub-Login` 请求头快速模拟登录，生产环境必须关闭。
 
 会话基于 `HttpOnly` Cookie（`astrbot_market_session`，非 JWT），Token 格式为 `sess_{token_urlsafe(24)}`，可在服务端即时吊销。详细安全机制见 [security.md](security.md)。
@@ -295,7 +303,7 @@ create_app(settings, store)
 - `smtp`：基于 `aiosmtplib`，默认自动协商加密与认证方式，也可显式指定 `STARTTLS`、`SSL/TLS`、明文以及 `AUTH LOGIN` / `AUTH PLAIN`。
 - `cloudflare`：调用 Cloudflare Email Sending API 发送邮件。
 
-每日发送总量受 `EMAIL_DAILY_LIMIT` 限制（内存按日计数），详见 [security.md](security.md)。
+每日发送总量受 `EMAIL_DAILY_LIMIT` 限制，单邮箱每日验证码受 `EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER` 限制（均写入 Redis / 本地共享存储），详见 [security.md](security.md)。
 
 ## 前端架构
 
@@ -341,7 +349,7 @@ create_app(settings, store)
 根目录 `package.json` 提供 `dev:web`、`build:web`、`dev:api`、`start:api`、`start:runtime-runner`、`test` 等快捷脚本。执行 `npm run build:web` 时先运行 `vp build`，再运行 `scripts/prerender.mjs`：
 
 - 未设置 `VITE_BASE_URL` 时，自动跳过 Sitemap 与 Puppeteer 预渲染，仅输出标准 SPA 产物。
-- 设置 `VITE_BASE_URL=https://your-domain` 时，构建阶段从 `/v1/plugins` 拉取已上架清单，生成 `sitemap.xml`、`robots.txt` 以及首页、提交页、REST 文档页和各插件/作者详情页的静态 HTML 快照。
+- 设置 `VITE_BASE_URL=https://your-domain` 时，构建阶段从 `/v1/plugins` 拉取已上架清单，并从 `/v1/authors` 补充无上架插件作者，生成 `sitemap.xml`、`robots.txt` 以及首页、提交页、REST 文档页和各插件/作者详情页的静态 HTML 快照。
 
 ## 部署架构
 

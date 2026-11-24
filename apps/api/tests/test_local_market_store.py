@@ -274,8 +274,8 @@ def test_local_mode_env_bootstrap_and_direct_admin_submission(tmp_path, monkeypa
                 "repo": "https://github.com/astrhub/astrbot_plugin_blocked",
             },
         )
-        assert blocked.status_code == 409
-        assert blocked.json()["code"] == "github_authorization_required"
+        assert blocked.status_code == 403
+        assert blocked.json()["code"] == "oauth_binding_required"
 
     # Restart and verify listed plugin and AstrBot feed survive.
     with TestClient(main_module.create_app(settings=settings)) as restarted:

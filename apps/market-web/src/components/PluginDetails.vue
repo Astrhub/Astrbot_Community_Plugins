@@ -346,6 +346,9 @@ const canManagePlugin = computed(() => {
   if (["core_admin", "admin"].includes(user.role)) return true;
   return Boolean(
     plugin.owner_user_id === user.id ||
+    (plugin.owner_username &&
+      user.public_username &&
+      plugin.owner_username === user.public_username) ||
     (plugin.owner_github_login && plugin.owner_github_login === user.github_login),
   );
 });

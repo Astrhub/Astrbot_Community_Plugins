@@ -426,6 +426,7 @@ def test_admin_user_listing_redacts_github_tokens() -> None:
     alice = next(user for user in users if user["github_login"] == "alice")
     assert alice["has_github_token"] is True
     assert "github_token" not in alice
+    assert alice["has_active_plugins"] is False
 
 
 def test_internal_admin_can_link_existing_github_identity() -> None:
@@ -1913,6 +1914,9 @@ def test_public_site_config_uses_settings() -> None:
         "auth": {
             "github_login_enabled": False,
             "public_login_enabled": True,
+            "email_registration_enabled": False,
+            "email_verification_required": True,
+            "email_service_enabled": False,
             "login_agreement_enabled": False,
             "login_agreement_text": "",
             "service_terms_enabled": False,

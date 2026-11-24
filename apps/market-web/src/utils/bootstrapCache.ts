@@ -14,6 +14,7 @@ interface CacheEnvelope<T> {
 
 export interface UserPreview {
   username?: string;
+  public_username?: string;
   internal_username?: string;
   github_login?: string;
   login?: string;
@@ -82,6 +83,7 @@ export function readCachedUserPreview(): UserPreview | null {
 export function writeCachedUserPreview(user: User): UserPreview | null {
   const preview: UserPreview = {
     username: optionalText(user.username),
+    public_username: optionalText(user.public_username),
     internal_username: optionalText(user.internal_username),
     github_login: optionalText(user.github_login),
     login: optionalText(user.login),

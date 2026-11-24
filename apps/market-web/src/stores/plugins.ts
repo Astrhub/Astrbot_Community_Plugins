@@ -143,6 +143,9 @@ const DEFAULT_SITE_CONFIG: SiteConfig = Object.freeze({
   auth: {
     github_login_enabled: false,
     public_login_enabled: true,
+    email_registration_enabled: false,
+    email_verification_required: true,
+    email_service_enabled: false,
     login_agreement_enabled: false,
     login_agreement_text: "",
     service_terms_enabled: false,
@@ -406,6 +409,7 @@ export const usePluginStore = defineStore("plugins", () => {
       plugin.desc,
       plugin.short_desc,
       plugin.author,
+      plugin.owner_username,
       plugin.owner_github_login,
       plugin.owner_user_id,
       plugin.repo,
@@ -948,9 +952,11 @@ export const usePluginStore = defineStore("plugins", () => {
     // A release can be prerendered against the preceding API before the atomic deployment.
     if (window.__ASTRHUB_PRERENDER__) {
       await loadPlugins();
+      const target = username.toLowerCase();
       const item = plugins.value.find(
         (item) =>
-          item.owner_github_login?.toLowerCase() === username.toLowerCase() &&
+          (item.owner_username?.toLowerCase() === target ||
+            item.owner_github_login?.toLowerCase() === target) &&
           item.name.toLowerCase() === name.toLowerCase(),
       );
       if (!item) throw new Error("插件不存在");
@@ -1320,7 +1326,7 @@ export const usePluginStore = defineStore("plugins", () => {
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "登录失败");
+    if (!response.ok) throw new Error(apiErrorMessage(data, "登录失败"));
     currentUser.value = data.user;
     currentUserPreview.value = writeCachedUserPreview(data.user);
     currentUserLoaded = true;
@@ -1328,6 +1334,195 @@ export const usePluginStore = defineStore("plugins", () => {
       unreadNotificationCount.value = 0;
     });
     return data.user;
+  }
+
+  async function applyAuthenticatedUser(user: User): Promise<User> {
+    currentUser.value = user;
+    currentUserPreview.value = writeCachedUserPreview(user);
+    currentUserLoaded = true;
+    await loadUnreadNotificationCount().catch(() => {
+      unreadNotificationCount.value = 0;
+    });
+    return user;
+  }
+
+  async function registerWithEmailDirect(payload: {
+    username: string;
+    email: string;
+    password: string;
+  }): Promise<User> {
+    const response = await fetch(`${apiBaseUrl}/v1/auth/email/register`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "注册失败")), { code: data.code });
+    return applyAuthenticatedUser(data.user);
+  }
+
+  async function requestEmailRegisterCode(payload: {
+    username: string;
+    email: string;
+    password: string;
+  }): Promise<{ registration_id: string; expires_in: number }> {
+    const response = await fetch(`${apiBaseUrl}/v1/auth/email/register/request`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "发送验证码失败")), { code: data.code });
+    return data;
+  }
+
+  async function verifyEmailRegisterCode(payload: {
+    registration_id: string;
+    code: string;
+  }): Promise<User> {
+    const response = await fetch(`${apiBaseUrl}/v1/auth/email/register/verify`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "验证码校验失败")), { code: data.code });
+    return applyAuthenticatedUser(data.user);
+  }
+
+  async function requestPasswordResetCode(payload: {
+    email: string;
+  }): Promise<{ reset_id: string; expires_in: number }> {
+    const response = await fetch(`${apiBaseUrl}/v1/auth/email/password-reset/request`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "发送重置验证码失败")), {
+        code: data.code,
+      });
+    return data;
+  }
+
+  async function verifyPasswordResetCode(payload: {
+    reset_id: string;
+    code: string;
+    new_password: string;
+  }): Promise<{ ok: boolean }> {
+    const response = await fetch(`${apiBaseUrl}/v1/auth/email/password-reset/verify`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "密码重置失败")), { code: data.code });
+    return data;
+  }
+
+  async function updateMyPassword(payload: {
+    current_password?: string;
+    new_password: string;
+    email?: string;
+  }): Promise<User> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/password`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "更新密码失败")), { code: data.code });
+    if (data.user) {
+      currentUser.value = data.user;
+      currentUserPreview.value = writeCachedUserPreview(data.user);
+      return data.user;
+    }
+    return currentUser.value as User;
+  }
+
+  async function requestEmailChange(payload: {
+    current_password: string;
+    new_email: string;
+  }): Promise<{
+    completed?: boolean;
+    verification_required?: boolean;
+    change_id?: string;
+    expires_in?: number;
+    user?: User;
+  }> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/email/change/request`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "修改邮箱失败")), { code: data.code });
+    if (data.user) {
+      currentUser.value = data.user;
+      currentUserPreview.value = writeCachedUserPreview(data.user);
+    }
+    return data;
+  }
+
+  async function verifyEmailChange(payload: { change_id: string; code: string }): Promise<User> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/email/change/verify`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "验证新邮箱失败")), { code: data.code });
+    if (data.user) {
+      currentUser.value = data.user;
+      currentUserPreview.value = writeCachedUserPreview(data.user);
+      return data.user;
+    }
+    return currentUser.value as User;
+  }
+
+  async function loadMyOAuthIdentities(): Promise<Record<string, unknown>[]> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/oauth-identities`, {
+      credentials: "include",
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "加载 OAuth 绑定失败"));
+    return Array.isArray(data.items) ? data.items : [];
+  }
+
+  async function unbindMyOAuthIdentity(identityId: string): Promise<User> {
+    const response = await fetch(
+      `${apiBaseUrl}/v1/me/oauth-identities/${encodeURIComponent(identityId)}`,
+      {
+        method: "DELETE",
+        credentials: "include",
+      },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok)
+      throw Object.assign(new Error(apiErrorMessage(data, "解绑 OAuth 失败")), { code: data.code });
+    if (data.user) {
+      currentUser.value = data.user;
+      currentUserPreview.value = writeCachedUserPreview(data.user);
+      return data.user;
+    }
+    return currentUser.value as User;
   }
 
   async function logout(): Promise<void> {
@@ -1512,6 +1707,16 @@ export const usePluginStore = defineStore("plugins", () => {
     loadCurrentUser,
     loginWithGithub,
     loginWithPassword,
+    registerWithEmailDirect,
+    requestEmailRegisterCode,
+    verifyEmailRegisterCode,
+    requestPasswordResetCode,
+    verifyPasswordResetCode,
+    updateMyPassword,
+    requestEmailChange,
+    verifyEmailChange,
+    loadMyOAuthIdentities,
+    unbindMyOAuthIdentity,
     logout,
     updateProfile,
     saveSetupConfig,

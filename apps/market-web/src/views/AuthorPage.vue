@@ -10,25 +10,40 @@
         </router-link>
         <div class="author-card">
           <img
+            v-if="authorAvatarUrl && !avatarLoadFailed"
             class="author-avatar"
-            :src="`https://github.com/${username}.png?size=96`"
-            :alt="`${username} 的 GitHub 头像`"
+            :src="authorAvatarUrl"
+            :alt="`${authorDisplayName} 的头像`"
             width="64"
             height="64"
+            @error="avatarLoadFailed = true"
           />
+          <span v-else class="author-avatar author-avatar--fallback" aria-hidden="true">
+            <n-icon size="30"><person-outline /></n-icon>
+          </span>
           <div class="author-info">
-            <h1 id="author-title">{{ username }}</h1>
-            <p>社区插件开发者</p>
+            <h1 id="author-title">{{ authorDisplayName }}</h1>
+            <p class="author-subtitle">
+              <span v-if="authorDisplayName !== canonicalUsername" class="author-handle">
+                @{{ canonicalUsername }}
+              </span>
+              <span>{{ plugins.length ? "社区插件开发者" : "社区成员" }}</span>
+            </p>
           </div>
-          <a
-            class="github-home-btn"
-            :href="`https://github.com/${username}`"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <n-icon><logo-github /></n-icon>
-            GitHub 主页
-          </a>
+          <div v-if="externalProfiles.length" class="author-links">
+            <a
+              v-for="profile in externalProfiles"
+              :key="`${profile.provider}:${profile.login}`"
+              class="github-home-btn"
+              :href="profile.url"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <n-icon v-if="profile.provider === 'github'"><logo-github /></n-icon>
+              <n-icon v-else><link-outline /></n-icon>
+              {{ profile.provider === "github" ? "GitHub 主页" : `${profile.provider} 主页` }}
+            </a>
+          </div>
         </div>
       </section>
 
@@ -42,6 +57,12 @@
           <div class="loading-dots" aria-label="正在加载作者插件">
             <span></span><span></span><span></span>
           </div>
+        </div>
+
+        <div v-else-if="notFound" class="empty-state">
+          <n-icon size="40"><alert-circle-outline /></n-icon>
+          <h2>作者不存在</h2>
+          <p>未找到该作者或公开账号。</p>
         </div>
 
         <div v-else-if="errorMessage" class="empty-state">
@@ -72,46 +93,135 @@
 </template>
 
 <script setup lang="ts">
+import { injectHead } from "@unhead/vue";
 import { computed, onMounted, shallowRef, watch } from "vue";
 import { useRoute } from "vue-router";
 import { NIcon } from "naive-ui";
-import { ArrowBack, LogoGithub, AlertCircleOutline, FileTrayOutline } from "@vicons/ionicons5";
+import {
+  ArrowBack,
+  LogoGithub,
+  AlertCircleOutline,
+  FileTrayOutline,
+  LinkOutline,
+  PersonOutline,
+} from "@vicons/ionicons5";
 import AppHeader from "@/components/AppHeader.vue";
 import AppFooter from "@/components/AppFooter.vue";
 import PluginCard from "@/components/PluginCard.vue";
-import { useSeo, absoluteSiteUrl } from "@/composables/useSeo";
-import type { Plugin } from "@/types";
+import { useSeo, commitSeo, absoluteSiteUrl } from "@/composables/useSeo";
+import { githubRawUrl } from "@/utils/github";
+import { usePluginStore } from "@/stores/plugins";
+import type { AuthorOAuthProfile, Plugin } from "@/types";
 
+const head = injectHead();
 const route = useRoute();
+const pluginStore = usePluginStore();
 const username = computed(() => String(route.params.username || "").trim());
+const canonicalUsername = shallowRef("");
+const displayName = shallowRef("");
+const avatarUrl = shallowRef("");
+const githubUrl = shallowRef("");
+const oauthProfiles = shallowRef<AuthorOAuthProfile[]>([]);
+const avatarLoadFailed = shallowRef(false);
 const plugins = shallowRef<Plugin[]>([]);
 const isLoading = shallowRef(true);
+const notFound = shallowRef(false);
 const errorMessage = shallowRef("");
 
-useSeo({
-  title: computed(() => `${username.value} 的插件`),
-  description: computed(() => `查看 ${username.value} 在 Astrhub 插件市场发布的所有插件。`),
-  path: computed(() => `/author/${encodeURIComponent(username.value)}`),
-  jsonLd: computed(() => ({
+const authorDisplayName = computed(
+  () => displayName.value || canonicalUsername.value || username.value,
+);
+const authorAvatarUrl = computed(() => githubRawUrl(avatarUrl.value.trim()));
+const externalProfiles = computed<AuthorOAuthProfile[]>(() => {
+  if (oauthProfiles.value.length) return oauthProfiles.value;
+  if (githubUrl.value) {
+    return [
+      {
+        provider: "github",
+        login: canonicalUsername.value || username.value,
+        url: githubUrl.value,
+      },
+    ];
+  }
+  return [];
+});
+
+const authorTitle = computed(() =>
+  notFound.value ? "作者不存在" : `${authorDisplayName.value || username.value} 的插件`,
+);
+const authorDescription = computed(() =>
+  notFound.value
+    ? "未找到该作者或公开账号。"
+    : `查看 ${authorDisplayName.value || username.value} 在 Astrhub 插件市场发布的所有插件。`,
+);
+const authorPath = computed(
+  () => `/author/${encodeURIComponent(canonicalUsername.value || username.value)}`,
+);
+const authorRobots = computed(() => (notFound.value ? "noindex,nofollow" : undefined));
+const authorJsonLd = computed(() => {
+  if (notFound.value) return undefined;
+  const authorPageUrl = absoluteSiteUrl(authorPath.value);
+  const sameAs = externalProfiles.value.map((item) => item.url).filter(Boolean);
+  return {
     "@context": "https://schema.org",
     "@type": "ProfilePage",
     mainEntity: {
       "@type": "Person",
-      name: username.value,
-      url: `https://github.com/${username.value}`,
+      name: authorDisplayName.value || username.value,
+      url: externalProfiles.value[0]?.url || authorPageUrl,
+      ...(sameAs.length ? { sameAs } : {}),
     },
-    url: absoluteSiteUrl(`/author/${encodeURIComponent(username.value)}`),
-  })),
+    url: authorPageUrl,
+  };
+});
+
+useSeo({
+  title: authorTitle,
+  description: authorDescription,
+  path: authorPath,
+  robots: authorRobots,
+  jsonLd: authorJsonLd,
 });
 
 async function loadAuthorPlugins() {
   if (!username.value) return;
   isLoading.value = true;
+  notFound.value = false;
   errorMessage.value = "";
+  avatarLoadFailed.value = false;
+  canonicalUsername.value = username.value;
+  displayName.value = "";
+  avatarUrl.value = "";
+  githubUrl.value = "";
+  oauthProfiles.value = [];
   try {
-    const response = await fetch(`/v1/authors/${encodeURIComponent(username.value)}/plugins`);
+    const response = await fetch(
+      `${pluginStore.apiBaseUrl}/v1/authors/${encodeURIComponent(username.value)}/plugins`,
+    );
     const data = await response.json().catch(() => ({}));
+    if (response.status === 404) {
+      notFound.value = true;
+      plugins.value = [];
+      return;
+    }
     if (!response.ok) throw new Error(data.detail || data.error || "作者插件加载失败");
+    canonicalUsername.value = String(data.username || username.value).trim();
+    displayName.value = String(data.display_name || "").trim();
+    avatarUrl.value = String(data.avatar_url || "").trim();
+    githubUrl.value = String(data.github_url || "").trim();
+    oauthProfiles.value = Array.isArray(data.oauth_profiles) ? data.oauth_profiles : [];
+    if (window.__ASTRHUB_PRERENDER__) {
+      commitSeo(
+        {
+          title: authorTitle.value,
+          description: authorDescription.value,
+          path: authorPath.value,
+          robots: authorRobots.value,
+          jsonLd: authorJsonLd.value,
+        },
+        head,
+      );
+    }
     plugins.value = data.items || [];
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "作者插件加载失败";
@@ -179,6 +289,14 @@ watch(username, () => {
   border-radius: 50%;
   border: 1px solid var(--border-base);
   flex-shrink: 0;
+  object-fit: cover;
+}
+
+.author-avatar--fallback {
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-tertiary);
+  background: var(--bg-base);
 }
 
 .author-info {
@@ -193,10 +311,24 @@ watch(username, () => {
   line-height: 1.3;
 }
 
-.author-info p {
+.author-subtitle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   margin: 4px 0 0;
   font-size: 13px;
   color: var(--text-tertiary);
+}
+
+.author-handle {
+  font-family: var(--font-mono, monospace);
+}
+
+.author-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .github-home-btn {

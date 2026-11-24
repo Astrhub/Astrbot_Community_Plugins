@@ -43,6 +43,10 @@ const props = defineProps({
     type: String,
     default: "",
   },
+  canCreateWriteKey: {
+    type: Boolean,
+    default: true,
+  },
 });
 
 const emit = defineEmits(["refresh", "create", "delete", "copy-key", "clear-new-key"]);
@@ -61,16 +65,19 @@ const scopeOptions = Object.freeze([
   {
     label: "写入市场数据",
     value: "market:write",
-    description: "为后续插件提交、同步和管理接口预留",
+    description: "仅开发者及以上身份可用，用于插件提交、同步与管理接口",
   },
 ]);
 
 const canCreate = computed(() => form.scopes.length > 0 && !props.creating);
 
 function createKey() {
+  const scopes = props.canCreateWriteKey
+    ? [...form.scopes]
+    : form.scopes.filter((scope) => scope !== "market:write");
   emit("create", {
     name: form.name.trim() || "AstrBot 插件访问密钥",
-    scopes: [...form.scopes],
+    scopes: scopes.length ? scopes : ["market:read"],
   });
 }
 
@@ -144,6 +151,7 @@ function isBusy(key) {
             v-for="scope in scopeOptions"
             :key="scope.value"
             :value="scope.value"
+            :disabled="scope.value === 'market:write' && !canCreateWriteKey"
             class="scope-option"
           >
             <div class="scope-copy">
@@ -152,6 +160,10 @@ function isBusy(key) {
             </div>
           </NCheckbox>
         </NCheckboxGroup>
+        <template v-if="!canCreateWriteKey" #feedback>
+          当前为注册用户，仅可创建只读（market:read）访问密钥。绑定 OAuth
+          账号成为开发者后可开启写入权限。
+        </template>
       </NFormItem>
 
       <div class="section-actions">

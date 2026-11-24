@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from ..auth import can_edit_plugin, is_admin, is_core_admin
 from ..github_authorization import require_repository_access
+from ..oauth_identities import has_bound_oauth_identity, is_developer_tier, resolve_account_tier
 from .archive import PLUGIN_NAME_PATTERN, PrecheckError, normalize_github_repo
 from .comments import ReviewCommentError
 from .content import ArtifactContentError
@@ -152,6 +153,12 @@ def build_artifact_router() -> APIRouter:
         _require_service(request)
         user = await _require_user(request)
         _ensure_submission_allowed(user)
+        if not is_admin(user) and not await has_bound_oauth_identity(request.app.state.store, user):
+            raise _http_error(
+                403,
+                "oauth_binding_required",
+                "请先绑定至少一个 OAuth 账号成为开发者后再登记插件",
+            )
         data = payload.model_dump()
         data["category_explicit"] = "category" in payload.model_fields_set
         try:
@@ -250,6 +257,13 @@ def build_artifact_router() -> APIRouter:
     ) -> dict[str, Any]:
         service = _require_service(request)
         user = await _require_user(request)
+        tier = await resolve_account_tier(request.app.state.store, user)
+        if not is_developer_tier(tier):
+            raise _http_error(
+                403,
+                "developer_required",
+                "仅开发者及以上身份可访问插件审查工作台",
+            )
         items = await service.repository.list_user_artifacts(str(user["id"]), limit, offset)
         return {
             "items": [public_artifact(item) for item in items],
