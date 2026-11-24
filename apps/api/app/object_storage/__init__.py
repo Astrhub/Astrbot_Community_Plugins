@@ -10,6 +10,7 @@ from .credentials import (
 )
 from .driver import ObjectStorageDriver
 from .local_fs import LocalFilesystemDriver
+from .manager import StorageManager, storage_migration_worker
 from .models import (
     PURPOSE_ALLOWED_BACKENDS,
     ObjectListingEntry,
@@ -18,11 +19,16 @@ from .models import (
     StorageBackend,
     StorageBinding,
     StorageCapabilities,
+    StorageMigration,
+    StorageMigrationItem,
+    StorageMigrationItemStatus,
+    StorageMigrationStatus,
     StorageObjectRecord,
     StorageObjectStatus,
     StorageProfile,
     StorageProfileStatus,
     StoragePurpose,
+    StorageUrlAlias,
     StoredObject,
     build_public_url,
     guess_content_type,
@@ -31,6 +37,14 @@ from .models import (
     validate_path_segment,
     validate_profile_id,
 )
+from .pg_driver import PostgresObjectStorageDriver, validate_pg_schema
+from .repository import (
+    LocalObjectStorageRepository,
+    ObjectStorageRepository,
+    PgObjectStorageRepository,
+    create_object_storage_repository,
+)
+from .routes import build_object_storage_router
 from .s3 import S3ObjectStorageDriver
 from .service import (
     LEGACY_PUBLISHED_PROFILE_ID,
@@ -39,39 +53,56 @@ from .service import (
     build_legacy_object_storage_service,
     build_local_legacy_object_storage_service,
 )
+from .sqlite_driver import SqliteObjectStorageDriver, validate_sqlite_db_path
 
 __all__ = [
     "InMemoryStorageSecretStore",
     "LEGACY_PUBLISHED_PROFILE_ID",
     "LEGACY_QUARANTINE_PROFILE_ID",
     "LocalFilesystemDriver",
+    "LocalObjectStorageRepository",
     "ObjectListingEntry",
     "ObjectRange",
     "ObjectStorageDriver",
     "ObjectStorageError",
+    "ObjectStorageRepository",
     "ObjectStorageService",
     "PURPOSE_ALLOWED_BACKENDS",
+    "PgObjectStorageRepository",
+    "PostgresObjectStorageDriver",
     "S3ObjectStorageDriver",
+    "SqliteObjectStorageDriver",
     "StorageBackend",
     "StorageBinding",
     "StorageCapabilities",
+    "StorageManager",
+    "StorageMigration",
+    "StorageMigrationItem",
+    "StorageMigrationItemStatus",
+    "StorageMigrationStatus",
     "StorageObjectRecord",
     "StorageObjectStatus",
     "StorageProfile",
     "StorageProfileStatus",
     "StoragePurpose",
     "StorageSecretStore",
+    "StorageUrlAlias",
     "StoredObject",
     "build_legacy_object_storage_service",
     "build_local_legacy_object_storage_service",
+    "build_object_storage_router",
     "build_public_url",
+    "create_object_storage_repository",
     "decrypt_storage_secret",
     "derive_storage_credential_cipher",
     "encrypt_storage_secret",
     "guess_content_type",
     "require_storage_credential_key",
+    "storage_migration_worker",
     "validate_namespace",
     "validate_object_key",
     "validate_path_segment",
+    "validate_pg_schema",
     "validate_profile_id",
+    "validate_sqlite_db_path",
 ]

@@ -45,13 +45,35 @@ STREAM_COPY_CHUNK_SIZE = 1024 * 1024
 class ObjectStorageService:
     """Coordinates storage profiles, purpose bindings, drivers, and object registration."""
 
-    def __init__(self, *, secret_store: StorageSecretStore | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        secret_store: StorageSecretStore | None = None,
+        repository: Any | None = None,
+    ) -> None:
         self.secret_store = secret_store
+        self.repository = repository
         self._profiles: dict[str, StorageProfile] = {}
         self._drivers: dict[str, ObjectStorageDriver] = {}
         self._bindings: dict[StoragePurpose, StorageBinding] = {}
         self._objects: dict[str, StorageObjectRecord] = {}
         self._object_index: dict[tuple[str, str, str], str] = {}
+
+    def unregister_profile(self, profile_id: str) -> None:
+        normalized = validate_profile_id(profile_id)
+        self._profiles.pop(normalized, None)
+        self._drivers.pop(normalized, None)
+
+    def reset(self) -> None:
+        self._profiles.clear()
+        self._drivers.clear()
+        self._bindings.clear()
+        self._objects.clear()
+        self._object_index.clear()
+
+    def set_binding(self, binding: StorageBinding) -> StorageBinding:
+        self._bindings[binding.purpose] = binding
+        return binding
 
     def register_profile(
         self,
@@ -155,7 +177,7 @@ class ObjectStorageService:
         resolved_type = guess_content_type(key, content_type)
         record_id = ""
         if register and resolved_purpose is not None:
-            record_id = self._register_pending(
+            record_id = await self._register_pending_async(
                 purpose=resolved_purpose,
                 profile_id=driver.profile_id,
                 backend=driver.backend.value,
@@ -178,10 +200,10 @@ class ObjectStorageService:
             )
         except Exception:
             if record_id:
-                self._discard_pending(record_id)
+                await self._discard_pending_async(record_id)
             raise
         if record_id:
-            self._activate_record(record_id, stored)
+            await self._activate_record_async(record_id, stored)
         return stored
 
     async def stat_object(
@@ -280,7 +302,7 @@ class ObjectStorageService:
         resolved_type = guess_content_type(target_key, content_type)
         record_id = ""
         if register and resolved_target_purpose is not None:
-            record_id = self._register_pending(
+            record_id = await self._register_pending_async(
                 purpose=resolved_target_purpose,
                 profile_id=target_driver.profile_id,
                 backend=target_driver.backend.value,
@@ -315,10 +337,10 @@ class ObjectStorageService:
                 )
         except Exception:
             if record_id:
-                self._discard_pending(record_id)
+                await self._discard_pending_async(record_id)
             raise
         if record_id:
-            self._activate_record(record_id, stored)
+            await self._activate_record_async(record_id, stored)
         return stored
 
     async def delete_object(
@@ -336,7 +358,7 @@ class ObjectStorageService:
         record_id = self._object_index.pop(index_key, None)
         if record_id and record_id in self._objects:
             existing = self._objects[record_id]
-            self._objects[record_id] = StorageObjectRecord(
+            updated = StorageObjectRecord(
                 id=existing.id,
                 purpose=existing.purpose,
                 profile_id=existing.profile_id,
@@ -353,6 +375,34 @@ class ObjectStorageService:
                 created_at=existing.created_at,
                 updated_at=utc_now_iso(),
             )
+            self._objects[record_id] = updated
+            if self.repository is not None:
+                await self.repository.upsert_object(updated)
+        elif self.repository is not None:
+            existing = await self.repository.find_active_object(
+                profile_id=driver.profile_id,
+                namespace=normalized_ns,
+                key=key,
+            )
+            if existing is not None:
+                deleted = StorageObjectRecord(
+                    id=existing.id,
+                    purpose=existing.purpose,
+                    profile_id=existing.profile_id,
+                    backend=existing.backend,
+                    namespace=existing.namespace,
+                    key=existing.key,
+                    size_bytes=existing.size_bytes,
+                    sha256=existing.sha256,
+                    content_type=existing.content_type,
+                    status=StorageObjectStatus.DELETED,
+                    public_url=existing.public_url,
+                    owner_type=existing.owner_type,
+                    owner_id=existing.owner_id,
+                    created_at=existing.created_at,
+                    updated_at=utc_now_iso(),
+                )
+                await self.repository.upsert_object(deleted)
 
     def public_url(
         self,
@@ -363,7 +413,18 @@ class ObjectStorageService:
         namespace: str = "",
     ) -> str:
         driver, _ = self._resolve_target(purpose=purpose, profile_id=profile_id)
-        return driver.public_url(key, namespace=namespace)
+        try:
+            return driver.public_url(key, namespace=namespace)
+        except ObjectStorageError as exc:
+            if exc.code == "public_url_unconfigured":
+                record = self.find_object_record(
+                    profile_id=driver.profile_id,
+                    namespace=namespace,
+                    key=key,
+                )
+                if record is not None and record.public_url:
+                    return record.public_url
+            raise
 
     async def list_objects(
         self,
@@ -491,6 +552,77 @@ class ObjectStorageService:
         index_key = (existing.profile_id, existing.namespace, existing.key)
         if self._object_index.get(index_key) == record_id:
             self._object_index.pop(index_key, None)
+
+    async def _register_pending_async(
+        self,
+        *,
+        purpose: StoragePurpose,
+        profile_id: str,
+        backend: str,
+        namespace: str,
+        key: str,
+        content_type: str,
+        owner_type: str,
+        owner_id: str,
+    ) -> str:
+        if self.repository is not None:
+            existing = await self.repository.find_active_object(
+                profile_id=profile_id,
+                namespace=namespace,
+                key=key,
+            )
+            if existing is not None and existing.status == StorageObjectStatus.ACTIVE:
+                self._objects[existing.id] = existing
+                self._object_index[(profile_id, namespace, key)] = existing.id
+                return existing.id
+        record_id = self._register_pending(
+            purpose=purpose,
+            profile_id=profile_id,
+            backend=backend,
+            namespace=namespace,
+            key=key,
+            content_type=content_type,
+            owner_type=owner_type,
+            owner_id=owner_id,
+        )
+        if self.repository is not None and record_id in self._objects:
+            await self.repository.upsert_object(self._objects[record_id])
+        return record_id
+
+    async def _activate_record_async(self, record_id: str, stored: StoredObject) -> None:
+        self._activate_record(record_id, stored)
+        if self.repository is not None and record_id in self._objects:
+            record = self._objects[record_id]
+            if not record.public_url and record.purpose in {
+                StoragePurpose.ARTIFACT_PUBLISHED,
+                StoragePurpose.AVATAR,
+            }:
+                record = StorageObjectRecord(
+                    id=record.id,
+                    purpose=record.purpose,
+                    profile_id=record.profile_id,
+                    backend=record.backend,
+                    namespace=record.namespace,
+                    key=record.key,
+                    size_bytes=record.size_bytes,
+                    sha256=record.sha256,
+                    content_type=record.content_type,
+                    status=record.status,
+                    public_url=f"/v1/storage/public/{record.id}",
+                    owner_type=record.owner_type,
+                    owner_id=record.owner_id,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                )
+                self._objects[record_id] = record
+            await self.repository.upsert_object(record)
+
+    async def _discard_pending_async(self, record_id: str) -> None:
+        existing = self._objects.get(record_id)
+        was_pending = existing is not None and existing.status == StorageObjectStatus.PENDING
+        self._discard_pending(record_id)
+        if was_pending and self.repository is not None:
+            await self.repository.delete_object_record(record_id)
 
     async def _stream_copy_across_profiles(
         self,

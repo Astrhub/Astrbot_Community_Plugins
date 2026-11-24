@@ -107,6 +107,11 @@ from .oauth_identities import (
     user_tier_context,
 )
 from .openapi_filter import filter_openapi_by_role, role_for_openapi
+from .object_storage import (
+    StorageManager,
+    build_object_storage_router,
+    storage_migration_worker,
+)
 from .plugin_identity import PluginIdentityConflict, plugin_canonical_path
 from .seo_render import (
     CRAWLER_CACHE_CONTROL,
@@ -190,6 +195,7 @@ DEFAULT_REDIS_CONFIG = {
 RESERVED_WEB_PATHS = {
     "v1",
     "health",
+    "packages",
     "plugins.json",
     "plugins-md5.json",
     "openapi.json",
@@ -197,7 +203,15 @@ RESERVED_WEB_PATHS = {
     "docs",
     "redoc",
 }
-RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
+RESERVED_WEB_PREFIXES = (
+    "v1/",
+    "health/",
+    "packages/",
+    "plugins.json/",
+    "plugins-md5.json/",
+    "docs/",
+    "redoc/",
+)
 PUBLIC_STATIC_ASSET_EXTENSIONS = (
     ".png",
     ".webp",
@@ -390,10 +404,15 @@ def create_app(
     app.state.env_settings = initial_settings
     app.state.settings = initial_settings
     app.state.store = store or create_store(app.state.settings)
+    app.state.storage_manager = StorageManager(
+        store=app.state.store,
+        settings=app.state.settings,
+    )
     app.state.artifact_runtime = build_artifact_runtime(
         app.state.settings,
         app.state.store,
         allow_in_memory_artifacts=store is not None,
+        object_storage=app.state.storage_manager.service,
     )
     app.state.email_daily_counter = {"date": "", "count": 0}
     app.state.github_api_token_index = 0
@@ -460,6 +479,7 @@ def create_app(
             runtime_settings_fn=runtime_settings_for_app,
         )
     )
+    app.include_router(build_object_storage_router(require_core_admin=require_core_admin))
     register_market_web_routes(app)
     return app
 
@@ -516,19 +536,26 @@ def create_store(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await maybe_call_store_lifecycle(app, "connect")
+    await app.state.storage_manager.initialize()
     await app.state.artifact_runtime.start(app.state.store)
     await bootstrap_internal_core_admin(app)
     sync_task = asyncio.create_task(github_metadata_sync_worker(app))
+    storage_migration_task = asyncio.create_task(
+        storage_migration_worker(app.state.storage_manager)
+    )
     try:
         yield None
     finally:
-        sync_task.cancel()
-        try:
-            await sync_task
-        except asyncio.CancelledError:
-            # Expected during application shutdown after cancelling the sync worker.
-            pass
+        for task in (sync_task, storage_migration_task):
+            task.cancel()
+        for task in (sync_task, storage_migration_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                # Expected during application shutdown after cancelling background workers.
+                pass
         await app.state.artifact_runtime.close()
+        await app.state.storage_manager.close()
         await maybe_call_store_lifecycle(app, "close")
 
 
@@ -684,6 +711,7 @@ def register_routes(app: FastAPI) -> None:
             payload,
             runtime_config,
         )
+        request.app.state.storage_manager.update_settings(request.app.state.settings)
         request.app.state.artifact_runtime.update_settings(request.app.state.settings)
         invalidate_seo_caches(request.app)
         return {
@@ -828,6 +856,7 @@ def register_routes(app: FastAPI) -> None:
                 site_name=payload.site.name,
                 web_url=payload.site.web_url,
             )
+            request.app.state.storage_manager.update_settings(request.app.state.settings)
             request.app.state.artifact_runtime.update_settings(request.app.state.settings)
             return {
                 "saved": True,
@@ -2839,8 +2868,11 @@ def cache_control_for_path(path: str, content_type: str = "") -> str:
         return "public, max-age=3600"
     if normalized in {"/v1/plugins", "/v1/site", "/v1/authors"}:
         return "public, max-age=60"
-    if re.fullmatch(r"/v1/plugins/[^/]+/(?:logo|readme-asset)", normalized) or re.fullmatch(
-        r"/v1/authors/[^/]+/avatar", normalized
+    if (
+        normalized.startswith("/v1/storage/public/")
+        or normalized.startswith("/packages/")
+        or re.fullmatch(r"/v1/plugins/[^/]+/(?:logo|readme-asset)", normalized)
+        or re.fullmatch(r"/v1/authors/[^/]+/avatar", normalized)
     ):
         return "public, max-age=3600"
     if normalized.startswith("/v1/"):
@@ -3221,6 +3253,13 @@ async def require_admin(request: Request) -> dict[str, Any]:
     user = await require_user(request)
     if not is_admin(user):
         raise error(403, "Forbidden")
+    return user
+
+
+async def require_core_admin(request: Request) -> dict[str, Any]:
+    user = await require_user(request)
+    if not is_core_admin(user):
+        raise error(403, "Only core admin can manage storage")
     return user
 
 
@@ -5157,6 +5196,9 @@ async def activate_setup_store(app: FastAPI, new_store: Any) -> None:
 
     old_store = app.state.store
     app.state.store = new_store
+    app.state.storage_manager.update_settings(app.state.settings)
+    app.state.storage_manager.rebind_store(new_store)
+    await app.state.storage_manager.initialize()
     app.state.artifact_runtime.update_settings(app.state.settings)
     await app.state.artifact_runtime.start(new_store)
     if old_store is new_store:

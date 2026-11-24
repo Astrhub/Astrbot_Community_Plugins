@@ -743,6 +743,8 @@
                     配置请在部署环境的 .env 中调整。
                   </p>
                 </section>
+
+                <infrastructure-storage-panel v-if="isCoreAdmin" />
               </div>
             </n-tab-pane>
           </n-tabs>
@@ -779,6 +781,7 @@ import FieldHint from "@/components/FieldHint.vue";
 import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import ThemeModeButton from "@/components/ThemeModeButton.vue";
 import AdminUserManagement from "@/components/settings/AdminUserManagement.vue";
+import InfrastructureStoragePanel from "@/components/settings/InfrastructureStoragePanel.vue";
 
 const SettingSwitch = {
   props: {

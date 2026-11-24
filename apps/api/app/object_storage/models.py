@@ -58,6 +58,24 @@ class StorageObjectStatus(StrEnum):
     DELETED = "deleted"
 
 
+class StorageMigrationStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    COMPLETED_WITH_ERRORS = "completed_with_errors"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class StorageMigrationItemStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 PURPOSE_ALLOWED_BACKENDS: dict[StoragePurpose, frozenset[StorageBackend]] = {
     StoragePurpose.ARTIFACT_QUARANTINE: frozenset(
         {StorageBackend.LOCAL, StorageBackend.S3, StorageBackend.WEBDAV}
@@ -128,6 +146,13 @@ class StorageProfile:
     config: Mapping[str, Any] = field(default_factory=dict)
     secret_ref: str = ""
     legacy: bool = False
+    health_status: str = "unknown"
+    health_message: str = ""
+    last_checked_at: str = ""
+    created_by: str = ""
+    updated_by: str = ""
+    created_at: str = ""
+    updated_at: str = ""
 
     def __post_init__(self) -> None:
         validate_profile_id(self.id)
@@ -141,6 +166,104 @@ class StorageProfile:
             "config": dict(self.config),
             "has_secret": bool(self.secret_ref),
             "legacy": self.legacy,
+            "health_status": self.health_status,
+            "health_message": self.health_message,
+            "last_checked_at": self.last_checked_at,
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class StorageUrlAlias:
+    id: str
+    alias_path: str
+    object_id: str
+    purpose: StoragePurpose
+    created_at: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class StorageMigration:
+    id: str
+    purpose: StoragePurpose
+    source_profile_id: str
+    target_profile_id: str
+    binding_generation: int
+    status: StorageMigrationStatus
+    total_count: int = 0
+    completed_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    unknown_objects: tuple[Mapping[str, Any], ...] = ()
+    last_error: str = ""
+    created_by: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    completed_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "purpose": self.purpose.value,
+            "source_profile_id": self.source_profile_id,
+            "target_profile_id": self.target_profile_id,
+            "binding_generation": self.binding_generation,
+            "status": self.status.value,
+            "total_count": self.total_count,
+            "completed_count": self.completed_count,
+            "failed_count": self.failed_count,
+            "skipped_count": self.skipped_count,
+            "unknown_objects": [dict(item) for item in self.unknown_objects],
+            "last_error": self.last_error,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "completed_at": self.completed_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class StorageMigrationItem:
+    id: str
+    migration_id: str
+    object_id: str
+    source_profile_id: str
+    source_namespace: str
+    source_key: str
+    source_public_url: str
+    target_profile_id: str
+    target_namespace: str
+    target_key: str
+    target_public_url: str
+    expected_sha256: str
+    status: StorageMigrationItemStatus
+    attempts: int = 0
+    last_error: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "migration_id": self.migration_id,
+            "object_id": self.object_id,
+            "source_profile_id": self.source_profile_id,
+            "source_namespace": self.source_namespace,
+            "source_key": self.source_key,
+            "source_public_url": self.source_public_url,
+            "target_profile_id": self.target_profile_id,
+            "target_namespace": self.target_namespace,
+            "target_key": self.target_key,
+            "target_public_url": self.target_public_url,
+            "expected_sha256": self.expected_sha256,
+            "status": self.status.value,
+            "attempts": self.attempts,
+            "last_error": self.last_error,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
 

@@ -14,6 +14,7 @@ from ..config import (
     Settings,
     runtime_image_digest,
 )
+from ..object_storage.models import StoragePurpose
 from ..runtime_runner.storage import LocalRuntimeResultWriter
 from .advisory import (
     DependencyAdvisoryProvider,
@@ -101,8 +102,17 @@ class ArtifactRuntime:
                     if hasattr(store, "_pool")
                     else InMemoryArtifactRepository(store)
                 )
+                shared_object_storage = self.object_storage
+                if shared_object_storage is not None and not (
+                    shared_object_storage.get_binding(StoragePurpose.ARTIFACT_QUARANTINE)
+                    is not None
+                    and shared_object_storage.get_binding(StoragePurpose.ARTIFACT_PUBLISHED)
+                    is not None
+                ):
+                    shared_object_storage = None
                 storage = create_artifact_storage(
                     self.config,
+                    object_storage=shared_object_storage,
                     master_key=self.settings.oauth_credential_key,
                 )
                 service = ArtifactService(
@@ -488,6 +498,7 @@ def build_artifact_runtime(
     *,
     allow_in_memory_artifacts: bool = True,
     worker_execution_enabled: bool = False,
+    object_storage: Any | None = None,
 ) -> ArtifactRuntime:
     """Build the shared runtime shell without starting an in-process worker."""
     return ArtifactRuntime(
@@ -498,6 +509,7 @@ def build_artifact_runtime(
         github_api_token=settings.github_api_token,
         allow_in_memory_artifacts=allow_in_memory_artifacts,
         worker_execution_enabled=worker_execution_enabled,
+        object_storage=object_storage,
     )
 
 

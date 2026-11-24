@@ -152,12 +152,16 @@ class InMemoryMarketStore:
             "rateLimits": state.get("rateLimits", {}),
             "cooldowns": state.get("cooldowns", {}),
             "options": state.get("options", {}),
+            "objectStorage": deepcopy(state.get("objectStorage", {})),
             "sessions": state.get("sessions", []),
             "nextNumericId": state.get("nextNumericId", 1),
         }
         self.state["users"] = [self._normalize_user(user) for user in self.state["users"]]
         self.state["plugins"] = [self._normalize_plugin(plugin) for plugin in self.state["plugins"]]
         self._backfill_seeded_identities()
+
+    def persist_object_storage(self) -> None:
+        return None
 
     def _backfill_seeded_identities(self) -> None:
         seen_public: set[str] = set()
@@ -2256,6 +2260,10 @@ class LocalFileMarketStore(InMemoryMarketStore):
         with self._lock:
             self._save_locked()
 
+    def persist_object_storage(self) -> None:
+        with self._lock:
+            self._save_locked()
+
     def get_first_internal_core_admin(self) -> dict[str, Any] | None:
         with self._lock:
             for user in self.state["users"]:
@@ -2287,6 +2295,7 @@ class LocalFileMarketStore(InMemoryMarketStore):
             "options": {
                 str(key): str(value) for key, value in dict(data.get("options", {})).items()
             },
+            "objectStorage": deepcopy(data.get("objectStorage", {})),
             "sessions": list(data.get("sessions", [])),
             "nextNumericId": max(1, int(data.get("nextNumericId") or 1)),
         }
