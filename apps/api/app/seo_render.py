@@ -123,12 +123,14 @@ def encode_path_segment(value: str) -> str:
 
 def safe_external_http_url(raw_url: Any) -> str:
     value = str(raw_url or "").strip()
-    if not value:
+    if not value or any(ch.isspace() for ch in value):
         return ""
-    parsed = urlsplit(value)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
         return ""
-    if any(ch.isspace() for ch in value):
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
         return ""
     return value
 
@@ -136,10 +138,16 @@ def safe_external_http_url(raw_url: Any) -> str:
 def resolve_site_origin(raw_url: str | None) -> str:
     value = str(raw_url or "").strip()
     if value:
-        parsed = urlsplit(value)
+        try:
+            parsed = urlsplit(value)
+            _ = parsed.port
+        except ValueError:
+            parsed = None
         if (
-            parsed.scheme.lower() in {"http", "https"}
+            parsed is not None
+            and parsed.scheme.lower() in {"http", "https"}
             and parsed.netloc
+            and parsed.hostname
             and not any(ch.isspace() for ch in parsed.netloc)
         ):
             return f"{parsed.scheme.lower()}://{parsed.netloc}".rstrip("/")

@@ -19,6 +19,7 @@ from app.seo_render import (
     clear_template_cache,
     load_index_template,
     resolve_site_origin,
+    safe_external_http_url,
 )
 from app.store import InMemoryMarketStore
 
@@ -439,3 +440,71 @@ def test_template_marker_validation_and_origin_fallback(tmp_path: Path) -> None:
     assert resolve_site_origin("") == FALLBACK_SITE_ORIGIN
     assert resolve_site_origin("ftp://example.com") == FALLBACK_SITE_ORIGIN
     assert resolve_site_origin("https://Example.COM/path/") == "https://Example.COM"
+
+
+def test_malformed_urls_fallback_and_return_400_without_500(
+    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING", logger="app.seo_render"):
+        assert resolve_site_origin("https://[") == FALLBACK_SITE_ORIGIN
+        assert resolve_site_origin("https://example.com:badport") == FALLBACK_SITE_ORIGIN
+    assert any("falling back" in record.message for record in caplog.records)
+
+    assert safe_external_http_url("https://[/alice") == ""
+    assert safe_external_http_url("https://example.com:badport/alice") == ""
+    assert safe_external_http_url("https://github.com/alice") == "https://github.com/alice"
+
+    store = InMemoryMarketStore()
+    store.create_internal_user(
+        username="coreadmin",
+        password_hash=hash_password("password123"),
+        role="core_admin",
+    )
+    author = store.upsert_github_user({"id": "401", "login": "SafeAuthor", "name": "Safe Author"})
+    store.upsert_oauth_identity(
+        author["id"],
+        provider="gitlab",
+        instance_url="https://[",
+        provider_user_id="gl-401",
+        provider_login="safe_gl",
+    )
+    client, _ = _setup_client(
+        tmp_path,
+        monkeypatch,
+        env={"WEB_URL": "https://["},
+        store=store,
+    )
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert f'<link rel="canonical" href="{FALLBACK_SITE_ORIGIN}/" />' in home.text
+
+    sitemap = client.get("/sitemap.xml")
+    assert sitemap.status_code == 200
+    assert f"<loc>{FALLBACK_SITE_ORIGIN}/</loc>" in sitemap.text
+
+    robots = client.get("/robots.txt")
+    assert robots.status_code == 200
+    assert f"Sitemap: {FALLBACK_SITE_ORIGIN}/sitemap.xml" in robots.text
+
+    author_page = client.get("/author/SafeAuthor")
+    assert author_page.status_code == 200
+    assert "https://github.com/SafeAuthor" in author_page.text
+    assert "https://[/safe_gl" not in author_page.text
+
+    login = client.post(
+        "/v1/auth/internal/login",
+        json={"username": "coreadmin", "password": "password123"},
+    )
+    assert login.status_code == 200
+
+    for field, bad_value in (
+        ("web_url", "https://["),
+        ("web_url", "https://example.com:badport"),
+        ("icon_url", "https://["),
+    ):
+        payload = client.get("/v1/admin/settings").json()
+        payload["site"]["web_url"] = "https://market.example.org"
+        payload["site"][field] = bad_value
+        resp = client.put("/v1/admin/settings", json=payload)
+        assert resp.status_code == 400, (field, bad_value, resp.text)

@@ -6233,17 +6233,26 @@ def parse_redis_url(value: str) -> dict[str, Any]:
 def is_valid_site_icon_url(value: str) -> bool:
     if value.startswith("/"):
         return True
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    return is_valid_public_url(value)
 
 
 def is_valid_public_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    text = str(value or "").strip()
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    try:
+        parsed = urlparse(text)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and bool(parsed.hostname)
 
 
 def is_local_url(value: str) -> bool:
-    hostname = (urlparse(value or "").hostname or "").lower()
+    try:
+        hostname = (urlparse(value or "").hostname or "").lower()
+    except ValueError:
+        return False
     return hostname in {"localhost", "::1", "0.0.0.0"} or hostname.startswith("127.")
 
 
