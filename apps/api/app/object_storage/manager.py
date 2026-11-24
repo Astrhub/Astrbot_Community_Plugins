@@ -14,6 +14,12 @@ from urllib.parse import urlsplit
 from ..config import Settings
 from .credentials import decrypt_storage_secret, encrypt_storage_secret
 from .driver import ObjectStorageDriver
+from .imgbed_driver import (
+    ImgBedObjectStorageDriver,
+    validate_imgbed_base_url,
+    validate_imgbed_folder,
+    validate_imgbed_scopes,
+)
 from .local_fs import LocalFilesystemDriver
 from .models import (
     PURPOSE_ALLOWED_BACKENDS,
@@ -77,6 +83,7 @@ class StorageManager:
         service: ObjectStorageService | None = None,
         s3_client_factory: Any | None = None,
         webdav_client_factory: Any | None = None,
+        imgbed_client_factory: Any | None = None,
         pg_pool_override: Any | None = None,
     ) -> None:
         self.store = store
@@ -86,6 +93,7 @@ class StorageManager:
         self.service.repository = self.repository
         self._s3_client_factory = s3_client_factory
         self._webdav_client_factory = webdav_client_factory
+        self._imgbed_client_factory = imgbed_client_factory
         self._pg_pool_override = pg_pool_override
         self._initialized = False
         self._migration_lock = asyncio.Lock()
@@ -325,7 +333,23 @@ class StorageManager:
             )
         driver = self.service.driver_for_profile(profile.id)
         updated_config = dict(profile.config)
-        if isinstance(driver, WebDavObjectStorageDriver):
+        if isinstance(driver, ImgBedObjectStorageDriver):
+            probe = await driver.probe_capabilities(probe_prefix=HEALTHCHECK_PREFIX)
+            checks = {
+                "write": probe.upload,
+                "read": probe.read,
+                "image_variants": probe.image_variants,
+                "delete": probe.delete,
+                "range": probe.range_read,
+                "plugin_zip_ready": probe.plugin_zip_ready,
+                "public_url": True,
+            }
+            base_ok = probe.upload and probe.read and probe.image_variants and probe.delete
+            health_status = "healthy" if base_ok else "unhealthy"
+            health_message = probe.message
+            updated_config["range_read_supported"] = probe.range_read
+            updated_config["plugin_zip_verified"] = probe.plugin_zip_ready
+        elif isinstance(driver, WebDavObjectStorageDriver):
             probe = await driver.probe_capabilities(probe_prefix=HEALTHCHECK_PREFIX)
             checks = {
                 "write": probe.write,
@@ -492,6 +516,60 @@ class StorageManager:
                     "webdav_capability_check_failed",
                     str(probe.get("health_message") or "WebDAV capability probe failed"),
                 )
+        if target.backend == StorageBackend.IMGBED:
+            if purpose == StoragePurpose.ARTIFACT_PUBLISHED:
+                driver = self.service.driver_for_profile(target.id)
+                assert isinstance(driver, ImgBedObjectStorageDriver)
+                if not (
+                    target.health_status == "healthy"
+                    and bool(target.config.get("plugin_zip_verified", False))
+                ):
+                    zip_probe = await driver.probe_capabilities(
+                        probe_prefix=HEALTHCHECK_PREFIX,
+                        test_plugin_zip=True,
+                    )
+                    checked_at = utc_now_iso()
+                    updated_cfg = {
+                        **dict(target.config),
+                        "range_read_supported": zip_probe.range_read,
+                        "plugin_zip_verified": zip_probe.plugin_zip_ready,
+                    }
+                    base_ok = (
+                        zip_probe.upload
+                        and zip_probe.read
+                        and zip_probe.image_variants
+                        and zip_probe.delete
+                    )
+                    updated_target = StorageProfile(
+                        id=target.id,
+                        name=target.name,
+                        backend=target.backend,
+                        status=target.status,
+                        config=updated_cfg,
+                        secret_ref=target.secret_ref,
+                        legacy=target.legacy,
+                        health_status="healthy" if base_ok else "unhealthy",
+                        health_message=zip_probe.message,
+                        last_checked_at=checked_at,
+                        created_by=target.created_by,
+                        updated_by=target.updated_by,
+                        created_at=target.created_at,
+                        updated_at=checked_at,
+                    )
+                    await self.repository.upsert_profile(updated_target)
+                    self.service.register_profile(updated_target, driver)
+                    if not zip_probe.plugin_zip_ready:
+                        raise ObjectStorageError(
+                            "imgbed_plugin_gate_failed",
+                            zip_probe.message,
+                        )
+            elif purpose == StoragePurpose.AVATAR and target.health_status != "healthy":
+                probe = await self.test_profile(target.id)
+                if not probe.get("ok"):
+                    raise ObjectStorageError(
+                        "imgbed_capability_check_failed",
+                        str(probe.get("health_message") or "ImgBed capability probe failed"),
+                    )
 
         previous = await self.repository.get_binding(purpose)
         generation = (previous.generation + 1) if previous is not None else 1
@@ -1411,6 +1489,39 @@ class StorageManager:
                 client=client,
             )
 
+        if profile.backend == StorageBackend.IMGBED:
+            allow_private = bool(cfg.get("allow_private_network", False))
+            base_url = validate_imgbed_base_url(
+                cfg.get("base_url"),
+                allow_private_network=allow_private,
+            )
+            upload_folder = validate_imgbed_folder(cfg.get("upload_folder"))
+            scopes = validate_imgbed_scopes(cfg.get("scopes"))
+            image_variants = bool(cfg.get("image_variants_enabled", True))
+            range_read = bool(cfg.get("range_read_supported", False))
+            plugin_zip_verified = bool(cfg.get("plugin_zip_verified", False))
+            verify_tls = bool(cfg.get("verify_tls", True))
+            secret = await self._load_secret(profile)
+            token = str(secret.get("token") or "").strip()
+            client = (
+                self._imgbed_client_factory(profile, cfg)
+                if callable(self._imgbed_client_factory)
+                else None
+            )
+            return ImgBedObjectStorageDriver(
+                profile_id=profile.id,
+                base_url=base_url,
+                token=token,
+                upload_folder=upload_folder,
+                scopes=scopes,
+                image_variants_enabled=image_variants,
+                range_read_supported=range_read,
+                plugin_zip_verified=plugin_zip_verified,
+                allow_private_network=allow_private,
+                verify_tls=verify_tls,
+                client=client,
+            )
+
         raise ObjectStorageError(
             "storage_backend_not_yet_implemented",
             f"Storage backend {profile.backend.value} will be enabled in a later stage",
@@ -1572,6 +1683,39 @@ class StorageManager:
             if "range_read_supported" in config:
                 sanitized_webdav["range_read_supported"] = bool(config["range_read_supported"])
             return sanitized_webdav, cleaned_secret
+
+        if backend == StorageBackend.IMGBED:
+            allow_private = bool(config.get("allow_private_network", False))
+            base_url = validate_imgbed_base_url(
+                config.get("base_url"),
+                allow_private_network=allow_private,
+            )
+            upload_folder = validate_imgbed_folder(config.get("upload_folder"))
+            scopes = validate_imgbed_scopes(config.get("scopes"))
+            image_variants = bool(config.get("image_variants_enabled", True))
+            verify_tls = bool(config.get("verify_tls", True))
+            cleaned_secret = {}
+            token = str(secret.get("token") or "").strip()
+            if token:
+                cleaned_secret["token"] = token
+            if not existing_secret_ref and not token:
+                raise ObjectStorageError(
+                    "imgbed_token_missing",
+                    "ImgBed Bearer token is required",
+                )
+            sanitized_imgbed: dict[str, Any] = {
+                "base_url": base_url,
+                "upload_folder": upload_folder,
+                "scopes": list(scopes),
+                "image_variants_enabled": image_variants,
+                "allow_private_network": allow_private,
+                "verify_tls": verify_tls,
+            }
+            if "range_read_supported" in config:
+                sanitized_imgbed["range_read_supported"] = bool(config["range_read_supported"])
+            if "plugin_zip_verified" in config:
+                sanitized_imgbed["plugin_zip_verified"] = bool(config["plugin_zip_verified"])
+            return sanitized_imgbed, cleaned_secret
 
         raise ObjectStorageError(
             "storage_backend_not_yet_implemented",

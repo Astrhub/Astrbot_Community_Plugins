@@ -110,8 +110,10 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 - **PostgreSQL**：完整模式下持久化业务数据、OAuth 身份、由 `OAUTH_CREDENTIAL_KEY` 加密的 `market_oauth_credentials`（含刷新令牌与轮转状态）、仓库归属绑定 `market_git_repository_bindings`、artifact 状态机、结构化审查发现、人工决策、租约任务与通知 outbox。
 - **Redis**：存储登录会话 Token（带 TTL），以及用于 GitHub 仓库权限校验的加密短期 OAuth 授权凭据（密钥由 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生并用 Fernet 加密，TTL 不超过 8 小时，注销或会话失效时删除）。不保存明文 OAuth 令牌或长期业务数据。
 - **本地单文件存储**：仅在自用单进程模式（`MARKET_STORAGE_MODE=local`）启用，通过原子替换持久化市场状态与会话，并默认关闭 artifact 审查管线。
-- **隔离存储**：上传与抓取的插件 ZIP 以及审查提取的文本对象存放在私有本地目录或私有对象存储桶中，不生成公开 URL。
-- **发布存储**：仅接收已过审 artifact 的原始隔离 ZIP，采用条件写入禁止覆盖；公开下载链接统一由独立的 CDN 域名拼接生成。
+- **隔离存储**：上传与抓取的插件 ZIP 以及审查提取的文本对象存放在绑定至 `artifact-quarantine` 用途的私有 Profile（本地目录、SQLite/PostgreSQL 分块表、私有 S3 桶或受控 WebDAV）中，不生成公开 URL；ImgBed 后端禁止绑定隔离区，且同源公开读取与 `/packages/*` 别名接口对隔离区对象一律返回 404。
+- **发布存储与头像存储**：`artifact-published` 与 `avatar` 分别独立绑定存储 Profile，支持本地文件系统、SQLite（禁止放在仓库目录或指向市场状态 JSON）、PostgreSQL、S3/R2、WebDAV 与 CloudFlare ImgBed。所有新增 Profile 的敏感凭据通过 `OAUTH_CREDENTIAL_KEY` 结合独立 HKDF 域（`astrhub/storage-credential/{profile_id}/v1`）派生 Fernet 密钥加密保存于 `market_storage_secrets`，编辑留空时保留原凭据且从不回显。
+- **WebDAV 与 ImgBed 边界**：WebDAV 与 ImgBed 默认强制 HTTPS、禁止在 URL 中内嵌凭据、拒绝私网/回环地址与 DNS 重绑定（仅核心管理员显式启用 `allow_private_network` 时放行受信任内网），关闭自动重定向且仅通过请求头传递认证。WebDAV 绑定前自动探测创建、读取、HTTP `206` Range、覆盖保护（无条件写服务端自动切换内容哈希命名并重读校验 SHA-256）与删除能力；ImgBed 按 Profile 声明的 `scopes` 与 `upload_folder` 在服务层实施目录隔离，保留 `/file/...` 路径而不信任底层直连 `publicUrl`，绑定 `artifact-published` 前必须具备 `upload + list + delete` 权限并通过 ZIP 白名单、GET/HEAD/Range、缓存与撤回验收。
+- **受控迁移与退役门控**：切换用途绑定后新写入立即进入目标 Profile，历史对象由后台迁移队列逐项校验复制并生成历史 URL 别名，并发替换会跳过旧版本，失败项保持源可读并支持仅重试失败项。源 Profile 只有在无活动绑定、无活动/待完成对象、无未完成迁移且无未对账的 `unknown_objects` 时才允许 `retire`（停止市场访问并立即撤销本地凭据，不自动删除远端文件）或 `DELETE`（保留审计记录）。 `/v1/admin/storage/*` 全部限制为核心管理员并返回 `private, no-store`，按角色从非核心管理员 `/openapi.json` 中剔除。
 
 ### Artifact 信任边界
 

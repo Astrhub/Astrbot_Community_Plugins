@@ -381,4 +381,97 @@ describe("InfrastructureStoragePanel", () => {
     );
     wrapper.unmount();
   });
+
+  it("renders and edits ImgBed profiles with scopes while preserving blank token", async () => {
+    const imgbedProfile: StorageProfileItem = {
+      id: "imgbed-avatars",
+      name: "CloudFlare ImgBed 头像",
+      backend: "imgbed",
+      status: "active",
+      config: {
+        base_url: "https://imgbed.example.com",
+        upload_folder: "astrhub/avatars",
+        scopes: ["upload"],
+        image_variants_enabled: true,
+        allow_private_network: false,
+        verify_tls: true,
+      },
+      has_secret: true,
+      legacy: false,
+      health_status: "healthy",
+      health_message: "ImgBed 头像上传与公开读取校验通过",
+      last_checked_at: "2026-11-25T00:00:00Z",
+      created_by: "admin-1",
+      updated_by: "admin-1",
+      created_at: "2026-11-25T00:00:00Z",
+      updated_at: "2026-11-25T00:00:00Z",
+      bound_purposes: ["avatar"],
+      active_object_count: 1,
+      pending_object_count: 0,
+      has_active_migrations: false,
+      capabilities: {
+        conditional_create: false,
+        range_read: false,
+        public_read: true,
+        image_variants: true,
+        list_objects: false,
+      },
+    };
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = (init?.method || "GET").toUpperCase();
+      if (url.endsWith("/v1/admin/storage/profiles") && method === "GET") {
+        return jsonResponse({ items: [imgbedProfile] });
+      }
+      if (url.endsWith("/v1/admin/storage/bindings") && method === "GET") {
+        return jsonResponse({ items: sampleBindings() });
+      }
+      if (url.endsWith("/v1/admin/storage/migrations") && method === "GET") {
+        return jsonResponse({ items: [] });
+      }
+      if (url.endsWith("/v1/admin/storage/profiles/imgbed-avatars") && method === "PATCH") {
+        return jsonResponse(imgbedProfile);
+      }
+      return jsonResponse({ error: `Unhandled ${method} ${url}` }, 404);
+    });
+
+    const wrapper = mountPanel();
+    await flushPromises();
+    expect(wrapper.text()).toContain(
+      "ImgBed · https://imgbed.example.com/file/astrhub/avatars · scopes=upload",
+    );
+
+    const card = wrapper
+      .findAll(".profile-card")
+      .find((item) => item.text().includes("imgbed-avatars"));
+    const editBtn = card!.findAll("button").find((btn) => btn.text().includes("编辑"));
+    await editBtn!.trigger("click");
+    await flushPromises();
+
+    const dialog = wrapper.get('[role="dialog"]');
+    const saveBtn = dialog.findAll("button").find((btn) => btn.text().includes("保存修改"));
+    await saveBtn!.trigger("click");
+    await flushPromises();
+
+    const patchCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/v1/admin/storage/profiles/imgbed-avatars") &&
+        (init as RequestInit)?.method === "PATCH",
+    );
+    expect(patchCall).toBeDefined();
+    const patchBody = (patchCall![1] as RequestInit).body;
+    expect(typeof patchBody).toBe("string");
+    const sent = JSON.parse(patchBody as string);
+    expect(sent).not.toHaveProperty("secret");
+    expect(sent.config).toEqual(
+      expect.objectContaining({
+        base_url: "https://imgbed.example.com",
+        upload_folder: "astrhub/avatars",
+        scopes: ["upload"],
+        image_variants_enabled: true,
+      }),
+    );
+    wrapper.unmount();
+  });
 });

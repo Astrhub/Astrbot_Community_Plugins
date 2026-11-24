@@ -260,7 +260,7 @@ docker compose build
 | `LOCAL_DATA_PATH` | `<env 目录>/data/market-state.json` | 本地模式的数据文件路径 |
 | `CORE_ADMIN_USERNAME` / `CORE_ADMIN_PASSWORD` | 空 | 可选：启动时自动初始化内部核心管理员（明文仅启动时哈希，不落盘） |
 | `DATABASE_URL` / `REDIS_URL` | 空 | `postgres` 模式下同时配置后启用持久化存储；首次部署可留空并在 `/setup` 配置 |
-| `OAUTH_CREDENTIAL_KEY` | 空（必填） | 独立 OAuth 凭据加密主密钥（至少 16 位，仅环境变量注入）；启用任意 OAuth 平台（含 GitHub）前必须配置 |
+| `OAUTH_CREDENTIAL_KEY` | 空（必填） | 独立凭据加密主密钥（至少 16 位，仅环境变量注入）；启用 OAuth 平台或加密保存对象存储 Profile 凭据前必须配置（按独立 HKDF 域隔离派生） |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App 凭证（`CLIENT_SECRET` 仅由部署环境注入，不存入数据库） |
 | `GITHUB_CALLBACK_URL` | `http://127.0.0.1:8787/v1/auth/github/callback` | GitHub OAuth 回调地址（生产启用登录时必须使用公网域名） |
 | `GITLAB_*` / `GITEE_*` / `ATOMGIT_*` / `GITEA_*` | 默认关闭 | 第三方已知平台 OAuth 配置（`*_LOGIN_ENABLED`、`*_CLIENT_ID`、`*_CLIENT_SECRET`、`*_CALLBACK_URL`、`*_SCOPE` 及 `ATOMGIT_API_BASE_URL`）；所有 `*_CLIENT_SECRET` 仅环境变量注入 |
@@ -271,7 +271,7 @@ docker compose build
 | `PLUGIN_AUTO_APPROVE_ENABLED` | `false` | 仅对未开启 CDN 的普通提交生效；开启 CDN 的包审查永不绕过扫描与人工复核 |
 | `MAX_PLUGIN_TAGS` | `8` | 单个插件允许的最大标签数 |
 | `ARTIFACTS_ENABLED` | `false` | 启用不可变插件包、审查任务队列与 CDN 发布门控 |
-| `ARTIFACT_STORAGE_BACKEND` / `ARTIFACT_LOCAL_ROOT` | `local` / `/var/lib/astrbot-market/artifacts` | 隔离区与发布区存储后端（`local` 或 `s3`）及本地根目录 |
+| `ARTIFACT_STORAGE_BACKEND` / `ARTIFACT_LOCAL_ROOT` | `local` / `/var/lib/astrbot-market/artifacts` | 默认遗留隔离区与发布区存储后端（`local` 或 `s3`）及本地根目录；更灵活的多 Profile 存储（SQLite / PostgreSQL / S3 / WebDAV / ImgBed）与用途迁移可在 `/admin/settings`「基础设施」标签页配置 |
 | `ARTIFACT_CDN_BASE_URL` | 空 | 已发布对象的公开 CDN 域名（隔离对象永不暴露在该域名下） |
 | `ARTIFACT_S3_*` / `ARTIFACT_*_BUCKET` | 空 | S3/R2 兼容对象存储的 endpoint、区域、凭证、隔离桶与发布桶 |
 | `ARTIFACT_MAX_UPLOAD_BYTES` / `...UNPACKED...` / `...MAX_FILES` | `32 MiB` / `128 MiB` / `2000` | 插件包流式上传与解压预检硬限制 |

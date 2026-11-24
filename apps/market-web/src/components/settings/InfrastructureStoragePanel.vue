@@ -422,7 +422,47 @@
           </n-form-item>
         </template>
 
-        <n-form-item label="公开访问基址（可选）">
+        <template v-if="profileForm.backend === 'imgbed'">
+          <n-form-item label="ImgBed 实例地址">
+            <n-input
+              v-model:value="profileForm.imgbedBaseUrl"
+              placeholder="https://imgbed.example.com"
+            />
+          </n-form-item>
+          <n-form-item label="专用上传目录（uploadFolder）">
+            <n-input
+              v-model:value="profileForm.imgbedUploadFolder"
+              placeholder="astrhub/avatars 或 astrhub/plugins"
+            />
+          </n-form-item>
+          <n-form-item label="Token 权限范围">
+            <n-select
+              v-model:value="profileForm.imgbedScopes"
+              multiple
+              :options="imgbedScopeOptions"
+              placeholder="头像仅需 upload；插件公开包需 upload + list + delete"
+            />
+          </n-form-item>
+          <n-form-item label="Bearer Token">
+            <n-input
+              v-model:value="profileForm.imgbedToken"
+              type="password"
+              show-password-on="click"
+              :placeholder="editingProfile?.has_secret ? '留空保留现有 Token' : '输入 ImgBed Token'"
+            />
+          </n-form-item>
+          <n-form-item label="启用图片尺寸参数（64/128/256）">
+            <n-switch v-model:value="profileForm.imgbedImageVariants" />
+          </n-form-item>
+          <n-form-item label="允许内网地址或明文 HTTP">
+            <n-switch v-model:value="profileForm.imgbedAllowPrivateNetwork" />
+          </n-form-item>
+          <n-form-item label="校验证书（HTTPS）">
+            <n-switch v-model:value="profileForm.imgbedVerifyTls" />
+          </n-form-item>
+        </template>
+
+        <n-form-item v-if="profileForm.backend !== 'imgbed'" label="公开访问基址（可选）">
           <n-input
             v-model:value="profileForm.publicBaseUrl"
             placeholder="留空时由市场同源接口 /v1/storage/public/{id} 提供下载"
@@ -573,7 +613,7 @@ const PURPOSE_META: Record<
   "artifact-published": {
     label: "已发布插件包",
     description: "保存通过审核的插件归档包，支持 CDN 或市场同源 Range 下载。",
-    allowedBackends: ["local", "s3", "webdav"],
+    allowedBackends: ["local", "s3", "webdav", "imgbed"],
   },
   avatar: {
     label: "用户头像",
@@ -593,6 +633,13 @@ const backendOptions = [
   { label: "本地文件系统 / SQLite / PostgreSQL", value: "local" },
   { label: "S3 / Cloudflare R2", value: "s3" },
   { label: "WebDAV 服务器", value: "webdav" },
+  { label: "CloudFlare ImgBed 图床", value: "imgbed" },
+];
+
+const imgbedScopeOptions = [
+  { label: "upload（上传）", value: "upload" },
+  { label: "list（列举对账）", value: "list" },
+  { label: "delete（撤回清理）", value: "delete" },
 ];
 
 const webdavAuthOptions = [
@@ -650,6 +697,13 @@ const profileForm = reactive({
   webdavToken: "",
   webdavAllowPrivateNetwork: false,
   webdavVerifyTls: true,
+  imgbedBaseUrl: "",
+  imgbedUploadFolder: "",
+  imgbedScopes: ["upload"] as string[],
+  imgbedToken: "",
+  imgbedImageVariants: true,
+  imgbedAllowPrivateNetwork: false,
+  imgbedVerifyTls: true,
   publicBaseUrl: "",
 });
 
@@ -699,6 +753,14 @@ const canSubmitProfileForm = computed(() => {
     }
     if (profileForm.webdavAuthType === "bearer" && !editingProfile.value?.has_secret) {
       return Boolean(profileForm.webdavToken.trim());
+    }
+    return true;
+  }
+  if (profileForm.backend === "imgbed") {
+    if (!profileForm.imgbedBaseUrl.trim()) return false;
+    if (!profileForm.imgbedScopes.includes("upload")) return false;
+    if (!editingProfile.value?.has_secret) {
+      return Boolean(profileForm.imgbedToken.trim());
     }
     return true;
   }
@@ -844,6 +906,13 @@ function summarizeProfileConfig(profile: StorageProfileItem): string {
     const base = String(cfg.base_url || "-");
     return root ? `WebDAV · ${base}/${root}` : `WebDAV · ${base}`;
   }
+  if (profile.backend === "imgbed") {
+    const folder = String(cfg.upload_folder || "").trim();
+    const base = String(cfg.base_url || "-");
+    const scopes = Array.isArray(cfg.scopes) ? cfg.scopes.join("+") : "upload";
+    const loc = folder ? `${base}/file/${folder}` : `${base}/file`;
+    return `ImgBed · ${loc} · scopes=${scopes}`;
+  }
   return profile.backend;
 }
 
@@ -886,6 +955,13 @@ function resetProfileForm() {
   profileForm.webdavToken = "";
   profileForm.webdavAllowPrivateNetwork = false;
   profileForm.webdavVerifyTls = true;
+  profileForm.imgbedBaseUrl = "";
+  profileForm.imgbedUploadFolder = "";
+  profileForm.imgbedScopes = ["upload"];
+  profileForm.imgbedToken = "";
+  profileForm.imgbedImageVariants = true;
+  profileForm.imgbedAllowPrivateNetwork = false;
+  profileForm.imgbedVerifyTls = true;
   profileForm.publicBaseUrl = "";
 }
 
@@ -920,6 +996,15 @@ function openEditModal(profile: StorageProfileItem) {
     profileForm.webdavAuthType = rawAuth === "bearer" || rawAuth === "none" ? rawAuth : "basic";
     profileForm.webdavAllowPrivateNetwork = Boolean(cfg.allow_private_network);
     profileForm.webdavVerifyTls = cfg.verify_tls !== false;
+  } else if (profile.backend === "imgbed") {
+    profileForm.imgbedBaseUrl = String(cfg.base_url || "");
+    profileForm.imgbedUploadFolder = String(cfg.upload_folder || "");
+    profileForm.imgbedScopes = Array.isArray(cfg.scopes)
+      ? cfg.scopes.map((item) => String(item))
+      : ["upload"];
+    profileForm.imgbedImageVariants = cfg.image_variants_enabled !== false;
+    profileForm.imgbedAllowPrivateNetwork = Boolean(cfg.allow_private_network);
+    profileForm.imgbedVerifyTls = cfg.verify_tls !== false;
   }
   profileModalOpen.value = true;
 }
@@ -970,6 +1055,17 @@ function buildConfigAndSecret(): {
       }
     } else if (profileForm.webdavAuthType === "bearer" && profileForm.webdavToken.trim()) {
       secret.token = profileForm.webdavToken.trim();
+    }
+  } else if (profileForm.backend === "imgbed") {
+    delete config.public_base_url;
+    config.base_url = profileForm.imgbedBaseUrl.trim();
+    config.upload_folder = profileForm.imgbedUploadFolder.trim();
+    config.scopes = [...profileForm.imgbedScopes];
+    config.image_variants_enabled = profileForm.imgbedImageVariants;
+    config.allow_private_network = profileForm.imgbedAllowPrivateNetwork;
+    config.verify_tls = profileForm.imgbedVerifyTls;
+    if (profileForm.imgbedToken.trim()) {
+      secret.token = profileForm.imgbedToken.trim();
     }
   }
   return { config, secret };

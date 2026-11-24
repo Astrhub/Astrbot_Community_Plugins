@@ -62,6 +62,8 @@ def _http_error_for_storage(exc: ObjectStorageError) -> HTTPException:
         "storage_migration_no_failed_items",
         "object_key_conflict",
         "webdav_capability_check_failed",
+        "imgbed_plugin_gate_failed",
+        "imgbed_capability_check_failed",
     }:
         return HTTPException(409, {"code": exc.code, "error": str(exc)})
     if exc.code in {

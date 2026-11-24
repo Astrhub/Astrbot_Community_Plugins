@@ -9,6 +9,15 @@ from .credentials import (
     require_storage_credential_key,
 )
 from .driver import ObjectStorageDriver
+from .imgbed_driver import (
+    AVATAR_VARIANT_SIZES,
+    ImgBedObjectStorageDriver,
+    ImgBedProbeResult,
+    build_imgbed_variant_url,
+    validate_imgbed_base_url,
+    validate_imgbed_folder,
+    validate_imgbed_scopes,
+)
 from .local_fs import LocalFilesystemDriver
 from .manager import StorageManager, storage_migration_worker
 from .models import (
@@ -64,6 +73,9 @@ from .webdav_driver import (
 )
 
 __all__ = [
+    "AVATAR_VARIANT_SIZES",
+    "ImgBedObjectStorageDriver",
+    "ImgBedProbeResult",
     "InMemoryStorageSecretStore",
     "LEGACY_PUBLISHED_PROFILE_ID",
     "LEGACY_QUARANTINE_PROFILE_ID",
@@ -98,6 +110,7 @@ __all__ = [
     "StoredObject",
     "WebDavObjectStorageDriver",
     "WebDavProbeResult",
+    "build_imgbed_variant_url",
     "build_legacy_object_storage_service",
     "build_local_legacy_object_storage_service",
     "build_object_storage_router",
@@ -110,6 +123,9 @@ __all__ = [
     "guess_content_type",
     "require_storage_credential_key",
     "storage_migration_worker",
+    "validate_imgbed_base_url",
+    "validate_imgbed_folder",
+    "validate_imgbed_scopes",
     "validate_namespace",
     "validate_object_key",
     "validate_path_segment",
