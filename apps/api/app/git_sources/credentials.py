@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import logging
 import secrets
 from typing import Any
 
@@ -14,6 +15,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import HTTPException
 
 from .models import OAuthTokenSet
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CREDENTIAL_KDF_INFO = b"astrhub/oauth-credential/v1"
 MIN_MASTER_KEY_LENGTH = 16
@@ -121,16 +124,26 @@ class CredentialStore:
         cipher = self._cipher(expected_provider)
         try:
             raw = cipher.decrypt(ciphertext.encode("ascii"))
+        except InvalidToken as exc:
+            logger.warning(
+                "Failed to decrypt OAuth credential %s for provider %s; preserving stored row",
+                ref,
+                expected_provider,
+            )
+            raise _credential_error(
+                503,
+                "oauth_credential_decrypt_failed",
+                "OAuth 凭据解密失败，请检查服务端 OAUTH_CREDENTIAL_KEY 配置是否变更",
+            ) from exc
+        try:
             data = json.loads(raw.decode("utf-8"))
-        except (InvalidToken, ValueError, UnicodeDecodeError):
-            await self.revoke(ref)
+        except (ValueError, UnicodeDecodeError):
             return None
         if (
             str(data.get("user_id") or "") != str(expected_user_id)
             or str(data.get("provider") or "").lower() != str(expected_provider).lower()
             or not str(data.get("access_token") or "").strip()
         ):
-            await self.revoke(ref)
             return None
         return OAuthTokenSet(
             provider=str(data["provider"]).lower(),
@@ -141,6 +154,54 @@ class CredentialStore:
             provider_user_id=str(data.get("provider_user_id") or ""),
             provider_login=str(data.get("provider_login") or ""),
         )
+
+    async def rebind_user_credentials(self, *, from_user_id: str, to_user_id: str) -> int:
+        if not hasattr(self.store, "list_oauth_credentials_by_user"):
+            return 0
+        records = await _store_call(self.store, "list_oauth_credentials_by_user", str(to_user_id))
+        if not records:
+            return 0
+        updated = 0
+        for record in records:
+            ref = str(record.get("credential_ref") or "").strip()
+            provider = str(record.get("provider") or "").strip().lower()
+            ciphertext = str(record.get("ciphertext") or "")
+            if not ref or not provider or not ciphertext:
+                continue
+            cipher = self._cipher(provider)
+            try:
+                raw = cipher.decrypt(ciphertext.encode("ascii"))
+            except InvalidToken as exc:
+                logger.warning(
+                    "Failed to decrypt OAuth credential %s during user merge; preserving stored row",
+                    ref,
+                )
+                raise _credential_error(
+                    503,
+                    "oauth_credential_decrypt_failed",
+                    "OAuth 凭据解密失败，请检查服务端 OAUTH_CREDENTIAL_KEY 配置是否变更",
+                ) from exc
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if str(data.get("user_id") or "") != str(from_user_id):
+                continue
+            data["user_id"] = str(to_user_id)
+            reencrypted = cipher.encrypt(
+                json.dumps(data, separators=(",", ":")).encode("utf-8")
+            ).decode("ascii")
+            await _store_call(
+                self.store,
+                "upsert_oauth_credential",
+                ref,
+                user_id=str(to_user_id),
+                provider=provider,
+                ciphertext=reencrypted,
+                expires_at=record.get("expires_at"),
+            )
+            updated += 1
+        return updated
 
     async def revoke(self, credential_ref: str) -> bool:
         ref = str(credential_ref or "").strip()

@@ -202,8 +202,20 @@ def normalize_atomgit_api_base(raw_url: str | None) -> str:
     if not cleaned:
         return ATOMGIT_DEFAULT_API_BASE
     parsed = urlsplit(cleaned)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise GitSourceError(
+            "invalid_atomgit_api_base",
+            "AtomGit API 地址端口格式无效",
+            status_code=400,
+        ) from exc
     normalized = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
-    if normalized not in ATOMGIT_ALLOWED_API_BASES or parsed.path not in {"", "/"}:
+    if (
+        port is not None
+        or normalized not in ATOMGIT_ALLOWED_API_BASES
+        or parsed.path not in {"", "/"}
+    ):
         raise GitSourceError(
             "invalid_atomgit_api_base",
             "AtomGit API 地址仅支持 https://api.atomgit.com 或 https://api.gitcode.com",
@@ -217,11 +229,19 @@ def parse_repository_ref(raw_url: str) -> RepositoryRef:
     if not value:
         raise GitSourceError("invalid_git_repository", "仓库地址不能为空", status_code=400)
     parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise GitSourceError(
+            "invalid_git_repository",
+            "仓库地址端口格式无效",
+            status_code=400,
+        ) from exc
     if (
         parsed.scheme.lower() != "https"
         or parsed.username
         or parsed.password
-        or parsed.port is not None
+        or port is not None
         or parsed.query
         or parsed.fragment
     ):

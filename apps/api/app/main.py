@@ -6347,9 +6347,16 @@ async def transfer_user_owned_records(
     from_user_id: str,
     to_user_id: str,
 ) -> None:
-    transfer = getattr(get_store(request), "merge_user_into_user", None)
+    store = get_store(request)
+    transfer = getattr(store, "merge_user_into_user", None)
     if transfer:
         await resolve_optional_awaitable(transfer(from_user_id, to_user_id))
+    from .git_sources.credentials import CredentialStore
+
+    settings = getattr(request.app.state, "settings", None)
+    await CredentialStore(
+        store, getattr(settings, "oauth_credential_key", "")
+    ).rebind_user_credentials(from_user_id=from_user_id, to_user_id=to_user_id)
 
 
 def normalize_email_provider(value: str) -> str:

@@ -759,6 +759,9 @@ class InMemoryMarketStore:
         now = utc_now()
         target["revoked_at"] = now
         target["updated_at"] = now
+        cred_ref = str(target.get("credential_ref") or "").strip()
+        if cred_ref:
+            self.state.setdefault("oauthCredentials", {}).pop(cred_ref, None)
         if target.get("provider") == "github":
             user = self.get_user_by_id(user_id)
             remaining = [
@@ -839,6 +842,14 @@ class InMemoryMarketStore:
     def get_oauth_credential(self, credential_ref: str) -> dict[str, Any] | None:
         record = self.state.setdefault("oauthCredentials", {}).get(str(credential_ref))
         return deepcopy(record) if record else None
+
+    def list_oauth_credentials_by_user(self, user_id: str) -> list[dict[str, Any]]:
+        uid = str(user_id)
+        return [
+            deepcopy(record)
+            for record in self.state.setdefault("oauthCredentials", {}).values()
+            if str(record.get("user_id") or "") == uid
+        ]
 
     def delete_oauth_credential(self, credential_ref: str) -> bool:
         return (
@@ -1296,6 +1307,11 @@ class InMemoryMarketStore:
             if existing.get("owner_user_id") != user.get("id"):
                 raise PermissionError("plugin_owner_mismatch")
             return existing
+        repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
+            str(payload.get("repo") or ""),
+            str(payload.get("repo_provider") or ""),
+            str(payload.get("repo_external_id") or ""),
+        )
         plugin = self._normalize_plugin(
             {
                 **plugin_metadata_from_payload(payload),
@@ -1305,6 +1321,9 @@ class InMemoryMarketStore:
                 "desc": payload["desc"],
                 "author": payload["author"],
                 "repo": payload["repo"],
+                "repo_provider": repo_provider,
+                "repo_external_id": repo_external_id,
+                "normalized_repo": normalized_repo,
                 "tags": payload.get("tags", []),
                 "category": payload.get("category", "other"),
                 "category_source": "user",
@@ -1413,13 +1432,20 @@ class InMemoryMarketStore:
         changes = {key: value for key, value in patch.items() if value is not None}
         changes.pop("version_updated_at", None)
         if "repo" in changes:
+            new_repo = str(changes["repo"])
+            prev_norm = str(plugin.get("normalized_repo") or "")
             repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
-                str(changes["repo"]),
-                str(changes.get("repo_provider") or plugin.get("repo_provider") or ""),
-                str(changes.get("repo_external_id") or plugin.get("repo_external_id") or ""),
+                new_repo,
+                str(changes.get("repo_provider") or ""),
+                str(changes.get("repo_external_id") or ""),
             )
-            changes.setdefault("repo_provider", repo_provider)
-            changes.setdefault("repo_external_id", repo_external_id)
+            if normalized_repo == prev_norm:
+                if "repo_provider" not in changes and not repo_provider:
+                    repo_provider = str(plugin.get("repo_provider") or "")
+                if "repo_external_id" not in changes:
+                    repo_external_id = str(plugin.get("repo_external_id") or "")
+            changes["repo_provider"] = repo_provider
+            changes["repo_external_id"] = repo_external_id
             changes["normalized_repo"] = normalized_repo
         new_repo_version = str(changes.get("repo_version") or "")
         if new_repo_version and new_repo_version != str(plugin.get("repo_version") or ""):
@@ -2475,6 +2501,10 @@ class LocalFileMarketStore(InMemoryMarketStore):
     def get_oauth_credential(self, credential_ref: str) -> dict[str, Any] | None:
         with self._lock:
             return super().get_oauth_credential(credential_ref)
+
+    def list_oauth_credentials_by_user(self, user_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return super().list_oauth_credentials_by_user(user_id)
 
     def delete_oauth_credential(self, credential_ref: str) -> bool:
         with self._persist():
@@ -3853,6 +3883,12 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 )
                 if not row:
                     return None
+                cred_ref = str(row["credential_ref"] or "").strip()
+                if cred_ref:
+                    await connection.execute(
+                        "DELETE FROM market_oauth_credentials WHERE credential_ref = $1",
+                        cred_ref,
+                    )
                 if row["provider"] == "github":
                     remaining = await connection.fetchrow(
                         """
@@ -3948,6 +3984,13 @@ class PgRedisMarketStore(InMemoryMarketStore):
             str(credential_ref),
         )
         return serialize_value(dict(row)) if row else None
+
+    async def list_oauth_credentials_by_user(self, user_id: str) -> list[dict[str, Any]]:
+        rows = await self._pool().fetch(
+            "SELECT * FROM market_oauth_credentials WHERE user_id = $1",
+            str(user_id),
+        )
+        return [serialize_value(dict(row)) for row in rows]
 
     async def delete_oauth_credential(self, credential_ref: str) -> bool:
         result = await self._pool().execute(
@@ -4615,11 +4658,24 @@ class PgRedisMarketStore(InMemoryMarketStore):
         if not current:
             return None
         updated = {**current, **clean_patch, "updated_at": utc_now()}
-        repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
-            str(updated.get("repo") or ""),
-            str(updated.get("repo_provider") or ""),
-            str(updated.get("repo_external_id") or ""),
-        )
+        if "repo" in clean_patch:
+            prev_norm = str(current.get("normalized_repo") or "")
+            repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
+                str(clean_patch["repo"]),
+                str(clean_patch.get("repo_provider") or ""),
+                str(clean_patch.get("repo_external_id") or ""),
+            )
+            if normalized_repo == prev_norm:
+                if "repo_provider" not in clean_patch and not repo_provider:
+                    repo_provider = str(current.get("repo_provider") or "")
+                if "repo_external_id" not in clean_patch:
+                    repo_external_id = str(current.get("repo_external_id") or "")
+        else:
+            repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
+                str(updated.get("repo") or ""),
+                str(updated.get("repo_provider") or ""),
+                str(updated.get("repo_external_id") or ""),
+            )
         updated["repo_provider"] = repo_provider
         updated["repo_external_id"] = repo_external_id
         updated["normalized_repo"] = normalized_repo

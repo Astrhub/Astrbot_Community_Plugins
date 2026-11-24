@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import main as main_module
@@ -29,7 +30,7 @@ from app.git_sources.models import (
     normalize_git_repo_url,
     parse_repository_ref,
 )
-from app.git_sources.registry import get_provider_oauth_config
+from app.git_sources.registry import ensure_valid_provider_token, get_provider_oauth_config
 from app.git_sources.v5_providers import AtomGitAdapter, GiteeAdapter
 from app.github_authorization import save_authorization
 from app.store import InMemoryMarketStore, LocalFileMarketStore
@@ -1164,3 +1165,423 @@ def test_cdn_admin_whitelist_bypass_and_fail_closed_checks(tmp_path: Path) -> No
         job_types2 = {job["type"] for job in jobs2}
         assert "static_scan" in job_types2
         assert "publish" not in job_types2
+
+
+def test_malformed_port_and_relative_redirects_handling(tmp_path: Path) -> None:
+    for bad_url in (
+        "https://github.com:abc/org/astrbot_plugin_x",
+        "https://gitlab.com:99999/org/astrbot_plugin_x",
+    ):
+        with pytest.raises(GitSourceError) as exc_info:
+            parse_repository_ref(bad_url)
+        assert exc_info.value.status_code == 400
+
+    with pytest.raises(GitSourceError) as exc_info:
+        normalize_atomgit_api_base("https://api.atomgit.com:bad")
+    assert exc_info.value.status_code == 400
+
+    cfg = load_settings(_base_env(tmp_path))
+
+    def redirect_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v4/projects/start":
+            return httpx.Response(302, headers={"Location": "final.json"})
+        if request.url.path == "/api/v4/projects/final.json":
+            return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/api/v4/projects/evil":
+            return httpx.Response(302, headers={"Location": "//evil.example/leak"})
+        if request.url.path == "/team/repo/-/archive/start":
+            return httpx.Response(302, headers={"Location": "pkg.zip"})
+        if request.url.path == "/team/repo/-/archive/pkg.zip":
+            return httpx.Response(200, content=b"PK\x03\x04zipdata")
+        return httpx.Response(404)
+
+    adapter = _adapter_for("gitlab", cfg, redirect_handler)
+    resp = asyncio.run(adapter.safe_request("GET", "https://gitlab.com/api/v4/projects/start"))
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+    with pytest.raises(GitSourceError) as blocked:
+        asyncio.run(adapter.safe_request("GET", "https://gitlab.com/api/v4/projects/evil"))
+    assert blocked.value.code == "gitlab_redirect_blocked"
+
+    from app.git_sources.models import ResolvedGitArchiveSource
+
+    async def _collect_archive() -> bytes:
+        chunks = []
+        async for chunk in adapter.stream_archive(
+            ResolvedGitArchiveSource(
+                provider="gitlab",
+                repo_url="https://gitlab.com/team/repo",
+                normalized_repo="https://gitlab.com/team/repo",
+                full_path="team/repo",
+                repo_name="repo",
+                requested_ref="main",
+                commit_sha="a" * 40,
+                archive_url="https://gitlab.com/team/repo/-/archive/start",
+            )
+        ):
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    assert asyncio.run(_collect_archive()) == b"PK\x03\x04zipdata"
+
+
+def test_credential_key_mismatch_preserves_row_and_returns_503() -> None:
+    store = InMemoryMarketStore()
+    user = store.create_oauth_user(provider="gitlab", provider_login="gl_key_user")
+    good_store = CredentialStore(store, "correct-master-key-at-least-16")
+    ref = asyncio.run(
+        good_store.save_token_set(
+            user_id=user["id"],
+            token_set=OAuthTokenSet(
+                provider="gitlab",
+                access_token="secret-tok",
+                refresh_token="secret-rt",
+            ),
+        )
+    )
+
+    bad_store = CredentialStore(store, "wrong-master-key-at-least-16")
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            bad_store.load_token_set(
+                ref,
+                expected_user_id=user["id"],
+                expected_provider="gitlab",
+            )
+        )
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "oauth_credential_decrypt_failed"
+    assert store.get_oauth_credential(ref) is not None
+
+    recovered = asyncio.run(
+        good_store.load_token_set(
+            ref,
+            expected_user_id=user["id"],
+            expected_provider="gitlab",
+        )
+    )
+    assert recovered is not None
+    assert recovered.access_token == "secret-tok"
+
+
+def test_concurrent_token_refresh_serializes_rotation(tmp_path: Path) -> None:
+    cfg = load_settings(_base_env(tmp_path))
+    store = InMemoryMarketStore()
+    user = store.create_oauth_user(provider="gitlab", provider_login="gl_race")
+    cred_store = CredentialStore(store, cfg.oauth_credential_key)
+    expiring_at = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
+    ref = asyncio.run(
+        cred_store.save_token_set(
+            user_id=user["id"],
+            token_set=OAuthTokenSet(
+                provider="gitlab",
+                access_token="old-access",
+                refresh_token="single-use-refresh-1",
+                expires_at=expiring_at,
+            ),
+        )
+    )
+    store.upsert_oauth_identity(
+        user["id"],
+        provider="gitlab",
+        instance_url="https://gitlab.com",
+        provider_user_id="777",
+        provider_login="gl_race",
+        credential_ref=ref,
+        expires_at=expiring_at,
+    )
+
+    refresh_calls = 0
+
+    def token_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal refresh_calls
+        if request.url.path == "/oauth/token":
+            refresh_calls += 1
+            body = request.content.decode("utf-8", errors="ignore")
+            if refresh_calls == 1 and "single-use-refresh-1" in body:
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": "rotated-access-2",
+                        "refresh_token": "single-use-refresh-2",
+                        "expires_in": 7200,
+                    },
+                )
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        return httpx.Response(404)
+
+    adapter = _adapter_for("gitlab", cfg, token_handler)
+
+    async def _run_concurrent() -> tuple[tuple[dict, OAuthTokenSet], tuple[dict, OAuthTokenSet]]:
+        return await asyncio.gather(
+            ensure_valid_provider_token(store, cfg, user, "gitlab", adapter=adapter),
+            ensure_valid_provider_token(store, cfg, user, "gitlab", adapter=adapter),
+        )
+
+    (_, tok1), (_, tok2) = asyncio.run(_run_concurrent())
+    assert refresh_calls == 1
+    assert tok1.access_token == "rotated-access-2"
+    assert tok2.access_token == "rotated-access-2"
+
+
+def test_user_merge_rebinds_credentials_and_atomic_revoke(tmp_path: Path) -> None:
+    cfg = load_settings(_base_env(tmp_path))
+    store = InMemoryMarketStore()
+    source_user = store.create_oauth_user(provider="gitlab", provider_login="gl_merge_src")
+    target_admin = store.create_oauth_user(provider="gitea", provider_login="gt_merge_dst")
+    store.update_user_role(target_admin["id"], "admin")
+
+    cred_store = CredentialStore(store, cfg.oauth_credential_key)
+    ref = asyncio.run(
+        cred_store.save_token_set(
+            user_id=source_user["id"],
+            token_set=OAuthTokenSet(
+                provider="gitlab",
+                access_token="merge-tok",
+                refresh_token="merge-rt",
+            ),
+        )
+    )
+    identity = store.upsert_oauth_identity(
+        source_user["id"],
+        provider="gitlab",
+        instance_url="https://gitlab.com",
+        provider_user_id="888",
+        provider_login="gl_merge_src",
+        credential_ref=ref,
+    )
+
+    app = main_module.create_app(settings=cfg, store=store)
+    from types import SimpleNamespace
+
+    asyncio.run(
+        main_module.transfer_user_owned_records(
+            SimpleNamespace(app=app),  # type: ignore[arg-type]
+            source_user["id"],
+            target_admin["id"],
+        )
+    )
+    loaded = asyncio.run(
+        cred_store.load_token_set(
+            ref,
+            expected_user_id=target_admin["id"],
+            expected_provider="gitlab",
+        )
+    )
+    assert loaded is not None
+    assert loaded.access_token == "merge-tok"
+
+    revoked = store.revoke_oauth_identity(target_admin["id"], identity["id"])
+    assert revoked is not None
+    assert store.get_oauth_credential(ref) is None
+
+
+def test_overlapping_oauth_callbacks_clean_up_orphans(tmp_path: Path) -> None:
+    cfg = load_settings(_base_env(tmp_path))
+    store = InMemoryMarketStore()
+
+    def gitea_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login/oauth/access_token":
+            return httpx.Response(
+                200,
+                json={"access_token": "gt-tok", "refresh_token": "gt-rt", "expires_in": 3600},
+            )
+        if request.url.path == "/api/v1/user":
+            return httpx.Response(
+                200,
+                json={"id": 4242, "login": "race_user", "full_name": "Race User", "email": ""},
+            )
+        return httpx.Response(404)
+
+    app = main_module.create_app(settings=cfg, store=store)
+    app.state.git_provider_adapter_factory = lambda s, p: _adapter_for(p, s, gitea_handler)
+
+    winner = store.create_oauth_user(provider="gitea", provider_login="race_user")
+    orig_get = store.get_oauth_identity_by_provider_user
+    orig_upsert = store.upsert_oauth_identity
+    calls = {"get": 0}
+
+    def racing_get(provider: str, instance_url: str, provider_user_id: str):
+        calls["get"] += 1
+        if calls["get"] == 1:
+            return None
+        return orig_get(provider, instance_url, provider_user_id)
+
+    def racing_upsert(user_id: str, **kwargs):
+        orig_upsert(winner["id"], **kwargs)
+        raise RuntimeError("duplicate provider identity")
+
+    store.get_oauth_identity_by_provider_user = racing_get  # type: ignore[method-assign]
+    store.upsert_oauth_identity = racing_upsert  # type: ignore[method-assign]
+
+    client = TestClient(app, follow_redirects=False)
+    client.cookies.set("astrbot_market_oauth_state_gitea", "state-race")
+    res = client.get("/v1/auth/oauth/gitea/callback?code=abc&state=state-race")
+    assert res.status_code == 302
+    assert len(store.state["users"]) == 1
+    assert store.state["users"][0]["id"] == winner["id"]
+    assert store.state["oauthCredentials"] == {}
+
+
+def test_mixed_case_repo_publication_and_repo_change_clears_stale_id(tmp_path: Path) -> None:
+    commit_sha = "d" * 40
+    archive_bytes = _make_plugin_zip(
+        name="astrbot_plugin_mixed",
+        version="v1.0.0",
+        author="MyTeam",
+        desc="Mixed case repo test",
+        repo="https://gitea.com/MyTeam/astrbot_plugin_Mixed",
+    )
+
+    def gitea_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/repos/MyTeam/astrbot_plugin_Mixed":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 5150,
+                    "name": "astrbot_plugin_Mixed",
+                    "full_name": "MyTeam/astrbot_plugin_Mixed",
+                    "private": False,
+                    "archived": False,
+                    "default_branch": "main",
+                    "stars_count": 2,
+                    "updated_at": "2026-11-24T00:00:00Z",
+                    "owner": {"id": 55, "login": "MyTeam", "type": "User"},
+                    "permissions": {"push": True, "admin": True},
+                },
+            )
+        if path.endswith("/raw/metadata.yaml"):
+            return httpx.Response(
+                200,
+                content=(
+                    b"name: astrbot_plugin_mixed\n"
+                    b"desc: Mixed case repo test\n"
+                    b"author: MyTeam\n"
+                    b"version: v1.0.0\n"
+                ),
+            )
+        if path.endswith("/contents"):
+            return httpx.Response(200, json=[])
+        if path.endswith("/git/commits/main"):
+            return httpx.Response(200, json={"sha": commit_sha})
+        if path.endswith(f"/archive/{commit_sha}.zip"):
+            return httpx.Response(200, content=archive_bytes)
+        return httpx.Response(404)
+
+    cfg = load_settings(
+        _base_env(
+            tmp_path,
+            ARTIFACTS_ENABLED="true",
+            ARTIFACT_STORAGE_BACKEND="local",
+            ARTIFACT_LOCAL_ROOT=str(tmp_path / "artifacts"),
+            ARTIFACT_CDN_BASE_URL="https://cdn.example.test",
+            ARTIFACT_AUTHORIZATION_TOKEN="worker-secret",
+        )
+    )
+    store = InMemoryMarketStore()
+    app = main_module.create_app(settings=cfg, store=store)
+    app.state.git_provider_adapter_factory = lambda s, p: _adapter_for(p, s, gitea_handler)
+
+    dev = store.create_oauth_user(provider="gitea", provider_login="MyTeam")
+    store.update_user_role(dev["id"], "admin")
+    cred_store = CredentialStore(store, cfg.oauth_credential_key)
+    cred_ref = asyncio.run(
+        cred_store.save_token_set(
+            user_id=dev["id"],
+            token_set=OAuthTokenSet(
+                provider="gitea",
+                access_token="tok-mixed",
+                expires_at=(datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+                provider_user_id="55",
+                provider_login="MyTeam",
+            ),
+        )
+    )
+    store.upsert_oauth_identity(
+        dev["id"],
+        provider="gitea",
+        instance_url="https://gitea.com",
+        provider_user_id="55",
+        provider_login="MyTeam",
+        credential_ref=cred_ref,
+    )
+    session = store.create_session(dev["id"])
+
+    with TestClient(app) as client:
+        client.cookies.set(cfg.session_cookie_name, session["token"])
+        created = client.post(
+            "/v1/plugins/submissions",
+            json={
+                "cdn_enabled": True,
+                "cdn_whitelist": True,
+                "repository_id": "5150",
+                "name": "astrbot_plugin_mixed",
+                "desc": "Mixed case repo test",
+                "author": "MyTeam",
+                "repo": "https://gitea.com/MyTeam/astrbot_plugin_Mixed",
+            },
+        )
+        assert created.status_code == 201
+        plugin = created.json()
+        # Original casing is preserved for display and AstrBot Feed
+        assert plugin["repo"] == "https://gitea.com/MyTeam/astrbot_plugin_Mixed"
+        assert plugin["repo_external_id"] == "5150"
+
+        processed = asyncio.run(
+            process_cdn_reviews(
+                app,
+                repository_loader=lambda _r: None,
+                source_loader=lambda _r: None,
+            )
+        )
+        assert processed == 1
+        sub_row = asyncio.run(CdnSubscriptions(store).get(plugin["id"]))
+        assert sub_row is not None and sub_row["artifact_id"]
+        artifact_id = sub_row["artifact_id"]
+
+        runner = app.state.artifact_runtime.job_runner
+        if runner is None:
+            from app.artifacts.archive import ArchivePrechecker
+            from app.artifacts.jobs import ArtifactJobRunner
+            from app.artifacts.scanner import StaticScanner
+
+            runner = ArtifactJobRunner(
+                repository=app.state.artifact_runtime.repository,
+                storage=app.state.artifact_runtime.storage,
+                prechecker=ArchivePrechecker(app.state.artifact_runtime.service.limits),
+                scanner=StaticScanner(),
+                cdn_base_url=cfg.artifacts.cdn_base_url,
+            )
+        asyncio.run(runner.run_once(limit=1))
+
+        # Publication access revalidation must accept mixed-case plugin['repo'] vs lowercased source_repo
+        from app.github_authorization import verify_publication_access
+        from types import SimpleNamespace
+
+        fake_req = SimpleNamespace(app=app)
+        verified = asyncio.run(verify_publication_access(fake_req, artifact_id))  # type: ignore[arg-type]
+        assert verified["artifact_id"] == artifact_id
+        assert verified["repo"] == "https://gitea.com/MyTeam/astrbot_plugin_Mixed"
+
+        # Changing repo without passing repo_external_id must clear stale ID and update provider
+        updated = store.update_plugin_metadata(
+            plugin["id"],
+            {"repo": "https://gitlab.com/OtherOrg/astrbot_plugin_Mixed"},
+        )
+        assert updated is not None
+        assert updated["repo"] == "https://gitlab.com/OtherOrg/astrbot_plugin_Mixed"
+        assert updated["repo_provider"] == "gitlab"
+        assert updated["repo_external_id"] == ""
+
+    migration_sql = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "migrations"
+        / "20261124_012_git_providers_and_oauth_credentials.sql"
+    ).read_text(encoding="utf-8")
+    assert "ROW_NUMBER() OVER" in migration_sql
+    assert migration_sql.index("ROW_NUMBER() OVER") < migration_sql.index(
+        "CREATE UNIQUE INDEX IF NOT EXISTS market_plugins_normalized_repo_key"
+    )

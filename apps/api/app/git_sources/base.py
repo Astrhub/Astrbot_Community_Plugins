@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 import httpx
 import yaml
@@ -168,8 +168,20 @@ class BaseGitProviderAdapter(ABC):
 
     def _validate_target_url(self, url: str) -> str:
         parsed = urlsplit(url)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise GitSourceError(
+                f"{self.provider}_redirect_blocked",
+                f"{self.label} 请求或重定向目标端口格式无效",
+                status_code=503,
+            ) from exc
         hostname = (parsed.hostname or "").lower()
-        if parsed.scheme.lower() != "https" or hostname not in self.allowed_hosts:
+        if (
+            parsed.scheme.lower() != "https"
+            or hostname not in self.allowed_hosts
+            or port not in {None, 443}
+        ):
             raise GitSourceError(
                 f"{self.provider}_redirect_blocked",
                 f"{self.label} 请求或重定向目标不在允许的白名单域名内",
@@ -213,10 +225,7 @@ class BaseGitProviderAdapter(ABC):
                     location = response.headers.get("location", "").strip()
                     if not location:
                         break
-                    target = urlsplit(location)
-                    if not target.scheme:
-                        base = urlsplit(current_url)
-                        location = f"{base.scheme}://{base.netloc}{location}"
+                    location = urljoin(current_url, location)
                     next_url = self._validate_target_url(location)
                     next_host = (urlsplit(next_url).hostname or "").lower()
                     if next_host != initial_host:
@@ -350,9 +359,7 @@ class BaseGitProviderAdapter(ABC):
                             location = resp.headers.get("location", "").strip()
                             if not location:
                                 break
-                            if not urlsplit(location).scheme:
-                                base = urlsplit(current_url)
-                                location = f"{base.scheme}://{base.netloc}{location}"
+                            location = urljoin(current_url, location)
                             next_url = self._validate_target_url(location)
                             if (urlsplit(next_url).hostname or "").lower() != initial_host:
                                 current_headers.pop("Authorization", None)

@@ -19,6 +19,7 @@ from .auth import can_configure_plugin_cdn, is_admin
 from .git_sources.models import (
     THIRD_PARTY_PROVIDERS,
     GitSourceError,
+    normalize_git_repo_key,
     normalize_git_repo_url,
     parse_repository_ref,
 )
@@ -416,6 +417,20 @@ class CdnSubscriptions:
                 )
 
 
+def _same_repo_key(raw_repo: Any, expected_normalized: str) -> bool:
+    try:
+        return normalize_git_repo_key(str(raw_repo or "")) == expected_normalized
+    except GitSourceError:
+        return False
+
+
+def _same_github_repo(raw_repo: Any, canonical: str) -> bool:
+    try:
+        return normalize_github_repo(str(raw_repo or "")) == canonical
+    except PrecheckError:
+        return False
+
+
 async def verify_subscription(
     store: Any,
     plugin: Mapping[str, Any],
@@ -440,7 +455,11 @@ async def verify_subscription(
         if proof.get("mode") == "site_admin":
             if not is_admin(user):
                 raise cdn_error("cdn_role_changed", "CDN 授权人的管理权限已失效", 403)
-        if proof.get("repo") != ref.repo_url or not proof.get("id") or not proof.get("owner_id"):
+        if (
+            not _same_repo_key(proof.get("repo"), ref.normalized_repo)
+            or not proof.get("id")
+            or not proof.get("owner_id")
+        ):
             raise cdn_error("cdn_authorization_required", "请重新开启 CDN 以验证仓库权限", 403)
         if hasattr(store, "get_active_git_repository_binding"):
             binding = await store_call(
@@ -490,7 +509,7 @@ async def verify_subscription(
         if (
             str(current_proof.repo_external_id) != str(proof["id"])
             or str(current_proof.owner_id) != str(proof["owner_id"])
-            or current_proof.repo != ref.repo_url
+            or current_proof.normalized_repo != ref.normalized_repo
             or (
                 proof.get("provider_user_id")
                 and str(current_proof.provider_user_id) != str(proof["provider_user_id"])
@@ -511,7 +530,11 @@ async def verify_subscription(
     elif str(user.get("github_id") or user["id"]) != str(proof.get("github_user_id") or ""):
         raise cdn_error("cdn_identity_changed", "CDN 授权的 GitHub 身份已变化", 403)
     canonical = normalize_github_repo(plugin["repo"])
-    if proof.get("repo") != canonical or not proof.get("id") or not proof.get("owner_id"):
+    if (
+        not _same_github_repo(proof.get("repo"), canonical)
+        or not proof.get("id")
+        or not proof.get("owner_id")
+    ):
         raise cdn_error("cdn_authorization_required", "请重新开启 CDN 以验证仓库权限", 403)
     if loader is None:
         raise cdn_error("site_github_authorization_unavailable", "站点仓库复核尚未配置", 503)

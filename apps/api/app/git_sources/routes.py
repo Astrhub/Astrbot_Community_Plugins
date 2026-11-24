@@ -191,6 +191,7 @@ def build_git_provider_router(
             profile.instance_url,
             profile.provider_user_id,
         )
+        created_new_user = False
         if logged_in:
             if existing_identity and existing_identity["user_id"] != logged_in["id"]:
                 raise HTTPException(
@@ -214,6 +215,7 @@ def build_git_provider_router(
                 display_name=profile.display_name,
                 avatar_url=profile.avatar_url,
             )
+            created_new_user = True
 
         cred_store = CredentialStore(request.app.state.store, settings.oauth_credential_key)
         existing_cred_ref = str((existing_identity or {}).get("credential_ref") or "").strip()
@@ -222,20 +224,43 @@ def build_git_provider_router(
             token_set=token_set,
             credential_ref=existing_cred_ref,
         )
-        await call_store(
-            request,
-            "upsert_oauth_identity",
-            user["id"],
-            provider=key,
-            instance_url=profile.instance_url,
-            provider_user_id=profile.provider_user_id,
-            provider_login=profile.provider_login,
-            provider_email=profile.email,
-            avatar_url=profile.avatar_url,
-            scopes=token_set.scope,
-            credential_ref=credential_ref,
-            expires_at=token_set.expires_at,
-        )
+        try:
+            await call_store(
+                request,
+                "upsert_oauth_identity",
+                user["id"],
+                provider=key,
+                instance_url=profile.instance_url,
+                provider_user_id=profile.provider_user_id,
+                provider_login=profile.provider_login,
+                provider_email=profile.email,
+                avatar_url=profile.avatar_url,
+                scopes=token_set.scope,
+                credential_ref=credential_ref,
+                expires_at=token_set.expires_at,
+            )
+        except Exception:
+            if not existing_cred_ref:
+                await cred_store.revoke(credential_ref)
+            if created_new_user:
+                winner = await call_store(
+                    request,
+                    "get_oauth_identity_by_provider_user",
+                    key,
+                    profile.instance_url,
+                    profile.provider_user_id,
+                )
+                if winner and winner.get("user_id") and winner["user_id"] != user["id"]:
+                    await call_store(request, "delete_user", user["id"], winner["user_id"])
+                    winning_user = await call_store(request, "get_user_by_id", winner["user_id"])
+                    if winning_user:
+                        user = winning_user
+                    else:
+                        raise
+                else:
+                    raise
+            else:
+                raise
 
         session = await call_store(request, "create_session", user["id"])
         destination = request.cookies.get(_return_cookie_name(key), "/")

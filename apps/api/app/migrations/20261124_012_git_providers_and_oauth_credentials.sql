@@ -96,6 +96,29 @@ UPDATE market_plugins
  WHERE btrim(repo) <> ''
    AND (btrim(repo_provider) = '' OR btrim(normalized_repo) = '');
 
+WITH ranked AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY lower(btrim(normalized_repo))
+               ORDER BY
+                   CASE status
+                       WHEN 'listed' THEN 0
+                       WHEN 'pending' THEN 1
+                       ELSE 2
+                   END,
+                   updated_at DESC NULLS LAST,
+                   created_at DESC NULLS LAST,
+                   id ASC
+           ) AS rn
+      FROM market_plugins
+     WHERE btrim(normalized_repo) <> ''
+)
+UPDATE market_plugins AS mp
+   SET normalized_repo = ''
+  FROM ranked
+ WHERE mp.id = ranked.id
+   AND ranked.rn > 1;
+
 CREATE UNIQUE INDEX IF NOT EXISTS market_plugins_normalized_repo_key
     ON market_plugins (lower(normalized_repo))
     WHERE btrim(normalized_repo) <> '';

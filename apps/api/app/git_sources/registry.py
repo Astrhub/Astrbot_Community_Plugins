@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import weakref
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -26,6 +28,19 @@ from .models import (
 from .v5_providers import AtomGitAdapter, GiteeAdapter
 
 TOKEN_REFRESH_SKEW_SECONDS = 120
+_REFRESH_LOCKS: weakref.WeakValueDictionary[tuple[int, str], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _refresh_lock_for(store: Any, credential_ref: str) -> asyncio.Lock:
+    lock_key = (id(store), str(credential_ref))
+    lock = _REFRESH_LOCKS.get(lock_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _REFRESH_LOCKS[lock_key] = lock
+    return lock
+
 
 _ADAPTER_CLASSES: dict[str, type[BaseGitProviderAdapter]] = {
     "gitlab": GitLabAdapter,
@@ -198,47 +213,87 @@ async def ensure_valid_provider_token(
     ):
         return identity, token_set
 
-    provider_adapter = adapter or get_provider_adapter(settings, key)
-    try:
-        refreshed = await provider_adapter.refresh_access_token(token_set.refresh_token)
-    except GitSourceError as exc:
+    lock = _refresh_lock_for(store, cred_ref)
+    async with lock:
+        # Re-read the latest stored credential after acquiring the lock so concurrent callers
+        # reuse a token already rotated by another request instead of replaying a spent refresh token.
+        latest_identities = await _store_call(store, "list_oauth_identities", user_id)
+        latest_identity = (
+            next(
+                (
+                    item
+                    for item in latest_identities
+                    if str(item.get("id") or "") == str(identity.get("id") or "")
+                    and not item.get("revoked_at")
+                ),
+                None,
+            )
+            or identity
+        )
+        latest_ref = str(latest_identity.get("credential_ref") or cred_ref).strip()
+        latest_token = await cred_store.load_token_set(
+            latest_ref,
+            expected_user_id=user_id,
+            expected_provider=key,
+        )
+        if latest_token is None:
+            raise HTTPException(
+                409,
+                {
+                    "code": f"{key}_authorization_required",
+                    "error": f"{label} 授权已失效，请重新连接",
+                },
+            )
+        if not force_refresh and not _is_token_expiring(
+            latest_token.expires_at or latest_identity.get("expires_at")
+        ):
+            return latest_identity, latest_token
+        if force_refresh and latest_token.access_token != token_set.access_token:
+            return latest_identity, latest_token
+
+        provider_adapter = adapter or get_provider_adapter(settings, key)
+        try:
+            refreshed = await provider_adapter.refresh_access_token(latest_token.refresh_token)
+        except GitSourceError as exc:
+            if hasattr(store, "update_oauth_identity_rotation"):
+                await _store_call(
+                    store,
+                    "update_oauth_identity_rotation",
+                    latest_identity["id"],
+                    rotation_status="refresh_failed",
+                )
+            raise HTTPException(exc.status_code, {"code": exc.code, "error": exc.message}) from exc
+
+        rotated = OAuthTokenSet(
+            provider=key,
+            access_token=refreshed.access_token,
+            refresh_token=refreshed.refresh_token or latest_token.refresh_token,
+            scope=refreshed.scope or latest_token.scope,
+            expires_at=refreshed.expires_at,
+            provider_user_id=latest_token.provider_user_id
+            or str(latest_identity.get("provider_user_id") or ""),
+            provider_login=latest_token.provider_login
+            or str(latest_identity.get("provider_login") or ""),
+        )
+        new_ref = await cred_store.save_token_set(
+            user_id=user_id,
+            token_set=rotated,
+            credential_ref=latest_ref,
+        )
         if hasattr(store, "update_oauth_identity_rotation"):
             await _store_call(
                 store,
                 "update_oauth_identity_rotation",
-                identity["id"],
-                rotation_status="refresh_failed",
+                latest_identity["id"],
+                credential_ref=new_ref,
+                expires_at=rotated.expires_at,
+                rotation_status="rotated",
+                token_refreshed_at=utc_now_iso(),
             )
-        raise HTTPException(exc.status_code, {"code": exc.code, "error": exc.message}) from exc
-
-    rotated = OAuthTokenSet(
-        provider=key,
-        access_token=refreshed.access_token,
-        refresh_token=refreshed.refresh_token or token_set.refresh_token,
-        scope=refreshed.scope or token_set.scope,
-        expires_at=refreshed.expires_at,
-        provider_user_id=token_set.provider_user_id or str(identity.get("provider_user_id") or ""),
-        provider_login=token_set.provider_login or str(identity.get("provider_login") or ""),
-    )
-    new_ref = await cred_store.save_token_set(
-        user_id=user_id,
-        token_set=rotated,
-        credential_ref=cred_ref,
-    )
-    if hasattr(store, "update_oauth_identity_rotation"):
-        await _store_call(
-            store,
-            "update_oauth_identity_rotation",
-            identity["id"],
-            credential_ref=new_ref,
-            expires_at=rotated.expires_at,
-            rotation_status="rotated",
-            token_refreshed_at=utc_now_iso(),
-        )
-    updated_identity = {
-        **identity,
-        "credential_ref": new_ref,
-        "expires_at": rotated.expires_at,
-        "rotation_status": "rotated",
-    }
-    return updated_identity, rotated
+        updated_identity = {
+            **latest_identity,
+            "credential_ref": new_ref,
+            "expires_at": rotated.expires_at,
+            "rotation_status": "rotated",
+        }
+        return updated_identity, rotated

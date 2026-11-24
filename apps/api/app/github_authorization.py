@@ -21,7 +21,7 @@ from .git_sources.models import (
     THIRD_PARTY_PROVIDERS,
     GitSourceError,
     OAuthTokenSet,
-    normalize_git_repo_url,
+    normalize_git_repo_key,
     parse_repository_ref,
 )
 from .git_sources.registry import ensure_valid_provider_token, get_provider_adapter
@@ -540,6 +540,20 @@ async def _verify_admin_publication(
         raise auth_error(409, "github_repository_changed", "GitHub 仓库身份或所属方已变化")
 
 
+def _same_repo(left: Any, right: Any) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    try:
+        return normalize_git_repo_key(left_text) == normalize_git_repo_key(right_text)
+    except GitSourceError:
+        try:
+            return normalize_github_repo(left_text) == normalize_github_repo(right_text)
+        except Exception:
+            return left_text.lower() == right_text.lower()
+
+
 async def _verify_third_party_publication(
     request: Request,
     store: Any,
@@ -563,7 +577,7 @@ async def _verify_third_party_publication(
             raise auth_error(409, "artifact_identity_changed", "批准的插件包与当前包不一致")
 
     if any(
-        normalize_git_repo_url(str(value or "")) != ref.repo_url
+        not _same_repo(value, ref.repo_url)
         for value in (proof.get("repo"), artifact.get("source_repo"))
     ):
         raise auth_error(409, "git_repository_changed", "提交后仓库地址已变化")
@@ -685,8 +699,9 @@ async def verify_publication_access(
         bound = subscription["authorization"]
         if (
             str(actor["id"]) != str(user["id"])
-            or artifact["source_repo"] != plugin["repo"]
-            or any(str(proof.get(key)) != str(bound.get(key)) for key in ("id", "owner_id", "repo"))
+            or not _same_repo(artifact["source_repo"], plugin["repo"])
+            or any(str(proof.get(key)) != str(bound.get(key)) for key in ("id", "owner_id"))
+            or not _same_repo(proof.get("repo"), bound.get("repo"))
         ):
             raise auth_error(403, "cdn_identity_changed", "CDN 提交来源已变化")
         if admin_approval:
@@ -705,13 +720,7 @@ async def verify_publication_access(
             "owner_user_id": str(plugin["owner_user_id"]),
         }
     if proof.get("mode") == "site_admin":
-        try:
-            current_repo = normalize_git_repo_url(plugin["repo"])
-            proof_repo = normalize_git_repo_url(proof["repo"])
-        except GitSourceError:
-            current_repo = normalize_github_repo(plugin["repo"])
-            proof_repo = normalize_github_repo(proof["repo"])
-        if not is_admin(user) or current_repo != proof_repo:
+        if not is_admin(user) or not _same_repo(plugin["repo"], proof.get("repo")):
             raise auth_error(403, "github_identity_changed", "管理权限或插件仓库已变化")
     elif provider in THIRD_PARTY_PROVIDERS:
         await _verify_third_party_publication(
