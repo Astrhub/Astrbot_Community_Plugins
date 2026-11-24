@@ -860,3 +860,24 @@ def test_end_to_end_rebind_migration_pause_retry_range_aliases_and_decommission_
     delete_ok = client.delete("/v1/admin/storage/profiles/sqlite-b")
     assert delete_ok.status_code == 200, delete_ok.text
     assert delete_ok.json()["status"] == "removed"
+
+
+def test_storage_manager_skips_unwritable_legacy_local_root_without_crashing(
+    tmp_path: Path,
+) -> None:
+    blocker_file = tmp_path / "not-a-directory"
+    blocker_file.write_text("occupied", encoding="utf-8")
+    settings = load_settings(
+        {
+            "ARTIFACTS_ENABLED": "true",
+            "ARTIFACT_STORAGE_BACKEND": "local",
+            "ARTIFACT_LOCAL_ROOT": str(blocker_file / "artifacts"),
+            "ARTIFACT_CDN_BASE_URL": "https://cdn.example.com",
+        }
+    )
+    store = InMemoryMarketStore()
+    app = create_app(settings=settings, store=store)
+    with TestClient(app) as client:
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["status"] == "ok"

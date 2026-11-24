@@ -1272,8 +1272,16 @@ class StorageManager:
             if not artifact_cfg.local_root:
                 return
             root = Path(artifact_cfg.local_root).resolve()
-            for directory in (root / "quarantine", root / "content", root / "published"):
-                directory.mkdir(parents=True, exist_ok=True)
+            try:
+                for directory in (root / "quarantine", root / "content", root / "published"):
+                    directory.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                LOGGER.warning(
+                    "Skipping legacy local artifact profile bootstrap for %s: %s",
+                    root,
+                    exc,
+                )
+                return
             q_profile = StorageProfile(
                 id=LEGACY_QUARANTINE_PROFILE_ID,
                 name="Legacy Local Quarantine",

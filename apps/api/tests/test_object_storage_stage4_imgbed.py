@@ -474,8 +474,10 @@ def test_imgbed_purpose_gates_migration_history_url_and_controlled_decommission_
     avatar_obj_id, plugin_obj_id = asyncio.run(seed_avatar_and_plugin())
 
     # Before migration, retiring or removing legacy-old-pkg is forbidden (409).
-    assert client.post("/v1/admin/storage/profiles/legacy-old-pkg/retire").status_code == 409
-    assert client.delete("/v1/admin/storage/profiles/legacy-old-pkg").status_code == 409
+    retire_blocked = client.post("/v1/admin/storage/profiles/legacy-old-pkg/retire")
+    assert retire_blocked.status_code == 409
+    delete_blocked = client.delete("/v1/admin/storage/profiles/legacy-old-pkg")
+    assert delete_blocked.status_code == 409
 
     # 6. Test and bind imgbed-plugins -> migrates historical ZIP from legacy-old-pkg to ImgBed!
     plugins_test = client.post("/v1/admin/storage/profiles/imgbed-plugins/test")
