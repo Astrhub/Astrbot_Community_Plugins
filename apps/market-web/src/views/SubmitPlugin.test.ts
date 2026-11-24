@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { flushPromises, mount } from "@vue/test-utils";
 import { createTestingPinia } from "@pinia/testing";
-import { NSelect, NDynamicTags } from "naive-ui";
+import { NDropdown, NModal, NSelect, NDynamicTags } from "naive-ui";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { usePluginStore } from "../stores/plugins";
 import SubmitPlugin from "./SubmitPlugin.vue";
@@ -67,7 +67,11 @@ function setup() {
     items: repositories,
     next_page: null,
   });
-  return { store, mount: () => mount(SubmitPlugin, { global: { plugins: [pinia] } }) };
+  return {
+    pinia,
+    store,
+    mount: () => mount(SubmitPlugin, { global: { plugins: [pinia] } }),
+  };
 }
 it("marks submitted repositories as disabled and shows fork/submitted labels", async () => {
   const context = setup();
@@ -93,25 +97,50 @@ it("marks submitted repositories as disabled and shows fork/submitted labels", a
   wrapper.unmount();
 });
 
-it("imports existing plugin metadata strictly for source repositories", async () => {
+it("persistently shows GitHub one-click batch import before selecting a repo and submits selected repos", async () => {
   const context = setup();
-  vi.mocked(context.store.fetchPluginSubmissionMetadata).mockResolvedValue({
-    name: "astrbot_plugin_imported",
-    desc: "导入简介",
-    author: "作者",
-    repo: "https://github.com/my-org/astrbot_plugin_a",
-  } as never);
-  const wrapper = context.mount();
-  await flushPromises();
-
-  wrapper.findAllComponents(NSelect)[0]!.vm.$emit("update:value", "a");
+  vi.mocked(context.store.fetchPluginSubmissionMetadata)
+    .mockResolvedValueOnce({
+      name: "astrbot_plugin_a",
+      desc: "导入简介 A",
+      author: "作者 A",
+      repo: repositories[0]!.repo,
+    } as never)
+    .mockResolvedValueOnce({
+      name: "astrbot_plugin_b",
+      desc: "导入简介 B",
+      author: "作者 B",
+      repo: repositories[1]!.repo,
+    } as never);
+  vi.mocked(context.store.submitPlugin).mockResolvedValue({
+    cdn_enabled: false,
+    status: "listed",
+  });
+  const wrapper = mount(SubmitPlugin, {
+    global: {
+      plugins: [context.pinia],
+      stubs: { teleport: true },
+    },
+  });
   await flushPromises();
 
   const importButton = wrapper
     .findAll("button")
-    .find((button) => button.text() === "一键导入已有插件");
+    .find((button) => button.text().includes("一键导入已有插件"));
   expect(importButton).toBeDefined();
   await importButton!.trigger("click");
+  await flushPromises();
+
+  const modal = wrapper.findComponent(NModal);
+  expect(modal.props("show")).toBe(true);
+  expect(wrapper.text()).toContain("my-org/astrbot_plugin_a");
+  expect(wrapper.text()).toContain("my-org/astrbot_plugin_b");
+
+  const batchSubmitBtn = wrapper
+    .findAll("button")
+    .find((button) => button.text().includes("一键导入并提交"));
+  expect(batchSubmitBtn).toBeDefined();
+  await batchSubmitBtn!.trigger("click");
   await flushPromises();
 
   expect(context.store.fetchPluginSubmissionMetadata).toHaveBeenCalledWith(
@@ -119,6 +148,12 @@ it("imports existing plugin metadata strictly for source repositories", async ()
     "a",
     true,
   );
+  expect(context.store.fetchPluginSubmissionMetadata).toHaveBeenCalledWith(
+    repositories[1]!.repo,
+    "b",
+    true,
+  );
+  expect(context.store.submitPlugin).toHaveBeenCalledTimes(2);
   wrapper.unmount();
 });
 
@@ -470,13 +505,68 @@ describe("SubmitPlugin repository selection", () => {
     const wrapper = context.mount();
     await flushPromises();
 
-    const gitlabBtn = wrapper.findAll("button").find((item) => item.text() === "GitLab");
-    expect(gitlabBtn).toBeDefined();
-    await gitlabBtn!.trigger("click");
+    const dropdown = wrapper.findComponent(NDropdown);
+    expect(dropdown.exists()).toBe(true);
+    const options = dropdown.props("options") as Array<{ key: string; label: string }>;
+    expect(options.some((item) => item.key === "gitlab")).toBe(true);
+    dropdown.vm.$emit("select", "gitlab");
     await flushPromises();
 
     expect(context.store.loadProviderRepositories).toHaveBeenCalledWith("gitlab", 1);
     expect(wrapper.text()).toContain("v4.27.0");
+    expect(
+      wrapper.findAll("button").some((button) => button.text().includes("一键导入已有插件")),
+    ).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("shows admin-only CDN whitelist option and submits cdn_whitelist for admin users", async () => {
+    const context = setup();
+    context.store.currentUser = {
+      id: "admin-user-1",
+      github_login: "alice_admin",
+      role: "admin",
+    } as never;
+    vi.mocked(context.store.fetchPluginSubmissionMetadata).mockResolvedValue({
+      name: "astrbot_plugin_a",
+      desc: "管理员插件简介",
+      author: "alice_admin",
+    } as never);
+    vi.mocked(context.store.submitPlugin).mockResolvedValue({
+      cdn_enabled: true,
+      cdn_whitelist: true,
+      status: "listed",
+    });
+
+    const wrapper = context.mount();
+    await flushPromises();
+
+    wrapper.findAllComponents(NSelect)[0]!.vm.$emit("update:value", "a");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("管理员白名单直发");
+    await wrapper.get('[role="checkbox"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("管理员白名单直发");
+    const checkboxes = wrapper.findAll('[role="checkbox"]');
+    expect(checkboxes.length).toBe(2);
+    await checkboxes[1]!.trigger("click");
+    await flushPromises();
+
+    const submitButton = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "白名单直发 CDN");
+    expect(submitButton).toBeDefined();
+    await submitButton!.trigger("click");
+    await flushPromises();
+
+    expect(context.store.submitPlugin).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cdn_enabled: true,
+        cdn_whitelist: true,
+      }),
+    );
     wrapper.unmount();
   });
 

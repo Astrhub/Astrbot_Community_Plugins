@@ -8,12 +8,12 @@
 
 ## 功能特性
 
-- **浏览、检索与 SEO**：插件卡片网格、关键词与模糊搜索、标签与官方分类筛选、多种排序（更新时间、星标、点赞、评论、随机）与 URL 查询分页；插件详情页（`/plugin/{username}/{name}`）与作者页（`/author/{username}`）支持独立路由、Markdown README 渲染、仓库目录浏览、文本/图片预览以及构建期 Sitemap 与 HTML 预渲染。
-- **可选社区源 CDN 与插件包审查**：提交插件默认关闭 CDN（通过原仓库直连安装，非 GitHub 仓库直连需 AstrBot `v4.27.0+`）；按插件开启 CDN 后，ZIP、公开 GitHub 仓库（优先采用正式 Release ZIP）或受支持第三方 OAuth 平台仓库（`source_type="git"`，按固定 commit SHA 拉取官方 HTTPS 归档）会固定为不可变 artifact 进入私有隔离区，经预检、静态分析、依赖漏洞/ClamAV/YARA/LLM 辅助审查、一次性容器运行时探针和人工复核后才发布到 CDN。
+- **浏览、检索与 SEO**：插件卡片网格、关键词与模糊搜索、标签与官方分类筛选、多种排序（更新时间、星标、点赞、评论、随机）与 URL 查询分页；插件详情页（`/plugin/{username}/{name}`）与作者页（`/author/{username}`）支持独立路由、Markdown README 渲染、仓库目录浏览、文本/图片预览以及运行时 SEO 与 Sitemap；海外平台（`GitLab.com` / `Gitea`）的插件 Logo、README 仓库内图片与海外用户头像提供受限服务端代理，国内平台（Gitee / AtomGit）保持直连。
+- **可选社区源 CDN 与插件包审查**：提交插件默认关闭 CDN（通过原仓库直连安装，非 GitHub 仓库直连需 AstrBot `v4.27.0+`）；按插件开启 CDN 后，ZIP、公开 GitHub 仓库（优先采用正式 Release ZIP）或受支持第三方 OAuth 平台仓库（`source_type="git"`，按固定 commit SHA 拉取官方 HTTPS 归档）会固定为不可变 artifact 进入私有隔离区，经预检、静态分析、依赖漏洞/ClamAV/YARA/LLM 辅助审查、一次性容器运行时探针和人工复核后才发布到 CDN；管理员自有 CDN 插件可选白名单直发，在通过压缩包预检并写入审计决策后直接发布。
 - **版本审查工作台**：`/plugin-workbench` 提供作者版本历史、文件 diff 与自动审查发现，以及管理员待审队列、评论、人工批准、重跑审查、重试发布与安全下架。
 - **GitHub 元数据同步**：后台任务周期性同步仓库星标、版本与 README，支持多 API Token 轮转应对速率限制；插件所有者与管理员也可手动触发刷新。
 - **社区互动与通知中心**：服务端持久化嵌套评论（Markdown + 语法高亮）、插件与评论点赞；回复、点赞、审核与下架事件自动触发站内通知，支持按维度配置站内与邮件通知偏好。
-- **身份、权限与 API Key**：内置核心管理员账号登录 + GitHub OAuth 登录；三级角色（`core_admin` / `admin` / `user`）与受信任 GitHub 组织自动提权；支持全局静态 Key、管理员颁发 Key 与个人 Key（`sk-ah-` 前缀，明文仅展示一次），按 `scopes` 通过 `Bearer` 鉴权。
+- **身份、权限与 API Key**：内置核心管理员账号登录、邮箱注册与多平台 OAuth 登录（GitHub / GitLab.com / Gitee / AtomGit / Gitea）；五级身份层级（`core_admin` / `admin` / `developer` / `user` / `guest`）与受信任 GitHub 组织自动提权；支持全局静态 Key、管理员颁发 Key 与个人 Key（`sk-ah-` 前缀，明文仅展示一次），按 `scopes` 通过 `Bearer` 鉴权。
 - **运行时配置与首次启动向导**：首次启动自动进入 `/setup` 分步初始化并热切换存储，无需重启进程；核心管理员可在 `/admin/settings` 热更新站点信息、GitHub OAuth、市场开关、邮件服务（SMTP / Cloudflare Email）与同步策略。
 - **API 文档与机器可读契约**：`/docs/rest` 提供内置 REST API 文档与在线试用；`/openapi.json` 和 `/llms.txt` 按当前登录角色动态过滤端点。
 

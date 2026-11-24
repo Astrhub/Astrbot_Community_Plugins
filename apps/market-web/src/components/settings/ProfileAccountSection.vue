@@ -14,17 +14,17 @@ import {
   useMessage,
 } from "naive-ui";
 import {
-  GitBranchOutline,
   KeyOutline,
   LinkOutline,
   LockClosedOutline,
-  LogoGithub,
   MailOutline,
   PersonCircleOutline,
   SaveOutline,
   UnlinkOutline,
 } from "@vicons/ionicons5";
-import { getGitProviderLabel, githubRawUrl } from "@/utils/github";
+import GitProviderIcon from "@/components/GitProviderIcon.vue";
+import { usePluginStore } from "@/stores/plugins";
+import { getGitProviderLabel, resolveMyAvatarUrl } from "@/utils/github";
 import type { AuthConfig, OAuthIdentity, OAuthProviderKey, User } from "@/types";
 
 const githubName = defineModel("githubName", { type: String, default: "" });
@@ -133,8 +133,12 @@ const tierInfo = computed(() => {
 });
 
 const avatarLoadFailed = shallowRef(false);
+const pluginStore = usePluginStore();
 const profileAvatarUrl = computed(() =>
-  githubRawUrl(String(props.currentUser?.avatar_url || props.currentUser?.avatar || "").trim()),
+  resolveMyAvatarUrl(
+    String(props.currentUser?.avatar_url || props.currentUser?.avatar || "").trim(),
+    pluginStore.apiBaseUrl,
+  ),
 );
 const showProfileAvatar = computed(
   () => Boolean(profileAvatarUrl.value) && !avatarLoadFailed.value,
@@ -283,6 +287,7 @@ function confirmUnbind(identity: OAuthIdentity): void {
               :src="profileAvatarUrl"
               :alt="`${publicUsername || '当前用户'}的头像`"
               class="profile-avatar__image"
+              referrerpolicy="no-referrer"
               @error="avatarLoadFailed = true"
             />
             <NIcon v-else><PersonCircleOutline /></NIcon>
@@ -370,10 +375,7 @@ function confirmUnbind(identity: OAuthIdentity): void {
       <div class="oauth-list">
         <div v-for="row in oauthProviderRows" :key="row.provider" class="oauth-row">
           <div class="oauth-info">
-            <NIcon class="oauth-provider-icon">
-              <LogoGithub v-if="row.provider === 'github'" />
-              <GitBranchOutline v-else />
-            </NIcon>
+            <GitProviderIcon :provider="row.provider" :size="20" class="oauth-provider-icon" />
             <div>
               <strong>
                 {{ row.label }}

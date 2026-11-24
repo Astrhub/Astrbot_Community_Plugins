@@ -70,6 +70,7 @@ flowchart LR
 | `cdn.py` | 按插件可选 CDN 订阅状态、版本代次管理与多平台自动送审队列 |
 | `github_authorization.py` | 多平台 OAuth 仓库管理权限核验、独立主密钥 Fernet 加密凭据读写与发布前仓库身份/绑定复核 |
 | `git_sources/` | 已知 OAuth 第三方 Git 平台适配器（`GitLab.com`、`Gitee`、`AtomGit / GitCode`、`Gitea`）、严格 HTTPS 域名白名单、持久化加密 `CredentialStore`（令牌刷新轮转）与 OAuth / 仓库绑定路由 |
+| `media_proxy.py` | 海外平台（`GitLab.com` / `Gitea`）插件 Logo、README 仓库内图片与海外用户头像受限代理（白名单校验、栅格图片魔数嗅探、Redis/内存短缓存与弱 `ETag`/`304`） |
 | `plugin_identity.py` | 插件命名空间冲突异常与规范详情路径（`/plugin/{owner}/{name}`）生成 |
 | `openapi_filter.py` / `llms_txt.py` | 按当前登录角色过滤 `/openapi.json`（含 `components` 闭包）与生成 `/llms.txt` |
 | `env_file.py` | `.env` 文件解析与写回工具（供一次性 `/v1/setup` 使用） |
@@ -159,8 +160,10 @@ create_app(settings, store)
 | `GET` | `/v1/plugins/by-author/{username}/{name}` | 按作者用户名与插件名获取已上架插件详情 |
 | `GET` | `/v1/plugins/{id}` | 按插件 ID 获取详情（含评论树与点赞状态） |
 | `GET` | `/v1/plugins/{id}/readme` | 获取插件 README 缓存或实时内容 |
+| `GET` | `/v1/plugins/{id}/logo` · `/v1/plugins/{id}/readme-asset` | 代理海外平台（`GitLab.com` / `Gitea`）插件 Logo 与 README 仓库内图片（`public, max-age=3600`） |
 | `GET` | `/v1/authors` | 获取公开作者名及是否有已上架插件 |
 | `GET` | `/v1/authors/{username}/plugins` | 获取指定作者的已上架插件列表 |
+| `GET` | `/v1/authors/{username}/avatar` | 代理海外来源公开作者头像（严格域名白名单与栅格图片校验，`public, max-age=3600`） |
 | `GET` | `/v1/announcements` | 公告列表 |
 | `GET` | `/plugins.json` · `/plugins-md5.json` | AstrBot 插件源 Feed 与 MD5 摘要 |
 | `GET` | `/v1/astrbot/plugins(.json\|-md5.json)` | 带 `v1` 前缀的等价 AstrBot 插件源端点 |
@@ -185,6 +188,7 @@ create_app(settings, store)
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` / `PATCH` | `/v1/me` · `/v1/me/profile` | 获取当前用户信息（含 `account_tier`、OAuth 绑定列表）/ 更新资料与通知偏好 |
+| `GET` | `/v1/me/avatar` | 代理当前登录用户的海外 OAuth 头像（`private, no-store`） |
 | `POST` | `/v1/me/password` | 修改本地密码或 OAuth 用户首次设置本地密码 |
 | `POST` | `/v1/me/email/change/request` · `verify` | 修改或绑定登录邮箱（随 `EMAIL_VERIFICATION_REQUIRED` 开关决定是否需验证码） |
 | `GET` / `DELETE` | `/v1/me/oauth-identities[/{id}]` | 查看或解绑已绑定的 OAuth 身份（保留防锁死保护） |
@@ -200,7 +204,7 @@ create_app(settings, store)
 | `POST` | `/v1/plugins/submissions/metadata-preview` | 核验仓库权限后从 GitHub 预取 `metadata.yaml` |
 | `POST` | `/v1/plugins/submissions` | 提交新插件或更新已有插件 |
 | `PATCH` | `/v1/plugins/{id}` | 编辑插件元数据（所有者或管理员） |
-| `PATCH` | `/v1/plugins/{id}/cdn` | 开启或关闭插件社区源 CDN（核心管理员或所有者） |
+| `PATCH` | `/v1/plugins/{id}/cdn` | 开启或关闭插件社区源 CDN（核心管理员或所有者；管理员自有插件可切换白名单直发） |
 | `POST` | `/v1/plugins/{id}/request-list` · `unlist` | 申请上架 / 自主下架（所有者） |
 | `POST` | `/v1/plugins/{id}/refresh-github` · `readme/refresh` | 手动刷新仓库元数据或 README 缓存 |
 | `POST` | `/v1/plugins/{id}/like` · `unlike` | 插件点赞 / 取消点赞 |
@@ -327,7 +331,7 @@ create_app(settings, store)
 | `/` | `Home.vue` | 插件市场首页（支持分页与瀑布流切换、筛选与排序） |
 | `/plugin/:username/:name` | `PluginDetailsPage.vue` | 规范插件详情页（含运行时与客户端 SEO、JSON-LD、README 与评论；大小写或历史登录名别名 301 重定向） |
 | `/author/:username` | `AuthorPage.vue` | 作者公开插件页（大小写或历史登录名别名 301 重定向） |
-| `/submit` | `SubmitPlugin.vue` | 插件提交页（社区模式走 GitHub 仓库选择，本地模式支持管理员直填 URL） |
+| `/submit` | `SubmitPlugin.vue` | 插件提交页（社区模式顶部切换受支持 Git 平台，GitHub 侧支持持久批量一键导入已有插件；本地模式支持管理员直填 URL） |
 | `/setup` | `Setup.vue` | 首次安装向导（`noindex,nofollow`） |
 | `/admin` | `AdminLogin.vue` | 内部管理员登录页（`noindex,nofollow`） |
 | `/admin/settings` | `Settings.vue` | 核心管理员系统设置页（`/settings` 重定向至此，`noindex,nofollow`） |
@@ -341,7 +345,7 @@ create_app(settings, store)
 
 ### 关键组件
 
-- 公共与市场视图：`AppHeader`、`AppFooter`、`PluginCard`、`PluginDetails`（含站内 README 渲染与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`。
+- 公共与市场视图：`AppHeader`、`AppFooter`、`GitProviderIcon`、`PluginCard`、`PluginDetails`（含站内 README 渲染与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`。
 - 个人与后台设置（`components/settings/`）：`AccessKeyManager`、`AdminUserManagement`、`NotificationPreferencesSection`、`PersonalPluginManager`、`ProfileAccountSection`。
 - 审查工作台（`components/workbench/`）：`ArtifactSubmissionPanel`、`PluginReviewWorkspace`、`ReviewSummaryPanel`、`ReviewFileBrowser`、`ReviewDiffViewer`、`ReviewCommentThread`、`ReviewManualPanel`、`ReviewDecisionPanel`、`ReviewHistoryTimeline`、`ReviewPolicyPanel`。
 

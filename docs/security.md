@@ -116,6 +116,7 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 - 预检会拒绝路径穿越、绝对路径、符号链接、加密条目、Zip Bomb、超限文件数或体积、重复路径、缺失或重复 metadata、非法版本或插件名、Git LFS、submodule 以及原生可执行制品。
 - 仓库来源仅允许严格白名单内的公开 HTTPS 地址：`github.com`、`gitlab.com`（支持多层子组，深度上限 20）、`gitee.com`、`atomgit.com`（兼容 `gitcode.com` 并归一化为 `atomgit.com`）与 `gitea.com`，拒绝非 HTTPS、内嵌凭据、自定义端口、查询串、片段、路径穿越及任意未知主机。GitHub 优先抓取正式 Release ZIP 资产，其余分支/标签与第三方平台均先解析固定 40 位 commit SHA 后再通过官方归档 HTTPS 端点流式拉取（记录为 `source_type='git'`），重定向仅允许白名单主机且跨主机自动剥离 `Authorization` 请求头。
 - 运行时烟雾测试通过独立 `runtime-runner` 和一次性隔离容器执行，不复用 API 或 `artifact-worker` 进程。
+- **管理员 CDN 白名单直发**：`cdn_whitelist` 仅面向 `admin` / `core_admin` 角色的本人名下插件开放（非管理员请求在绑定前直接返回 `403 cdn_whitelist_admin_only`，对非管理员所有者的插件开启返回 `403 cdn_whitelist_admin_owner_required`）。开启后仍须完整通过 `PrecheckStage` 压缩包安全与 `metadata.yaml` 校验，随后由工作进程实时复核所有者与提交者仍具备管理员角色，写入可审计的 `review_decisions`（`action="auto_approve"`、`source="admin"`、`metadata={"cdn_whitelist": true}`）再进入 `publish`；一旦管理员被降权，自动回退至常规静态与安全审查管线。
 - LLM 分析结果仅作为辅助建议展示，不能直接背书或绕过人工决策。
 
 已发布对象路径固定为 `/{author_id}/{repo_name}/{version}/{plugin_name}-{version}-{suffix}.zip`，其中 `suffix` 首次生成后持久化。目标路径已存在时，仅在 SHA-256 完全一致时视为幂等成功，否则发布失败。
@@ -128,6 +129,7 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 - **仓库地址校验**：必须为受支持 OAuth Git 平台（`github.com`、`gitlab.com`、`gitee.com`、`atomgit.com` / `gitcode.com`、`gitea.com`）的公开 HTTPS 仓库地址；社区模式下提交者必须通过对应平台 OAuth 证明仓库维护权限并写入 `market_git_repository_bindings`，本地单进程模式下仅管理员在不启用 CDN 时可直填白名单内的公开仓库地址。
 - **分类与标签限制**：插件分类必须在官方白名单内，标签数量受 `MAX_PLUGIN_TAGS`（默认 8）限制。
 - **Markdown 与预览清洗**：前端先通过 `marked` 渲染 Markdown，再由 `DOMPurify` 清洗输出，并在写入 `v-html` 前再次执行最终 `DOMPurify` 门禁；图片预览强制校验 `http(s)://` 协议。
+- **海外媒体与头像受限代理**：服务端仅对已登记的海外平台（`GitLab.com`、`Gitea`）插件 Logo（`/v1/plugins/{id}/logo`）、README 仓库内图片（`/v1/plugins/{id}/readme-asset`）与白名单海外头像域名（`/v1/authors/{username}/avatar`、`/v1/me/avatar`）提供代理；国内平台（Gitee / AtomGit）保持浏览器直连并设置 `referrerpolicy="no-referrer"`，GitHub 沿用既有 jsDelivr / raw 规则。代理接口不接受任意 URL，强制校验仓库内相对路径、文件大小上限与栅格图片魔数（仅放行 PNG/JPEG/GIF/WebP/AVIF，拒绝 SVG/HTML），并输出 `X-Content-Type-Options: nosniff`。
 - **评论软删除**：删除根评论会同时隐藏其下回复（通过 `deleted` 标记与部分索引 `WHERE deleted = false` 实现），保留服务端审计记录。
 - **审查内容最小披露**：源码、diff、扫描证据和运行日志仅通过所有者或管理员鉴权接口按需读取。状态通知邮件使用固定模板，批准与发布邮件仅附带经过长度限制、去除代码块并脱敏敏感字段的管理员评价，不透出原始源码、行评论、内部路径、对象 key 或扫描证据。
 

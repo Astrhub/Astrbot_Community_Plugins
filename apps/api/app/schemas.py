@@ -7,6 +7,7 @@ from .config import DEFAULT_EMAIL_FROM_NAME, normalize_smtp_auth_method, normali
 
 class PluginSubmission(BaseModel):
     cdn_enabled: bool = Field(default=False, strict=True)
+    cdn_whitelist: bool = Field(default=False, strict=True)
     repository_id: str = ""
     name: str
     display_name: str | None = None
@@ -79,6 +80,7 @@ class PluginPatch(BaseModel):
 
 class PluginCdnPayload(BaseModel):
     enabled: bool = Field(strict=True)
+    whitelist: bool | None = Field(default=None, strict=True)
 
 
 class PluginUnlistPayload(BaseModel):

@@ -18,9 +18,7 @@ import {
   useMessage,
 } from "naive-ui";
 import {
-  GitBranchOutline,
   LogOutOutline,
-  LogoGithub,
   NotificationsOutline,
   PersonOutline,
   SettingsOutline,
@@ -28,8 +26,9 @@ import {
 } from "@vicons/ionicons5";
 import ThemeModeButton from "./ThemeModeButton.vue";
 import AnnouncementButton from "./AnnouncementButton.vue";
+import GitProviderIcon from "./GitProviderIcon.vue";
 import { usePluginStore } from "../stores/plugins";
-import { getGitProviderLabel, githubRawUrl } from "../utils/github";
+import { getGitProviderLabel, resolveMyAvatarUrl } from "../utils/github";
 import type { OAuthProviderKey, PublicOAuthProviderInfo } from "../types";
 
 const router = useRouter();
@@ -118,7 +117,10 @@ const displayUserName = computed(
     "已登录",
 );
 const userAvatarUrl = computed(() =>
-  githubRawUrl(String(headerUser.value?.avatar_url || headerUser.value?.avatar || "").trim()),
+  resolveMyAvatarUrl(
+    String(headerUser.value?.avatar_url || headerUser.value?.avatar || "").trim(),
+    store.apiBaseUrl,
+  ),
 );
 const showUserAvatar = computed(() => Boolean(userAvatarUrl.value) && !avatarLoadFailed.value);
 const authConfig = computed(() => siteConfig.value.auth);
@@ -468,6 +470,7 @@ async function handleUserMenuSelect(key: string): Promise<void> {
                 :src="userAvatarUrl"
                 alt=""
                 class="user-avatar__image"
+                referrerpolicy="no-referrer"
                 @error="avatarLoadFailed = true"
               />
               <n-icon v-else><person-outline /></n-icon>
@@ -704,10 +707,7 @@ async function handleUserMenuSelect(key: string): Promise<void> {
             @click="handleOAuthLogin(item.provider)"
           >
             <template #icon>
-              <n-icon>
-                <logo-github v-if="item.provider === 'github'" />
-                <git-branch-outline v-else />
-              </n-icon>
+              <git-provider-icon :provider="item.provider" :size="16" />
             </template>
             {{ item.label }} 登录 / 注册
           </n-button>

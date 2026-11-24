@@ -32,6 +32,7 @@ _PUBLIC_SECTION = """\
 - 获取插件详情：GET /v1/plugins/{plugin_id}
 - 获取公开作者列表：GET /v1/authors
 - 获取作者已上架插件：GET /v1/authors/{username}/plugins
+- 获取海外平台插件图标/README 图片/作者头像代理：GET /v1/plugins/{plugin_id}/logo · GET /v1/plugins/{plugin_id}/readme-asset · GET /v1/authors/{username}/avatar
 - 获取站点配置：GET /v1/site
 - 获取公告：GET /v1/announcements
 - 获取插件源（机器可读）：GET /plugins.json

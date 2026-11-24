@@ -9,6 +9,7 @@ import {
   RefreshOutline,
 } from "@vicons/ionicons5";
 import FieldHint from "@/components/FieldHint.vue";
+import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import { useExternalOpenConfirm } from "@/composables/useExternalOpenConfirm";
 import { PLUGIN_CATEGORY_LABELS, PLUGIN_CATEGORY_OPTIONS } from "@/stores/plugins";
 import type { Plugin, PluginCategory, PluginStatus } from "@/types";
@@ -44,12 +45,16 @@ const props = withDefaults(
     loading?: boolean;
     busyIds?: Record<string, string>;
     maxTags?: number;
+    isAdminUser?: boolean;
+    apiBaseUrl?: string;
   }>(),
   {
     plugins: () => [],
     loading: false,
     busyIds: () => ({}),
     maxTags: 8,
+    isAdminUser: false,
+    apiBaseUrl: "",
   },
 );
 
@@ -58,7 +63,7 @@ const emit = defineEmits<{
   savePlugin: [payload: SavePluginPayload];
   requestList: [plugin: Plugin];
   unlist: [plugin: Plugin];
-  toggleCdn: [payload: { plugin: Plugin; enabled: boolean }];
+  toggleCdn: [payload: { plugin: Plugin; enabled: boolean; whitelist?: boolean }];
 }>();
 
 const { confirmExternalOpen } = useExternalOpenConfirm();
@@ -202,11 +207,12 @@ function savePlugin(plugin: Plugin): void {
         <article v-for="plugin in plugins" :key="plugin.id" class="pm-row">
           <div class="pm-head">
             <img
-              :src="resolvePluginLogoUrl(plugin)"
+              :src="resolvePluginLogoUrl(plugin, props.apiBaseUrl)"
               :alt="`${pluginTitle(plugin)} 插件图标`"
               class="pm-logo"
               width="38"
               height="38"
+              referrerpolicy="no-referrer"
               @error="setDefaultPluginLogo"
             />
 
@@ -228,6 +234,10 @@ function savePlugin(plugin: Plugin): void {
                     class="repo-link"
                     @click="confirmExternalOpen(String(plugin.repo))"
                   >
+                    <git-provider-icon
+                      :provider="plugin.repo_provider || detectGitProvider(plugin.repo) || 'github'"
+                      :size="12"
+                    />
                     {{
                       getGitProviderLabel(plugin.repo_provider || detectGitProvider(plugin.repo))
                     }}
@@ -295,9 +305,28 @@ function savePlugin(plugin: Plugin): void {
               :loading="busyAction(plugin) === 'cdn'"
               @update:value="(enabled: boolean) => emit('toggleCdn', { plugin, enabled })"
             />
+            <template v-if="isAdminUser && plugin.cdn_enabled === true">
+              <span :id="`cdn-wl-label-${pluginKey(plugin)}`" class="pm-cdn-wl-label">
+                白名单直发
+              </span>
+              <n-switch
+                :value="plugin.cdn_whitelist === true"
+                :aria-labelledby="`cdn-wl-label-${pluginKey(plugin)}`"
+                :disabled="isBusy(plugin)"
+                :loading="busyAction(plugin) === 'cdn'"
+                @update:value="
+                  (whitelist: boolean) => emit('toggleCdn', { plugin, enabled: true, whitelist })
+                "
+              />
+            </template>
             <p>
               开启后每次新版本都会自动送审，通过前不提供该版本的 CDN 链接；关闭后仍可通过原 Git
               仓库安装，不影响插件上架。
+              <template
+                v-if="isAdminUser && plugin.cdn_enabled === true && plugin.cdn_whitelist === true"
+              >
+                当前已开启管理员白名单直发，新版本完成基础预检后将跳过审查直接发布。
+              </template>
               <template
                 v-if="plugin.repo && !isGithubRepoUrl(plugin.repo) && plugin.cdn_enabled !== true"
               >
@@ -519,6 +548,9 @@ function savePlugin(plugin: Plugin): void {
 }
 
 .repo-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 0;
   color: var(--primary-color);
   font: inherit;
@@ -526,6 +558,10 @@ function savePlugin(plugin: Plugin): void {
   background: transparent;
   border: 0;
   cursor: pointer;
+}
+
+.pm-cdn-wl-label {
+  margin-left: 8px;
 }
 
 .repo-link:hover,

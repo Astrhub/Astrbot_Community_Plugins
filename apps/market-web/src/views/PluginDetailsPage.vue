@@ -7,9 +7,7 @@ import {
   ArrowBackOutline,
   ChatbubbleEllipsesOutline,
   CopyOutline,
-  GitBranchOutline,
   HeartOutline,
-  LogoGithub,
   StarSharp,
 } from "@vicons/ionicons5";
 import { PLUGIN_CATEGORY_LABELS, usePluginStore } from "../stores/plugins";
@@ -25,6 +23,7 @@ import { useSeo, useSeoContext } from "../composables/useSeo";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
 import AppFooter from "../components/AppFooter.vue";
 import AppHeader from "../components/AppHeader.vue";
+import GitProviderIcon from "../components/GitProviderIcon.vue";
 import { pluginDetailPath } from "../utils/pluginRoute";
 
 const PluginDetails = defineAsyncComponent(() => import("../components/PluginDetails.vue"));
@@ -204,10 +203,11 @@ function updatePlugin(updated: PluginDetail): void {
           <section class="plugin-intro" aria-labelledby="plugin-title">
             <div class="plugin-intro__identity">
               <img
-                :src="resolvePluginLogoUrl(plugin)"
+                :src="resolvePluginLogoUrl(plugin, store.apiBaseUrl)"
                 :alt="`${displayName} 插件图标`"
                 width="88"
                 height="88"
+                referrerpolicy="no-referrer"
                 @error="setDefaultPluginLogo"
               />
               <div class="plugin-intro__copy">
@@ -279,10 +279,7 @@ function updatePlugin(updated: PluginDetail): void {
               <span v-else class="sidebar-muted">点赞已关闭</span>
               <n-button v-if="plugin.repo" secondary @click="confirmExternalOpen(plugin.repo)">
                 <template #icon>
-                  <n-icon>
-                    <logo-github v-if="repoProvider === 'github'" />
-                    <git-branch-outline v-else />
-                  </n-icon>
+                  <git-provider-icon :provider="repoProvider" :size="16" />
                 </template>
                 查看 {{ repoProviderLabel }} 仓库
               </n-button>

@@ -4,7 +4,10 @@ import {
   detectGitProvider,
   getGitProviderLabel,
   isGithubRepoUrl,
+  isOverseasAvatarUrl,
   isSupportedGitRepoUrl,
+  resolveAuthorAvatarUrl,
+  resolveMyAvatarUrl,
   resolvePluginLogoUrl,
   setDefaultPluginLogo,
 } from "./github";
@@ -66,6 +69,37 @@ describe("multi-platform Git URL helpers", () => {
     expect(isGithubRepoUrl("https://github.com/alice/astrbot_plugin_a")).toBe(true);
     expect(isGithubRepoUrl("https://gitlab.com/alice/astrbot_plugin_b")).toBe(false);
     expect(getGitProviderLabel("atomgit")).toBe("AtomGit");
+  });
+
+  it("proxies GitLab/Gitea logos and overseas avatars while keeping Gitee/AtomGit direct", () => {
+    expect(
+      resolvePluginLogoUrl(
+        {
+          id: "astrbot_plugin_gl",
+          repo: "https://gitlab.com/team/astrbot_plugin_gl",
+          logo: "https://gitlab.com/team/astrbot_plugin_gl/-/raw/main/logo.png",
+        },
+        "https://market.example.com",
+      ),
+    ).toBe("https://market.example.com/v1/plugins/astrbot_plugin_gl/logo");
+
+    expect(
+      resolvePluginLogoUrl({
+        id: "astrbot_plugin_ge",
+        repo: "https://gitee.com/alice/astrbot_plugin_ge",
+        logo: "https://gitee.com/alice/astrbot_plugin_ge/raw/master/logo.png",
+      }),
+    ).toBe("https://gitee.com/alice/astrbot_plugin_ge/raw/master/logo.png");
+
+    expect(isOverseasAvatarUrl("https://gitlab.com/uploads/avatar.png")).toBe(true);
+    expect(isOverseasAvatarUrl("https://gitea.com/avatars/123")).toBe(true);
+    expect(isOverseasAvatarUrl("https://gitee.com/uploads/avatar.png")).toBe(false);
+    expect(
+      resolveAuthorAvatarUrl("https://gitlab.com/uploads/a.png", "gl_alice", "https://m.test"),
+    ).toBe("https://m.test/v1/authors/gl_alice/avatar");
+    expect(resolveMyAvatarUrl("https://gitea.com/avatars/1", "https://m.test")).toBe(
+      "https://m.test/v1/me/avatar",
+    );
   });
 
   it("rejects arbitrary hosts, non-https URLs, credentials, query params, and traversal", () => {

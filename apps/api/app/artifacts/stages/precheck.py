@@ -203,6 +203,35 @@ class PrecheckStage:
                     },
                 },
             )
+        refreshed_artifact = await context.repository.get_artifact(str(context.artifact["id"]))
+        if (
+            refreshed_artifact
+            and refreshed_artifact.get("cdn_enabled") is True
+            and refreshed_artifact.get("cdn_whitelist") is True
+            and str(refreshed_artifact.get("owner_role") or "") in {"admin", "core_admin"}
+            and str(refreshed_artifact.get("submitter_role") or "") in {"admin", "core_admin"}
+            and hasattr(context.repository, "whitelist_approve_artifact")
+        ):
+            try:
+                await context.repository.whitelist_approve_artifact(
+                    str(context.artifact["id"]),
+                    reason="管理员 CDN 白名单直发，跳过安全审查",
+                    expected_repo_version=str(refreshed_artifact.get("repo_version") or ""),
+                    expected_normalized_version=result.normalized_version,
+                    expected_version=result.version,
+                    idempotency_key=f"cdn-whitelist-approve:{context.artifact['id']}",
+                    precheck_run_id=str(run["id"]),
+                )
+                return StageOutcome.completed(
+                    "管理员 CDN 白名单直发，已跳过审查并进入发布",
+                    coverage={
+                        "file_count": len(result.members),
+                        "tree_sha256": result.tree_sha256,
+                        "cdn_whitelist": True,
+                    },
+                )
+            except (ValueError, KeyError):
+                pass
         await context.repository.transition_review_status(
             str(context.artifact["id"]), ReviewStatus.SCANNING.value
         )

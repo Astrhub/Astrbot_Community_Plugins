@@ -908,14 +908,18 @@ export const usePluginStore = defineStore("plugins", () => {
     return normalizePluginItem(data, 0);
   }
 
-  async function updatePluginCdn(pluginId: number | string, enabled: boolean): Promise<Plugin> {
+  async function updatePluginCdn(
+    pluginId: number | string,
+    enabled: boolean,
+    whitelist?: boolean,
+  ): Promise<Plugin> {
     const response = await fetch(
       `${apiBaseUrl}/v1/plugins/${encodeURIComponent(String(pluginId))}/cdn`,
       {
         method: "PATCH",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify(whitelist === undefined ? { enabled } : { enabled, whitelist }),
       },
     );
     const data = await response.json().catch(() => ({}));

@@ -15,6 +15,7 @@ import {
 } from "naive-ui";
 import { ArrowBack } from "@vicons/ionicons5";
 import AccessKeyManager from "@/components/settings/AccessKeyManager.vue";
+import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import NotificationPreferencesSection from "@/components/settings/NotificationPreferencesSection.vue";
 import PersonalPluginManager from "@/components/settings/PersonalPluginManager.vue";
 import ProfileAccountSection from "@/components/settings/ProfileAccountSection.vue";
@@ -242,14 +243,32 @@ async function withPluginBusy(plugin, action, task) {
   }
 }
 
-async function togglePluginCdn({ plugin, enabled }: { plugin: Plugin; enabled: boolean }) {
+async function togglePluginCdn({
+  plugin,
+  enabled,
+  whitelist,
+}: {
+  plugin: Plugin;
+  enabled: boolean;
+  whitelist?: boolean;
+}) {
   if (pluginBusyIds[plugin.id]) return;
   try {
-    const updated = await withPluginBusy(plugin, "cdn", () => updatePluginCdn(plugin.id, enabled));
+    const updated = await withPluginBusy(plugin, "cdn", () =>
+      updatePluginCdn(plugin.id, enabled, whitelist),
+    );
+    if (whitelist !== undefined && updated.cdn_enabled) {
+      message.success(
+        updated.cdn_whitelist
+          ? "已开启管理员 CDN 白名单直发，后续发版将跳过审查直接发布"
+          : "已关闭管理员 CDN 白名单直发，后续发版将按正常流程审查",
+      );
+      return;
+    }
     message.success(
       updated.cdn_enabled
         ? "已开启 CDN，未审查的新版本会自动送审"
-        : "已关闭 CDN，插件仍可通过 GitHub 安装",
+        : "已关闭 CDN，插件仍可通过原 Git 仓库安装",
     );
   } catch (error) {
     message.error(error instanceof Error ? error.message : "更新 CDN 设置失败");
@@ -493,6 +512,9 @@ onMounted(async () => {
                     style="margin-left: 8px; margin-top: 4px"
                     @click="handleConnectOAuth(item.provider)"
                   >
+                    <template #icon>
+                      <GitProviderIcon :provider="item.provider" :size="14" />
+                    </template>
                     绑定 {{ item.label }}
                   </NButton>
                 </template>
@@ -502,6 +524,8 @@ onMounted(async () => {
                 :loading="loadingPlugins"
                 :busy-ids="pluginBusyIds"
                 :max-tags="maxPluginTags"
+                :is-admin-user="isAdminUser"
+                :api-base-url="store.apiBaseUrl"
                 @refresh="refreshMyPlugins"
                 @save-plugin="savePluginMetadata"
                 @toggle-cdn="togglePluginCdn"

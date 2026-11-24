@@ -136,10 +136,7 @@
         <n-space justify="end" :size="12">
           <n-button secondary type="primary" @click="openUrl(plugin?.repo)">
             <template #icon>
-              <n-icon>
-                <logo-github v-if="isGithubRepo" />
-                <git-branch-outline v-else />
-              </n-icon>
+              <git-provider-icon :provider="repoProvider" :size="16" />
             </template>
             查看 {{ repoProviderLabel }} 仓库
           </n-button>
@@ -227,11 +224,13 @@ import { storeToRefs } from "pinia";
 import { usePluginStore } from "../stores/plugins";
 import PluginComment from "./PluginComment.vue";
 import FieldHint from "./FieldHint.vue";
+import GitProviderIcon from "./GitProviderIcon.vue";
 import {
   detectGitProvider,
   getGitProviderLabel,
   githubRawUrl,
   isGithubRepoUrl,
+  isOverseasProxyProvider,
 } from "../utils/github";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
 import { buildReadmeBrowserUrl, usePluginReadme } from "../composables/usePluginReadme";
@@ -240,9 +239,7 @@ import {
   ArrowBackOutline,
   DocumentTextOutline,
   ExtensionPuzzleOutline,
-  GitBranchOutline,
   HeartOutline,
-  LogoGithub,
   RefreshOutline,
 } from "@vicons/ionicons5";
 
@@ -329,12 +326,12 @@ const MAX_INLINE_FILE_SIZE = 300000;
 const commentsEnabled = computed(() => Boolean(siteConfig.value.market?.comments_enabled));
 const likesEnabled = computed(() => Boolean(siteConfig.value.market?.likes_enabled));
 const activePlugin = computed(() => detail.value || props.plugin || {});
-const isGithubRepo = computed(() => isGithubRepoUrl(activePlugin.value?.repo));
-const repoProviderLabel = computed(() =>
-  getGitProviderLabel(
+const repoProvider = computed(
+  () =>
     activePlugin.value?.repo_provider || detectGitProvider(activePlugin.value?.repo) || "github",
-  ),
 );
+const isGithubRepo = computed(() => isGithubRepoUrl(activePlugin.value?.repo));
+const repoProviderLabel = computed(() => getGitProviderLabel(repoProvider.value));
 const canGoBackReadme = computed(() => readmeHistory.value.length > 0);
 const isViewingRepositoryFile = computed(() => readmeView.value.kind !== "readme");
 const readmeNavigationVisible = computed(
@@ -834,6 +831,7 @@ function renderReadmeHtml(markdown, context) {
   container.querySelectorAll("img[src]").forEach((image) => {
     image.src = resolveReadmeUrl(image.getAttribute("src"), context, basePath, true);
     image.loading = "lazy";
+    image.referrerPolicy = "no-referrer";
   });
 
   container.querySelectorAll("a[href]").forEach((link) => {
@@ -1108,11 +1106,51 @@ function countChars(value, char) {
   return [...value].filter((item) => item === char).length;
 }
 
+function extractOverseasRepoAssetPath(url) {
+  const repoUrl = String(activePlugin.value?.repo || "").replace(/\/+$/, "");
+  if (!repoUrl) return "";
+  try {
+    const parsed = new URL(url);
+    const repoParsed = new URL(repoUrl);
+    if (parsed.hostname.toLowerCase() !== repoParsed.hostname.toLowerCase()) return "";
+    const repoPrefix = repoParsed.pathname.replace(/\/+$/, "");
+    if (!parsed.pathname.startsWith(`${repoPrefix}/`)) return "";
+    const rest = parsed.pathname.slice(repoPrefix.length + 1);
+    const gitlabMatch = rest.match(/^-\/(?:raw|blob)\/[^/]+\/(.+)$/);
+    if (gitlabMatch?.[1]) return decodeURIComponent(gitlabMatch[1]);
+    const giteaMatch = rest.match(/^(?:raw|src)\/(?:branch|commit|tag)\/[^/]+\/(.+)$/);
+    if (giteaMatch?.[1]) return decodeURIComponent(giteaMatch[1]);
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function buildOverseasAssetProxyUrl(assetPath) {
+  const pluginId = activePlugin.value?.id;
+  if (!pluginId || !assetPath) return "";
+  if (!/\.(?:png|jpe?g|gif|webp|avif)$/i.test(assetPath)) return "";
+  return `${store.apiBaseUrl}/v1/plugins/${encodeURIComponent(String(pluginId))}/readme-asset?path=${encodeURIComponent(assetPath)}`;
+}
+
 function resolveReadmeUrl(url, context, basePath, raw) {
   if (!url || /^(mailto:|#)/i.test(url)) return url;
   const absoluteUrl = normalizeAbsoluteReadmeUrl(url, raw);
-  if (absoluteUrl) return absoluteUrl;
+  if (absoluteUrl) {
+    if (raw && isOverseasProxyProvider(repoProvider.value)) {
+      const sameRepoAsset = extractOverseasRepoAssetPath(absoluteUrl);
+      const proxied = buildOverseasAssetProxyUrl(sameRepoAsset);
+      if (proxied) return proxied;
+    }
+    return absoluteUrl;
+  }
   if (!context?.owner || !context?.repo) {
+    const [path] = splitReadmeUrl(url);
+    if (raw && path && isOverseasProxyProvider(repoProvider.value)) {
+      const cleanPath = normalizeReadmePath(path.startsWith("/") ? "" : basePath, path);
+      const proxied = buildOverseasAssetProxyUrl(cleanPath);
+      if (proxied) return proxied;
+    }
     const fallbackBase = readmeSource.value?.source_url || activePlugin.value?.repo || "";
     if (!fallbackBase) return url;
     try {

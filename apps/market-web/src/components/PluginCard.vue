@@ -46,7 +46,7 @@ const formattedVersion = computed(() => {
   const version = String(props.plugin.version || "1.0.0");
   return version.startsWith("v") ? version : `v${version}`;
 });
-const logoUrl = computed(() => resolvePluginLogoUrl(props.plugin));
+const logoUrl = computed(() => resolvePluginLogoUrl(props.plugin, store.apiBaseUrl));
 const isNew = computed(() => isNewPlugin(props.plugin.created_at));
 const isAdminUser = computed(() =>
   ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
@@ -136,6 +136,7 @@ async function unlistPlugin(): Promise<void> {
         width="48"
         height="48"
         loading="lazy"
+        referrerpolicy="no-referrer"
         @error="setDefaultPluginLogo"
       />
       <div class="plugin-identity">

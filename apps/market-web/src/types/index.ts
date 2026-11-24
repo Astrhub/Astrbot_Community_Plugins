@@ -114,6 +114,8 @@ export interface Plugin {
   submission_id?: number | string;
   download_url?: string;
   cdn_enabled?: boolean;
+  cdn_generation?: number;
+  cdn_whitelist?: boolean;
   astrbot_version?: string;
   support_platforms?: string[];
   updated_at?: string;

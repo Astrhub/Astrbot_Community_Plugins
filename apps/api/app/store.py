@@ -1228,7 +1228,7 @@ class InMemoryMarketStore:
                 **(
                     {
                         key: existing[key]
-                        for key in ("cdn_enabled", "cdn_generation")
+                        for key in ("cdn_enabled", "cdn_generation", "cdn_whitelist")
                         if key in existing
                     }
                     if existing
@@ -4368,7 +4368,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
                                CASE WHEN market_plugins.metadata ? 'cdn_enabled'
                                     THEN jsonb_build_object(
                                         'cdn_enabled', market_plugins.metadata->'cdn_enabled',
-                                        'cdn_generation', COALESCE(market_plugins.metadata->'cdn_generation', '0'::jsonb))
+                                        'cdn_generation', COALESCE(market_plugins.metadata->'cdn_generation', '0'::jsonb),
+                                        'cdn_whitelist', COALESCE(market_plugins.metadata->'cdn_whitelist', 'false'::jsonb))
                                     ELSE '{}'::jsonb END,
                            updated_at = now()
                      WHERE market_plugins.owner_user_id = EXCLUDED.owner_user_id

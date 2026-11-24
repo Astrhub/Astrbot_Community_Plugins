@@ -39,6 +39,10 @@ def cdn_enabled(plugin: Mapping[str, Any]) -> bool:
     return plugin.get("cdn_enabled", True) is True
 
 
+def cdn_whitelist(plugin: Mapping[str, Any]) -> bool:
+    return plugin.get("cdn_whitelist") is True
+
+
 class CdnPublicationError(ValueError):
     code = "cdn_disabled_or_changed"
 
@@ -115,9 +119,12 @@ class CdnSubscriptions:
         actor: Mapping[str, Any],
         authorization: Mapping[str, Any] | None = None,
         queue_review: bool = True,
+        whitelist: bool | None = None,
     ) -> dict[str, Any]:
         if enabled:
             ensure_cdn_submission_allowed(actor)
+        if whitelist is True and not is_admin(actor):
+            raise cdn_error("cdn_whitelist_admin_only", "CDN 白名单直发仅限管理员使用", 403)
         if hasattr(self.store, "_pool"):
             async with self.store._pool().acquire() as connection:
                 async with connection.transaction():
@@ -126,18 +133,33 @@ class CdnSubscriptions:
                     )
                     plugin = self.store._plugin_from_record(row) if row else None
                     self._check_actor(plugin, actor)
+                    effective_whitelist = await self._resolve_whitelist(
+                        plugin, enabled=enabled, actor=actor, whitelist=whitelist
+                    )
                     old = await connection.fetchrow(
                         "SELECT * FROM plugin_cdn_subscriptions WHERE plugin_id=$1 FOR UPDATE",
                         plugin_id,
                     )
                     values = self._configuration(plugin, old, enabled, authorization, queue_review)
                     if values.get("unchanged"):
+                        if effective_whitelist != cdn_whitelist(plugin):
+                            await connection.execute(
+                                """UPDATE market_plugins SET metadata=metadata || $2::jsonb, updated_at=now()
+                                   WHERE id=$1""",
+                                plugin_id,
+                                {"cdn_whitelist": effective_whitelist},
+                            )
+                            return await store_call(self.store, "get_plugin", plugin_id)
                         return plugin
                     await connection.execute(
                         """UPDATE market_plugins SET metadata=metadata || $2::jsonb, updated_at=now()
                            WHERE id=$1""",
                         plugin_id,
-                        {"cdn_enabled": enabled, "cdn_generation": values["generation"]},
+                        {
+                            "cdn_enabled": enabled,
+                            "cdn_generation": values["generation"],
+                            "cdn_whitelist": effective_whitelist,
+                        },
                     )
                     await connection.execute(
                         """INSERT INTO plugin_cdn_subscriptions
@@ -157,10 +179,20 @@ class CdnSubscriptions:
         async with self.lock:
             plugin = await store_call(self.store, "get_plugin", plugin_id)
             self._check_actor(plugin, actor)
+            effective_whitelist = await self._resolve_whitelist(
+                plugin, enabled=enabled, actor=actor, whitelist=whitelist
+            )
             values = self._configuration(
                 plugin, self.rows.get(plugin_id), enabled, authorization, queue_review
             )
             if values.get("unchanged"):
+                if effective_whitelist != cdn_whitelist(plugin):
+                    return await store_call(
+                        self.store,
+                        "update_plugin_metadata",
+                        plugin_id,
+                        {"cdn_whitelist": effective_whitelist},
+                    )
                 return plugin
             self.rows[plugin_id] = {
                 **values,
@@ -174,8 +206,41 @@ class CdnSubscriptions:
                 self.store,
                 "update_plugin_metadata",
                 plugin_id,
-                {"cdn_enabled": enabled, "cdn_generation": values["generation"]},
+                {
+                    "cdn_enabled": enabled,
+                    "cdn_generation": values["generation"],
+                    "cdn_whitelist": effective_whitelist,
+                },
             )
+
+    async def _resolve_whitelist(
+        self,
+        plugin: Mapping[str, Any],
+        *,
+        enabled: bool,
+        actor: Mapping[str, Any],
+        whitelist: bool | None,
+    ) -> bool:
+        if not enabled:
+            return False
+        desired = cdn_whitelist(plugin) if whitelist is None else bool(whitelist)
+        if not desired:
+            return False
+        if not is_admin(actor):
+            if whitelist is True:
+                raise cdn_error("cdn_whitelist_admin_only", "CDN 白名单直发仅限管理员使用", 403)
+            return False
+        owner_id = str(plugin.get("owner_user_id") or "").strip()
+        owner = await store_call(self.store, "get_user_by_id", owner_id) if owner_id else None
+        if not owner or not is_admin(owner):
+            if whitelist is True:
+                raise cdn_error(
+                    "cdn_whitelist_admin_owner_required",
+                    "CDN 白名单直发仅支持管理员名下的插件",
+                    403,
+                )
+            return False
+        return True
 
     @staticmethod
     def _check_actor(plugin: Mapping[str, Any] | None, actor: Mapping[str, Any]) -> None:

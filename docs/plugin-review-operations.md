@@ -76,6 +76,7 @@ Compose 默认将 Runner 指向 `/run/user/10001/docker.sock`、UID/GID `10001:1
 插件提交默认不开启 CDN，不触发包审查，按站点自动通过开关直接上架或进入人工上架审核。勾选社区源 CDN 后，插件进入逐版本包审查流程；如果审查服务不可用，后端会明确拒绝开启，不会静默降级为免审。
 
 - **开关权限与影响**：插件所有者可在个人设置关闭自有插件的 CDN，核心管理员可管理任意插件的 CDN，普通管理员仅能管理自有插件。关闭 CDN 无需重新授权平台 OAuth，插件维持原有上架状态，历史包与审计记录保留；Feed 最多受 300 秒缓存影响，之后不再输出 CDN 链接，已有历史文件不会自动删除。重新开启 CDN 须再次验证对应平台仓库管理权限，并为当前未审版本创建送审请求。
+- **管理员白名单直发（`cdn_whitelist`）**：仅限 `admin` / `core_admin` 在提交或 `PATCH /v1/plugins/{id}/cdn` 中为本人名下的 CDN 插件启用。启用后仍会完整执行 `PrecheckStage` 压缩包完整性与元数据校验，随后由 `artifact-worker` 实时复核插件所有者与提交者的管理员角色并写入 `review_decisions`（`action="auto_approve"`、`metadata={"cdn_whitelist": true}`），直接进入 `publish` 阶段；若管理员被降权或关闭白名单，将自动回到常规包审查流程。
 - **自动跟踪与发布复核**：后台元数据同步发现新版本后会自动送审；GitHub 优先抓取正式 Release ZIP 资产，第三方 OAuth 平台（GitLab.com / Gitee / AtomGit / Gitea）在通过持久凭据自动刷新并复核 `market_git_repository_bindings` 有效性与代次后，固定默认分支 40 位 commit SHA 拉取官方 HTTPS 归档（`source_type='git'`）。任务按版本去重；若管理员通过 `/v1/admin/git-bindings/{id}/revoke` 或 `transfer` 撤销或转移仓库绑定，旧代次待发布任务会被立即阻断。发布事务提交前会再次核对 CDN 开关、授权代次与绑定状态。
 - **历史迁移兼容**：迁移 `20260927_007_optional_cdn` 为既有已发布 artifact 的插件保留开启状态，其余插件默认关闭；缺少完整授权快照的历史订阅保留既有包，后续新版本送审需重新开启并完成仓库权限授权。
 

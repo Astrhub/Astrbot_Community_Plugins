@@ -226,7 +226,10 @@
 
                 <section class="settings-section">
                   <div class="section-title">
-                    <h2>GitHub OAuth</h2>
+                    <h2 class="provider-heading">
+                      <git-provider-icon provider="github" :size="18" />
+                      GitHub OAuth
+                    </h2>
                     <p>用于第三方登录、插件仓库归属识别和指定组织管理员。</p>
                   </div>
                   <div class="form-grid">
@@ -273,7 +276,10 @@
                   class="settings-section"
                 >
                   <div class="section-title">
-                    <h2>{{ providerItem.title }}</h2>
+                    <h2 class="provider-heading">
+                      <git-provider-icon :provider="providerItem.key" :size="18" />
+                      {{ providerItem.title }}
+                    </h2>
                     <p>{{ providerItem.description }}</p>
                   </div>
                   <div class="form-grid">
@@ -770,6 +776,7 @@ import {
 import { ArrowBack, RefreshOutline } from "@vicons/ionicons5";
 import { usePluginStore } from "@/stores/plugins";
 import FieldHint from "@/components/FieldHint.vue";
+import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import ThemeModeButton from "@/components/ThemeModeButton.vue";
 import AdminUserManagement from "@/components/settings/AdminUserManagement.vue";
 
@@ -1610,6 +1617,12 @@ h1 {
 .section-title h2 {
   color: var(--text-primary);
   font-size: 18px;
+}
+
+.provider-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .section-title p {

@@ -799,3 +799,368 @@ def test_admin_settings_keep_provider_secrets_and_master_key_out_of_options(
     ):
         assert secret_key not in options
     assert options["ATOMGIT_API_BASE_URL"] == "https://api.gitcode.com"
+
+
+_TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc`\x00\x00"
+    b"\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def test_overseas_media_proxy_for_gitlab_gitea_and_avatars(tmp_path: Path) -> None:
+    def gitlab_handler(request: httpx.Request) -> httpx.Response:
+        raw_path = request.url.raw_path.decode("ascii", errors="ignore").split("?", 1)[0]
+        if raw_path.endswith("/repository/files/logo.png/raw"):
+            return httpx.Response(200, content=_TINY_PNG)
+        if raw_path.endswith("/repository/files/docs%2Fshot.png/raw"):
+            return httpx.Response(200, content=_TINY_PNG)
+        if raw_path.endswith("/repository/files/docs%2Ffake.png/raw"):
+            return httpx.Response(200, content=b"<svg><script>alert(1)</script></svg>")
+        if "/api/v4/projects/" in raw_path:
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(404)
+
+    def avatar_handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://gitlab.com/uploads/alice.png":
+            return httpx.Response(200, content=_TINY_PNG)
+        return httpx.Response(404)
+
+    cfg = load_settings(_base_env(tmp_path))
+    store = InMemoryMarketStore()
+    app = main_module.create_app(settings=cfg, store=store)
+    app.state.git_provider_adapter_factory = lambda s, p: _adapter_for(p, s, gitlab_handler)
+    app.state.media_proxy_transport = httpx.MockTransport(avatar_handler)
+
+    alice = store.create_oauth_user(
+        provider="gitlab",
+        provider_login="gl_alice",
+        avatar_url="https://gitlab.com/uploads/alice.png",
+    )
+    gitee_user = store.create_oauth_user(
+        provider="gitee",
+        provider_login="ge_bob",
+        avatar_url="https://gitee.com/uploads/bob.png",
+    )
+    gl_plugin = store.submit_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_gl_proxy",
+            "desc": "GitLab proxy test",
+            "author": "gl_alice",
+            "repo": "https://gitlab.com/team/astrbot_plugin_gl_proxy",
+            "logo": "https://gitlab.com/team/astrbot_plugin_gl_proxy/-/raw/main/logo.png",
+        },
+    )
+    store.update_plugin_status(gl_plugin["id"], "listed", alice["id"])
+    ge_plugin = store.submit_plugin(
+        gitee_user,
+        {
+            "name": "astrbot_plugin_ge_direct",
+            "desc": "Gitee direct test",
+            "author": "ge_bob",
+            "repo": "https://gitee.com/ge_bob/astrbot_plugin_ge_direct",
+            "logo": "https://gitee.com/ge_bob/astrbot_plugin_ge_direct/raw/master/logo.png",
+        },
+    )
+    store.update_plugin_status(ge_plugin["id"], "listed", gitee_user["id"])
+
+    client = TestClient(app)
+    logo_res = client.get(f"/v1/plugins/{gl_plugin['id']}/logo")
+    assert logo_res.status_code == 200
+    assert logo_res.headers["content-type"] == "image/png"
+    assert logo_res.headers["cache-control"] == "public, max-age=3600"
+    assert logo_res.headers["x-content-type-options"] == "nosniff"
+    etag = logo_res.headers["etag"]
+    assert (
+        client.get(
+            f"/v1/plugins/{gl_plugin['id']}/logo", headers={"if-none-match": etag}
+        ).status_code
+        == 304
+    )
+
+    # Domestic provider (Gitee) is NOT proxied
+    assert client.get(f"/v1/plugins/{ge_plugin['id']}/logo").status_code == 404
+
+    # README relative image proxy + strict security checks
+    asset_res = client.get(f"/v1/plugins/{gl_plugin['id']}/readme-asset?path=docs/shot.png")
+    assert asset_res.status_code == 200
+    assert asset_res.headers["content-type"] == "image/png"
+    assert asset_res.headers["cache-control"] == "public, max-age=3600"
+    assert (
+        client.get(f"/v1/plugins/{gl_plugin['id']}/readme-asset?path=../secret.png").status_code
+        == 400
+    )
+    assert (
+        client.get(f"/v1/plugins/{gl_plugin['id']}/readme-asset?path=docs/evil.svg").status_code
+        == 400
+    )
+    assert (
+        client.get(f"/v1/plugins/{gl_plugin['id']}/readme-asset?path=docs/fake.png").status_code
+        == 415
+    )
+
+    # Overseas avatar proxy (public author + private /v1/me/avatar)
+    avatar_res = client.get("/v1/authors/gl_alice/avatar")
+    assert avatar_res.status_code == 200
+    assert avatar_res.headers["content-type"] == "image/png"
+    assert avatar_res.headers["cache-control"] == "public, max-age=3600"
+    assert client.get("/v1/authors/ge_bob/avatar").status_code == 404
+
+    alice_session = store.create_session(alice["id"])
+    client.cookies.set(cfg.session_cookie_name, alice_session["token"])
+    me_avatar = client.get("/v1/me/avatar")
+    assert me_avatar.status_code == 200
+    assert me_avatar.headers["cache-control"] == "private, no-store"
+
+
+def test_cdn_admin_whitelist_bypass_and_fail_closed_checks(tmp_path: Path) -> None:
+    commit_sha = "b" * 40
+    archive_bytes = _make_plugin_zip(
+        name="astrbot_plugin_admin_fast",
+        version="v1.0.0",
+        author="admin_dev",
+        desc="Admin whitelist fast release",
+        repo="https://gitea.com/admin_dev/astrbot_plugin_admin_fast",
+    )
+
+    def gitea_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/repos/admin_dev/astrbot_plugin_admin_fast":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 909,
+                    "name": "astrbot_plugin_admin_fast",
+                    "full_name": "admin_dev/astrbot_plugin_admin_fast",
+                    "private": False,
+                    "archived": False,
+                    "default_branch": "main",
+                    "stars_count": 3,
+                    "updated_at": "2026-11-24T00:00:00Z",
+                    "owner": {"id": 99, "login": "admin_dev", "type": "User"},
+                    "permissions": {"push": True, "admin": True},
+                },
+            )
+        if path.endswith("/raw/metadata.yaml"):
+            return httpx.Response(
+                200,
+                content=(
+                    b"name: astrbot_plugin_admin_fast\n"
+                    b"desc: Admin whitelist fast release\n"
+                    b"author: admin_dev\n"
+                    b"version: v1.0.0\n"
+                ),
+            )
+        if path.endswith("/contents"):
+            return httpx.Response(200, json=[])
+        if path.endswith("/git/commits/main"):
+            return httpx.Response(200, json={"sha": commit_sha})
+        if path.endswith(f"/archive/{commit_sha}.zip"):
+            return httpx.Response(200, content=archive_bytes)
+        return httpx.Response(404)
+
+    cfg = load_settings(
+        _base_env(
+            tmp_path,
+            ARTIFACTS_ENABLED="true",
+            ARTIFACT_STORAGE_BACKEND="local",
+            ARTIFACT_LOCAL_ROOT=str(tmp_path / "artifacts"),
+            ARTIFACT_CDN_BASE_URL="https://cdn.example.test",
+            ARTIFACT_AUTHORIZATION_TOKEN="worker-secret",
+        )
+    )
+    store = InMemoryMarketStore()
+    app = main_module.create_app(settings=cfg, store=store)
+    app.state.git_provider_adapter_factory = lambda s, p: _adapter_for(p, s, gitea_handler)
+
+    admin_user = store.create_oauth_user(provider="gitea", provider_login="admin_dev")
+    store.update_user_role(admin_user["id"], "admin")
+    normal_user = store.create_oauth_user(provider="gitea", provider_login="normal_dev")
+
+    cred_store = CredentialStore(store, cfg.oauth_credential_key)
+    for u, uid, login in ((admin_user, "99", "admin_dev"), (normal_user, "100", "normal_dev")):
+        cred_ref = asyncio.run(
+            cred_store.save_token_set(
+                user_id=u["id"],
+                token_set=OAuthTokenSet(
+                    provider="gitea",
+                    access_token=f"tok-{login}",
+                    expires_at=(datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+                    provider_user_id=uid,
+                    provider_login=login,
+                ),
+            )
+        )
+        store.upsert_oauth_identity(
+            u["id"],
+            provider="gitea",
+            instance_url="https://gitea.com",
+            provider_user_id=uid,
+            provider_login=login,
+            credential_ref=cred_ref,
+        )
+
+    admin_session = store.create_session(admin_user["id"])
+    normal_session = store.create_session(normal_user["id"])
+
+    with TestClient(app) as client:
+        # 1. Normal user cannot request cdn_whitelist
+        client.cookies.set(cfg.session_cookie_name, normal_session["token"])
+        forbidden = client.post(
+            "/v1/plugins/submissions",
+            json={
+                "cdn_enabled": True,
+                "cdn_whitelist": True,
+                "repository_id": "909",
+                "name": "astrbot_plugin_admin_fast",
+                "desc": "Forbidden whitelist",
+                "author": "normal_dev",
+                "repo": "https://gitea.com/admin_dev/astrbot_plugin_admin_fast",
+            },
+        )
+        assert forbidden.status_code == 403
+
+        # 2. Admin submits with cdn_enabled=True and cdn_whitelist=True
+        client.cookies.set(cfg.session_cookie_name, admin_session["token"])
+        created = client.post(
+            "/v1/plugins/submissions",
+            json={
+                "cdn_enabled": True,
+                "cdn_whitelist": True,
+                "repository_id": "909",
+                "name": "astrbot_plugin_admin_fast",
+                "desc": "Admin whitelist fast release",
+                "author": "admin_dev",
+                "repo": "https://gitea.com/admin_dev/astrbot_plugin_admin_fast",
+            },
+        )
+        assert created.status_code == 201
+        plugin = created.json()
+        assert plugin["cdn_enabled"] is True
+        assert plugin["cdn_whitelist"] is True
+
+        # 3. Process CDN review -> precheck skips static scan and directly approves & enqueues publish
+        processed = asyncio.run(
+            process_cdn_reviews(
+                app,
+                repository_loader=lambda _r: None,
+                source_loader=lambda _r: None,
+            )
+        )
+        assert processed == 1
+        sub_row = asyncio.run(CdnSubscriptions(store).get(plugin["id"]))
+        assert sub_row is not None and sub_row["state"] == "submitted"
+        artifact_id = sub_row["artifact_id"]
+
+        # Run single precheck job via artifact runtime job runner
+        runner = app.state.artifact_runtime.job_runner
+        if runner is None:
+            from app.artifacts.jobs import ArtifactJobRunner
+            from app.artifacts.archive import ArchivePrechecker
+            from app.artifacts.scanner import StaticScanner
+
+            runner = ArtifactJobRunner(
+                repository=app.state.artifact_runtime.repository,
+                storage=app.state.artifact_runtime.storage,
+                prechecker=ArchivePrechecker(app.state.artifact_runtime.service.limits),
+                scanner=StaticScanner(),
+                cdn_base_url=cfg.artifacts.cdn_base_url,
+            )
+        handled = asyncio.run(runner.run_once(limit=1))
+        assert handled >= 1
+
+        repo = app.state.artifact_runtime.repository
+        artifact = asyncio.run(repo.get_artifact(artifact_id))
+        assert artifact is not None
+        assert artifact["review_status"] == "approved"
+        jobs = [job for job in repo.jobs.values() if job["artifact_id"] == artifact_id]
+        job_types = {job["type"] for job in jobs}
+        assert "publish" in job_types
+        assert "static_scan" not in job_types
+        decisions = asyncio.run(repo.list_review_decisions(artifact_id))
+        assert any(
+            d["action"] == "auto_approve" and (d.get("metadata") or {}).get("cdn_whitelist") is True
+            for d in decisions
+        )
+
+        # 4. Admin can turn off whitelist via PATCH /v1/plugins/{id}/cdn while keeping CDN enabled
+        toggled = client.patch(
+            f"/v1/plugins/{plugin['id']}/cdn",
+            json={"enabled": True, "whitelist": False},
+        )
+        assert toggled.status_code == 200
+        assert toggled.json()["cdn_enabled"] is True
+        assert toggled.json()["cdn_whitelist"] is False
+
+        # 5. Core admin cannot enable cdn_whitelist on a non-admin owner's plugin
+        core_admin = store.create_oauth_user(provider="gitea", provider_login="core_owner")
+        store.update_user_role(core_admin["id"], "core_admin")
+        core_session = store.create_session(core_admin["id"])
+        normal_plugin = store.submit_plugin(
+            normal_user,
+            {
+                "name": "astrbot_plugin_normal_owned",
+                "desc": "Normal user plugin",
+                "author": "normal_dev",
+                "repo": "https://gitea.com/normal_dev/astrbot_plugin_normal_owned",
+                "cdn_enabled": True,
+            },
+        )
+        client.cookies.set(cfg.session_cookie_name, core_session["token"])
+        denied_owner = client.patch(
+            f"/v1/plugins/{normal_plugin['id']}/cdn",
+            json={"enabled": True, "whitelist": True},
+        )
+        assert denied_owner.status_code == 403
+        assert denied_owner.json()["code"] == "cdn_whitelist_admin_owner_required"
+
+        # 6. Fail-closed: if an admin with cdn_whitelist enabled is demoted before precheck runs,
+        # the new artifact falls back to normal static scanning instead of bypassing review.
+        client.cookies.set(cfg.session_cookie_name, admin_session["token"])
+        reenabled = client.patch(
+            f"/v1/plugins/{plugin['id']}/cdn",
+            json={"enabled": True, "whitelist": True},
+        )
+        assert reenabled.status_code == 200
+        assert reenabled.json()["cdn_whitelist"] is True
+
+        store.update_user_role(admin_user["id"], "user")
+        v2_zip = _make_plugin_zip(
+            name="astrbot_plugin_admin_fast",
+            version="v1.0.1",
+            author="admin_dev",
+            desc="Admin whitelist demoted fallback",
+            repo="https://gitea.com/admin_dev/astrbot_plugin_admin_fast",
+        )
+
+        async def _chunks(data: bytes):
+            yield data
+
+        from types import SimpleNamespace
+
+        updated_plugin = store.get_plugin(plugin["id"])
+        demoted_user = store.get_user_by_id(admin_user["id"])
+        assert updated_plugin is not None and demoted_user is not None
+        artifact2 = asyncio.run(
+            app.state.artifact_runtime.service.submit_git(
+                plugin=updated_plugin,
+                user=demoted_user,
+                source=SimpleNamespace(
+                    repo_url=updated_plugin["repo"],
+                    requested_ref="main",
+                    commit_sha="c" * 40,
+                ),
+                archive_chunks=_chunks(v2_zip),
+            )
+        )
+        # Drain artifact1's queued publish job + artifact2's precheck job
+        handled2 = asyncio.run(runner.run_once(limit=2))
+        assert handled2 == 2
+        checked2 = asyncio.run(repo.get_artifact(artifact2["id"]))
+        assert checked2 is not None
+        assert checked2["review_status"] == "scanning"
+        jobs2 = [job for job in repo.jobs.values() if job["artifact_id"] == artifact2["id"]]
+        job_types2 = {job["type"] for job in jobs2}
+        assert "static_scan" in job_types2
+        assert "publish" not in job_types2

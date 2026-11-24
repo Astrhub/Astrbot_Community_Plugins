@@ -365,6 +365,22 @@ class GitLabAdapter(BaseGitProviderAdapter):
             payload["i18n"] = i18n
         return payload
 
+    async def fetch_raw_file(
+        self,
+        ref: RepositoryRef,
+        path: str,
+        *,
+        access_token: str = "",
+    ) -> bytes | None:
+        encoded = quote(ref.full_path, safe="")
+        resp = await self.safe_request(
+            "GET", f"{self.api_base}/projects/{encoded}", headers=self._headers(access_token)
+        )
+        branch = "main"
+        if resp.status_code == 200 and isinstance(resp.json(), dict):
+            branch = str(resp.json().get("default_branch") or "main").strip() or "main"
+        return await self._fetch_raw_file(encoded, path, branch, access_token)
+
     async def fetch_readme_document(
         self,
         ref: RepositoryRef,

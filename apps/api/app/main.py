@@ -31,7 +31,7 @@ from redis.exceptions import RedisError
 from .artifacts import build_artifact_runtime
 from .artifacts.archive import PrecheckError, parse_plugin_metadata_bytes
 from .artifacts.routes import build_artifact_router
-from .cdn import CdnSubscriptions, cdn_enabled, process_cdn_reviews
+from .cdn import CdnSubscriptions, cdn_enabled, cdn_whitelist, process_cdn_reviews
 from .artifacts.github_source import (
     COMMIT_PATTERN,
     ResolvedGithubSource,
@@ -95,6 +95,7 @@ from .github_authorization import (
     verify_publication_access,
 )
 from .llms_txt import build_llms_txt
+from .media_proxy import build_media_proxy_router
 from .oauth_identities import (
     GITHUB_INSTANCE_URL,
     GITHUB_PROVIDER,
@@ -411,6 +412,12 @@ def create_app(
             github_list_repositories=lambda request, user, page: access_for_request(
                 request, user
             ).list_repositories(page),
+        )
+    )
+    app.include_router(
+        build_media_proxy_router(
+            current_user_fn=current_user,
+            runtime_settings_fn=runtime_settings_for_app,
         )
     )
     register_market_web_routes(app)
@@ -1542,6 +1549,12 @@ def register_routes(app: FastAPI) -> None:
         if not settings.market_submissions_enabled:
             raise error(403, "Plugin submissions are closed")
         data = payload.model_dump()
+        cdn_whitelist_flag = bool(data.pop("cdn_whitelist", False))
+        if cdn_whitelist_flag and not is_admin(user):
+            raise HTTPException(
+                403,
+                {"code": "cdn_whitelist_admin_only", "error": "CDN 白名单直发仅限管理员使用"},
+            )
         data["category_explicit"] = "category" in payload.model_fields_set
         validate_plugin_submission(data, settings)
         local_admin_override = allow_local_admin_repo_override(
@@ -1599,7 +1612,11 @@ def register_routes(app: FastAPI) -> None:
                 )
             plugin = await call_store(request, "register_plugin", user, data)
             if existing:
-                metadata = {key: value for key, value in data.items() if key != "cdn_enabled"}
+                metadata = {
+                    key: value
+                    for key, value in data.items()
+                    if key not in {"cdn_enabled", "cdn_whitelist"}
+                }
                 metadata["repo_version"] = data.get("version") or plugin.get("repo_version") or ""
                 plugin = await call_store(request, "update_plugin_metadata", plugin["id"], metadata)
                 invalidate_seo_caches(request.app)
@@ -1608,6 +1625,7 @@ def register_routes(app: FastAPI) -> None:
                 enabled=True,
                 actor=user,
                 authorization=proof,
+                whitelist=cdn_whitelist_flag,
             )
             queued = await CdnSubscriptions(request.app.state.store).get(plugin["id"])
             return {**plugin, "cdn_review_pending": queued["state"] != "submitted"}
@@ -1616,6 +1634,7 @@ def register_routes(app: FastAPI) -> None:
             plugin["id"],
             enabled=False,
             actor=user,
+            whitelist=False,
         )
         if settings.plugin_auto_approve_enabled:
             listed = await call_store(
@@ -1637,10 +1656,30 @@ def register_routes(app: FastAPI) -> None:
         if not can_configure_plugin_cdn(user, plugin):
             raise error(403, "Forbidden")
         subscriptions = CdnSubscriptions(request.app.state.store)
-        if cdn_enabled(plugin) == payload.enabled and await subscriptions.get(plugin_id):
+        existing_sub = await subscriptions.get(plugin_id)
+        whitelist_unchanged = payload.whitelist is None or bool(payload.whitelist) == cdn_whitelist(
+            plugin
+        )
+        if cdn_enabled(plugin) == payload.enabled and existing_sub and whitelist_unchanged:
             return plugin
+        if payload.whitelist is True:
+            if not is_admin(user):
+                raise HTTPException(
+                    403,
+                    {"code": "cdn_whitelist_admin_only", "error": "CDN 白名单直发仅限管理员使用"},
+                )
+            owner_id = str(plugin.get("owner_user_id") or "")
+            owner = await call_store(request, "get_user_by_id", owner_id) if owner_id else None
+            if not owner or not is_admin(owner):
+                raise HTTPException(
+                    403,
+                    {
+                        "code": "cdn_whitelist_admin_owner_required",
+                        "error": "CDN 白名单直发仅支持管理员本人名下的插件",
+                    },
+                )
         proof = None
-        if payload.enabled:
+        if payload.enabled and (not cdn_enabled(plugin) or not existing_sub):
             await require_submission_oauth_gate(request, user, allow_override=is_core_admin(user))
             runtime = request.app.state.artifact_runtime
             if not runtime.available or runtime.service is None:
@@ -1653,6 +1692,7 @@ def register_routes(app: FastAPI) -> None:
             enabled=payload.enabled,
             actor=user,
             authorization=proof,
+            whitelist=payload.whitelist,
         )
 
     @app.get(
@@ -2698,6 +2738,10 @@ def cache_control_for_path(path: str, content_type: str = "") -> str:
         return "public, max-age=3600"
     if normalized in {"/v1/plugins", "/v1/site", "/v1/authors"}:
         return "public, max-age=60"
+    if re.fullmatch(r"/v1/plugins/[^/]+/(?:logo|readme-asset)", normalized) or re.fullmatch(
+        r"/v1/authors/[^/]+/avatar", normalized
+    ):
+        return "public, max-age=3600"
     if normalized.startswith("/v1/"):
         return "private, no-store"
     if "text/html" in content_type:

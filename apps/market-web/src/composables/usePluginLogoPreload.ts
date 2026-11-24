@@ -15,6 +15,7 @@ export function usePluginLogoPreload(plugins: ComputedRef<Plugin[]>): void {
       seen.add(url);
       if (seen.size > 256) seen.delete(seen.values().next().value!);
       const img = new Image();
+      img.referrerPolicy = "no-referrer";
       img.fetchPriority = "low";
       pending.add(img);
       img.onload = img.onerror = () => {
@@ -35,7 +36,7 @@ export function usePluginLogoPreload(plugins: ComputedRef<Plugin[]>): void {
       if (connection?.saveData || ["slow-2g", "2g"].includes(connection?.effectiveType || ""))
         return;
       // Only warm a small upcoming batch. Default local images are shared and need no prefetch.
-      queue = [...new Set(items.slice(0, 6).map(resolvePluginLogoUrl))].filter(
+      queue = [...new Set(items.slice(0, 6).map((plugin) => resolvePluginLogoUrl(plugin)))].filter(
         (url) => /^https?:\/\//.test(url) && !seen.has(url),
       );
       pump();

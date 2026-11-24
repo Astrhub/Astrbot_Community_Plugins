@@ -53,4 +53,19 @@ describe("PersonalPluginManager CDN consent", () => {
     expect(wrapper.emitted("toggleCdn")).toBeUndefined();
     wrapper.unmount();
   });
+
+  it("shows admin-only CDN whitelist switch and emits whitelist toggle", async () => {
+    const wrapper = mount(PersonalPluginManager, {
+      props: { plugins: [{ ...plugin, cdn_whitelist: false }], isAdminUser: true },
+      global: { stubs: { RouterLink: { template: "<a><slot /></a>" } } },
+    });
+    const switches = wrapper.findAll('[role="switch"]');
+    expect(switches.length).toBe(2);
+    expect(wrapper.text()).toContain("白名单直发");
+    await switches[1]!.trigger("click");
+    expect(wrapper.emitted("toggleCdn")).toEqual([
+      [{ plugin: { ...plugin, cdn_whitelist: false }, enabled: true, whitelist: true }],
+    ]);
+    wrapper.unmount();
+  });
 });
