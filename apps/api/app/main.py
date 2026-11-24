@@ -128,6 +128,7 @@ from .seo_render import (
     build_text_response,
     canonical_author_username,
     get_cached_sitemap_xml,
+    get_sitemap_cache_generation,
     invalidate_seo_caches,
     plugin_owner_handle,
     plugin_public_path,
@@ -359,6 +360,7 @@ def create_app(
     app.state.email_daily_counter = {"date": "", "count": 0}
     app.state.github_api_token_index = 0
     app.state.rate_limit_counters = {}
+    app.state._seo_sitemap_cache_generation = 0
 
     app.add_middleware(
         CORSMiddleware,
@@ -1398,7 +1400,7 @@ def register_routes(app: FastAPI) -> None:
             if author
             else username
         )
-        plugins = await call_store(request, "list_author_plugins", canonical_username)
+        plugins = await _list_listed_plugins_for_author(request, author, canonical_username)
         if not author and not plugins:
             raise error(404, "Author not found")
         identities = (
@@ -2497,7 +2499,16 @@ def register_routes(app: FastAPI) -> None:
 
 async def site_seo_context_for_request(request: Request) -> SiteSeoContext:
     settings = get_settings(request)
-    runtime_config = await effective_runtime_config(request)
+    try:
+        runtime_config = await effective_runtime_config(request)
+    except Exception:
+        LOGGER.exception(
+            "Failed to load persisted runtime site config for %s %s; "
+            "falling back to environment settings",
+            request.method,
+            request.url.path,
+        )
+        return build_site_seo_context(settings)
     return build_site_seo_context(settings, runtime_config)
 
 
@@ -2560,15 +2571,63 @@ async def _resolve_listed_plugin_for_web(
     return plugin
 
 
+async def _list_listed_plugins_for_author(
+    request: Request,
+    author: dict[str, Any] | None,
+    canonical_username: str,
+) -> list[dict[str, Any]]:
+    plugins = list(await call_store(request, "list_author_plugins", canonical_username) or [])
+    if not author:
+        return plugins
+    github_login = str(author.get("github_login") or "").strip()
+    if not github_login or github_login.lower() == canonical_username.lower():
+        return plugins
+    legacy_plugins = list(await call_store(request, "list_author_plugins", github_login) or [])
+    if not legacy_plugins:
+        return plugins
+    author_id = str(author.get("id") or "").strip()
+    merged: dict[str, dict[str, Any]] = {}
+    for plugin in plugins:
+        plugin_id = str(plugin.get("id") or "")
+        if plugin_id:
+            merged[plugin_id] = plugin
+    for plugin in legacy_plugins:
+        plugin_id = str(plugin.get("id") or "")
+        if not plugin_id or plugin_id in merged:
+            continue
+        plugin_owner_id = str(plugin.get("owner_user_id") or "").strip()
+        if author_id and plugin_owner_id:
+            if plugin_owner_id != author_id:
+                continue
+        elif str(plugin.get("owner_username") or "").strip():
+            continue
+        merged[plugin_id] = plugin
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            str(item.get("updated_at") or item.get("created_at") or ""),
+            str(item.get("id") or ""),
+        ),
+        reverse=True,
+    )
+
+
 def register_market_web_routes(app: FastAPI) -> None:
     @app.api_route("/sitemap.xml", methods=["GET", "HEAD"], include_in_schema=False)
     async def dynamic_sitemap(request: Request) -> Response:
+        generation = get_sitemap_cache_generation(request.app)
         ctx = await site_seo_context_for_request(request)
         xml = get_cached_sitemap_xml(request.app, ctx.origin)
         if xml is None:
             plugins = await call_store(request, "list_public_plugins")
             xml = build_sitemap_xml(ctx.origin, plugins)
-            set_cached_sitemap_xml(request.app, ctx.origin, xml)
+            if get_sitemap_cache_generation(request.app) == generation:
+                set_cached_sitemap_xml(
+                    request.app,
+                    ctx.origin,
+                    xml,
+                    expected_generation=generation,
+                )
         return build_text_response(
             request,
             xml,
@@ -2655,7 +2714,7 @@ def register_market_web_routes(app: FastAPI) -> None:
             if not author:
                 author = await call_store(request, "get_user_by_github_login", username)
             canonical_username = canonical_author_username(author, fallback=username)
-            plugins = await call_store(request, "list_author_plugins", canonical_username)
+            plugins = await _list_listed_plugins_for_author(request, author, canonical_username)
             if not author and not plugins:
                 return render_market_web_page(
                     request, ctx, build_not_found_page(ctx), status_code=404
@@ -6233,17 +6292,26 @@ def parse_redis_url(value: str) -> dict[str, Any]:
 def is_valid_site_icon_url(value: str) -> bool:
     if value.startswith("/"):
         return True
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    return is_valid_public_url(value)
 
 
 def is_valid_public_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    text = str(value or "").strip()
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    try:
+        parsed = urlparse(text)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and bool(parsed.hostname)
 
 
 def is_local_url(value: str) -> bool:
-    hostname = (urlparse(value or "").hostname or "").lower()
+    try:
+        hostname = (urlparse(value or "").hostname or "").lower()
+    except ValueError:
+        return False
     return hostname in {"localhost", "::1", "0.0.0.0"} or hostname.startswith("127.")
 
 

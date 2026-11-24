@@ -78,4 +78,51 @@ describe("PluginCard", () => {
     expect(wrapper.get(".description").text()).toBe("");
     wrapper.unmount();
   });
+
+  it("omits the detail link when plugin has no canonical owner path", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: "/", component: { template: "<div />" } },
+        {
+          path: "/plugin/:username/:name",
+          name: "PluginDetails",
+          component: { template: "<div />" },
+        },
+      ],
+    });
+    await router.push("/");
+    await router.isReady();
+
+    const ownerlessPlugin: Plugin = {
+      ...plugin,
+      owner_username: "",
+      owner_github_login: "",
+      canonical_path: "",
+    };
+    const Host = defineComponent({
+      components: {
+        NConfigProvider,
+        NDialogProvider,
+        NMessageProvider,
+        PluginCard,
+      },
+      setup: () => ({ plugin: ownerlessPlugin }),
+      template: `
+        <n-config-provider>
+          <n-message-provider>
+            <n-dialog-provider>
+              <plugin-card :plugin="plugin" />
+            </n-dialog-provider>
+          </n-message-provider>
+        </n-config-provider>
+      `,
+    });
+    const wrapper = mount(Host, { global: { plugins: [createPinia(), router] } });
+
+    expect(wrapper.find(".plugin-card__detail-link").exists()).toBe(false);
+    expect(wrapper.get(".plugin-name").text()).toBe("New Plugin");
+    expect(wrapper.get(".description").text()).toBe("Plugin card fixture");
+    wrapper.unmount();
+  });
 });

@@ -8,7 +8,7 @@ class PluginIdentityConflict(ValueError):
 
 def plugin_canonical_path(plugin: dict[str, Any]) -> str:
     username = str(plugin.get("owner_username") or plugin.get("owner_github_login") or "").strip()
-    name = str(plugin.get("name") or plugin["id"]).strip()
-    if username:
+    name = str(plugin.get("name") or plugin.get("id") or "").strip()
+    if username and name:
         return f"/plugin/{quote(username, safe='')}/{quote(name, safe='')}"
-    return f"/plugin/{quote(str(plugin['id']), safe='')}"
+    return ""

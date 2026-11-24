@@ -45,7 +45,9 @@ const displayName = computed(() => plugin.value?.display_name || plugin.value?.n
 const description = computed(
   () => plugin.value?.desc || plugin.value?.short_desc || "查看 AstrBot 社区插件详情。",
 );
-const canonicalPath = computed(() => (plugin.value ? pluginDetailPath(plugin.value) : route.path));
+const canonicalPath = computed(() =>
+  plugin.value ? pluginDetailPath(plugin.value) || route.path : route.path,
+);
 const categoryLabel = computed(() =>
   plugin.value ? PLUGIN_CATEGORY_LABELS[plugin.value.category] || "其他" : "其他",
 );
@@ -125,7 +127,9 @@ watch(
       if (request !== detailRequest) return;
       plugin.value = detail;
       const path = pluginDetailPath(detail);
-      if (path !== route.path) await router.replace({ path, query: route.query, hash: route.hash });
+      if (path && path !== route.path) {
+        await router.replace({ path, query: route.query, hash: route.hash });
+      }
     } catch {
       if (request === detailRequest) notFound.value = true;
     } finally {

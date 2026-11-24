@@ -4,10 +4,11 @@ export function pluginDetailPath(plugin: {
   owner_username?: string;
   owner_github_login?: string;
   canonical_path?: string;
-}): string {
-  if (plugin.canonical_path) return plugin.canonical_path;
+}): string | null {
+  const canonical = String(plugin.canonical_path || "").trim();
+  if (/^\/plugin\/[^/]+\/[^/]+$/.test(canonical)) return canonical;
   const username = String(plugin.owner_username || plugin.owner_github_login || "").trim();
-  return username
-    ? `/plugin/${encodeURIComponent(username)}/${encodeURIComponent(plugin.name || String(plugin.id))}`
-    : `/plugin/${encodeURIComponent(String(plugin.id))}`;
+  const name = String(plugin.name || plugin.id || "").trim();
+  if (!username || !name) return null;
+  return `/plugin/${encodeURIComponent(username)}/${encodeURIComponent(name)}`;
 }

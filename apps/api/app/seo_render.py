@@ -123,12 +123,14 @@ def encode_path_segment(value: str) -> str:
 
 def safe_external_http_url(raw_url: Any) -> str:
     value = str(raw_url or "").strip()
-    if not value:
+    if not value or any(ch.isspace() for ch in value):
         return ""
-    parsed = urlsplit(value)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
         return ""
-    if any(ch.isspace() for ch in value):
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
         return ""
     return value
 
@@ -136,10 +138,16 @@ def safe_external_http_url(raw_url: Any) -> str:
 def resolve_site_origin(raw_url: str | None) -> str:
     value = str(raw_url or "").strip()
     if value:
-        parsed = urlsplit(value)
+        try:
+            parsed = urlsplit(value)
+            _ = parsed.port
+        except ValueError:
+            parsed = None
         if (
-            parsed.scheme.lower() in {"http", "https"}
+            parsed is not None
+            and parsed.scheme.lower() in {"http", "https"}
             and parsed.netloc
+            and parsed.hostname
             and not any(ch.isspace() for ch in parsed.netloc)
         ):
             return f"{parsed.scheme.lower()}://{parsed.netloc}".rstrip("/")
@@ -615,6 +623,10 @@ def build_sitemap_xml(origin: str, listed_plugins: Iterable[Mapping[str, Any]]) 
     return "\n".join(lines)
 
 
+def get_sitemap_cache_generation(app: FastAPI) -> int:
+    return int(getattr(app.state, "_seo_sitemap_cache_generation", 0))
+
+
 def get_cached_sitemap_xml(app: FastAPI, origin: str) -> str | None:
     cache: dict[str, tuple[float, str]] | None = getattr(app.state, "_seo_sitemap_cache", None)
     if not cache:
@@ -629,15 +641,25 @@ def get_cached_sitemap_xml(app: FastAPI, origin: str) -> str | None:
     return xml
 
 
-def set_cached_sitemap_xml(app: FastAPI, origin: str, xml: str) -> None:
+def set_cached_sitemap_xml(
+    app: FastAPI,
+    origin: str,
+    xml: str,
+    *,
+    expected_generation: int | None = None,
+) -> bool:
+    if expected_generation is not None and get_sitemap_cache_generation(app) != expected_generation:
+        return False
     cache: dict[str, tuple[float, str]] | None = getattr(app.state, "_seo_sitemap_cache", None)
     if cache is None:
         cache = {}
         app.state._seo_sitemap_cache = cache
     cache[origin] = (time.monotonic() + SITEMAP_CACHE_TTL_SECONDS, xml)
+    return True
 
 
 def invalidate_seo_caches(app: FastAPI) -> None:
+    app.state._seo_sitemap_cache_generation = get_sitemap_cache_generation(app) + 1
     cache: dict[str, tuple[float, str]] | None = getattr(app.state, "_seo_sitemap_cache", None)
     if cache is not None:
         cache.clear()

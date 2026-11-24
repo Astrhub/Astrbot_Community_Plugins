@@ -51,6 +51,10 @@ def test_namespaces_use_oauth_username_and_preserve_interactions():
     assert first["name"] == second["name"]
     assert plugin_canonical_path(first) == "/plugin/Alice/astrbot_plugin_same"
     assert plugin_canonical_path(second) == "/plugin/Bob/astrbot_plugin_same"
+    assert (
+        plugin_canonical_path({"id": "astrbot_plugin_orphan", "name": "astrbot_plugin_orphan"})
+        == ""
+    )
     assert store.get_plugin_by_author("alice", first["name"])["id"] == first["id"]
     assert store.get_comment(comment["id"])["plugin_id"] == first["id"]
     assert store.get_plugin(first["id"])["likes"] == 1

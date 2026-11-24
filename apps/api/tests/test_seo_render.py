@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -14,11 +16,12 @@ from app.config import load_settings
 from app.seo_render import (
     EXTERNAL_SITEMAPS,
     FALLBACK_SITE_ORIGIN,
-    PRIVATE_ROUTE_TITLES,
     TemplateMarkerError,
     clear_template_cache,
+    get_cached_sitemap_xml,
     load_index_template,
     resolve_site_origin,
+    safe_external_http_url,
 )
 from app.store import InMemoryMarketStore
 
@@ -211,7 +214,17 @@ def test_public_private_and_error_route_seo_matrix(tmp_path: Path, monkeypatch: 
         assert '<meta name="robots" content="index,follow" />' in resp.text
 
     # Exact private routes return 200 with noindex,nofollow and unique H1
-    for path, heading in PRIVATE_ROUTE_TITLES.items():
+    expected_private_routes = (
+        ("/setup", "安装向导"),
+        ("/settings", "系统设置"),
+        ("/settings/personal", "账号与插件"),
+        ("/notifications", "消息中心"),
+        ("/admin", "后台登录"),
+        ("/admin/settings", "系统设置"),
+        ("/admin/plugins", "插件审查工作台"),
+        ("/plugin-workbench", "插件审查工作台"),
+    )
+    for path, heading in expected_private_routes:
         resp = client.get(path)
         assert resp.status_code == 200, path
         assert _count_h1(resp.text) == 1
@@ -373,6 +386,16 @@ def test_dynamic_sitemap_only_lists_authors_with_listed_plugins_and_invalidates_
     assert "https://market.example.org/plugin/Alice/astrbot_plugin_alpha" in listed_sitemap.text
     assert "https://market.example.org/author/Alice" in listed_sitemap.text
     assert "/author/empty_user" not in listed_sitemap.text
+    assert get_cached_sitemap_xml(client.app, "https://market.example.org") is not None
+
+    # Saving non-origin settings under the same WEB_URL must still invalidate the cached sitemap.
+    same_origin_settings = client.get("/v1/admin/settings").json()
+    same_origin_settings["site"]["name"] = "更新后的插件市场"
+    same_origin_saved = client.put("/v1/admin/settings", json=same_origin_settings)
+    assert same_origin_saved.status_code == 200
+    assert get_cached_sitemap_xml(client.app, "https://market.example.org") is None
+    updated_home = client.get("/")
+    assert "<title>AstrBot 社区插件 - 更新后的插件市场</title>" in updated_home.text
 
     # Admin updates WEB_URL via settings -> sitemap immediately reflects new origin.
     current_settings = client.get("/v1/admin/settings").json()
@@ -439,3 +462,396 @@ def test_template_marker_validation_and_origin_fallback(tmp_path: Path) -> None:
     assert resolve_site_origin("") == FALLBACK_SITE_ORIGIN
     assert resolve_site_origin("ftp://example.com") == FALLBACK_SITE_ORIGIN
     assert resolve_site_origin("https://Example.COM/path/") == "https://Example.COM"
+
+
+def test_malformed_urls_fallback_and_return_400_without_500(
+    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING", logger="app.seo_render"):
+        assert resolve_site_origin("https://[") == FALLBACK_SITE_ORIGIN
+        assert resolve_site_origin("https://example.com:badport") == FALLBACK_SITE_ORIGIN
+    assert any("falling back" in record.message for record in caplog.records)
+
+    assert safe_external_http_url("https://[/alice") == ""
+    assert safe_external_http_url("https://example.com:badport/alice") == ""
+    assert safe_external_http_url("https://github.com/alice") == "https://github.com/alice"
+
+    store = InMemoryMarketStore()
+    store.create_internal_user(
+        username="coreadmin",
+        password_hash=hash_password("password123"),
+        role="core_admin",
+    )
+    author = store.upsert_github_user({"id": "401", "login": "SafeAuthor", "name": "Safe Author"})
+    store.upsert_oauth_identity(
+        author["id"],
+        provider="gitlab",
+        instance_url="https://[",
+        provider_user_id="gl-401",
+        provider_login="safe_gl",
+    )
+    client, _ = _setup_client(
+        tmp_path,
+        monkeypatch,
+        env={"WEB_URL": "https://["},
+        store=store,
+    )
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert f'<link rel="canonical" href="{FALLBACK_SITE_ORIGIN}/" />' in home.text
+
+    sitemap = client.get("/sitemap.xml")
+    assert sitemap.status_code == 200
+    assert f"<loc>{FALLBACK_SITE_ORIGIN}/</loc>" in sitemap.text
+
+    robots = client.get("/robots.txt")
+    assert robots.status_code == 200
+    assert f"Sitemap: {FALLBACK_SITE_ORIGIN}/sitemap.xml" in robots.text
+
+    author_page = client.get("/author/SafeAuthor")
+    assert author_page.status_code == 200
+    assert "https://github.com/SafeAuthor" in author_page.text
+    assert "https://[/safe_gl" not in author_page.text
+
+    login = client.post(
+        "/v1/auth/internal/login",
+        json={"username": "coreadmin", "password": "password123"},
+    )
+    assert login.status_code == 200
+
+    for field, bad_value in (
+        ("web_url", "https://["),
+        ("web_url", "https://example.com:badport"),
+        ("icon_url", "https://["),
+    ):
+        payload = client.get("/v1/admin/settings").json()
+        payload["site"]["web_url"] = "https://market.example.org"
+        payload["site"][field] = bad_value
+        resp = client.put("/v1/admin/settings", json=payload)
+        assert resp.status_code == 400, (field, bad_value, resp.text)
+
+
+def test_persisted_config_failure_falls_back_to_env_settings(
+    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    class FailingOptionsStore(InMemoryMarketStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_options = False
+            self.fail_plugins = False
+
+        def list_options(self) -> dict[str, str]:
+            if self.fail_options:
+                raise RuntimeError("options db unavailable")
+            return super().list_options()
+
+        def list_public_plugins(self) -> list[dict[str, Any]]:
+            if self.fail_plugins:
+                raise RuntimeError("plugins db unavailable")
+            return super().list_public_plugins()
+
+    store = FailingOptionsStore()
+    author = store.upsert_github_user({"id": "501", "login": "EnvAuthor"})
+    plugin = store.register_plugin(
+        author,
+        {
+            "name": "astrbot_plugin_cached",
+            "display_name": "Cached",
+            "desc": "Cached plugin",
+            "author": "EnvAuthor",
+            "repo": "https://github.com/EnvAuthor/astrbot_plugin_cached",
+        },
+    )
+    store.update_plugin_status(plugin["id"], "listed", None)
+
+    client, _ = _setup_client(
+        tmp_path,
+        monkeypatch,
+        env={"WEB_URL": "https://env.example.org"},
+        store=store,
+    )
+
+    # Pre-populate sitemap cache for the environment origin while DB is healthy.
+    warm = client.get("/sitemap.xml")
+    assert warm.status_code == 200
+    assert "https://env.example.org/plugin/EnvAuthor/astrbot_plugin_cached" in warm.text
+
+    # Simulate DB failure for both site options and plugin listings.
+    store.fail_options = True
+    store.fail_plugins = True
+
+    with caplog.at_level("ERROR", logger="app.main"):
+        robots = client.get("/robots.txt")
+    assert robots.status_code == 200
+    assert "Sitemap: https://env.example.org/sitemap.xml" in robots.text
+    assert any(
+        "/robots.txt" in record.message and "options db unavailable" in (record.exc_text or "")
+        for record in caplog.records
+    )
+
+    submit = client.get("/submit")
+    assert submit.status_code == 200
+    assert '<link rel="canonical" href="https://env.example.org/submit" />' in submit.text
+
+    cached_sitemap = client.get("/sitemap.xml")
+    assert cached_sitemap.status_code == 200
+    assert "https://env.example.org/plugin/EnvAuthor/astrbot_plugin_cached" in cached_sitemap.text
+
+    # On sitemap cache miss, plugin DB query errors must still propagate.
+    client.app.state._seo_sitemap_cache.clear()
+    with pytest.raises(RuntimeError, match="plugins db unavailable"):
+        client.get("/sitemap.xml")
+
+
+def test_concurrent_invalidation_prevents_stale_sitemap_cache_write(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    async def scenario() -> None:
+        read_started = asyncio.Event()
+        allow_resume = asyncio.Event()
+
+        class CoordinatedStore(InMemoryMarketStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.pause_first_read = True
+
+            async def list_public_plugins(self) -> list[dict[str, Any]]:
+                snapshot = super().list_public_plugins()
+                if self.pause_first_read:
+                    self.pause_first_read = False
+                    read_started.set()
+                    await allow_resume.wait()
+                return snapshot
+
+        store = CoordinatedStore()
+        store.create_internal_user(
+            username="coreadmin",
+            password_hash=hash_password("password123"),
+            role="core_admin",
+        )
+        author = store.upsert_github_user({"id": "601", "login": "RaceAuthor"})
+        plugin = store.register_plugin(
+            author,
+            {
+                "name": "astrbot_plugin_race",
+                "display_name": "Race Plugin",
+                "desc": "Race condition plugin",
+                "author": "RaceAuthor",
+                "repo": "https://github.com/RaceAuthor/astrbot_plugin_race",
+            },
+        )
+
+        dist = tmp_path / "dist"
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text(TEMPLATE_HTML, encoding="utf-8")
+        monkeypatch.setattr(main_module, "MARKET_WEB_DIST", dist)
+        clear_template_cache()
+        settings = load_settings(
+            {
+                "WEB_URL": "https://market.example.org",
+                "SITE_NAME": "测试插件市场",
+                "SITE_DESCRIPTION": "自定义市场描述",
+                "ENABLE_DEV_AUTH": "false",
+            }
+        )
+        app = main_module.create_app(settings=settings, store=store)
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            task_a = asyncio.create_task(client.get("/sitemap.xml"))
+            await asyncio.wait_for(read_started.wait(), timeout=2.0)
+
+            login = await client.post(
+                "/v1/auth/internal/login",
+                json={"username": "coreadmin", "password": "password123"},
+            )
+            assert login.status_code == 200
+            approve = await client.post(f"/v1/admin/plugins/{plugin['id']}/list")
+            assert approve.status_code == 200
+
+            allow_resume.set()
+            resp_a = await asyncio.wait_for(task_a, timeout=2.0)
+            assert resp_a.status_code == 200
+            assert "/plugin/RaceAuthor/astrbot_plugin_race" not in resp_a.text
+
+            # Request A must not repopulate the cache with stale XML after invalidation.
+            assert get_cached_sitemap_xml(app, "https://market.example.org") is None
+
+            resp_c = await client.get("/sitemap.xml")
+            assert resp_c.status_code == 200
+            assert "https://market.example.org/plugin/RaceAuthor/astrbot_plugin_race" in resp_c.text
+            cached = get_cached_sitemap_xml(app, "https://market.example.org")
+            assert cached is not None
+            assert "https://market.example.org/plugin/RaceAuthor/astrbot_plugin_race" in cached
+
+    asyncio.run(scenario())
+
+
+def test_author_page_and_api_include_legacy_github_login_plugins_without_duplicates(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    store = InMemoryMarketStore()
+    alice = store.upsert_github_user({"id": "701", "login": "AliceGH", "name": "Alice Public"})
+    for stored_user in store.state["users"]:
+        if stored_user["id"] == alice["id"]:
+            stored_user["public_username"] = "AlicePublic"
+            alice = dict(stored_user)
+            break
+
+    other = store.create_email_user(
+        username="other_user",
+        email="other@example.com",
+        password_hash=hash_password("password123"),
+    )
+
+    canonical_plugin = store.register_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_canonical",
+            "display_name": "规范插件",
+            "desc": "Canonical plugin",
+            "author": "Alice Public",
+            "repo": "https://github.com/AliceGH/astrbot_plugin_canonical",
+        },
+    )
+    legacy_plugin = store.register_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_legacy_gh",
+            "display_name": "旧身份插件",
+            "desc": "Legacy plugin",
+            "author": "Alice Public",
+            "repo": "https://github.com/AliceGH/astrbot_plugin_legacy_gh",
+        },
+    )
+    unlisted_legacy = store.register_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_legacy_unlisted",
+            "display_name": "未上架旧插件",
+            "desc": "Unlisted legacy plugin",
+            "author": "Alice Public",
+            "repo": "https://github.com/AliceGH/astrbot_plugin_legacy_unlisted",
+        },
+    )
+    unrelated_plugin = store.register_plugin(
+        other,
+        {
+            "name": "astrbot_plugin_unrelated",
+            "display_name": "他人插件",
+            "desc": "Belongs to another user",
+            "author": "Other",
+            "repo": "https://github.com/other/astrbot_plugin_unrelated",
+        },
+    )
+
+    store.update_plugin_status(canonical_plugin["id"], "listed", None)
+    store.update_plugin_status(legacy_plugin["id"], "listed", None)
+    store.update_plugin_status(unrelated_plugin["id"], "listed", None)
+
+    for item in store.state["plugins"]:
+        if item["id"] == canonical_plugin["id"]:
+            item["owner_username"] = "AlicePublic"
+            item["owner_github_login"] = "AliceGH"
+            item["updated_at"] = "2026-11-20T10:00:00Z"
+        elif item["id"] == legacy_plugin["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = "AliceGH"
+            item["updated_at"] = "2026-11-22T10:00:00Z"
+        elif item["id"] == unlisted_legacy["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = "AliceGH"
+        elif item["id"] == unrelated_plugin["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = "AliceGH"
+            item["owner_user_id"] = other["id"]
+
+    client, _ = _setup_client(tmp_path, monkeypatch, store=store)
+
+    api_resp = client.get("/v1/authors/AlicePublic/plugins")
+    assert api_resp.status_code == 200
+    api_items = api_resp.json()["items"]
+    assert [item["name"] for item in api_items] == [
+        "astrbot_plugin_legacy_gh",
+        "astrbot_plugin_canonical",
+    ]
+
+    alias_api_resp = client.get("/v1/authors/AliceGH/plugins")
+    assert alias_api_resp.status_code == 200
+    assert alias_api_resp.json()["username"] == "AlicePublic"
+    assert [item["name"] for item in alias_api_resp.json()["items"]] == [
+        "astrbot_plugin_legacy_gh",
+        "astrbot_plugin_canonical",
+    ]
+
+    ssr_resp = client.get("/author/AlicePublic")
+    assert ssr_resp.status_code == 200
+    assert ssr_resp.text.count("astrbot_plugin_canonical") == 1
+    assert ssr_resp.text.count("astrbot_plugin_legacy_gh") == 1
+    assert "astrbot_plugin_legacy_unlisted" not in ssr_resp.text
+    assert "astrbot_plugin_unrelated" not in ssr_resp.text
+    assert ssr_resp.text.index("astrbot_plugin_legacy_gh") < ssr_resp.text.index(
+        "astrbot_plugin_canonical"
+    )
+
+    alias_redirect = client.get("/author/AliceGH", follow_redirects=False)
+    assert alias_redirect.status_code == 301
+    assert alias_redirect.headers["location"] == "/author/AlicePublic"
+
+
+def test_ownerless_plugin_omits_two_segment_canonical_path_and_links(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    store = InMemoryMarketStore()
+    alice = store.upsert_github_user({"id": "711", "login": "ValidOwner"})
+    owned = store.register_plugin(
+        alice,
+        {
+            "name": "astrbot_plugin_owned",
+            "display_name": "Owned Plugin",
+            "desc": "Owned plugin",
+            "author": "ValidOwner",
+            "repo": "https://github.com/ValidOwner/astrbot_plugin_owned",
+        },
+    )
+    orphan = store.register_plugin(
+        {"id": "orphan-owner-id"},
+        {
+            "name": "astrbot_plugin_ownerless",
+            "display_name": "Ownerless Plugin",
+            "desc": "Abnormal record without owner handle",
+            "author": "nobody",
+            "repo": "https://github.com/nobody/astrbot_plugin_ownerless",
+        },
+    )
+    for item in store.state["plugins"]:
+        if item["id"] == orphan["id"]:
+            item["owner_username"] = ""
+            item["owner_github_login"] = ""
+            break
+    store.update_plugin_status(owned["id"], "listed", None)
+    store.update_plugin_status(orphan["id"], "listed", None)
+
+    client, _ = _setup_client(tmp_path, monkeypatch, store=store)
+
+    listed_api = client.get("/v1/plugins")
+    assert listed_api.status_code == 200
+    by_name = {item["name"]: item for item in listed_api.json()["items"]}
+    assert by_name["astrbot_plugin_owned"]["canonical_path"] == (
+        "/plugin/ValidOwner/astrbot_plugin_owned"
+    )
+    assert by_name["astrbot_plugin_ownerless"]["canonical_path"] == ""
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert '<a href="/plugin/ValidOwner/astrbot_plugin_owned">' in home.text
+    assert "astrbot_plugin_ownerless" not in home.text
+
+    sitemap = client.get("/sitemap.xml")
+    assert sitemap.status_code == 200
+    assert "https://market.example.org/plugin/ValidOwner/astrbot_plugin_owned" in sitemap.text
+    assert "astrbot_plugin_ownerless" not in sitemap.text
+
+    legacy_404 = client.get(f"/plugin/{orphan['id']}", follow_redirects=False)
+    assert legacy_404.status_code == 404

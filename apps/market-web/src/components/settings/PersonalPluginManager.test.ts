@@ -68,4 +68,26 @@ describe("PersonalPluginManager CDN consent", () => {
     ]);
     wrapper.unmount();
   });
+
+  it("renders the detail link only when a canonical owner path exists", () => {
+    const withoutOwner = render();
+    expect(withoutOwner.find(".pm-action-link").exists()).toBe(false);
+    withoutOwner.unmount();
+
+    const withOwner = mount(PersonalPluginManager, {
+      props: { plugins: [{ ...plugin, owner_username: "Alice" }] },
+      global: {
+        stubs: {
+          RouterLink: {
+            props: ["to"],
+            template: '<a class="pm-action-link" :data-to="to"><slot /></a>',
+          },
+        },
+      },
+    });
+    expect(withOwner.get(".pm-action-link").attributes("data-to")).toBe(
+      "/plugin/Alice/astrbot_plugin_demo",
+    );
+    withOwner.unmount();
+  });
 });

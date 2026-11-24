@@ -2,15 +2,15 @@
 
 ## 规范详情地址与命名空间
 
-- 公开插件详情页使用两段规范地址 `/plugin/{owner_github_login}/{name}`。其中用户名取自登记者在市场中保存的 GitHub OAuth 用户名，不从仓库 URL 或 `metadata.yaml` 的 `author` 字段推导；提交组织仓库时，路径中的用户名同样为提交者的市场用户名。
-- `owner_github_login` 在插件登记时固定为快照。用户后续更新 GitHub 用户名后，不会自动改写已登记插件的公开路径。实际所有权校验始终绑定稳定的 `owner_user_id`，OAuth 账号匹配基于稳定的 GitHub ID，防止通过复用旧用户名冒领账号或插件权限。
+- 公开插件详情页使用 3 段规范地址 `/plugin/{owner}/{name}`。其中 `{owner}` 取自登记者在市场中保存的公开用户名 `owner_username`（兼容历史记录的 `owner_github_login`），不从仓库 URL 或 `metadata.yaml` 的 `author` 字段推导；提交组织仓库时，路径中的用户名同样为提交者的市场用户名。
+- `owner_username` 与 `owner_github_login` 在插件登记时固定为快照。用户后续更新用户名后，不会自动改写已登记插件的公开路径。实际所有权校验始终绑定稳定的 `owner_user_id`，OAuth 账号匹配基于稳定的外部账号 ID，防止通过复用旧用户名冒领账号或插件权限。
 - 数据库迁移 `20260910_005_plugin_namespace` 与 `20261122_010_plugin_author_name_identity` 移除了全局插件名唯一约束，改为按 `(owner_user_id, name)`、大小写不敏感 `(owner_github_login, name)` 以及大小写不敏感 `(author, name)` 建立唯一索引，原有插件 ID、评论、点赞与 Artifact 外键保持不变。
 - 新登记插件优先沿用未占用的插件名作为 `id`；当全局已存在同名插件时，系统在事务内按名称加锁并分配不透明唯一 `id`。同一用户下的同名插件不能静默换绑到另一个仓库；重命名、账号合并或出现重复 `author/name` 组合时返回 `409 Conflict`。
 
 ## 路由兼容、状态校验与 Feed 键设计
 
 - 详情查询接口 `/v1/plugins/by-author/{username}/{name}` 仅返回已上架插件；按 ID 访问的接口供评论、点赞、管理操作与审查工作台使用。
-- 访问旧单段地址 `/plugin/{id}` 时，对已上架插件返回 `301` 永久重定向至规范地址；未知或已下架插件统一返回真实 `404`，即便磁盘上存在过期的预渲染 HTML 快照也不会绕过上架状态检查。
+- 旧 2 段地址 `/plugin/{id}` 已不再支持，统一返回真实 HTTP `404`（带 `noindex,nofollow`），不做重定向；未知或已下架插件同样返回真实 `404`。对于缺少 `owner_username` 且缺少 `owner_github_login` 的异常插件记录，公开接口的 `canonical_path` 返回空字符串，前端插件卡片、管理列表、运行时 SSR 首页及 `/sitemap.xml` 均不为其生成公开详情链接。
 - `/plugins.json` 遵循 AstrBot `2026-06-27` 插件市场 JSON 规范（Schema Version 1）：根对象包含保留键 `$meta`，插件条目使用 `${author}/${name}` 作为对象键，条目内保留实际插件名 `name` 且不输出客户端保留字段 `market_plugin_id`，同时允许不同作者登记同名插件且支持在 AstrBot 中与其他合规插件源互通绑定。
 
 > [!NOTE]
