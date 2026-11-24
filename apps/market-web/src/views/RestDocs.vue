@@ -27,11 +27,12 @@ import { Playground } from "vue-api-playground";
 import "vue-api-playground/styles";
 import ThemeModeButton from "../components/ThemeModeButton.vue";
 import { usePluginStore } from "../stores/plugins";
-import { useSeo } from "../composables/useSeo";
+import { useSeo, useSeoContext } from "../composables/useSeo";
 
+const { brandName } = useSeoContext();
 useSeo({
   title: "REST API 文档",
-  description: "Astrhub 插件市场 REST API 文档与在线调试。",
+  description: computed(() => `${brandName.value} REST API 文档与在线调试。`),
   path: "/docs/rest",
 });
 

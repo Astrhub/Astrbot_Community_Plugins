@@ -16,9 +16,6 @@ async function mockMarket(page: Page) {
     tags: [],
     category: "other",
   };
-  await page.addInitScript(() => {
-    (window as unknown as Record<string, unknown>).__ASTRHUB_PRERENDER__ = true;
-  });
   await page.route("**/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;

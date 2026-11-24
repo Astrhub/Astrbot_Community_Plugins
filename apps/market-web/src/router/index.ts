@@ -29,11 +29,6 @@ const routes: RouteRecordRaw[] = [
     props: true,
   },
   {
-    path: "/plugin/:name",
-    name: "LegacyPluginDetails",
-    component: PluginDetailsPage,
-  },
-  {
     path: "/",
     name: "Home",
     component: Home,

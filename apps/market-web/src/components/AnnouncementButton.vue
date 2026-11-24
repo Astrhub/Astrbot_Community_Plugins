@@ -36,7 +36,7 @@ function openAnnouncements(): void {
 watch(
   revision,
   (value) => {
-    if (!window.__ASTRHUB_PRERENDER__ && value && value !== seenRevision) openAnnouncements();
+    if (value && value !== seenRevision) openAnnouncements();
   },
   { immediate: true },
 );

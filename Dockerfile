@@ -4,14 +4,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src/apps/market-web
 ARG NPM_REGISTRY=""
-ARG VITE_BASE_URL=""
-RUN if [ -n "$VITE_BASE_URL" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends chromium \
-        && rm -rf /var/lib/apt/lists/*; \
-    fi
 COPY apps/market-web/package*.json ./
-ENV VITE_BASE_URL=$VITE_BASE_URL \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
     && npm install --global npm@11.18.0 \
     && npm ci

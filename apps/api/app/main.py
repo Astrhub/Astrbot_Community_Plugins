@@ -91,6 +91,32 @@ from .oauth_identities import (
 )
 from .openapi_filter import filter_openapi_by_role, role_for_openapi
 from .plugin_identity import PluginIdentityConflict, plugin_canonical_path
+from .seo_render import (
+    CRAWLER_CACHE_CONTROL,
+    HTML_CACHE_CONTROL,
+    PRIVATE_ROUTE_TITLES,
+    PageSpec,
+    SiteSeoContext,
+    author_public_path,
+    build_author_page,
+    build_home_page,
+    build_not_found_page,
+    build_plugin_detail_page,
+    build_private_page,
+    build_rest_docs_page,
+    build_robots_txt,
+    build_site_seo_context,
+    build_sitemap_xml,
+    build_submit_page,
+    build_text_response,
+    canonical_author_username,
+    get_cached_sitemap_xml,
+    invalidate_seo_caches,
+    plugin_owner_handle,
+    plugin_public_path,
+    render_html_document,
+    set_cached_sitemap_xml,
+)
 from .schemas import (
     PluginCdnPayload,
     AnnouncementCreate,
@@ -154,17 +180,18 @@ RESERVED_WEB_PATHS = {
     "redoc",
 }
 RESERVED_WEB_PREFIXES = ("v1/", "health/", "plugins.json/", "plugins-md5.json/", "docs/", "redoc/")
-FRONTEND_EXACT_ROUTES = {
-    "",
-    "submit",
-    "setup",
-    "settings",
-    "notifications",
-    "admin",
-    "plugin-workbench",
-    "docs/rest",
-}
-FRONTEND_ROUTE_PREFIXES = ("settings/", "admin/", "plugin/")
+PUBLIC_STATIC_ASSET_EXTENSIONS = (
+    ".png",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".avif",
+)
 POSTGRES_MAINTENANCE_DATABASE = "postgres"
 GITHUB_METADATA_SYNC_BATCH_SIZE = 10
 GITHUB_METADATA_SYNC_WORKER_SLEEP_SECONDS = 60
@@ -461,9 +488,10 @@ async def bootstrap_internal_core_admin(app: FastAPI) -> None:
 
 
 def register_routes(app: FastAPI) -> None:
-    @app.get("/docs/rest", include_in_schema=False)
-    async def rest_api_docs() -> Response:
-        return serve_market_web_file("docs/rest")
+    @app.api_route("/docs/rest", methods=["GET", "HEAD"], include_in_schema=False)
+    async def rest_api_docs(request: Request) -> Response:
+        ctx = await site_seo_context_for_request(request)
+        return render_market_web_page(request, ctx, build_rest_docs_page(ctx))
 
     @app.get(
         "/health",
@@ -557,6 +585,7 @@ def register_routes(app: FastAPI) -> None:
             runtime_config,
         )
         request.app.state.artifact_runtime.update_settings(request.app.state.settings)
+        invalidate_seo_caches(request.app)
         return {
             "saved": True,
             "restart_required": settings_restart_required(settings, updated_runtime_config),
@@ -1510,6 +1539,7 @@ def register_routes(app: FastAPI) -> None:
                 metadata = {key: value for key, value in data.items() if key != "cdn_enabled"}
                 metadata["repo_version"] = data.get("version") or plugin.get("repo_version") or ""
                 plugin = await call_store(request, "update_plugin_metadata", plugin["id"], metadata)
+                invalidate_seo_caches(request.app)
             plugin = await CdnSubscriptions(request.app.state.store).configure(
                 plugin["id"],
                 enabled=True,
@@ -1528,6 +1558,7 @@ def register_routes(app: FastAPI) -> None:
             listed = await call_store(
                 request, "update_plugin_status", plugin["id"], "listed", user["id"]
             )
+            invalidate_seo_caches(request.app)
             if listed:
                 await notify_plugin_review(request, listed, user, auto_approved=True)
             return listed or plugin
@@ -1684,6 +1715,7 @@ def register_routes(app: FastAPI) -> None:
                 or "",
             },
         )
+        invalidate_seo_caches(request.app)
         return updated or {}
 
     @app.post(
@@ -1737,6 +1769,7 @@ def register_routes(app: FastAPI) -> None:
         updated = await call_store(request, "unlist_plugin", plugin_id, user["id"], reason)
         if not updated:
             raise error(404, "Plugin not found")
+        invalidate_seo_caches(request.app)
         return updated
 
     @app.post(
@@ -2000,6 +2033,7 @@ def register_routes(app: FastAPI) -> None:
         updated = await call_store(request, "update_plugin_status", plugin_id, "listed", user["id"])
         if not updated:
             raise error(404, "Plugin not found")
+        invalidate_seo_caches(request.app)
         queue_plugin_github_metadata_refresh(background_tasks, request.app, updated, user)
         if previous_status != "listed" and updated.get("owner_user_id"):
             await notify_plugin_review(request, updated, user)
@@ -2071,6 +2105,7 @@ def register_routes(app: FastAPI) -> None:
         updated = await call_store(request, "unlist_plugin", plugin_id, user["id"], payload.reason)
         if not updated:
             raise error(404, "Plugin not found")
+        invalidate_seo_caches(request.app)
         if plugin.get("owner_user_id"):
             await notify_plugin_unlisted(request, updated, user, payload.reason)
         return updated
@@ -2348,80 +2383,235 @@ def register_routes(app: FastAPI) -> None:
         return PlainTextResponse(build_llms_txt(role), media_type="text/plain; charset=utf-8")
 
 
-def register_market_web_routes(app: FastAPI) -> None:
-    @app.get("/", include_in_schema=False)
-    async def market_web_index() -> Response:
-        return serve_market_web_file("")
+async def site_seo_context_for_request(request: Request) -> SiteSeoContext:
+    settings = get_settings(request)
+    runtime_config = await effective_runtime_config(request)
+    return build_site_seo_context(settings, runtime_config)
 
-    @app.get("/{full_path:path}", include_in_schema=False)
+
+def _require_market_web_index() -> Path:
+    index_file = MARKET_WEB_DIST / "index.html"
+    if not index_file.is_file():
+        raise error(404, "Market web build is missing. Run npm run build:web first.")
+    return index_file
+
+
+def render_market_web_page(
+    request: Request,
+    ctx: SiteSeoContext,
+    page: PageSpec,
+    *,
+    status_code: int = 200,
+) -> Response:
+    index_file = _require_market_web_index()
+    document = render_html_document(index_file, ctx, page)
+    return build_text_response(
+        request,
+        document,
+        media_type="text/html; charset=utf-8",
+        status_code=status_code,
+        cache_control=HTML_CACHE_CONTROL,
+        enable_etag=status_code == 200,
+    )
+
+
+async def _resolve_listed_plugin_for_web(
+    request: Request,
+    owner_segment: str,
+    name_segment: str,
+) -> dict[str, Any] | None:
+    plugin = await call_store(request, "get_plugin_by_author", owner_segment, name_segment)
+    if not plugin:
+        alias_user = await call_store(request, "get_user_by_github_login", owner_segment)
+        if alias_user and alias_user.get("id"):
+            plugin = await call_store(
+                request,
+                "get_owned_plugin_by_name",
+                alias_user["id"],
+                name_segment,
+            )
+    if not plugin:
+        listed = await call_store(request, "list_public_plugins")
+        target_owner = owner_segment.strip().lower()
+        target_name = name_segment.strip().lower()
+        plugin = next(
+            (
+                item
+                for item in listed
+                if str(item.get("owner_github_login") or "").strip().lower() == target_owner
+                and str(item.get("name") or "").strip().lower() == target_name
+            ),
+            None,
+        )
+    if not plugin or plugin.get("status") != "listed":
+        return None
+    return plugin
+
+
+def register_market_web_routes(app: FastAPI) -> None:
+    @app.api_route("/sitemap.xml", methods=["GET", "HEAD"], include_in_schema=False)
+    async def dynamic_sitemap(request: Request) -> Response:
+        ctx = await site_seo_context_for_request(request)
+        xml = get_cached_sitemap_xml(request.app, ctx.origin)
+        if xml is None:
+            plugins = await call_store(request, "list_public_plugins")
+            xml = build_sitemap_xml(ctx.origin, plugins)
+            set_cached_sitemap_xml(request.app, ctx.origin, xml)
+        return build_text_response(
+            request,
+            xml,
+            media_type="application/xml; charset=utf-8",
+            cache_control=CRAWLER_CACHE_CONTROL,
+            enable_etag=True,
+        )
+
+    @app.api_route("/robots.txt", methods=["GET", "HEAD"], include_in_schema=False)
+    async def dynamic_robots(request: Request) -> Response:
+        ctx = await site_seo_context_for_request(request)
+        return build_text_response(
+            request,
+            build_robots_txt(ctx.origin),
+            media_type="text/plain; charset=utf-8",
+            cache_control=CRAWLER_CACHE_CONTROL,
+            enable_etag=True,
+        )
+
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+    async def market_web_index(request: Request) -> Response:
+        _require_market_web_index()
+        ctx = await site_seo_context_for_request(request)
+        plugins = await call_store(request, "list_public_plugins")
+        return render_market_web_page(request, ctx, build_home_page(ctx, plugins))
+
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def market_web_fallback(request: Request, full_path: str) -> Response:
         if is_reserved_api_path(full_path):
             raise error(404, "Not found")
-        if full_path.startswith("plugin/"):
-            segments = full_path.strip("/").split("/")
-            plugin = None
-            if len(segments) == 2:
-                plugin = await call_store(request, "get_plugin", segments[1])
-            elif len(segments) == 3:
-                plugin = await call_store(request, "get_plugin_by_author", segments[1], segments[2])
-            if not plugin or plugin.get("status") != "listed":
-                return FileResponse(MARKET_WEB_DIST / "index.html", status_code=404)
-            canonical = plugin_canonical_path(plugin)
-            if "/" + full_path != unquote(canonical):
+
+        requested_file = resolve_market_web_file(full_path)
+        if requested_file:
+            return FileResponse(requested_file)
+
+        _require_market_web_index()
+        ctx = await site_seo_context_for_request(request)
+        clean = full_path.strip("/")
+
+        if clean == "submit":
+            return render_market_web_page(request, ctx, build_submit_page(ctx))
+
+        exact_path = f"/{clean}"
+        if exact_path in PRIVATE_ROUTE_TITLES:
+            return render_market_web_page(request, ctx, build_private_page(ctx, exact_path))
+
+        if clean == "plugin" or clean.startswith("plugin/"):
+            segments = clean.split("/")
+            if len(segments) != 3 or not segments[1] or not segments[2]:
+                return render_market_web_page(
+                    request, ctx, build_not_found_page(ctx), status_code=404
+                )
+            plugin = await _resolve_listed_plugin_for_web(
+                request,
+                unquote(segments[1]),
+                unquote(segments[2]),
+            )
+            if not plugin:
+                return render_market_web_page(
+                    request, ctx, build_not_found_page(ctx), status_code=404
+                )
+            canonical = plugin_public_path(plugin)
+            if not canonical:
+                return render_market_web_page(
+                    request, ctx, build_not_found_page(ctx), status_code=404
+                )
+            if f"/{full_path}" != unquote(canonical):
                 query = f"?{request.url.query}" if request.url.query else ""
                 return RedirectResponse(
                     canonical + query,
                     status_code=301,
-                    headers={"Cache-Control": "public, max-age=0, must-revalidate"},
+                    headers={"Cache-Control": HTML_CACHE_CONTROL},
                 )
-        if full_path.startswith("author/"):
-            segments = full_path.strip("/").split("/")
+            return render_market_web_page(request, ctx, build_plugin_detail_page(ctx, plugin))
+
+        if clean == "author" or clean.startswith("author/"):
+            segments = clean.split("/")
             if len(segments) != 2 or not segments[1]:
-                return FileResponse(MARKET_WEB_DIST / "index.html", status_code=404)
+                return render_market_web_page(
+                    request, ctx, build_not_found_page(ctx), status_code=404
+                )
             username = unquote(segments[1])
             author = await call_store(request, "get_user_by_public_username", username)
             if not author:
                 author = await call_store(request, "get_user_by_github_login", username)
-            plugins = await call_store(request, "list_author_plugins", username)
+            canonical_username = canonical_author_username(author, fallback=username)
+            plugins = await call_store(request, "list_author_plugins", canonical_username)
             if not author and not plugins:
-                return FileResponse(MARKET_WEB_DIST / "index.html", status_code=404)
-            requested_file = resolve_market_web_file(full_path)
-            if requested_file:
-                return FileResponse(requested_file)
-            return FileResponse(MARKET_WEB_DIST / "index.html", status_code=200)
-        return serve_market_web_file(full_path)
+                return render_market_web_page(
+                    request, ctx, build_not_found_page(ctx), status_code=404
+                )
+            if not author and plugins:
+                plugin_owner = plugin_owner_handle(plugins[0])
+                if plugin_owner:
+                    canonical_username = plugin_owner
+            canonical = author_public_path(canonical_username)
+            if f"/{full_path}" != unquote(canonical):
+                query = f"?{request.url.query}" if request.url.query else ""
+                return RedirectResponse(
+                    canonical + query,
+                    status_code=301,
+                    headers={"Cache-Control": HTML_CACHE_CONTROL},
+                )
+            identities = (
+                await list_active_oauth_identities(get_store(request), str(author["id"]))
+                if author and author.get("id")
+                else []
+            )
+            oauth_profiles = author_oauth_profiles(identities)
+            if not oauth_profiles and not author:
+                fallback_login = next(
+                    (
+                        str(item.get("owner_github_login") or "").strip()
+                        for item in plugins
+                        if item.get("owner_github_login")
+                    ),
+                    "",
+                )
+                if fallback_login:
+                    oauth_profiles = [
+                        {
+                            "provider": GITHUB_PROVIDER,
+                            "login": fallback_login,
+                            "url": f"https://github.com/{quote(fallback_login, safe='')}",
+                        }
+                    ]
+            author_display = user_display_name(author) if author else canonical_username
+            return render_market_web_page(
+                request,
+                ctx,
+                build_author_page(
+                    ctx,
+                    canonical_username=canonical_username,
+                    author_display_name=author_display,
+                    oauth_profiles=oauth_profiles,
+                    listed_plugins=plugins,
+                ),
+            )
 
-
-def serve_market_web_file(full_path: str) -> FileResponse:
-    index_file = MARKET_WEB_DIST / "index.html"
-    if not index_file.is_file():
-        raise error(404, "Market web build is missing. Run npm run build:web first.")
-
-    requested_file = resolve_market_web_file(full_path)
-    if requested_file:
-        return FileResponse(requested_file)
-    status_code = 200 if is_known_frontend_route(full_path) else 404
-    return FileResponse(index_file, status_code=status_code)
+        return render_market_web_page(request, ctx, build_not_found_page(ctx), status_code=404)
 
 
 def resolve_market_web_file(full_path: str) -> Path | None:
+    rel = full_path.strip("/")
+    if not rel or rel.lower() in {"index.html", "sitemap.xml", "robots.txt"}:
+        return None
     dist_dir = MARKET_WEB_DIST.resolve()
-    candidates = [(dist_dir / full_path).resolve()]
-    if full_path.strip("/"):
-        candidates.append((dist_dir / full_path / "index.html").resolve())
-    for candidate in candidates:
-        try:
-            candidate.relative_to(dist_dir)
-        except ValueError:
-            continue
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def is_known_frontend_route(full_path: str) -> bool:
-    path = full_path.strip("/")
-    return path in FRONTEND_EXACT_ROUTES or path.startswith(FRONTEND_ROUTE_PREFIXES)
+    candidate = (dist_dir / rel).resolve()
+    try:
+        candidate.relative_to(dist_dir)
+    except ValueError:
+        return None
+    if not candidate.is_file() or candidate.name.lower() == "index.html":
+        return None
+    return candidate
 
 
 def cache_control_for_path(path: str, content_type: str = "") -> str:
@@ -2440,6 +2630,10 @@ def cache_control_for_path(path: str, content_type: str = "") -> str:
         return "private, no-store"
     if "text/html" in content_type:
         return "public, max-age=0, must-revalidate"
+    if normalized.startswith("/font/") or (
+        Path(normalized).suffix.lower() in PUBLIC_STATIC_ASSET_EXTENSIONS
+    ):
+        return "public, max-age=3600"
     return "private, no-store"
 
 
@@ -3578,6 +3772,7 @@ async def refresh_plugin_github_metadata_for_plugin(
             app.state.store.update_plugin_metadata(plugin["id"], metadata)
         )
         if updated:
+            invalidate_seo_caches(app)
             await CdnSubscriptions(app.state.store).queue_version(updated)
         return updated
     except PluginIdentityConflict as exc:

@@ -3116,16 +3116,32 @@ def test_market_web_fallback_does_not_mask_api_routes(tmp_path, monkeypatch) -> 
 def test_market_web_serves_built_spa(tmp_path, monkeypatch) -> None:
     web_dist = tmp_path / "dist"
     web_dist.mkdir()
-    (web_dist / "index.html").write_text("<html>market</html>", encoding="utf-8")
+    (web_dist / "index.html").write_text(
+        (
+            "<!doctype html><html><head><!-- SSR_HEAD_START --><title>Default</title>"
+            '<!-- SSR_HEAD_END --></head><body><div id="app"><!-- SSR_BODY --></div>'
+            "</body></html>"
+        ),
+        encoding="utf-8",
+    )
     (web_dist / "logo.webp").write_text("logo", encoding="utf-8")
     monkeypatch.setattr(main_module, "MARKET_WEB_DIST", web_dist)
 
     client = make_client()
 
-    assert client.get("/").text == "<html>market</html>"
-    assert client.get("/submit").text == "<html>market</html>"
-    assert client.get("/docs/rest").text == "<html>market</html>"
-    assert client.get("/logo.webp").text == "logo"
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "<h1>社区插件市场</h1>" in home.text
+    submit = client.get("/submit")
+    assert submit.status_code == 200
+    assert "<h1>提交插件</h1>" in submit.text
+    docs = client.get("/docs/rest")
+    assert docs.status_code == 200
+    assert "<h1>REST API 文档</h1>" in docs.text
+    logo = client.get("/logo.webp")
+    assert logo.status_code == 200
+    assert logo.text == "logo"
+    assert logo.headers["cache-control"] == "public, max-age=3600"
 
 
 def test_store_selection_uses_pg_redis_only_when_both_urls_are_configured() -> None:

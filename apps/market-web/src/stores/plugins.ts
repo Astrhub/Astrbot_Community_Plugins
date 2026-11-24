@@ -40,31 +40,9 @@ const normalizeBaseUrl = (value: string | undefined): string =>
     .trim()
     .replace(/\/$/, "");
 
-const isLoopbackBaseUrl = (value: string): boolean => {
-  try {
-    const hostname = new URL(value).hostname.toLowerCase();
-    return (
-      hostname === "localhost" ||
-      hostname === "0.0.0.0" ||
-      hostname === "::1" ||
-      hostname.startsWith("127.")
-    );
-  } catch {
-    return false;
-  }
-};
-
-const WINDOW_ORIGIN = window.location.origin;
-const CONFIGURED_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_BASE_URL);
-const CONFIGURED_API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL);
-const canUseConfiguredBaseUrl =
-  !CONFIGURED_BASE_URL ||
-  !isLoopbackBaseUrl(CONFIGURED_BASE_URL) ||
-  isLoopbackBaseUrl(WINDOW_ORIGIN);
-const BASE_URL =
-  canUseConfiguredBaseUrl && CONFIGURED_BASE_URL ? CONFIGURED_BASE_URL : WINDOW_ORIGIN;
-const API_BASE_URL =
-  CONFIGURED_API_BASE_URL || (canUseConfiguredBaseUrl ? CONFIGURED_BASE_URL : "");
+const WINDOW_ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
+const BASE_URL = normalizeBaseUrl(WINDOW_ORIGIN);
+const API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const COMMUNITY_REPO_URL = String(import.meta.env.VITE_COMMUNITY_REPO_URL || "");
 
 export const PLUGIN_CATEGORY_LABELS = Object.freeze({
@@ -296,9 +274,6 @@ export const usePluginStore = defineStore("plugins", () => {
 
   function prefersDark(): boolean {
     if (typeof window === "undefined") return false;
-    if ((window as Window & { __ASTRHUB_PRERENDER__?: boolean }).__ASTRHUB_PRERENDER__) {
-      return false;
-    }
     return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
   }
 
@@ -327,7 +302,10 @@ export const usePluginStore = defineStore("plugins", () => {
   const irisMaskPosition = ref({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
 
   const apiBaseUrl = API_BASE_URL;
-  const pluginSourceUrl = `${BASE_URL}/plugins.json`;
+  const pluginSourceUrl = computed(() => {
+    const origin = normalizeBaseUrl(siteConfig.value.web_url) || BASE_URL;
+    return `${origin}/plugins.json`;
+  });
   const communityRepoUrl = COMMUNITY_REPO_URL;
   let mediaQuery: MediaQueryList | null = null;
   let pluginsLoaded = false;
@@ -949,19 +927,6 @@ export const usePluginStore = defineStore("plugins", () => {
   }
 
   async function loadPluginByAuthor(username: string, name: string): Promise<PluginDetail> {
-    // A release can be prerendered against the preceding API before the atomic deployment.
-    if (window.__ASTRHUB_PRERENDER__) {
-      await loadPlugins();
-      const target = username.toLowerCase();
-      const item = plugins.value.find(
-        (item) =>
-          (item.owner_username?.toLowerCase() === target ||
-            item.owner_github_login?.toLowerCase() === target) &&
-          item.name.toLowerCase() === name.toLowerCase(),
-      );
-      if (!item) throw new Error("插件不存在");
-      return loadPluginDetail(item.id);
-    }
     const response = await fetch(
       `${apiBaseUrl}/v1/plugins/by-author/${encodeURIComponent(username)}/${encodeURIComponent(name)}`,
       {

@@ -113,7 +113,7 @@ docker compose -f docker-compose-local.yml up -d --build
 启动后的默认行为：
 
 1. 数据文件与初始化配置保存在 Docker 命名卷 `market-local-data`（容器内 `/var/lib/astrbot-market/data/`），重建或重启容器不会丢失数据。
-2. 构建参数 `VITE_BASE_URL` 固定为空，Dockerfile 自动跳过 Chromium 安装与预渲染，镜像更轻、构建更快。
+2. 构建阶段不再安装 Chromium 或执行构建期预渲染，SEO 元数据、`/sitemap.xml` 与 `/robots.txt` 由后端按运行期 `WEB_URL` 实时生成，镜像更轻、构建更快。
 3. 访问 `http://127.0.0.1:8787/setup`，只需填写站点名称和核心管理员账号密码即可启用；登录后可在 `/submit` 直接粘贴公开 GitHub 插件仓库地址读取元数据并上架。
 
 > [!TIP]
@@ -132,7 +132,7 @@ docker compose up -d --build
 ```
 
 > [!TIP]
-> 面向公网部署且需要自动生成 `sitemap.xml`、`robots.txt` 与静态预渲染页面时，请在根目录 `.env` 中设置 `SITE_URL=https://your-domain`（或 `VITE_BASE_URL=https://your-domain`）；留空时会跳过 Chromium 预渲染，仅输出标准 SPA 产物。
+> 面向公网部署时，请在根目录 `.env` 或后台系统设置中配置 `WEB_URL=https://your-domain`；后端会按运行期 `WEB_URL` 实时注入 SEO 元数据并动态提供 `/sitemap.xml` 与 `/robots.txt`，无需在构建期注入域名或重新构建前端。
 
 打开 `http://127.0.0.1:8787/setup` 完成初始化，Compose 内置服务连接信息如下：
 
@@ -181,7 +181,7 @@ sudo cp deploy/systemd/astrbot-artifact-worker.service /etc/systemd/system/
 sudo cp deploy/systemd/astrbot-runtime-runner.service /etc/systemd/system/
 
 npm install --prefix apps/market-web
-VITE_BASE_URL=https://your-domain npm run build:web
+npm run build:web
 uv sync --project apps/api --no-dev
 ```
 
@@ -314,8 +314,7 @@ EMAIL_PROVIDER=disabled
 
 | 变量 | 说明 |
 | --- | --- |
-| `VITE_BASE_URL` | 站点公开基础 URL。设置后，生产构建会自动生成 `sitemap.xml`、`robots.txt` 并执行 Puppeteer 静态预渲染；留空时跳过预渲染 |
-| `VITE_API_BASE_URL` | 后端 API 基础地址（优先级最高）。前后端分端口本地开发时配置，同源部署通常留空 |
+| `VITE_API_BASE_URL` | 后端 API 基础地址。前后端分端口本地开发时配置，同源部署通常留空 |
 | `VITE_COMMUNITY_REPO_URL` | 页脚展示的社区仓库链接（留空时自动读取当前 Git 仓库地址） |
 
 ## 身份与五级角色
@@ -354,9 +353,9 @@ uv run pytest
 cd apps/market-web
 npm install
 npm run dev       # vp dev
-npm run build     # vp build && node scripts/prerender.mjs
+npm run build     # vp build
 vp check          # 格式、Lint 与类型检查
-vp test --run     # 前端单元测试（当前 32 个测试文件、102 项用例）
+vp test --run     # 前端单元测试
 ```
 
 安装本地 Git hooks（前端在 `pre-commit` 自动运行 `vp staged`，后端在 `pre-push` 运行 Ruff 检查）：

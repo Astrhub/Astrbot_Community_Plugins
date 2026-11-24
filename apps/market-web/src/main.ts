@@ -26,7 +26,6 @@ async function bootstrap(): Promise<void> {
   }
 
   app.mount("#app");
-  document.documentElement.classList.remove("route-snapshot-mismatch");
 }
 
 void bootstrap();

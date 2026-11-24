@@ -8,7 +8,18 @@ import SubmitPlugin from "./SubmitPlugin.vue";
 
 const messages = vi.hoisted(() => ({ success: vi.fn(), warning: vi.fn(), error: vi.fn() }));
 
-vi.mock("../composables/useSeo", () => ({ useSeo: vi.fn() }));
+vi.mock("../composables/useSeo", async () => {
+  const { ref } = await import("vue");
+  return {
+    useSeo: vi.fn(),
+    useSeoContext: () => ({
+      siteOrigin: ref("http://127.0.0.1:8787"),
+      brandName: ref("Astrhub 插件市场"),
+      defaultOgImage: ref("http://127.0.0.1:8787/og-cover.png"),
+      absoluteSiteUrl: (path: string) => `http://127.0.0.1:8787${path}`,
+    }),
+  };
+});
 vi.mock("vue-router", () => ({ useRouter: () => ({ push: vi.fn(), back: vi.fn() }) }));
 vi.mock("naive-ui", async (original) => ({
   ...(await original<typeof import("naive-ui")>()),

@@ -313,7 +313,7 @@ create_app(settings, store)
 | --- | --- |
 | 构建与校验 | Vite+（`vp dev` / `vp build` / `vp check` / `vp test --run`），配置见 `apps/market-web/vite.config.ts` |
 | UI 组件 | Naive UI 2.43 与 `@vicons/ionicons5` 图标 |
-| 路由与 SEO | Vue Router 4（`createWebHistory`）、`@unhead/vue`、`vite-plugin-sitemap` 与 `scripts/prerender.mjs` |
+| 路由与 SEO | Vue Router 4（`createWebHistory`）、`@unhead/vue` 与后端运行时 HTML 注入（`apps/api/app/seo_render.py`） |
 | 状态管理 | Pinia 3：`stores/plugins.ts`（市场域）、`stores/artifacts.ts`（插件包）、`stores/reviewWorkspace.ts`（审查工作台）、`stores/reviewPolicy.ts`（策略管理） |
 | 网络请求 | 原生 `fetch`（统一携带 `credentials: "include"`） |
 | Markdown 与文档 | `marked` + `marked-alert` + `DOMPurify` + `highlight.js`、`vue-api-playground` |
@@ -323,9 +323,8 @@ create_app(settings, store)
 | 路径 | 视图组件 | 说明 |
 | --- | --- | --- |
 | `/` | `Home.vue` | 插件市场首页（支持分页与瀑布流切换、筛选与排序） |
-| `/plugin/:username/:name` | `PluginDetailsPage.vue` | 规范插件详情页（含 SEO、JSON-LD、README 与评论） |
-| `/plugin/:name` | `PluginDetailsPage.vue` | 兼容旧单段详情路由（服务端对已上架插件返回 301 重定向） |
-| `/author/:username` | `AuthorPage.vue` | 作者公开插件页 |
+| `/plugin/:username/:name` | `PluginDetailsPage.vue` | 规范插件详情页（含运行时与客户端 SEO、JSON-LD、README 与评论；大小写或历史登录名别名 301 重定向） |
+| `/author/:username` | `AuthorPage.vue` | 作者公开插件页（大小写或历史登录名别名 301 重定向） |
 | `/submit` | `SubmitPlugin.vue` | 插件提交页（社区模式走 GitHub 仓库选择，本地模式支持管理员直填 URL） |
 | `/setup` | `Setup.vue` | 首次安装向导（`noindex,nofollow`） |
 | `/admin` | `AdminLogin.vue` | 内部管理员登录页（`noindex,nofollow`） |
@@ -344,19 +343,19 @@ create_app(settings, store)
 - 个人与后台设置（`components/settings/`）：`AccessKeyManager`、`AdminUserManagement`、`NotificationPreferencesSection`、`PersonalPluginManager`、`ProfileAccountSection`。
 - 审查工作台（`components/workbench/`）：`ArtifactSubmissionPanel`、`PluginReviewWorkspace`、`ReviewSummaryPanel`、`ReviewFileBrowser`、`ReviewDiffViewer`、`ReviewCommentThread`、`ReviewManualPanel`、`ReviewDecisionPanel`、`ReviewHistoryTimeline`、`ReviewPolicyPanel`。
 
-### 构建与预渲染
+### 构建与运行时 SEO 注入
 
-根目录 `package.json` 提供 `dev:web`、`build:web`、`dev:api`、`start:api`、`start:runtime-runner`、`test` 等快捷脚本。执行 `npm run build:web` 时先运行 `vp build`，再运行 `scripts/prerender.mjs`：
+根目录 `package.json` 提供 `dev:web`、`build:web`、`dev:api`、`start:api`、`start:runtime-runner`、`test` 等快捷脚本。执行 `npm run build:web` 仅运行 `vp build` 输出标准前端静态产物，产物 `dist/index.html` 保留 `<!-- SSR_HEAD_START -->`、`<!-- SSR_HEAD_END -->` 与 `<!-- SSR_BODY -->` 占位标记。
 
-- 未设置 `VITE_BASE_URL` 时，自动跳过 Sitemap 与 Puppeteer 预渲染，仅输出标准 SPA 产物。
-- 设置 `VITE_BASE_URL=https://your-domain` 时，构建阶段从 `/v1/plugins` 拉取已上架清单，并从 `/v1/authors` 补充无上架插件作者，生成 `sitemap.xml`、`robots.txt` 以及首页、提交页、REST 文档页和各插件/作者详情页的静态 HTML 快照。
+FastAPI 进程（`apps/api/app/seo_render.py`）在请求期实时基于运行期 `WEB_URL` 与站点配置向模板注入页面 `<head>` 元数据、JSON-LD 与轻量语义 `#app` 骨架，并动态生成 `/sitemap.xml`（仅收录静态公开页、已上架插件和拥有已上架插件的作者，带 60 秒短缓存与写路径主动失效）和 `/robots.txt`，支持弱 `ETag`／`304` 协商缓存与 `GET`／`HEAD`。
 
 ## 部署架构
 
 API 进程默认监听 `:8787`，按路径统一分发：
 
-- `/` 及已注册页面路径 → 对应预渲染 HTML 或 `apps/market-web/dist/index.html`（未知路径返回 404）
-- `/assets/...` → 长期强缓存指纹静态资源
+- `/` 及已注册页面路径 → FastAPI 运行时注入 SEO 元数据与语义骨架的 `apps/market-web/dist/index.html`（未知路径与旧 2 段 `/plugin/{id}` 返回真实 HTTP 404）
+- `/sitemap.xml`、`/robots.txt` → FastAPI 动态生成的站点地图与爬虫声明（`public, max-age=3600`）
+- `/assets/...` → 长期强缓存指纹静态资源（`public, max-age=31536000, immutable`）；`dist/` 根目录非指纹公开资源（`/og-cover.png`、`/logo.webp`、`/font/*` 等）使用 `public, max-age=3600`
 - `/plugins.json`、`/plugins-md5.json`、`/v1/astrbot/...` → AstrBot 插件源
 - `/v1/...` → 市场与审查 REST API
 - `/openapi.json`、`/llms.txt`、`/docs/rest` → 角色过滤契约与内置 API 文档

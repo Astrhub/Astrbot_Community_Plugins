@@ -93,7 +93,6 @@
 </template>
 
 <script setup lang="ts">
-import { injectHead } from "@unhead/vue";
 import { computed, onMounted, shallowRef, watch } from "vue";
 import { useRoute } from "vue-router";
 import { NIcon } from "naive-ui";
@@ -108,14 +107,14 @@ import {
 import AppHeader from "@/components/AppHeader.vue";
 import AppFooter from "@/components/AppFooter.vue";
 import PluginCard from "@/components/PluginCard.vue";
-import { useSeo, commitSeo, absoluteSiteUrl } from "@/composables/useSeo";
+import { useSeo, useSeoContext } from "@/composables/useSeo";
 import { githubRawUrl } from "@/utils/github";
 import { usePluginStore } from "@/stores/plugins";
 import type { AuthorOAuthProfile, Plugin } from "@/types";
 
-const head = injectHead();
 const route = useRoute();
 const pluginStore = usePluginStore();
+const { brandName, absoluteSiteUrl } = useSeoContext();
 const username = computed(() => String(route.params.username || "").trim());
 const canonicalUsername = shallowRef("");
 const displayName = shallowRef("");
@@ -152,7 +151,7 @@ const authorTitle = computed(() =>
 const authorDescription = computed(() =>
   notFound.value
     ? "未找到该作者或公开账号。"
-    : `查看 ${authorDisplayName.value || username.value} 在 Astrhub 插件市场发布的所有插件。`,
+    : `查看 ${authorDisplayName.value || username.value} 在 ${brandName.value} 发布的所有插件。`,
 );
 const authorPath = computed(
   () => `/author/${encodeURIComponent(canonicalUsername.value || username.value)}`,
@@ -210,18 +209,6 @@ async function loadAuthorPlugins() {
     avatarUrl.value = String(data.avatar_url || "").trim();
     githubUrl.value = String(data.github_url || "").trim();
     oauthProfiles.value = Array.isArray(data.oauth_profiles) ? data.oauth_profiles : [];
-    if (window.__ASTRHUB_PRERENDER__) {
-      commitSeo(
-        {
-          title: authorTitle.value,
-          description: authorDescription.value,
-          path: authorPath.value,
-          robots: authorRobots.value,
-          jsonLd: authorJsonLd.value,
-        },
-        head,
-      );
-    }
     plugins.value = data.items || [];
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "作者插件加载失败";

@@ -37,4 +37,14 @@ describe("plugin workbench route guard", () => {
     expect(router.currentRoute.value.query.login).toBe("required");
     expect(router.currentRoute.value.query.redirect).toBe("/plugin-workbench");
   });
+
+  it("routes legacy 2-segment /plugin/:id paths to NotFound and keeps 3-segment plugin routes", () => {
+    const legacy = router.resolve("/plugin/astrbot_plugin_demo");
+    expect(legacy.name).toBe("NotFound");
+    expect(legacy.meta.noindex).toBe(true);
+
+    const canonical = router.resolve("/plugin/Alice/astrbot_plugin_demo");
+    expect(canonical.name).toBe("PluginDetails");
+    expect(canonical.params).toEqual({ username: "Alice", name: "astrbot_plugin_demo" });
+  });
 });
