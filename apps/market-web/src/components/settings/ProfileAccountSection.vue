@@ -14,6 +14,7 @@ import {
   useMessage,
 } from "naive-ui";
 import {
+  GitBranchOutline,
   KeyOutline,
   LinkOutline,
   LockClosedOutline,
@@ -23,8 +24,8 @@ import {
   SaveOutline,
   UnlinkOutline,
 } from "@vicons/ionicons5";
-import { githubRawUrl } from "@/utils/github";
-import type { AuthConfig, OAuthIdentity, User } from "@/types";
+import { getGitProviderLabel, githubRawUrl } from "@/utils/github";
+import type { AuthConfig, OAuthIdentity, OAuthProviderKey, User } from "@/types";
 
 const githubName = defineModel("githubName", { type: String, default: "" });
 const githubToken = defineModel("githubToken", { type: String, default: "" });
@@ -52,6 +53,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   save: [];
   "connect-github": [];
+  "connect-oauth": [provider: OAuthProviderKey];
   "unbind-oauth": [identity: OAuthIdentity];
   "update-password": [payload: { current_password?: string; new_password: string; email?: string }];
   "request-email-change": [
@@ -80,10 +82,43 @@ const hasPassword = computed(() => Boolean(props.currentUser?.has_password));
 const userEmail = computed(() => String(props.currentUser?.email || "").trim());
 const emailVerified = computed(() => Boolean(props.currentUser?.email_verified));
 const oauthIdentities = computed<OAuthIdentity[]>(() => props.currentUser?.oauth_identities || []);
-const githubIdentity = computed(() =>
-  oauthIdentities.value.find((item) => item.provider === "github"),
+const ALL_OAUTH_PROVIDERS: OAuthProviderKey[] = ["github", "gitlab", "gitee", "atomgit", "gitea"];
+function isProviderEnabled(provider: OAuthProviderKey): boolean {
+  const configured = props.authConfig?.oauth_providers;
+  if (Array.isArray(configured) && configured.length > 0) {
+    const matched = configured.find((item) => item.provider === provider);
+    if (matched) return Boolean(matched.enabled);
+  }
+  const flagMap: Record<OAuthProviderKey, boolean | undefined> = {
+    github: props.authConfig?.github_login_enabled,
+    gitlab: props.authConfig?.gitlab_login_enabled,
+    gitee: props.authConfig?.gitee_login_enabled,
+    atomgit: props.authConfig?.atomgit_login_enabled,
+    gitea: props.authConfig?.gitea_login_enabled,
+  };
+  return Boolean(flagMap[provider]);
+}
+const oauthProviderRows = computed(() =>
+  ALL_OAUTH_PROVIDERS.map((provider) => ({
+    provider,
+    label: getGitProviderLabel(provider),
+    enabled: isProviderEnabled(provider),
+    identity: oauthIdentities.value.find((item) => item.provider === provider) || null,
+  })),
 );
-const githubLoginEnabled = computed(() => Boolean(props.authConfig?.github_login_enabled));
+function connectProvider(provider: OAuthProviderKey): void {
+  if (provider === "github") emit("connect-github");
+  emit("connect-oauth", provider);
+}
+function rotationTag(identity: OAuthIdentity): { label: string; type: "warning" | "error" } | null {
+  if (identity.rotation_status === "reauth_required") {
+    return { label: "需要重新授权", type: "error" };
+  }
+  if (identity.rotation_status === "expired") {
+    return { label: "令牌已过期", type: "warning" };
+  }
+  return null;
+}
 const emailVerificationRequired = computed(
   () => props.authConfig?.email_verification_required !== false,
 );
@@ -333,20 +368,43 @@ function confirmUnbind(identity: OAuthIdentity): void {
       </NAlert>
 
       <div class="oauth-list">
-        <div v-if="githubIdentity" class="oauth-row">
+        <div v-for="row in oauthProviderRows" :key="row.provider" class="oauth-row">
           <div class="oauth-info">
-            <NIcon class="oauth-provider-icon"><LogoGithub /></NIcon>
+            <NIcon class="oauth-provider-icon">
+              <LogoGithub v-if="row.provider === 'github'" />
+              <GitBranchOutline v-else />
+            </NIcon>
             <div>
-              <strong>GitHub · @{{ githubIdentity.provider_login }}</strong>
-              <span class="summary-meta">{{ githubIdentity.profile_url }}</span>
+              <strong>
+                {{ row.label }}
+                <template v-if="row.identity"> · @{{ row.identity.provider_login }}</template>
+                <NTag
+                  v-if="row.identity && rotationTag(row.identity)"
+                  :type="rotationTag(row.identity)!.type"
+                  size="small"
+                  round
+                  style="margin-left: 6px"
+                >
+                  {{ rotationTag(row.identity)!.label }}
+                </NTag>
+              </strong>
+              <span class="summary-meta">
+                {{
+                  row.identity
+                    ? row.identity.profile_url || "已绑定"
+                    : row.enabled
+                      ? "未绑定"
+                      : "未启用"
+                }}
+              </span>
             </div>
           </div>
-          <NSpace :size="8">
+          <NSpace v-if="row.identity" :size="8">
             <NButton
-              v-if="githubLoginEnabled"
+              v-if="row.enabled"
               size="small"
               secondary
-              @click="emit('connect-github')"
+              @click="connectProvider(row.provider)"
             >
               重新授权
             </NButton>
@@ -354,12 +412,12 @@ function confirmUnbind(identity: OAuthIdentity): void {
               size="small"
               secondary
               type="error"
-              :disabled="!canUnbind(githubIdentity)"
-              :loading="oauthBusyId === githubIdentity.id"
+              :disabled="!canUnbind(row.identity)"
+              :loading="oauthBusyId === row.identity.id"
               :title="
-                canUnbind(githubIdentity) ? undefined : '请先设置本地登录密码后再解绑最后一个 OAuth'
+                canUnbind(row.identity) ? undefined : '请先设置本地登录密码后再解绑最后一个 OAuth'
               "
-              @click="confirmUnbind(githubIdentity)"
+              @click="confirmUnbind(row.identity)"
             >
               <template #icon>
                 <NIcon><UnlinkOutline /></NIcon>
@@ -367,23 +425,14 @@ function confirmUnbind(identity: OAuthIdentity): void {
               解绑
             </NButton>
           </NSpace>
-        </div>
-
-        <div v-else class="oauth-row">
-          <div class="oauth-info">
-            <NIcon class="oauth-provider-icon"><LogoGithub /></NIcon>
-            <div>
-              <strong>GitHub</strong>
-              <span class="summary-meta">未绑定</span>
-            </div>
-          </div>
           <NButton
+            v-else
             type="primary"
             size="small"
-            :disabled="!githubLoginEnabled"
-            @click="emit('connect-github')"
+            :disabled="!row.enabled"
+            @click="connectProvider(row.provider)"
           >
-            绑定 GitHub
+            绑定 {{ row.label }}
           </NButton>
         </div>
       </div>

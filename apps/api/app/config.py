@@ -325,6 +325,28 @@ class Settings:
     storage_mode: str = DEFAULT_STORAGE_MODE
     local_data_path: str = ""
     core_admin_password: str = field(default="", repr=False)
+    oauth_credential_key: str = field(default="", repr=False)
+    gitlab_login_enabled: bool = False
+    gitlab_client_id: str = ""
+    gitlab_client_secret: str = field(default="", repr=False)
+    gitlab_callback_url: str = ""
+    gitlab_scope: str = "read_user read_api"
+    gitee_login_enabled: bool = False
+    gitee_client_id: str = ""
+    gitee_client_secret: str = field(default="", repr=False)
+    gitee_callback_url: str = ""
+    gitee_scope: str = "user_info projects"
+    atomgit_login_enabled: bool = False
+    atomgit_client_id: str = ""
+    atomgit_client_secret: str = field(default="", repr=False)
+    atomgit_callback_url: str = ""
+    atomgit_scope: str = "read_user read_repository"
+    atomgit_api_base_url: str = "https://api.atomgit.com"
+    gitea_login_enabled: bool = False
+    gitea_client_id: str = ""
+    gitea_client_secret: str = field(default="", repr=False)
+    gitea_callback_url: str = ""
+    gitea_scope: str = "read:user read:repository read:organization"
 
     def is_local_storage(self) -> bool:
         return self.storage_mode == "local"
@@ -366,6 +388,40 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         storage_mode=storage_mode,
         local_data_path=local_data_path,
         core_admin_password=merged.get("CORE_ADMIN_PASSWORD", ""),
+        oauth_credential_key=merged.get("OAUTH_CREDENTIAL_KEY", ""),
+        gitlab_login_enabled=_bool(merged.get("GITLAB_LOGIN_ENABLED")),
+        gitlab_client_id=merged.get("GITLAB_CLIENT_ID", ""),
+        gitlab_client_secret=merged.get("GITLAB_CLIENT_SECRET", ""),
+        gitlab_callback_url=merged.get(
+            "GITLAB_CALLBACK_URL",
+            f"{merged.get('WEB_URL', 'http://127.0.0.1:8787').rstrip('/')}/v1/auth/oauth/gitlab/callback",
+        ),
+        gitlab_scope=merged.get("GITLAB_SCOPE", "read_user read_api"),
+        gitee_login_enabled=_bool(merged.get("GITEE_LOGIN_ENABLED")),
+        gitee_client_id=merged.get("GITEE_CLIENT_ID", ""),
+        gitee_client_secret=merged.get("GITEE_CLIENT_SECRET", ""),
+        gitee_callback_url=merged.get(
+            "GITEE_CALLBACK_URL",
+            f"{merged.get('WEB_URL', 'http://127.0.0.1:8787').rstrip('/')}/v1/auth/oauth/gitee/callback",
+        ),
+        gitee_scope=merged.get("GITEE_SCOPE", "user_info projects"),
+        atomgit_login_enabled=_bool(merged.get("ATOMGIT_LOGIN_ENABLED")),
+        atomgit_client_id=merged.get("ATOMGIT_CLIENT_ID", ""),
+        atomgit_client_secret=merged.get("ATOMGIT_CLIENT_SECRET", ""),
+        atomgit_callback_url=merged.get(
+            "ATOMGIT_CALLBACK_URL",
+            f"{merged.get('WEB_URL', 'http://127.0.0.1:8787').rstrip('/')}/v1/auth/oauth/atomgit/callback",
+        ),
+        atomgit_scope=merged.get("ATOMGIT_SCOPE", "read_user read_repository"),
+        atomgit_api_base_url=merged.get("ATOMGIT_API_BASE_URL", "https://api.atomgit.com"),
+        gitea_login_enabled=_bool(merged.get("GITEA_LOGIN_ENABLED")),
+        gitea_client_id=merged.get("GITEA_CLIENT_ID", ""),
+        gitea_client_secret=merged.get("GITEA_CLIENT_SECRET", ""),
+        gitea_callback_url=merged.get(
+            "GITEA_CALLBACK_URL",
+            f"{merged.get('WEB_URL', 'http://127.0.0.1:8787').rstrip('/')}/v1/auth/oauth/gitea/callback",
+        ),
+        gitea_scope=merged.get("GITEA_SCOPE", "read:user read:repository read:organization"),
         artifact_authorization_url=merged.get("ARTIFACT_AUTHORIZATION_URL", ""),
         artifact_authorization_token=merged.get("ARTIFACT_AUTHORIZATION_TOKEN", ""),
         host=merged.get("HOST", "127.0.0.1"),

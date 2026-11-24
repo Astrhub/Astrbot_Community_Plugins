@@ -95,6 +95,9 @@ def public_oauth_identity(identity: Mapping[str, Any]) -> dict[str, Any]:
         "provider_email": str(identity.get("provider_email") or ""),
         "avatar_url": str(identity.get("avatar_url") or ""),
         "profile_url": provider_profile_url(identity),
+        "rotation_status": str(identity.get("rotation_status") or ""),
+        "expires_at": identity.get("expires_at"),
+        "token_refreshed_at": identity.get("token_refreshed_at"),
         "created_at": identity.get("created_at"),
         "updated_at": identity.get("updated_at"),
     }

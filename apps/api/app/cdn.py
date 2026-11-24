@@ -16,8 +16,22 @@ from .artifacts.archive import PrecheckError, normalize_github_repo, normalize_v
 from .artifacts.github_source import GithubSourceError
 from .artifacts.storage import ArtifactStorageError
 from .auth import can_configure_plugin_cdn, is_admin
+from .git_sources.models import (
+    THIRD_PARTY_PROVIDERS,
+    GitSourceError,
+    normalize_git_repo_url,
+    parse_repository_ref,
+)
+from .git_sources.registry import ensure_valid_provider_token, get_provider_adapter
 
 PERMANENT_CDN_HTTP_STATUSES = {400, 403, 404, 409, 413, 422}
+
+
+def _canonical_repo_url(repo: str) -> str:
+    try:
+        return normalize_git_repo_url(repo)
+    except GitSourceError:
+        return normalize_github_repo(repo)
 
 
 def cdn_enabled(plugin: Mapping[str, Any]) -> bool:
@@ -176,15 +190,25 @@ class CdnSubscriptions:
         proof = dict(authorization or (old or {}).get("authorization") or {})
         proof.pop("auth_reference", None)
         if enabled:
-            if not proof or normalize_github_repo(
-                str(proof.get("repo") or "")
-            ) != normalize_github_repo(plugin["repo"]):
-                raise cdn_error(
-                    "cdn_authorization_required", "开启 CDN 前需要验证 GitHub 仓库权限", 403
-                )
+            try:
+                proof_repo = _canonical_repo_url(str(proof.get("repo") or ""))
+                plugin_repo = _canonical_repo_url(str(plugin["repo"]))
+            except (PrecheckError, GitSourceError):
+                proof_repo = ""
+                plugin_repo = "mismatch"
+            if not proof or proof_repo != plugin_repo:
+                raise cdn_error("cdn_authorization_required", "开启 CDN 前需要验证仓库权限", 403)
             proof["plugin_owner_user_id"] = str(plugin["owner_user_id"])
         target = version_key(plugin.get("repo_version") or plugin.get("version"))
-        scope = ("repo", "id", "owner_id", "user_id", "plugin_owner_user_id")
+        scope = (
+            "provider",
+            "repo",
+            "id",
+            "owner_id",
+            "user_id",
+            "plugin_owner_user_id",
+            "binding_generation",
+        )
         same_scope = old and all(
             str(proof.get(key)) == str(old["authorization"].get(key)) for key in scope
         )
@@ -331,7 +355,10 @@ async def verify_subscription(
     store: Any,
     plugin: Mapping[str, Any],
     subscription: Mapping[str, Any],
-    loader: Callable[[str], Awaitable[Mapping[str, Any]]],
+    loader: Callable[[str], Awaitable[Mapping[str, Any]]] | None,
+    *,
+    settings: Any = None,
+    adapter_factory: Callable[[Any, str], Any] | None = None,
 ) -> tuple[dict[str, Any], Mapping[str, Any]]:
     if not cdn_enabled(plugin) or cdn_generation(plugin) != subscription["generation"]:
         raise cdn_error("cdn_disabled_or_changed", "CDN 已关闭或设置已变化")
@@ -339,6 +366,80 @@ async def verify_subscription(
     user = await store_call(store, "get_user_by_id", proof.get("user_id"))
     if not user or str(plugin.get("owner_user_id")) != proof.get("plugin_owner_user_id"):
         raise cdn_error("cdn_owner_changed", "CDN 授权的维护者已变化", 403)
+    try:
+        ref = parse_repository_ref(str(plugin["repo"]))
+    except GitSourceError as exc:
+        raise cdn_error(exc.code, exc.message, exc.status_code) from exc
+
+    if ref.provider in THIRD_PARTY_PROVIDERS:
+        if proof.get("mode") == "site_admin":
+            if not is_admin(user):
+                raise cdn_error("cdn_role_changed", "CDN 授权人的管理权限已失效", 403)
+        if proof.get("repo") != ref.repo_url or not proof.get("id") or not proof.get("owner_id"):
+            raise cdn_error("cdn_authorization_required", "请重新开启 CDN 以验证仓库权限", 403)
+        if hasattr(store, "get_active_git_repository_binding"):
+            binding = await store_call(
+                store, "get_active_git_repository_binding", ref.normalized_repo
+            )
+            if not binding or str(binding.get("user_id") or "") != str(user["id"]):
+                raise cdn_error("git_binding_revoked", "仓库归属绑定已撤销或变更", 403)
+            if proof.get("binding_generation") and int(
+                binding.get("binding_generation") or 0
+            ) != int(proof["binding_generation"]):
+                raise cdn_error("git_binding_changed", "仓库绑定代次已变化，请重新开启 CDN", 403)
+        if settings is None:
+            raise cdn_error("cdn_provider_unconfigured", "缺少第三方 Git 平台运行时配置", 503)
+        adapter = (
+            adapter_factory(settings, ref.provider)
+            if adapter_factory is not None
+            else get_provider_adapter(settings, ref.provider)
+        )
+        _, token_set = await ensure_valid_provider_token(
+            store, settings, user, ref.provider, adapter=adapter
+        )
+        try:
+            current_proof = await adapter.verify_repository_access(
+                ref,
+                user_id=str(user["id"]),
+                token_set=token_set,
+                expected_repository_id=str(proof["id"]),
+            )
+        except GitSourceError as exc:
+            if exc.status_code == 409 and token_set.refresh_token:
+                _, token_set = await ensure_valid_provider_token(
+                    store, settings, user, ref.provider, adapter=adapter, force_refresh=True
+                )
+                try:
+                    current_proof = await adapter.verify_repository_access(
+                        ref,
+                        user_id=str(user["id"]),
+                        token_set=token_set,
+                        expected_repository_id=str(proof["id"]),
+                    )
+                except GitSourceError as retry_exc:
+                    raise cdn_error(
+                        retry_exc.code, retry_exc.message, retry_exc.status_code
+                    ) from retry_exc
+            else:
+                raise cdn_error(exc.code, exc.message, exc.status_code) from exc
+        if (
+            str(current_proof.repo_external_id) != str(proof["id"])
+            or str(current_proof.owner_id) != str(proof["owner_id"])
+            or current_proof.repo != ref.repo_url
+            or (
+                proof.get("provider_user_id")
+                and str(current_proof.provider_user_id) != str(proof["provider_user_id"])
+            )
+        ):
+            raise cdn_error("cdn_repository_changed", "仓库身份或归属已变化，需要重新授权", 403)
+        return user, {
+            "provider": ref.provider,
+            "ref": ref,
+            "proof": current_proof,
+            "access_token": token_set.access_token,
+            "adapter": adapter,
+        }
+
     if proof.get("mode") == "site_admin":
         if not is_admin(user):
             raise cdn_error("cdn_role_changed", "CDN 授权人的管理权限已失效", 403)
@@ -347,6 +448,8 @@ async def verify_subscription(
     canonical = normalize_github_repo(plugin["repo"])
     if proof.get("repo") != canonical or not proof.get("id") or not proof.get("owner_id"):
         raise cdn_error("cdn_authorization_required", "请重新开启 CDN 以验证仓库权限", 403)
+    if loader is None:
+        raise cdn_error("site_github_authorization_unavailable", "站点仓库复核尚未配置", 503)
     current = await loader(canonical)
     if (
         current.get("private") is not False
@@ -390,7 +493,12 @@ async def process_cdn_reviews(
                 ):
                     raise cdn_error("cdn_version_changed", "仓库版本已变化，等待新的审查任务")
                 user, repository = await verify_subscription(
-                    app.state.store, plugin, claim, repository_loader
+                    app.state.store,
+                    plugin,
+                    claim,
+                    repository_loader,
+                    settings=app.state.settings,
+                    adapter_factory=getattr(app.state, "git_provider_adapter_factory", None),
                 )
                 ensure_cdn_submission_allowed(user)
                 publications = await runtime.repository.list_current_publications([plugin["id"]])
@@ -402,7 +510,6 @@ async def process_cdn_reviews(
                 ):
                     await subscriptions.finish(claim, artifact_id=published["id"])
                     return
-                source = await source_loader(repository)
                 actor = {
                     **user,
                     "_repository_authorization": {
@@ -411,22 +518,35 @@ async def process_cdn_reviews(
                         "origin": "automatic_cdn_update",
                     },
                 }
-                artifact = await runtime.service.submit_github(
-                    plugin=plugin,
-                    user=actor,
-                    source_ref=source.requested_ref,
-                    resolved_source=source,
-                )
-                if (
-                    getattr(source, "release_tag", "")
-                    and artifact.get("version")
-                    and version_key(artifact.get("version")) != claim["requested_version"]
-                ):
-                    raise cdn_error(
-                        "release_version_mismatch",
-                        "最新 GitHub Release 版本与仓库当前版本不一致",
-                        503,
+                if repository.get("provider") in THIRD_PARTY_PROVIDERS:
+                    adapter = repository["adapter"]
+                    ref = repository["ref"]
+                    access_token = str(repository.get("access_token") or "")
+                    source = await adapter.resolve_archive_source(ref, access_token=access_token)
+                    artifact = await runtime.service.submit_git(
+                        plugin=plugin,
+                        user=actor,
+                        source=source,
+                        archive_chunks=adapter.stream_archive(source),
                     )
+                else:
+                    source = await source_loader(repository)
+                    artifact = await runtime.service.submit_github(
+                        plugin=plugin,
+                        user=actor,
+                        source_ref=source.requested_ref,
+                        resolved_source=source,
+                    )
+                    if (
+                        getattr(source, "release_tag", "")
+                        and artifact.get("version")
+                        and version_key(artifact.get("version")) != claim["requested_version"]
+                    ):
+                        raise cdn_error(
+                            "release_version_mismatch",
+                            "最新 GitHub Release 版本与仓库当前版本不一致",
+                            503,
+                        )
                 if artifact["review_status"] == "approved" and artifact["publication_status"] in {
                     "unpublished",
                     "publish_failed",
@@ -451,6 +571,7 @@ async def process_cdn_reviews(
         except Exception as exc:
             blocked = (
                 (isinstance(exc, GithubSourceError) and not exc.retryable)
+                or (isinstance(exc, GitSourceError) and not exc.retryable)
                 or isinstance(exc, PrecheckError)
                 or (isinstance(exc, ArtifactStorageError) and exc.code == "archive_too_large")
                 or (

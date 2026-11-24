@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
-import { DEFAULT_PLUGIN_LOGO_URL, resolvePluginLogoUrl, setDefaultPluginLogo } from "./github";
+import {
+  DEFAULT_PLUGIN_LOGO_URL,
+  detectGitProvider,
+  getGitProviderLabel,
+  isGithubRepoUrl,
+  isSupportedGitRepoUrl,
+  resolvePluginLogoUrl,
+  setDefaultPluginLogo,
+} from "./github";
 
 describe("resolvePluginLogoUrl", () => {
   it("uses an explicit plugin logo when one is provided", () => {
@@ -42,5 +50,36 @@ describe("resolvePluginLogoUrl", () => {
     setDefaultPluginLogo({ currentTarget: image } as unknown as Event);
 
     expect(image.src).toBe(DEFAULT_PLUGIN_LOGO_URL);
+  });
+});
+
+describe("multi-platform Git URL helpers", () => {
+  it("recognizes all five allowlisted OAuth Git providers and GitLab nested groups", () => {
+    expect(detectGitProvider("https://github.com/alice/astrbot_plugin_a")).toBe("github");
+    expect(detectGitProvider("https://gitlab.com/org/team/sub/astrbot_plugin_b.git")).toBe(
+      "gitlab",
+    );
+    expect(detectGitProvider("https://gitee.com/alice/astrbot_plugin_c")).toBe("gitee");
+    expect(detectGitProvider("https://atomgit.com/alice/astrbot_plugin_d")).toBe("atomgit");
+    expect(detectGitProvider("https://gitcode.com/alice/astrbot_plugin_e.git/")).toBe("atomgit");
+    expect(detectGitProvider("https://gitea.com/alice/astrbot_plugin_f")).toBe("gitea");
+    expect(isGithubRepoUrl("https://github.com/alice/astrbot_plugin_a")).toBe(true);
+    expect(isGithubRepoUrl("https://gitlab.com/alice/astrbot_plugin_b")).toBe(false);
+    expect(getGitProviderLabel("atomgit")).toBe("AtomGit");
+  });
+
+  it("rejects arbitrary hosts, non-https URLs, credentials, query params, and traversal", () => {
+    for (const invalid of [
+      "http://github.com/alice/astrbot_plugin_a",
+      "https://bitbucket.org/alice/astrbot_plugin_a",
+      "https://codeberg.org/alice/astrbot_plugin_a",
+      "https://user:pass@gitlab.com/alice/astrbot_plugin_a",
+      "https://gitee.com/alice/astrbot_plugin_a?foo=1",
+      "https://gitea.com/alice/astrbot_plugin_a#readme",
+      "https://gitee.com/org/sub/astrbot_plugin_too_deep",
+      "https://gitlab.com/alice/../astrbot_plugin_bad",
+    ]) {
+      expect(isSupportedGitRepoUrl(invalid)).toBe(false);
+    }
   });
 });

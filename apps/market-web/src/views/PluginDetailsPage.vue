@@ -2,18 +2,25 @@
 import { computed, defineAsyncComponent, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
-import { NButton, NCard, NIcon, NResult, NSpin, NTag, useMessage } from "naive-ui";
+import { NAlert, NButton, NCard, NIcon, NResult, NSpin, NTag, useMessage } from "naive-ui";
 import {
   ArrowBackOutline,
   ChatbubbleEllipsesOutline,
   CopyOutline,
+  GitBranchOutline,
   HeartOutline,
   LogoGithub,
   StarSharp,
 } from "@vicons/ionicons5";
 import { PLUGIN_CATEGORY_LABELS, usePluginStore } from "../stores/plugins";
 import type { PluginDetail } from "../types";
-import { resolvePluginLogoUrl, setDefaultPluginLogo } from "../utils/github";
+import {
+  detectGitProvider,
+  getGitProviderLabel,
+  isGithubRepoUrl,
+  resolvePluginLogoUrl,
+  setDefaultPluginLogo,
+} from "../utils/github";
 import { useSeo, useSeoContext } from "../composables/useSeo";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
 import AppFooter from "../components/AppFooter.vue";
@@ -42,6 +49,16 @@ const description = computed(
 const canonicalPath = computed(() => (plugin.value ? pluginDetailPath(plugin.value) : route.path));
 const categoryLabel = computed(() =>
   plugin.value ? PLUGIN_CATEGORY_LABELS[plugin.value.category] || "其他" : "其他",
+);
+const repoProvider = computed(
+  () => plugin.value?.repo_provider || detectGitProvider(plugin.value?.repo) || "github",
+);
+const repoProviderLabel = computed(() => getGitProviderLabel(repoProvider.value));
+const showDirectCloneVersionHint = computed(
+  () =>
+    Boolean(plugin.value?.repo) &&
+    !isGithubRepoUrl(plugin.value?.repo) &&
+    plugin.value?.cdn_enabled !== true,
 );
 const likesEnabled = computed(() => Boolean(siteConfig.value.market?.likes_enabled));
 const { absoluteSiteUrl } = useSeoContext();
@@ -261,12 +278,25 @@ function updatePlugin(updated: PluginDetail): void {
               </n-button>
               <span v-else class="sidebar-muted">点赞已关闭</span>
               <n-button v-if="plugin.repo" secondary @click="confirmExternalOpen(plugin.repo)">
-                <template #icon
-                  ><n-icon><logo-github /></n-icon
-                ></template>
-                查看仓库
+                <template #icon>
+                  <n-icon>
+                    <logo-github v-if="repoProvider === 'github'" />
+                    <git-branch-outline v-else />
+                  </n-icon>
+                </template>
+                查看 {{ repoProviderLabel }} 仓库
               </n-button>
             </div>
+
+            <n-alert
+              v-if="showDirectCloneVersionHint"
+              type="info"
+              :bordered="false"
+              class="direct-clone-hint"
+            >
+              该插件托管于 {{ repoProviderLabel }} 且未启用社区源 CDN，直接从仓库安装需 AstrBot
+              v4.27.0 及以上版本。
+            </n-alert>
 
             <div v-if="plugin.repo" class="repo-copy">
               <code>{{ plugin.repo }}</code>
@@ -463,6 +493,11 @@ function updatePlugin(updated: PluginDetail): void {
 .sidebar-muted {
   color: var(--text-tertiary);
   font-size: 13px;
+}
+
+.direct-clone-hint {
+  margin-top: 12px;
+  font-size: 12px;
 }
 
 .repo-copy {

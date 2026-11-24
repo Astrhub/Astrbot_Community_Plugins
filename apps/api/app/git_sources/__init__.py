@@ -1,0 +1,68 @@
+"""Known third-party Git OAuth providers, credential storage, and repository adapters."""
+
+from .base import BaseGitProviderAdapter, ProviderOAuthConfig
+from .credentials import (
+    CredentialStore,
+    oauth_credential_cipher,
+    require_oauth_credential_key,
+)
+from .models import (
+    ALLOWED_API_HOSTS_BY_PROVIDER,
+    ALLOWED_REPO_HOSTS,
+    ATOMGIT_DEFAULT_API_BASE,
+    ATOMGIT_ALLOWED_API_BASES,
+    PROVIDER_CANONICAL_HOSTS,
+    PROVIDER_DEFAULT_SCOPES,
+    PROVIDER_INSTANCE_URLS,
+    PROVIDER_LABELS,
+    SUPPORTED_PROVIDERS,
+    THIRD_PARTY_PROVIDERS,
+    GitSourceError,
+    OAuthTokenSet,
+    OAuthUserProfile,
+    RepositoryProof,
+    RepositoryRef,
+    ResolvedGitArchiveSource,
+    is_supported_git_repo_url,
+    normalize_git_repo_key,
+    normalize_git_repo_url,
+    parse_repository_ref,
+)
+from .registry import (
+    ensure_valid_provider_token,
+    get_provider_adapter,
+    get_provider_oauth_config,
+    public_oauth_providers_config,
+)
+
+__all__ = [
+    "ALLOWED_API_HOSTS_BY_PROVIDER",
+    "ALLOWED_REPO_HOSTS",
+    "ATOMGIT_ALLOWED_API_BASES",
+    "ATOMGIT_DEFAULT_API_BASE",
+    "BaseGitProviderAdapter",
+    "CredentialStore",
+    "GitSourceError",
+    "OAuthTokenSet",
+    "OAuthUserProfile",
+    "PROVIDER_CANONICAL_HOSTS",
+    "PROVIDER_DEFAULT_SCOPES",
+    "PROVIDER_INSTANCE_URLS",
+    "PROVIDER_LABELS",
+    "ProviderOAuthConfig",
+    "RepositoryProof",
+    "RepositoryRef",
+    "ResolvedGitArchiveSource",
+    "SUPPORTED_PROVIDERS",
+    "THIRD_PARTY_PROVIDERS",
+    "ensure_valid_provider_token",
+    "get_provider_adapter",
+    "get_provider_oauth_config",
+    "is_supported_git_repo_url",
+    "normalize_git_repo_key",
+    "normalize_git_repo_url",
+    "oauth_credential_cipher",
+    "parse_repository_ref",
+    "public_oauth_providers_config",
+    "require_oauth_credential_key",
+]

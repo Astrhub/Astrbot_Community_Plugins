@@ -2,7 +2,7 @@ import { readonly, shallowRef, toValue } from "vue";
 import type { MaybeRefOrGetter } from "vue";
 import { usePluginStore } from "@/stores/plugins";
 import type { Plugin, PluginReadmeContext, PluginReadmeDocument } from "@/types";
-import { githubRawUrl, parseGithubRepoUrl } from "@/utils/github";
+import { githubRawUrl, isGithubRepoUrl, parseGithubRepoUrl } from "@/utils/github";
 
 interface LoadPluginReadmeOptions {
   path?: string;
@@ -11,8 +11,11 @@ interface LoadPluginReadmeOptions {
 
 const README_CANDIDATES = ["README.md", "Readme.md", "readme.md", "README.MD", "README"];
 
-export function buildReadmeBrowserUrl(context: PluginReadmeContext): string {
-  return `https://github.com/${context.owner}/${context.repo}/blob/${context.branch}/${context.path}`;
+export function buildReadmeBrowserUrl(context: PluginReadmeContext, fallbackUrl = ""): string {
+  if (context.owner && context.repo) {
+    return `https://github.com/${context.owner}/${context.repo}/blob/${context.branch}/${context.path}`;
+  }
+  return fallbackUrl;
 }
 
 export function usePluginReadme(pluginInput: MaybeRefOrGetter<Plugin | null | undefined>) {
@@ -37,7 +40,10 @@ export function usePluginReadme(pluginInput: MaybeRefOrGetter<Plugin | null | un
           ...cached,
           context: readmeContextFromSource(cached.source_url, plugin.repo, path),
         };
-      } catch {
+      } catch (backendError) {
+        if (!isGithubRepoUrl(plugin.repo)) {
+          throw backendError instanceof Error ? backendError : new Error("加载 README 失败");
+        }
         result = await fetchReadmeDirect(plugin.repo, path);
       }
       document.value = result;

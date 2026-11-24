@@ -12,7 +12,13 @@ import FieldHint from "@/components/FieldHint.vue";
 import { useExternalOpenConfirm } from "@/composables/useExternalOpenConfirm";
 import { PLUGIN_CATEGORY_LABELS, PLUGIN_CATEGORY_OPTIONS } from "@/stores/plugins";
 import type { Plugin, PluginCategory, PluginStatus } from "@/types";
-import { resolvePluginLogoUrl, setDefaultPluginLogo } from "@/utils/github";
+import {
+  detectGitProvider,
+  getGitProviderLabel,
+  isGithubRepoUrl,
+  resolvePluginLogoUrl,
+  setDefaultPluginLogo,
+} from "@/utils/github";
 
 interface PluginDraft {
   display_name: string;
@@ -222,6 +228,9 @@ function savePlugin(plugin: Plugin): void {
                     class="repo-link"
                     @click="confirmExternalOpen(String(plugin.repo))"
                   >
+                    {{
+                      getGitProviderLabel(plugin.repo_provider || detectGitProvider(plugin.repo))
+                    }}
                     仓库 ↗
                   </button>
                 </template>
@@ -287,8 +296,13 @@ function savePlugin(plugin: Plugin): void {
               @update:value="(enabled: boolean) => emit('toggleCdn', { plugin, enabled })"
             />
             <p>
-              开启后每次新版本都会自动送审，通过前不提供该版本的 CDN 链接；关闭后仍可通过 GitHub
-              安装，不影响插件上架。
+              开启后每次新版本都会自动送审，通过前不提供该版本的 CDN 链接；关闭后仍可通过原 Git
+              仓库安装，不影响插件上架。
+              <template
+                v-if="plugin.repo && !isGithubRepoUrl(plugin.repo) && plugin.cdn_enabled !== true"
+              >
+                非 GitHub 仓库关闭 CDN 后，需要 AstrBot v4.27.0 及以上版本才能直接从仓库安装。
+              </template>
             </p>
           </div>
 

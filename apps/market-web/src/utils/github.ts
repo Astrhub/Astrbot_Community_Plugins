@@ -71,6 +71,86 @@ export function setDefaultPluginLogo(event: Event): void {
   image.src = DEFAULT_PLUGIN_LOGO_URL;
 }
 
+import type { OAuthProviderKey } from "@/types";
+
+export const GIT_PROVIDER_LABELS: Record<OAuthProviderKey, string> = {
+  github: "GitHub",
+  gitlab: "GitLab",
+  gitee: "Gitee",
+  atomgit: "AtomGit",
+  gitea: "Gitea",
+};
+
+const ALLOWED_GIT_HOSTS: Record<string, OAuthProviderKey> = {
+  "github.com": "github",
+  "www.github.com": "github",
+  "gitlab.com": "gitlab",
+  "www.gitlab.com": "gitlab",
+  "gitee.com": "gitee",
+  "www.gitee.com": "gitee",
+  "atomgit.com": "atomgit",
+  "www.atomgit.com": "atomgit",
+  "gitcode.com": "atomgit",
+  "www.gitcode.com": "atomgit",
+  "gitea.com": "gitea",
+  "www.gitea.com": "gitea",
+};
+
+const PATH_SEGMENT_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+export function getGitProviderLabel(provider?: string | null): string {
+  const key = String(provider || "")
+    .trim()
+    .toLowerCase() as OAuthProviderKey;
+  return GIT_PROVIDER_LABELS[key] || (key ? key.toUpperCase() : "Git");
+}
+
+export function detectGitProvider(value?: string | null): OAuthProviderKey | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.port ||
+      url.search ||
+      url.hash
+    ) {
+      return null;
+    }
+    const provider = ALLOWED_GIT_HOSTS[url.hostname.toLowerCase()];
+    if (!provider) return null;
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (
+      segments.some(
+        (segment) => segment === "." || segment === ".." || !PATH_SEGMENT_PATTERN.test(segment),
+      )
+    ) {
+      return null;
+    }
+    if (provider === "gitlab") {
+      if (segments.length < 2 || segments.length > 20) return null;
+    } else if (segments.length !== 2) {
+      return null;
+    }
+    const repo = segments[segments.length - 1].replace(/\.git$/i, "");
+    if (!repo || repo === "." || repo === "..") return null;
+    return provider;
+  } catch {
+    return null;
+  }
+}
+
+export function isSupportedGitRepoUrl(value?: string | null): boolean {
+  return detectGitProvider(value) !== null;
+}
+
+export function isGithubRepoUrl(value?: string | null): boolean {
+  return detectGitProvider(value) === "github";
+}
+
 export function parseGithubRepoUrl(value: string): { owner: string; repo: string } | null {
   if (!value) return null;
 

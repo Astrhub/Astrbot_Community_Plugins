@@ -6,7 +6,6 @@ import re
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Literal, Self
-from urllib.parse import urlsplit
 
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
@@ -149,24 +148,15 @@ class ExpectedPluginMetadata(ContractModel):
     @field_validator("source_repo")
     @classmethod
     def validate_source_repo(cls, value: str) -> str:
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname not in {"github.com", "www.github.com"}
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("Source repository must be a credential-free GitHub HTTPS URL")
-        parts = [part for part in parsed.path.strip("/").split("/") if part]
-        if (
-            len(parts) != 2
-            or any(part in {".", ".."} for part in parts)
-            or not all(_GITHUB_PATH_SEGMENT.fullmatch(part) for part in parts)
-        ):
-            raise ValueError("Source repository must identify one GitHub owner and repository")
-        return value.rstrip("/")
+        from ..git_sources.models import GitSourceError, parse_repository_ref
+
+        try:
+            ref = parse_repository_ref(value)
+        except GitSourceError as exc:
+            raise ValueError(
+                "Source repository must be a credential-free HTTPS URL on an allowlisted OAuth Git provider"
+            ) from exc
+        return ref.repo_url
 
     @field_validator("source_commit_sha")
     @classmethod

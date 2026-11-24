@@ -19,7 +19,8 @@ import NotificationPreferencesSection from "@/components/settings/NotificationPr
 import PersonalPluginManager from "@/components/settings/PersonalPluginManager.vue";
 import ProfileAccountSection from "@/components/settings/ProfileAccountSection.vue";
 import { usePluginStore } from "@/stores/plugins";
-import type { OAuthIdentity, Plugin } from "@/types";
+import { getGitProviderLabel } from "@/utils/github";
+import type { OAuthIdentity, OAuthProviderKey, Plugin } from "@/types";
 
 const router = useRouter();
 const message = useMessage();
@@ -33,6 +34,7 @@ const {
   loadMyApiKeys,
   loadMyPlugins,
   loginWithGithub,
+  loginWithOAuth,
   requestEmailChange,
   requestPluginListing,
   unbindMyOAuthIdentity,
@@ -360,6 +362,27 @@ function handleConnectGithub() {
   loginWithGithub("/settings/personal");
 }
 
+function handleConnectOAuth(provider: OAuthProviderKey) {
+  loginWithOAuth(provider, "/settings/personal");
+}
+
+const enabledOAuthProviders = computed(() => {
+  const configured = siteConfig.value.auth.oauth_providers;
+  if (Array.isArray(configured) && configured.length > 0) {
+    return configured.filter((item) => item.enabled);
+  }
+  const fallback: Array<{ provider: OAuthProviderKey; enabled: boolean }> = [
+    { provider: "github", enabled: Boolean(siteConfig.value.auth.github_login_enabled) },
+    { provider: "gitlab", enabled: Boolean(siteConfig.value.auth.gitlab_login_enabled) },
+    { provider: "gitee", enabled: Boolean(siteConfig.value.auth.gitee_login_enabled) },
+    { provider: "atomgit", enabled: Boolean(siteConfig.value.auth.atomgit_login_enabled) },
+    { provider: "gitea", enabled: Boolean(siteConfig.value.auth.gitea_login_enabled) },
+  ];
+  return fallback
+    .filter((item) => item.enabled)
+    .map((item) => ({ provider: item.provider, label: getGitProviderLabel(item.provider) }));
+});
+
 async function handleUnbindOAuth(identity: OAuthIdentity) {
   oauthBusyId.value = identity.id;
   try {
@@ -423,7 +446,7 @@ onMounted(async () => {
                 :email-saving="savingEmail"
                 :oauth-busy-id="oauthBusyId"
                 @save="saveProfile"
-                @connect-github="handleConnectGithub"
+                @connect-oauth="handleConnectOAuth"
                 @unbind-oauth="handleUnbindOAuth"
                 @update-password="handleUpdatePassword"
                 @request-email-change="handleRequestEmailChange"
@@ -459,14 +482,18 @@ onMounted(async () => {
             <div class="profile-tab-content">
               <NAlert v-if="!isDeveloper && !myPlugins.length" type="info" :bordered="false">
                 当前账号为注册用户，绑定至少一个 OAuth 账号成为开发者后即可提交与上架插件。
-                <template v-if="siteConfig.auth.github_login_enabled">
+                <template v-if="enabledOAuthProviders.length">
                   <NButton
+                    v-for="item in enabledOAuthProviders"
+                    :key="item.provider"
                     size="small"
-                    type="primary"
-                    style="margin-left: 10px"
-                    @click="handleConnectGithub"
+                    :type="
+                      item.provider === enabledOAuthProviders[0]?.provider ? 'primary' : 'default'
+                    "
+                    style="margin-left: 8px; margin-top: 4px"
+                    @click="handleConnectOAuth(item.provider)"
                   >
-                    绑定 GitHub 成为开发者
+                    绑定 {{ item.label }}
                   </NButton>
                 </template>
               </NAlert>

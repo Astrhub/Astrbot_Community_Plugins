@@ -349,6 +349,10 @@ class AdminSetupConfig(BaseModel):
 
 class AuthSetupConfig(BaseModel):
     github_login_enabled: bool = False
+    gitlab_login_enabled: bool = False
+    gitee_login_enabled: bool = False
+    atomgit_login_enabled: bool = False
+    gitea_login_enabled: bool = False
     public_login_enabled: bool = True
     email_registration_enabled: bool = False
     email_verification_required: bool = True
@@ -361,6 +365,21 @@ class AuthSetupConfig(BaseModel):
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
+
+
+class OAuthProviderSetupConfig(BaseModel):
+    client_id: str = ""
+    client_secret: str = ""
+    callback_url: str = ""
+    scope: str = ""
+    api_base_url: str = ""
+
+    @field_validator(
+        "client_id", "client_secret", "callback_url", "scope", "api_base_url", mode="before"
+    )
+    @classmethod
+    def strip_text(cls, value: str | None) -> str:
+        return str(value or "").strip()
 
 
 class GithubSetupConfig(BaseModel):
@@ -481,6 +500,23 @@ class SystemSettingsPayload(BaseModel):
     site: SiteSetupConfig = Field(default_factory=SiteSetupConfig)
     auth: AuthSetupConfig = Field(default_factory=AuthSetupConfig)
     github: GithubSetupConfig = Field(default_factory=GithubSetupConfig)
+    gitlab: OAuthProviderSetupConfig = Field(
+        default_factory=lambda: OAuthProviderSetupConfig(scope="read_user read_api")
+    )
+    gitee: OAuthProviderSetupConfig = Field(
+        default_factory=lambda: OAuthProviderSetupConfig(scope="user_info projects")
+    )
+    atomgit: OAuthProviderSetupConfig = Field(
+        default_factory=lambda: OAuthProviderSetupConfig(
+            scope="read_user read_repository",
+            api_base_url="https://api.atomgit.com",
+        )
+    )
+    gitea: OAuthProviderSetupConfig = Field(
+        default_factory=lambda: OAuthProviderSetupConfig(
+            scope="read:user read:repository read:organization"
+        )
+    )
     market: MarketSetupConfig = Field(default_factory=MarketSetupConfig)
     email: EmailSetupConfig = Field(default_factory=EmailSetupConfig)
 
@@ -507,5 +543,22 @@ class SetupConfig(BaseModel):
     admin: AdminSetupConfig
     auth: AuthSetupConfig = Field(default_factory=AuthSetupConfig)
     github: GithubSetupConfig = Field(default_factory=GithubSetupConfig)
+    gitlab: OAuthProviderSetupConfig = Field(
+        default_factory=lambda: OAuthProviderSetupConfig(scope="read_user read_api")
+    )
+    gitee: OAuthProviderSetupConfig = Field(
+        default_factory=lambda: OAuthProviderSetupConfig(scope="user_info projects")
+    )
+    atomgit: OAuthProviderSetupConfig = Field(
+        default_factory=lambda: OAuthProviderSetupConfig(
+            scope="read_user read_repository",
+            api_base_url="https://api.atomgit.com",
+        )
+    )
+    gitea: OAuthProviderSetupConfig = Field(
+        default_factory=lambda: OAuthProviderSetupConfig(
+            scope="read:user read:repository read:organization"
+        )
+    )
     market: MarketSetupConfig = Field(default_factory=MarketSetupConfig)
     email: EmailSetupConfig = Field(default_factory=EmailSetupConfig)

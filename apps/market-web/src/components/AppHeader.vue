@@ -18,6 +18,7 @@ import {
   useMessage,
 } from "naive-ui";
 import {
+  GitBranchOutline,
   LogOutOutline,
   LogoGithub,
   NotificationsOutline,
@@ -28,7 +29,8 @@ import {
 import ThemeModeButton from "./ThemeModeButton.vue";
 import AnnouncementButton from "./AnnouncementButton.vue";
 import { usePluginStore } from "../stores/plugins";
-import { githubRawUrl } from "../utils/github";
+import { getGitProviderLabel, githubRawUrl } from "../utils/github";
+import type { OAuthProviderKey, PublicOAuthProviderInfo } from "../types";
 
 const router = useRouter();
 const message = useMessage();
@@ -36,6 +38,7 @@ const store = usePluginStore();
 const { currentUser, currentUserPreview, siteConfig, unreadNotificationCount } = storeToRefs(store);
 const {
   loginWithGithub,
+  loginWithOAuth,
   loginWithPassword,
   registerWithEmailDirect,
   requestEmailRegisterCode,
@@ -126,9 +129,44 @@ const emailVerificationRequired = computed(
 );
 const emailServiceEnabled = computed(() => Boolean(authConfig.value.email_service_enabled));
 const githubLoginEnabled = computed(() => Boolean(authConfig.value.github_login_enabled));
+const enabledOAuthProviders = computed<PublicOAuthProviderInfo[]>(() => {
+  const configured = authConfig.value.oauth_providers;
+  if (Array.isArray(configured) && configured.length > 0) {
+    return configured.filter((item) => item.enabled);
+  }
+  const fallbackKeys: Array<{ provider: OAuthProviderKey; flag: boolean }> = [
+    { provider: "github", flag: Boolean(authConfig.value.github_login_enabled) },
+    { provider: "gitlab", flag: Boolean(authConfig.value.gitlab_login_enabled) },
+    { provider: "gitee", flag: Boolean(authConfig.value.gitee_login_enabled) },
+    { provider: "atomgit", flag: Boolean(authConfig.value.atomgit_login_enabled) },
+    { provider: "gitea", flag: Boolean(authConfig.value.gitea_login_enabled) },
+  ];
+  return fallbackKeys
+    .filter((item) => item.flag)
+    .map((item) => ({
+      provider: item.provider,
+      label: getGitProviderLabel(item.provider),
+      enabled: true,
+      login_path:
+        item.provider === "github"
+          ? "/v1/auth/github/login"
+          : `/v1/auth/oauth/${item.provider}/login`,
+    }));
+});
 const hasAnyAuthMethod = computed(
-  () => passwordLoginEnabled.value || emailRegisterEnabled.value || githubLoginEnabled.value,
+  () =>
+    passwordLoginEnabled.value ||
+    emailRegisterEnabled.value ||
+    githubLoginEnabled.value ||
+    enabledOAuthProviders.value.length > 0,
 );
+function handleOAuthLogin(provider: OAuthProviderKey): void {
+  if (provider === "github") {
+    loginWithGithub();
+    return;
+  }
+  loginWithOAuth(provider);
+}
 const agreementText = computed(() => {
   const auth = authConfig.value || {};
   const parts: string[] = [];
@@ -648,22 +686,32 @@ async function handleUserMenuSelect(key: string): Promise<void> {
           </n-tab-pane>
         </n-tabs>
 
-        <n-divider v-if="(passwordLoginEnabled || emailRegisterEnabled) && githubLoginEnabled">
+        <n-divider
+          v-if="(passwordLoginEnabled || emailRegisterEnabled) && enabledOAuthProviders.length"
+        >
           或
         </n-divider>
 
-        <n-button
-          v-if="githubLoginEnabled"
-          :type="passwordLoginEnabled || emailRegisterEnabled ? 'default' : 'primary'"
-          block
-          :disabled="!canSubmitLogin"
-          @click="loginWithGithub"
-        >
-          <template #icon
-            ><n-icon><logo-github /></n-icon
-          ></template>
-          GitHub 登录 / 注册
-        </n-button>
+        <div v-if="enabledOAuthProviders.length" class="oauth-login-list">
+          <n-button
+            v-for="(item, index) in enabledOAuthProviders"
+            :key="item.provider"
+            :type="
+              !passwordLoginEnabled && !emailRegisterEnabled && index === 0 ? 'primary' : 'default'
+            "
+            block
+            :disabled="!canSubmitLogin"
+            @click="handleOAuthLogin(item.provider)"
+          >
+            <template #icon>
+              <n-icon>
+                <logo-github v-if="item.provider === 'github'" />
+                <git-branch-outline v-else />
+              </n-icon>
+            </template>
+            {{ item.label }} 登录 / 注册
+          </n-button>
+        </div>
       </template>
 
       <n-alert v-else type="warning" :bordered="false">
@@ -855,6 +903,11 @@ async function handleUserMenuSelect(key: string): Promise<void> {
 
 .agreement-box {
   margin-bottom: 4px;
+}
+
+.oauth-login-list {
+  display: grid;
+  gap: 10px;
 }
 
 .agreement-text {

@@ -21,6 +21,7 @@ import asyncpg
 from redis import asyncio as redis_asyncio
 
 from .auth import Role, normalize_role
+from .git_sources.models import GitSourceError, parse_repository_ref
 from .schema_migrations import apply_schema_migrations
 from .plugin_identity import PluginIdentityConflict
 
@@ -33,6 +34,22 @@ class UserIdentityConflict(ValueError):
     def __init__(self, message: str, code: str = "user_identity_conflict") -> None:
         super().__init__(message)
         self.code = code
+
+
+def _canonical_repo_fields(
+    repo: str,
+    provider: str = "",
+    external_id: str = "",
+) -> tuple[str, str, str]:
+    raw_repo = str(repo or "").strip()
+    if raw_repo:
+        try:
+            ref = parse_repository_ref(raw_repo)
+            return (ref.provider, str(external_id or "").strip(), ref.normalized_repo)
+        except GitSourceError:
+            pass
+    fallback_key = raw_repo.lower().removesuffix(".git").rstrip("/")
+    return (str(provider or "").strip().lower(), str(external_id or "").strip(), fallback_key)
 
 
 def plugin_identity_write(method: Any) -> Any:
@@ -48,6 +65,8 @@ def plugin_identity_write(method: Any) -> Any:
                 "market_plugins_namespace_key",
                 "market_plugins_owner_username_name_key",
                 "market_plugins_repo_key",
+                "market_plugins_normalized_repo_key",
+                "market_git_repository_bindings_active_repo_idx",
             }:
                 raise PluginIdentityConflict("该用户名下已存在同名插件，或仓库已被登记") from exc
             raise
@@ -127,6 +146,8 @@ class InMemoryMarketStore:
             "notifications": state.get("notifications", []),
             "apiKeys": state.get("apiKeys", []),
             "oauthIdentities": state.get("oauthIdentities", []),
+            "oauthCredentials": dict(state.get("oauthCredentials", {})),
+            "gitBindings": list(state.get("gitBindings", [])),
             "emailChallenges": state.get("emailChallenges", {}),
             "rateLimits": state.get("rateLimits", {}),
             "cooldowns": state.get("cooldowns", {}),
@@ -208,16 +229,24 @@ class InMemoryMarketStore:
                     or str(plugin.get("owner_github_login") or "").strip()
                 )
 
-    def _allocate_public_username(self, preferred: str, *, exclude_user_id: str = "") -> str:
+    def _allocate_public_username(
+        self,
+        preferred: str,
+        *,
+        exclude_user_id: str = "",
+        suffix_tag: str = "gh",
+    ) -> str:
         base = str(preferred or "").strip() or f"user_{secrets.token_hex(4)}"
         taken = {
-            str(u.get("public_username") or "").strip().lower()
+            str(u.get(field) or "").strip().lower()
             for u in self.state["users"]
-            if u["id"] != exclude_user_id and str(u.get("public_username") or "").strip()
+            if u["id"] != exclude_user_id
+            for field in ("public_username", "internal_username", "github_login")
+            if str(u.get(field) or "").strip()
         }
         if base.lower() not in taken:
             return base
-        candidate = f"{base}_gh"
+        candidate = f"{base}_{suffix_tag}"
         if candidate.lower() not in taken:
             return candidate
         for index in range(1, 1000):
@@ -225,6 +254,42 @@ class InMemoryMarketStore:
             if candidate.lower() not in taken:
                 return candidate
         return f"{base}_{secrets.token_hex(3)}"
+
+    def create_oauth_user(
+        self,
+        *,
+        provider: str,
+        provider_login: str,
+        display_name: str = "",
+        avatar_url: str = "",
+    ) -> dict[str, Any]:
+        norm_provider = str(provider or "oauth").strip().lower()
+        clean_login = str(provider_login or "").strip() or f"{norm_provider}_{secrets.token_hex(3)}"
+        public_username = self._allocate_public_username(clean_login, suffix_tag=norm_provider)
+        user = self._normalize_user(
+            {
+                "id": self._next_id("user"),
+                "github_id": None,
+                "github_login": "",
+                "internal_username": "",
+                "public_username": public_username,
+                "email": "",
+                "email_verified_at": None,
+                "session_version": 1,
+                "password_hash": "",
+                "auth_source": "oauth",
+                "github_name": str(display_name or clean_login).strip(),
+                "github_email": "",
+                "avatar_url": str(avatar_url or "").strip(),
+                "role": Role.USER,
+                "muted_until": None,
+                "muted_reason": "",
+                "created_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+        )
+        self.state["users"].append(user)
+        return deepcopy(user)
 
     def upsert_github_user(self, profile: dict[str, Any]) -> dict[str, Any]:
         login = profile.get("login") or profile.get("github_login")
@@ -717,6 +782,253 @@ class InMemoryMarketStore:
                 user["updated_at"] = now
         return deepcopy(target)
 
+    def update_oauth_identity_rotation(
+        self,
+        identity_id: str,
+        *,
+        credential_ref: str = "",
+        expires_at: str | None = None,
+        rotation_status: str = "",
+        token_refreshed_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        target = next(
+            (
+                item
+                for item in self.state["oauthIdentities"]
+                if item.get("id") == identity_id and item.get("revoked_at") is None
+            ),
+            None,
+        )
+        if not target:
+            return None
+        if credential_ref:
+            target["credential_ref"] = str(credential_ref)
+        if expires_at is not None:
+            target["expires_at"] = expires_at
+        if rotation_status:
+            target["rotation_status"] = str(rotation_status)
+        if token_refreshed_at is not None:
+            target["token_refreshed_at"] = token_refreshed_at
+        target["updated_at"] = utc_now()
+        return deepcopy(target)
+
+    def upsert_oauth_credential(
+        self,
+        credential_ref: str,
+        *,
+        user_id: str,
+        provider: str,
+        ciphertext: str,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        creds = self.state.setdefault("oauthCredentials", {})
+        existing = creds.get(credential_ref) or {}
+        now = utc_now()
+        record = {
+            "credential_ref": str(credential_ref),
+            "user_id": str(user_id),
+            "provider": str(provider or "").strip().lower(),
+            "ciphertext": str(ciphertext),
+            "expires_at": expires_at,
+            "created_at": existing.get("created_at") or now,
+            "updated_at": now,
+        }
+        creds[str(credential_ref)] = record
+        return deepcopy(record)
+
+    def get_oauth_credential(self, credential_ref: str) -> dict[str, Any] | None:
+        record = self.state.setdefault("oauthCredentials", {}).get(str(credential_ref))
+        return deepcopy(record) if record else None
+
+    def delete_oauth_credential(self, credential_ref: str) -> bool:
+        return (
+            self.state.setdefault("oauthCredentials", {}).pop(str(credential_ref), None) is not None
+        )
+
+    def upsert_git_repository_binding(
+        self,
+        user_id: str,
+        *,
+        normalized_repo: str,
+        repo_url: str,
+        provider: str,
+        instance_url: str = "",
+        repo_external_id: str = "",
+        owner_id: str = "",
+        permission_level: str = "",
+        verification_method: str = "oauth",
+        credential_ref: str = "",
+        verified_at: str | None = None,
+    ) -> dict[str, Any]:
+        bindings = self.state.setdefault("gitBindings", [])
+        norm_key = str(normalized_repo or "").strip().lower()
+        now = utc_now()
+        active = next(
+            (
+                item
+                for item in bindings
+                if item.get("revoked_at") is None
+                and str(item.get("normalized_repo") or "").lower() == norm_key
+            ),
+            None,
+        )
+        if active:
+            if str(active.get("user_id")) != str(user_id):
+                raise PluginIdentityConflict("该仓库已绑定到其他市场账号，请联系管理员核对")
+            gen = int(active.get("binding_generation") or 1)
+            identity_changed = (
+                bool(active.get("repo_external_id"))
+                and bool(repo_external_id)
+                and str(active.get("repo_external_id")) != str(repo_external_id)
+            ) or (
+                bool(active.get("owner_id"))
+                and bool(owner_id)
+                and str(active.get("owner_id")) != str(owner_id)
+            )
+            if identity_changed:
+                gen += 1
+            active.update(
+                {
+                    "repo_url": str(repo_url),
+                    "provider": str(provider or "").strip().lower(),
+                    "instance_url": str(instance_url or active.get("instance_url") or ""),
+                    "repo_external_id": str(
+                        repo_external_id or active.get("repo_external_id") or ""
+                    ),
+                    "owner_id": str(owner_id or active.get("owner_id") or ""),
+                    "permission_level": str(
+                        permission_level or active.get("permission_level") or ""
+                    ),
+                    "verification_method": str(verification_method or "oauth"),
+                    "credential_ref": str(credential_ref or active.get("credential_ref") or ""),
+                    "binding_generation": gen,
+                    "verified_at": verified_at or now,
+                    "updated_at": now,
+                }
+            )
+            return deepcopy(active)
+
+        prior_max = max(
+            (
+                int(item.get("binding_generation") or 0)
+                for item in bindings
+                if str(item.get("normalized_repo") or "").lower() == norm_key
+            ),
+            default=0,
+        )
+        record = {
+            "id": self._next_id("gitbind"),
+            "user_id": str(user_id),
+            "normalized_repo": norm_key,
+            "repo_url": str(repo_url),
+            "provider": str(provider or "").strip().lower(),
+            "instance_url": str(instance_url or ""),
+            "repo_external_id": str(repo_external_id or ""),
+            "owner_id": str(owner_id or ""),
+            "permission_level": str(permission_level or ""),
+            "verification_method": str(verification_method or "oauth"),
+            "credential_ref": str(credential_ref or ""),
+            "binding_generation": prior_max + 1,
+            "verified_at": verified_at or now,
+            "revoked_at": None,
+            "revoked_by": None,
+            "revoke_reason": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        bindings.append(record)
+        return deepcopy(record)
+
+    def get_active_git_repository_binding(self, normalized_repo: str) -> dict[str, Any] | None:
+        norm_key = str(normalized_repo or "").strip().lower()
+        return next(
+            (
+                deepcopy(item)
+                for item in self.state.setdefault("gitBindings", [])
+                if item.get("revoked_at") is None
+                and str(item.get("normalized_repo") or "").lower() == norm_key
+            ),
+            None,
+        )
+
+    def list_git_repository_bindings(self, include_revoked: bool = False) -> list[dict[str, Any]]:
+        return [
+            deepcopy(item)
+            for item in reversed(self.state.setdefault("gitBindings", []))
+            if include_revoked or item.get("revoked_at") is None
+        ]
+
+    def revoke_git_repository_binding(
+        self,
+        binding_id: str,
+        *,
+        revoked_by: str,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        target = next(
+            (
+                item
+                for item in self.state.setdefault("gitBindings", [])
+                if item.get("id") == binding_id and item.get("revoked_at") is None
+            ),
+            None,
+        )
+        if not target:
+            return None
+        now = utc_now()
+        target["revoked_at"] = now
+        target["revoked_by"] = str(revoked_by)
+        target["revoke_reason"] = str(reason or "")
+        target["updated_at"] = now
+        return deepcopy(target)
+
+    def transfer_git_repository_binding(
+        self,
+        binding_id: str,
+        *,
+        target_user_id: str,
+        actor_user_id: str,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        bindings = self.state.setdefault("gitBindings", [])
+        old = next(
+            (
+                item
+                for item in bindings
+                if item.get("id") == binding_id and item.get("revoked_at") is None
+            ),
+            None,
+        )
+        if not old:
+            return None
+        now = utc_now()
+        old["revoked_at"] = now
+        old["revoked_by"] = str(actor_user_id)
+        old["revoke_reason"] = str(reason or "管理员转移绑定")
+        old["updated_at"] = now
+        new_record = {
+            "id": self._next_id("gitbind"),
+            "user_id": str(target_user_id),
+            "normalized_repo": old["normalized_repo"],
+            "repo_url": old["repo_url"],
+            "provider": old["provider"],
+            "instance_url": old.get("instance_url") or "",
+            "repo_external_id": old.get("repo_external_id") or "",
+            "owner_id": old.get("owner_id") or "",
+            "permission_level": old.get("permission_level") or "",
+            "verification_method": old.get("verification_method") or "oauth",
+            "credential_ref": "",
+            "binding_generation": int(old.get("binding_generation") or 1) + 1,
+            "verified_at": now,
+            "revoked_at": None,
+            "revoked_by": None,
+            "revoke_reason": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        bindings.append(new_record)
+        return deepcopy(new_record)
+
     def list_github_authorization_references(self, user_id: str) -> list[str]:
         references = [
             hashlib.sha256(str(session["token"]).encode()).hexdigest()
@@ -843,8 +1155,15 @@ class InMemoryMarketStore:
         )
         if existing and existing.get("owner_user_id") != user["id"]:
             raise PermissionError("plugin_owner_mismatch")
-        if existing and existing["repo"].rstrip("/").lower() != payload["repo"].rstrip("/").lower():
-            raise PluginIdentityConflict("该用户名下的插件名已关联其他仓库")
+        if existing:
+            _, _, existing_repo_key = _canonical_repo_fields(
+                str(existing.get("normalized_repo") or existing.get("repo") or "")
+            )
+            _, _, payload_repo_key = _canonical_repo_fields(
+                str(payload.get("normalized_repo") or payload.get("repo") or "")
+            )
+            if existing_repo_key != payload_repo_key:
+                raise PluginIdentityConflict("该用户名下的插件名已关联其他仓库")
         plugin_id = existing["id"] if existing else (payload.get("id") or payload["name"])
         if not existing and self.get_plugin(plugin_id):
             plugin_id = new_id("astrbot_plugin")
@@ -888,7 +1207,13 @@ class InMemoryMarketStore:
             other_author = str(other.get("author") or "").strip().lower()
             if same_name and candidate_author and other_author == candidate_author:
                 raise PluginIdentityConflict("已存在相同作者与插件名组合的插件")
-            if other["repo"].rstrip("/").lower() == candidate["repo"].rstrip("/").lower():
+            _, _, other_repo_key = _canonical_repo_fields(
+                str(other.get("normalized_repo") or other.get("repo") or "")
+            )
+            _, _, candidate_repo_key = _canonical_repo_fields(
+                str(candidate.get("normalized_repo") or candidate.get("repo") or "")
+            )
+            if other_repo_key and other_repo_key == candidate_repo_key:
                 raise PluginIdentityConflict("该仓库已登记为其他插件")
 
     def get_comment(self, comment_id: str) -> dict[str, Any] | None:
@@ -1087,6 +1412,15 @@ class InMemoryMarketStore:
             return None
         changes = {key: value for key, value in patch.items() if value is not None}
         changes.pop("version_updated_at", None)
+        if "repo" in changes:
+            repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
+                str(changes["repo"]),
+                str(changes.get("repo_provider") or plugin.get("repo_provider") or ""),
+                str(changes.get("repo_external_id") or plugin.get("repo_external_id") or ""),
+            )
+            changes.setdefault("repo_provider", repo_provider)
+            changes.setdefault("repo_external_id", repo_external_id)
+            changes["normalized_repo"] = normalized_repo
         new_repo_version = str(changes.get("repo_version") or "")
         if new_repo_version and new_repo_version != str(plugin.get("repo_version") or ""):
             changes["version_updated_at"] = utc_now()
@@ -1274,6 +1608,17 @@ class InMemoryMarketStore:
             self.state[collection] = [
                 item for item in self.state[collection] if item.get("user_id") != user_id
             ]
+        self.state["oauthCredentials"] = {
+            ref: cred
+            for ref, cred in self.state.setdefault("oauthCredentials", {}).items()
+            if cred.get("user_id") != user_id
+        }
+        for binding in self.state.setdefault("gitBindings", []):
+            if binding.get("user_id") == user_id and binding.get("revoked_at") is None:
+                binding["user_id"] = replacement_user_id
+                binding["credential_ref"] = ""
+                binding["binding_generation"] = int(binding.get("binding_generation") or 1) + 1
+                binding["updated_at"] = utc_now()
         self.state["users"] = [item for item in self.state["users"] if item["id"] != user_id]
         self._refresh_like_counts()
         for plugin in self.state["plugins"]:
@@ -1328,6 +1673,12 @@ class InMemoryMarketStore:
         for identity in self.state["oauthIdentities"]:
             if identity.get("user_id") == from_user_id:
                 identity["user_id"] = to_user_id
+        for cred in self.state.setdefault("oauthCredentials", {}).values():
+            if cred.get("user_id") == from_user_id:
+                cred["user_id"] = to_user_id
+        for binding in self.state.setdefault("gitBindings", []):
+            if binding.get("user_id") == from_user_id:
+                binding["user_id"] = to_user_id
         self._merge_likes("pluginLikes", "plugin_id", from_user_id, to_user_id)
         self._merge_likes("commentLikes", "comment_id", from_user_id, to_user_id)
         self._refresh_like_counts()
@@ -1789,8 +2140,16 @@ class InMemoryMarketStore:
         }
 
     def _normalize_plugin(self, plugin: dict[str, Any]) -> dict[str, Any]:
+        repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
+            str(plugin.get("repo") or ""),
+            str(plugin.get("repo_provider") or ""),
+            str(plugin.get("repo_external_id") or ""),
+        )
         return {
             **plugin,
+            "repo_provider": str(plugin.get("repo_provider") or repo_provider),
+            "repo_external_id": str(plugin.get("repo_external_id") or repo_external_id),
+            "normalized_repo": str(plugin.get("normalized_repo") or normalized_repo).lower(),
             "owner_username": str(plugin.get("owner_username") or ""),
             "tags": plugin.get("tags") if isinstance(plugin.get("tags"), list) else [],
             "stars": int(plugin.get("stars") or 0),
@@ -1894,6 +2253,8 @@ class LocalFileMarketStore(InMemoryMarketStore):
             "notifications": list(data.get("notifications", [])),
             "apiKeys": list(data.get("apiKeys", [])),
             "oauthIdentities": list(data.get("oauthIdentities", [])),
+            "oauthCredentials": dict(data.get("oauthCredentials", {})),
+            "gitBindings": list(data.get("gitBindings", [])),
             "emailChallenges": dict(data.get("emailChallenges", {})),
             "rateLimits": dict(data.get("rateLimits", {})),
             "cooldowns": dict(data.get("cooldowns", {})),
@@ -2058,6 +2419,132 @@ class LocalFileMarketStore(InMemoryMarketStore):
     def revoke_oauth_identity(self, user_id: str, identity_id: str) -> dict[str, Any] | None:
         with self._persist():
             return super().revoke_oauth_identity(user_id, identity_id)
+
+    def create_oauth_user(
+        self,
+        *,
+        provider: str,
+        provider_login: str,
+        display_name: str = "",
+        avatar_url: str = "",
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().create_oauth_user(
+                provider=provider,
+                provider_login=provider_login,
+                display_name=display_name,
+                avatar_url=avatar_url,
+            )
+
+    def update_oauth_identity_rotation(
+        self,
+        identity_id: str,
+        *,
+        credential_ref: str = "",
+        expires_at: str | None = None,
+        rotation_status: str = "",
+        token_refreshed_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().update_oauth_identity_rotation(
+                identity_id,
+                credential_ref=credential_ref,
+                expires_at=expires_at,
+                rotation_status=rotation_status,
+                token_refreshed_at=token_refreshed_at,
+            )
+
+    def upsert_oauth_credential(
+        self,
+        credential_ref: str,
+        *,
+        user_id: str,
+        provider: str,
+        ciphertext: str,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().upsert_oauth_credential(
+                credential_ref,
+                user_id=user_id,
+                provider=provider,
+                ciphertext=ciphertext,
+                expires_at=expires_at,
+            )
+
+    def get_oauth_credential(self, credential_ref: str) -> dict[str, Any] | None:
+        with self._lock:
+            return super().get_oauth_credential(credential_ref)
+
+    def delete_oauth_credential(self, credential_ref: str) -> bool:
+        with self._persist():
+            return super().delete_oauth_credential(credential_ref)
+
+    def upsert_git_repository_binding(
+        self,
+        user_id: str,
+        *,
+        normalized_repo: str,
+        repo_url: str,
+        provider: str,
+        instance_url: str = "",
+        repo_external_id: str = "",
+        owner_id: str = "",
+        permission_level: str = "",
+        verification_method: str = "oauth",
+        credential_ref: str = "",
+        verified_at: str | None = None,
+    ) -> dict[str, Any]:
+        with self._persist():
+            return super().upsert_git_repository_binding(
+                user_id,
+                normalized_repo=normalized_repo,
+                repo_url=repo_url,
+                provider=provider,
+                instance_url=instance_url,
+                repo_external_id=repo_external_id,
+                owner_id=owner_id,
+                permission_level=permission_level,
+                verification_method=verification_method,
+                credential_ref=credential_ref,
+                verified_at=verified_at,
+            )
+
+    def get_active_git_repository_binding(self, normalized_repo: str) -> dict[str, Any] | None:
+        with self._lock:
+            return super().get_active_git_repository_binding(normalized_repo)
+
+    def list_git_repository_bindings(self, include_revoked: bool = False) -> list[dict[str, Any]]:
+        with self._lock:
+            return super().list_git_repository_bindings(include_revoked=include_revoked)
+
+    def revoke_git_repository_binding(
+        self,
+        binding_id: str,
+        *,
+        revoked_by: str,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().revoke_git_repository_binding(
+                binding_id, revoked_by=revoked_by, reason=reason
+            )
+
+    def transfer_git_repository_binding(
+        self,
+        binding_id: str,
+        *,
+        target_user_id: str,
+        actor_user_id: str,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().transfer_git_repository_binding(
+                binding_id,
+                target_user_id=target_user_id,
+                actor_user_id=actor_user_id,
+                reason=reason,
+            )
 
     def upsert_options(self, values: dict[str, str]) -> dict[str, str]:
         with self._persist():
@@ -2336,6 +2823,9 @@ PLUGIN_COLUMN_KEYS = {
     "desc",
     "author",
     "repo",
+    "repo_provider",
+    "repo_external_id",
+    "normalized_repo",
     "tags",
     "social_link",
     "owner_user_id",
@@ -2715,15 +3205,20 @@ class PgRedisMarketStore(InMemoryMarketStore):
         preferred: str,
         *,
         exclude_user_id: str = "",
+        suffix_tag: str = "gh",
     ) -> str:
         base = str(preferred or "").strip() or f"user_{secrets.token_hex(4)}"
-        for suffix in ("", "_gh", *(f"_{i}" for i in range(1, 100))):
+        for suffix in ("", f"_{suffix_tag}", *(f"_{i}" for i in range(1, 100))):
             candidate = f"{base}{suffix}"
             exists = await connection.fetchval(
                 """
                 SELECT 1
                   FROM market_users
-                 WHERE lower(btrim(public_username)) = lower($1)
+                 WHERE (
+                       lower(btrim(public_username)) = lower($1)
+                    OR lower(btrim(internal_username)) = lower($1)
+                    OR lower(btrim(github_login)) = lower($1)
+                 )
                    AND id <> $2
                 """,
                 candidate,
@@ -2732,6 +3227,40 @@ class PgRedisMarketStore(InMemoryMarketStore):
             if not exists:
                 return candidate
         return f"{base}_{secrets.token_hex(4)}"
+
+    async def create_oauth_user(
+        self,
+        *,
+        provider: str,
+        provider_login: str,
+        display_name: str = "",
+        avatar_url: str = "",
+    ) -> dict[str, Any]:
+        norm_provider = str(provider or "oauth").strip().lower()
+        clean_login = str(provider_login or "").strip() or f"{norm_provider}_{secrets.token_hex(3)}"
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("LOCK TABLE market_users IN EXCLUSIVE MODE")
+                public_username = await self._allocate_pg_public_username(
+                    connection, clean_login, suffix_tag=norm_provider
+                )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO market_users (
+                        id, github_id, github_login, internal_username, public_username,
+                        email, email_verified_at, session_version, password_hash,
+                        auth_source, github_name, github_email, avatar_url, role
+                    )
+                    VALUES ($1, NULL, '', '', $2, '', NULL, 1, '', 'oauth', $3, '', $4, $5)
+                    RETURNING *
+                    """,
+                    new_id("user"),
+                    public_username,
+                    str(display_name or clean_login).strip(),
+                    str(avatar_url or "").strip(),
+                    Role.USER.value,
+                )
+                return self._user_from_record(row)
 
     async def _upsert_pg_oauth_identity(
         self,
@@ -3353,6 +3882,305 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     )
         return serialize_value(dict(row))
 
+    async def update_oauth_identity_rotation(
+        self,
+        identity_id: str,
+        *,
+        credential_ref: str = "",
+        expires_at: str | None = None,
+        rotation_status: str = "",
+        token_refreshed_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_oauth_identities
+               SET credential_ref = COALESCE(NULLIF($2, ''), credential_ref),
+                   expires_at = COALESCE($3::timestamptz, expires_at),
+                   rotation_status = COALESCE(NULLIF($4, ''), rotation_status),
+                   token_refreshed_at = COALESCE($5::timestamptz, token_refreshed_at),
+                   updated_at = now()
+             WHERE id = $1
+               AND revoked_at IS NULL
+         RETURNING *
+            """,
+            identity_id,
+            str(credential_ref or ""),
+            expires_at,
+            str(rotation_status or ""),
+            token_refreshed_at,
+        )
+        return serialize_value(dict(row)) if row else None
+
+    async def upsert_oauth_credential(
+        self,
+        credential_ref: str,
+        *,
+        user_id: str,
+        provider: str,
+        ciphertext: str,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO market_oauth_credentials (
+                credential_ref, user_id, provider, ciphertext, expires_at
+            )
+            VALUES ($1, $2, $3, $4, $5::timestamptz)
+            ON CONFLICT (credential_ref) DO UPDATE
+               SET user_id = EXCLUDED.user_id,
+                   provider = EXCLUDED.provider,
+                   ciphertext = EXCLUDED.ciphertext,
+                   expires_at = EXCLUDED.expires_at,
+                   updated_at = now()
+            RETURNING *
+            """,
+            str(credential_ref),
+            str(user_id),
+            str(provider or "").strip().lower(),
+            str(ciphertext),
+            expires_at,
+        )
+        return serialize_value(dict(row))
+
+    async def get_oauth_credential(self, credential_ref: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            "SELECT * FROM market_oauth_credentials WHERE credential_ref = $1",
+            str(credential_ref),
+        )
+        return serialize_value(dict(row)) if row else None
+
+    async def delete_oauth_credential(self, credential_ref: str) -> bool:
+        result = await self._pool().execute(
+            "DELETE FROM market_oauth_credentials WHERE credential_ref = $1",
+            str(credential_ref),
+        )
+        return int(result.rsplit(" ", 1)[-1]) > 0
+
+    @plugin_identity_write
+    async def upsert_git_repository_binding(
+        self,
+        user_id: str,
+        *,
+        normalized_repo: str,
+        repo_url: str,
+        provider: str,
+        instance_url: str = "",
+        repo_external_id: str = "",
+        owner_id: str = "",
+        permission_level: str = "",
+        verification_method: str = "oauth",
+        credential_ref: str = "",
+        verified_at: str | None = None,
+    ) -> dict[str, Any]:
+        norm_key = str(normalized_repo or "").strip().lower()
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    f"git_binding:{norm_key}",
+                )
+                active = await connection.fetchrow(
+                    """
+                    SELECT *
+                      FROM market_git_repository_bindings
+                     WHERE lower(normalized_repo) = lower($1)
+                       AND revoked_at IS NULL
+                       FOR UPDATE
+                    """,
+                    norm_key,
+                )
+                if active:
+                    if str(active["user_id"]) != str(user_id):
+                        raise PluginIdentityConflict("该仓库已绑定到其他市场账号，请联系管理员核对")
+                    gen = int(active["binding_generation"] or 1)
+                    identity_changed = (
+                        bool(active["repo_external_id"])
+                        and bool(repo_external_id)
+                        and str(active["repo_external_id"]) != str(repo_external_id)
+                    ) or (
+                        bool(active["owner_id"])
+                        and bool(owner_id)
+                        and str(active["owner_id"]) != str(owner_id)
+                    )
+                    if identity_changed:
+                        gen += 1
+                    row = await connection.fetchrow(
+                        """
+                        UPDATE market_git_repository_bindings
+                           SET repo_url = $2,
+                               provider = $3,
+                               instance_url = COALESCE(NULLIF($4, ''), instance_url),
+                               repo_external_id = COALESCE(NULLIF($5, ''), repo_external_id),
+                               owner_id = COALESCE(NULLIF($6, ''), owner_id),
+                               permission_level = COALESCE(NULLIF($7, ''), permission_level),
+                               verification_method = $8,
+                               credential_ref = COALESCE(NULLIF($9, ''), credential_ref),
+                               binding_generation = $10,
+                               verified_at = COALESCE($11::timestamptz, now()),
+                               updated_at = now()
+                         WHERE id = $1
+                     RETURNING *
+                        """,
+                        active["id"],
+                        str(repo_url),
+                        str(provider or "").strip().lower(),
+                        str(instance_url or ""),
+                        str(repo_external_id or ""),
+                        str(owner_id or ""),
+                        str(permission_level or ""),
+                        str(verification_method or "oauth"),
+                        str(credential_ref or ""),
+                        gen,
+                        verified_at,
+                    )
+                    return serialize_value(dict(row))
+
+                prior_max = int(
+                    await connection.fetchval(
+                        """
+                        SELECT COALESCE(MAX(binding_generation), 0)
+                          FROM market_git_repository_bindings
+                         WHERE lower(normalized_repo) = lower($1)
+                        """,
+                        norm_key,
+                    )
+                    or 0
+                )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO market_git_repository_bindings (
+                        id, user_id, normalized_repo, repo_url, provider, instance_url,
+                        repo_external_id, owner_id, permission_level, verification_method,
+                        credential_ref, binding_generation, verified_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13::timestamptz, now()))
+                    RETURNING *
+                    """,
+                    new_id("gitbind"),
+                    str(user_id),
+                    norm_key,
+                    str(repo_url),
+                    str(provider or "").strip().lower(),
+                    str(instance_url or ""),
+                    str(repo_external_id or ""),
+                    str(owner_id or ""),
+                    str(permission_level or ""),
+                    str(verification_method or "oauth"),
+                    str(credential_ref or ""),
+                    prior_max + 1,
+                    verified_at,
+                )
+                return serialize_value(dict(row))
+
+    async def get_active_git_repository_binding(
+        self, normalized_repo: str
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            SELECT *
+              FROM market_git_repository_bindings
+             WHERE lower(normalized_repo) = lower($1)
+               AND revoked_at IS NULL
+             LIMIT 1
+            """,
+            str(normalized_repo or "").strip().lower(),
+        )
+        return serialize_value(dict(row)) if row else None
+
+    async def list_git_repository_bindings(
+        self, include_revoked: bool = False
+    ) -> list[dict[str, Any]]:
+        if include_revoked:
+            rows = await self._pool().fetch(
+                "SELECT * FROM market_git_repository_bindings ORDER BY created_at DESC"
+            )
+        else:
+            rows = await self._pool().fetch(
+                """
+                SELECT *
+                  FROM market_git_repository_bindings
+                 WHERE revoked_at IS NULL
+              ORDER BY created_at DESC
+                """
+            )
+        return [serialize_value(dict(row)) for row in rows]
+
+    async def revoke_git_repository_binding(
+        self,
+        binding_id: str,
+        *,
+        revoked_by: str,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_git_repository_bindings
+               SET revoked_at = now(),
+                   revoked_by = $2,
+                   revoke_reason = $3,
+                   updated_at = now()
+             WHERE id = $1
+               AND revoked_at IS NULL
+         RETURNING *
+            """,
+            binding_id,
+            str(revoked_by),
+            str(reason or ""),
+        )
+        return serialize_value(dict(row)) if row else None
+
+    @plugin_identity_write
+    async def transfer_git_repository_binding(
+        self,
+        binding_id: str,
+        *,
+        target_user_id: str,
+        actor_user_id: str,
+        reason: str = "",
+    ) -> dict[str, Any] | None:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                old = await connection.fetchrow(
+                    """
+                    UPDATE market_git_repository_bindings
+                       SET revoked_at = now(),
+                           revoked_by = $2,
+                           revoke_reason = $3,
+                           updated_at = now()
+                     WHERE id = $1
+                       AND revoked_at IS NULL
+                 RETURNING *
+                    """,
+                    binding_id,
+                    str(actor_user_id),
+                    str(reason or "管理员转移绑定"),
+                )
+                if not old:
+                    return None
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO market_git_repository_bindings (
+                        id, user_id, normalized_repo, repo_url, provider, instance_url,
+                        repo_external_id, owner_id, permission_level, verification_method,
+                        credential_ref, binding_generation, verified_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, now())
+                    RETURNING *
+                    """,
+                    new_id("gitbind"),
+                    str(target_user_id),
+                    old["normalized_repo"],
+                    old["repo_url"],
+                    old["provider"],
+                    old["instance_url"],
+                    old["repo_external_id"],
+                    old["owner_id"],
+                    old["permission_level"],
+                    old["verification_method"],
+                    int(old["binding_generation"] or 1) + 1,
+                )
+                return serialize_value(dict(row))
+
     async def list_users(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch("SELECT * FROM market_users ORDER BY created_at ASC")
         return [self._user_from_record(row) for row in rows]
@@ -3472,7 +4300,13 @@ class PgRedisMarketStore(InMemoryMarketStore):
         if existing:
             if existing["owner_user_id"] != user["id"]:
                 raise PermissionError("plugin_owner_mismatch")
-            if existing["repo"].rstrip("/").lower() != payload["repo"].rstrip("/").lower():
+            _, _, existing_repo_key = _canonical_repo_fields(
+                str(existing.get("normalized_repo") or existing.get("repo") or "")
+            )
+            _, _, payload_repo_key = _canonical_repo_fields(
+                str(payload.get("normalized_repo") or payload.get("repo") or "")
+            )
+            if existing_repo_key != payload_repo_key:
                 raise PluginIdentityConflict("该用户名下的插件名已关联其他仓库")
             return existing["id"]
         plugin_id = payload.get("id") or payload["name"]
@@ -3487,6 +4321,11 @@ class PgRedisMarketStore(InMemoryMarketStore):
     @plugin_identity_write
     async def submit_plugin(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         metadata = plugin_metadata_from_payload(payload)
+        repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
+            str(payload.get("repo") or ""),
+            str(payload.get("repo_provider") or ""),
+            str(payload.get("repo_external_id") or ""),
+        )
         owner_username = str(
             user.get("public_username")
             or user.get("github_login")
@@ -3499,18 +4338,23 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 row = await connection.fetchrow(
                     """
                     INSERT INTO market_plugins (
-                        id, name, display_name, desc_text, author, repo, tags, social_link,
+                        id, name, display_name, desc_text, author, repo,
+                        repo_provider, repo_external_id, normalized_repo,
+                        tags, social_link,
                         owner_user_id, owner_github_login, owner_username, status, stars, likes,
                         comments_count, metadata, repo_version
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11,
-                            'pending', 0, 0, 0, $12::jsonb, $13)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14,
+                            'pending', 0, 0, 0, $15::jsonb, $16)
                     ON CONFLICT (id) DO UPDATE
                        SET name = EXCLUDED.name,
                            display_name = EXCLUDED.display_name,
                            desc_text = EXCLUDED.desc_text,
                            author = EXCLUDED.author,
                            repo = EXCLUDED.repo,
+                           repo_provider = COALESCE(NULLIF(EXCLUDED.repo_provider, ''), market_plugins.repo_provider),
+                           repo_external_id = COALESCE(NULLIF(EXCLUDED.repo_external_id, ''), market_plugins.repo_external_id),
+                           normalized_repo = COALESCE(NULLIF(EXCLUDED.normalized_repo, ''), market_plugins.normalized_repo),
                            tags = EXCLUDED.tags,
                            social_link = EXCLUDED.social_link,
                            repo_version = COALESCE(NULLIF(EXCLUDED.repo_version, ''), market_plugins.repo_version),
@@ -3536,6 +4380,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     payload["desc"],
                     payload["author"],
                     payload["repo"],
+                    repo_provider,
+                    repo_external_id,
+                    normalized_repo,
                     payload.get("tags", []),
                     payload.get("social_link", ""),
                     user["id"],
@@ -3563,6 +4410,11 @@ class PgRedisMarketStore(InMemoryMarketStore):
         self, user: dict[str, Any], payload: dict[str, Any]
     ) -> dict[str, Any]:
         metadata = plugin_metadata_from_payload(payload)
+        repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
+            str(payload.get("repo") or ""),
+            str(payload.get("repo_provider") or ""),
+            str(payload.get("repo_external_id") or ""),
+        )
         owner_username = str(
             user.get("public_username")
             or user.get("github_login")
@@ -3575,12 +4427,14 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 row = await connection.fetchrow(
                     """
                     INSERT INTO market_plugins (
-                        id, name, display_name, desc_text, author, repo, tags, social_link,
+                        id, name, display_name, desc_text, author, repo,
+                        repo_provider, repo_external_id, normalized_repo,
+                        tags, social_link,
                         owner_user_id, owner_github_login, owner_username, status, stars, likes,
                         comments_count, metadata, category, category_source, repo_version
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11,
-                            'pending', 0, 0, 0, $12::jsonb, $13, 'user', $14)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14,
+                            'pending', 0, 0, 0, $15::jsonb, $16, 'user', $17)
                     ON CONFLICT (id) DO UPDATE SET id = market_plugins.id
                       WHERE market_plugins.owner_user_id = EXCLUDED.owner_user_id
                     RETURNING *
@@ -3591,6 +4445,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     payload["desc"],
                     payload["author"],
                     payload["repo"],
+                    repo_provider,
+                    repo_external_id,
+                    normalized_repo,
                     payload.get("tags", []),
                     payload.get("social_link", ""),
                     user["id"],
@@ -3757,6 +4614,14 @@ class PgRedisMarketStore(InMemoryMarketStore):
         if not current:
             return None
         updated = {**current, **clean_patch, "updated_at": utc_now()}
+        repo_provider, repo_external_id, normalized_repo = _canonical_repo_fields(
+            str(updated.get("repo") or ""),
+            str(updated.get("repo_provider") or ""),
+            str(updated.get("repo_external_id") or ""),
+        )
+        updated["repo_provider"] = repo_provider
+        updated["repo_external_id"] = repo_external_id
+        updated["normalized_repo"] = normalized_repo
         metadata = {
             key: value
             for key, value in updated.items()
@@ -3772,29 +4637,32 @@ class PgRedisMarketStore(InMemoryMarketStore):
                    desc_text = $4,
                    author = $5,
                    repo = $6,
-                   tags = $7::jsonb,
-                   social_link = $8,
-                   owner_user_id = $9,
-                   owner_github_login = $10,
-                   owner_username = $11,
-                   status = $12,
-                   stars = $13,
-                   likes = $14,
-                   comments_count = $15,
-                   moderated_by = $16,
-                   repo_version = $17,
+                   repo_provider = $7,
+                   repo_external_id = $8,
+                   normalized_repo = $9,
+                   tags = $10::jsonb,
+                   social_link = $11,
+                   owner_user_id = $12,
+                   owner_github_login = $13,
+                   owner_username = $14,
+                   status = $15,
+                   stars = $16,
+                   likes = $17,
+                   comments_count = $18,
+                   moderated_by = $19,
+                   repo_version = $20,
                    version_updated_at = CASE
-                       WHEN NULLIF($17, '') IS NOT NULL
-                            AND market_plugins.repo_version IS DISTINCT FROM $17
+                       WHEN NULLIF($20, '') IS NOT NULL
+                            AND market_plugins.repo_version IS DISTINCT FROM $20
                        THEN now()
                        ELSE market_plugins.version_updated_at
                    END,
-                   category = $18,
-                   category_source = $19,
-                   suggested_category = $20,
-                   category_confidence = $21,
-                   category_reason = $22,
-                   metadata = $23::jsonb,
+                   category = $21,
+                   category_source = $22,
+                   suggested_category = $23,
+                   category_confidence = $24,
+                   category_reason = $25,
+                   metadata = $26::jsonb,
                    updated_at = now()
              WHERE id = $1
          RETURNING *
@@ -3805,6 +4673,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
             updated["desc"],
             updated["author"],
             updated["repo"],
+            repo_provider,
+            repo_external_id,
+            normalized_repo,
             updated["tags"],
             updated.get("social_link", ""),
             updated["owner_user_id"],
@@ -4083,6 +4954,21 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     "UPDATE market_users SET muted_by = NULL WHERE muted_by = $1",
                     user_id,
                 )
+                await connection.execute(
+                    """
+                    UPDATE market_git_repository_bindings
+                       SET user_id = $2,
+                           credential_ref = CASE WHEN revoked_at IS NULL THEN '' ELSE credential_ref END,
+                           binding_generation = CASE
+                               WHEN revoked_at IS NULL THEN binding_generation + 1
+                               ELSE binding_generation
+                           END,
+                           updated_at = now()
+                     WHERE user_id = $1
+                    """,
+                    user_id,
+                    replacement_user_id,
+                )
                 await connection.execute("DELETE FROM market_users WHERE id = $1", user_id)
                 await connection.execute(
                     """
@@ -4213,6 +5099,24 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 await connection.execute(
                     """
                     UPDATE market_oauth_identities
+                       SET user_id = $2, updated_at = now()
+                     WHERE user_id = $1
+                    """,
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE market_oauth_credentials
+                       SET user_id = $2, updated_at = now()
+                     WHERE user_id = $1
+                    """,
+                    from_user_id,
+                    to_user_id,
+                )
+                await connection.execute(
+                    """
+                    UPDATE market_git_repository_bindings
                        SET user_id = $2, updated_at = now()
                      WHERE user_id = $1
                     """,

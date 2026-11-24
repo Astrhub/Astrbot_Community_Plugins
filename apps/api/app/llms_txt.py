@@ -51,6 +51,7 @@ _PUBLIC_SECTION = """\
 - 请求找回密码验证码：POST /v1/auth/email/password-reset/request
 - 验证并重置密码：POST /v1/auth/email/password-reset/verify
 - GitHub OAuth 登录：GET /v1/auth/github/login
+- 第三方 Git 平台 OAuth 登录（GitLab / Gitee / AtomGit / Gitea）：GET /v1/auth/oauth/{provider}/login
 - 退出登录：POST /v1/auth/logout
 - 检查会话：GET /v1/auth/session
 """
@@ -77,6 +78,7 @@ _DEVELOPER_SECTION = """\
 - 提交新插件：POST /v1/plugins/submissions（社区模式需绑定任意 OAuth）
 - 获取我的插件：GET /v1/me/plugins
 - 查看可管理 GitHub 仓库：GET /v1/me/github/repositories
+- 查看指定 Git 平台可管理仓库：GET /v1/me/git/{provider}/repositories
 - 更新自有插件信息：PATCH /v1/plugins/{plugin_id}
 - 开关自有插件 CDN：PATCH /v1/plugins/{plugin_id}/cdn
 - 申请上架或主动下架：POST /v1/plugins/{plugin_id}/request-list · POST /v1/plugins/{plugin_id}/unlist
@@ -97,6 +99,7 @@ _ADMIN_SECTION = """\
 - 禁言用户：POST /v1/admin/users/{user_id}/mute
 - 解除禁言：POST /v1/admin/users/{user_id}/unmute
 - 删除评论：DELETE /v1/admin/comments/{comment_id}
+- 管理 Git 仓库绑定：GET /v1/admin/git-bindings · POST /v1/admin/git-bindings/{binding_id}/revoke · POST /v1/admin/git-bindings/{binding_id}/transfer
 
 ### API Key
 - 签发 API Key：POST /v1/api-keys

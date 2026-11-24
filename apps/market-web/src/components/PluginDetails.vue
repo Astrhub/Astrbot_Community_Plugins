@@ -49,7 +49,7 @@
             :loading="refreshing"
             @click="openRefreshModal"
           >
-            刷新 GitHub
+            {{ isGithubRepo ? "刷新 GitHub" : "刷新元数据" }}
           </n-button>
           <span v-if="!likesEnabled" class="muted-text">点赞已关闭</span>
         </div>
@@ -136,9 +136,12 @@
         <n-space justify="end" :size="12">
           <n-button secondary type="primary" @click="openUrl(plugin?.repo)">
             <template #icon>
-              <n-icon><logo-github /></n-icon>
+              <n-icon>
+                <logo-github v-if="isGithubRepo" />
+                <git-branch-outline v-else />
+              </n-icon>
             </template>
-            查看仓库
+            查看 {{ repoProviderLabel }} 仓库
           </n-button>
           <n-button type="primary" @click="show = false"> 关闭 </n-button>
         </n-space>
@@ -224,7 +227,12 @@ import { storeToRefs } from "pinia";
 import { usePluginStore } from "../stores/plugins";
 import PluginComment from "./PluginComment.vue";
 import FieldHint from "./FieldHint.vue";
-import { githubRawUrl } from "../utils/github";
+import {
+  detectGitProvider,
+  getGitProviderLabel,
+  githubRawUrl,
+  isGithubRepoUrl,
+} from "../utils/github";
 import { useExternalOpenConfirm } from "../composables/useExternalOpenConfirm";
 import { buildReadmeBrowserUrl, usePluginReadme } from "../composables/usePluginReadme";
 import type { Plugin, PluginDetail } from "../types";
@@ -232,6 +240,7 @@ import {
   ArrowBackOutline,
   DocumentTextOutline,
   ExtensionPuzzleOutline,
+  GitBranchOutline,
   HeartOutline,
   LogoGithub,
   RefreshOutline,
@@ -320,6 +329,12 @@ const MAX_INLINE_FILE_SIZE = 300000;
 const commentsEnabled = computed(() => Boolean(siteConfig.value.market?.comments_enabled));
 const likesEnabled = computed(() => Boolean(siteConfig.value.market?.likes_enabled));
 const activePlugin = computed(() => detail.value || props.plugin || {});
+const isGithubRepo = computed(() => isGithubRepoUrl(activePlugin.value?.repo));
+const repoProviderLabel = computed(() =>
+  getGitProviderLabel(
+    activePlugin.value?.repo_provider || detectGitProvider(activePlugin.value?.repo) || "github",
+  ),
+);
 const canGoBackReadme = computed(() => readmeHistory.value.length > 0);
 const isViewingRepositoryFile = computed(() => readmeView.value.kind !== "readme");
 const readmeNavigationVisible = computed(
@@ -332,11 +347,11 @@ const readmeViewTitle = computed(() => {
 });
 const readmeSourceLabel = computed(() => {
   const source = readmeSource.value?.source_url;
-  if (!source) return "GitHub";
+  if (!source) return repoProviderLabel.value;
   try {
     return new URL(source).hostname;
   } catch {
-    return "GitHub";
+    return repoProviderLabel.value;
   }
 });
 const canManagePlugin = computed(() => {
@@ -417,7 +432,10 @@ async function fetchReadme(options: { refresh?: boolean } = {}) {
       view: {
         kind: "readme",
         path: readmeContext.path,
-        browserUrl: buildReadmeBrowserUrl(readmeContext),
+        browserUrl: buildReadmeBrowserUrl(
+          readmeContext,
+          source.source_url || activePlugin.value?.repo || "",
+        ),
       },
     });
     rootReadmeView.value = currentReadmeSnapshot();
@@ -475,6 +493,10 @@ function openRefreshModal() {
     save_token: false,
     refresh_interval_seconds: currentUser.value?.github_refresh_interval_seconds || 3600,
   };
+  if (!isGithubRepo.value) {
+    void confirmRefreshGithub();
+    return;
+  }
   showRefreshModal.value = true;
 }
 
@@ -492,9 +514,14 @@ async function confirmRefreshGithub() {
     await loadCurrentUser();
     await fetchDetail();
     showRefreshModal.value = false;
-    message.success("GitHub 数据已刷新");
+    message.success(`${repoProviderLabel.value} 元数据已刷新`);
   } catch (err) {
-    message.error(err.message || "刷新失败，请填写只读 GitHub Token 后重试");
+    message.error(
+      err.message ||
+        (isGithubRepo.value
+          ? "刷新失败，请填写只读 GitHub Token 后重试"
+          : "刷新失败，请确认对应平台授权仍有效"),
+    );
   } finally {
     refreshing.value = false;
   }
@@ -923,6 +950,7 @@ function renderImageFileHtml(imageUrl, path) {
 function buildReadmeLinkTarget(url, context, basePath) {
   if (!url || /^mailto:/i.test(url)) return null;
   if (url.startsWith("#")) return { kind: "anchor", hash: url };
+  if (!context?.owner || !context?.repo) return null;
   const absoluteTarget = githubUrlToReadmeTarget(url, context);
   if (absoluteTarget) return absoluteTarget;
   if (/^[a-z][a-z\d+.-]*:/i.test(url) || url.startsWith("//")) return null;
@@ -1084,6 +1112,18 @@ function resolveReadmeUrl(url, context, basePath, raw) {
   if (!url || /^(mailto:|#)/i.test(url)) return url;
   const absoluteUrl = normalizeAbsoluteReadmeUrl(url, raw);
   if (absoluteUrl) return absoluteUrl;
+  if (!context?.owner || !context?.repo) {
+    const fallbackBase = readmeSource.value?.source_url || activePlugin.value?.repo || "";
+    if (!fallbackBase) return url;
+    try {
+      return new URL(
+        url,
+        fallbackBase.endsWith("/") ? fallbackBase : `${fallbackBase}/`,
+      ).toString();
+    } catch {
+      return fallbackBase;
+    }
+  }
   const [path, suffix = ""] = splitReadmeUrl(url);
   if (!path) return suffix || url;
   const cleanPath = normalizeReadmePath(path.startsWith("/") ? "" : basePath, path);

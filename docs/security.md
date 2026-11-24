@@ -4,7 +4,7 @@
 
 ## 身份认证
 
-首次启动时通过初始化向导或环境变量创建核心管理员账号（用户名 + 密码），用于管理站点策略、认证开关、OAuth 与管理员队伍。普通社区成员可通过邮箱注册（受 `EMAIL_REGISTRATION_ENABLED` 与 `EMAIL_VERIFICATION_REQUIRED` 控制）或通过 GitHub OAuth 注册/登录；账号主体与 OAuth 身份解耦，OAuth 绑定关系存储在通用 `market_oauth_identities` 表中。OAuth 用户**不会**自动成为核心管理员，只能由核心管理员显式提升，或在命中 `GITHUB_ADMIN_ORG` 受信任组织配置时自动获得普通管理员权限。
+首次启动时通过初始化向导或环境变量创建核心管理员账号（用户名 + 密码），用于管理站点策略、认证开关、OAuth 与管理员队伍。普通社区成员可通过邮箱注册（受 `EMAIL_REGISTRATION_ENABLED` 与 `EMAIL_VERIFICATION_REQUIRED` 控制）或通过受支持的 OAuth 平台（GitHub、GitLab.com、Gitee、AtomGit / GitCode、Gitea）注册/登录；账号主体与 OAuth 身份解耦，OAuth 绑定关系存储在通用 `market_oauth_identities` 表中。OAuth 用户**不会**自动成为核心管理员，只能由核心管理员显式提升，或在命中 `GITHUB_ADMIN_ORG` 受信任组织配置时自动获得普通管理员权限。
 
 ### 登录与注册方式
 
@@ -14,7 +14,8 @@
 | 邮箱注册（免验证直通） | `POST /v1/auth/email/register` | `EMAIL_REGISTRATION_ENABLED=true` 且 `EMAIL_VERIFICATION_REQUIRED=false` |
 | 邮箱注册（验证码两步） | `POST /v1/auth/email/register/request` → `verify` | `EMAIL_REGISTRATION_ENABLED=true`、`EMAIL_VERIFICATION_REQUIRED=true` 且 `EMAIL_PROVIDER != disabled` |
 | 找回 / 重置密码 | `POST /v1/auth/email/password-reset/request` → `verify` | `EMAIL_PROVIDER != disabled` |
-| GitHub OAuth | `GET /v1/auth/github/login` → `/callback` | `GITHUB_LOGIN_ENABLED=true` |
+| GitHub OAuth | `GET /v1/auth/github/login` → `/callback` | `GITHUB_LOGIN_ENABLED=true` 且配置 `OAUTH_CREDENTIAL_KEY` |
+| 第三方已知平台 OAuth | `GET /v1/auth/oauth/{provider}/login` → `/callback` | 对应平台开关启用（`gitlab` / `gitee` / `atomgit` / `gitea`）且配置 `OAUTH_CREDENTIAL_KEY` |
 | 开发调试 | `GET /v1/auth/debug-login` | 仅限 `ENABLE_DEV_AUTH=true`（生产环境必须为 `false`） |
 
 公开用户名与另一账号的内部登录名发生冲突时，密码登录会返回 `409 login_identifier_ambiguous`，不会按查询顺序选择账号。迁移与本地种子数据回填会避开这类命名冲突。
@@ -91,9 +92,9 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 
 内部账号密码采用 **PBKDF2-SHA256（260,000 次迭代）**存储（`apps/api/app/auth.py`），校验阶段通过 `secrets.compare_digest` 进行常量时间比对以抵御时序侧信道攻击。通过环境变量 `CORE_ADMIN_PASSWORD` 引导初始化时，明文密码仅在启动阶段用于计算哈希，不会写入 `.env` 或数据文件。GitHub OAuth 用户不保存本地密码。
 
-### 敏感字段脱敏保留
+### 敏感字段与独立主加密密钥
 
-系统设置中的 GitHub Client Secret、SMTP 密码、Cloudflare Email API Token 以及用户的 `github_token` 均不会通过任何接口明文回显，返回时统一遮蔽为 `********`。前端提交设置更新时，若对应字段保持遮蔽值，后端会保留原有密钥而不写入遮蔽字符串，避免保存表单时误清空密钥。
+系统设置中的各平台 OAuth Client Secret（`GITHUB_CLIENT_SECRET`、`GITLAB_CLIENT_SECRET`、`GITEE_CLIENT_SECRET`、`ATOMGIT_CLIENT_SECRET`、`GITEA_CLIENT_SECRET`）与独立主加密密钥 `OAUTH_CREDENTIAL_KEY` 仅由部署环境变量注入，**不会**写入持久化配置表 `market_options`，也不通过管理接口明文回显。启用任何 OAuth 平台（含 GitHub）都必须配置至少 16 字符的 `OAUTH_CREDENTIAL_KEY`；缺失或过短时登录、回调与凭据写入直接返回 `503 oauth_credential_key_unconfigured`，不回退至 `GITHUB_CLIENT_SECRET`。SMTP 密码、Cloudflare Email API Token 以及用户的 `github_token` 在接口中统一遮蔽为 `********`，提交遮蔽值时保留原密钥。
 
 ### GitHub API Token 轮转
 
@@ -101,8 +102,8 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 
 ### 存储边界
 
-- **PostgreSQL**：完整模式下持久化业务数据、artifact 状态机、结构化审查发现、人工决策、租约任务与通知 outbox。
-- **Redis**：存储登录会话 Token（带 TTL），以及用于仓库权限校验的加密短期 GitHub OAuth 授权凭据（密钥由 `GITHUB_CLIENT_SECRET` 经 HKDF 派生并用 Fernet 加密，TTL 不超过 8 小时，注销或会话失效时删除）。不保存明文 OAuth 令牌或长期业务数据。
+- **PostgreSQL**：完整模式下持久化业务数据、OAuth 身份、由 `OAUTH_CREDENTIAL_KEY` 加密的 `market_oauth_credentials`（含刷新令牌与轮转状态）、仓库归属绑定 `market_git_repository_bindings`、artifact 状态机、结构化审查发现、人工决策、租约任务与通知 outbox。
+- **Redis**：存储登录会话 Token（带 TTL），以及用于 GitHub 仓库权限校验的加密短期 OAuth 授权凭据（密钥由 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生并用 Fernet 加密，TTL 不超过 8 小时，注销或会话失效时删除）。不保存明文 OAuth 令牌或长期业务数据。
 - **本地单文件存储**：仅在自用单进程模式（`MARKET_STORAGE_MODE=local`）启用，通过原子替换持久化市场状态与会话，并默认关闭 artifact 审查管线。
 - **隔离存储**：上传与抓取的插件 ZIP 以及审查提取的文本对象存放在私有本地目录或私有对象存储桶中，不生成公开 URL。
 - **发布存储**：仅接收已过审 artifact 的原始隔离 ZIP，采用条件写入禁止覆盖；公开下载链接统一由独立的 CDN 域名拼接生成。
@@ -113,7 +114,7 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 - ZIP 与 GitHub 来源的 artifact 提交按登录用户和直接来源 IP 做每分钟限流；Redis 不可用时退化为单进程内存计数。
 - `artifact-worker` 在独立进程或容器中执行预检、YAML `safe_load`、Python AST 静态规则、依赖漏洞匹配及可选的 ClamAV/YARA/LLM 检查，整个过程不执行插件代码。
 - 预检会拒绝路径穿越、绝对路径、符号链接、加密条目、Zip Bomb、超限文件数或体积、重复路径、缺失或重复 metadata、非法版本或插件名、Git LFS、submodule 以及原生可执行制品。
-- GitHub 来源仅允许公开 `https://github.com/<owner>/<repo>` 仓库，优先抓取正式 Release ZIP 资产，分支与标签均先固定为 40 位 commit SHA 后再从固定 `codeload` 主机下载。
+- 仓库来源仅允许严格白名单内的公开 HTTPS 地址：`github.com`、`gitlab.com`（支持多层子组，深度上限 20）、`gitee.com`、`atomgit.com`（兼容 `gitcode.com` 并归一化为 `atomgit.com`）与 `gitea.com`，拒绝非 HTTPS、内嵌凭据、自定义端口、查询串、片段、路径穿越及任意未知主机。GitHub 优先抓取正式 Release ZIP 资产，其余分支/标签与第三方平台均先解析固定 40 位 commit SHA 后再通过官方归档 HTTPS 端点流式拉取（记录为 `source_type='git'`），重定向仅允许白名单主机且跨主机自动剥离 `Authorization` 请求头。
 - 运行时烟雾测试通过独立 `runtime-runner` 和一次性隔离容器执行，不复用 API 或 `artifact-worker` 进程。
 - LLM 分析结果仅作为辅助建议展示，不能直接背书或绕过人工决策。
 
@@ -124,7 +125,7 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 所有外部输入（插件元数据、README、仓库文件预览、评论）均视为不可信数据：
 
 - **插件名校验**：必须符合 `astrbot_plugin_*` 命名格式。
-- **仓库地址校验**：必须为 `https://github.com/<owner>/<repo>` 格式；社区模式下提交者必须证明 GitHub 仓库管理权限，本地单进程模式下仅管理员在不启用 CDN 时可直填公开仓库地址。
+- **仓库地址校验**：必须为受支持 OAuth Git 平台（`github.com`、`gitlab.com`、`gitee.com`、`atomgit.com` / `gitcode.com`、`gitea.com`）的公开 HTTPS 仓库地址；社区模式下提交者必须通过对应平台 OAuth 证明仓库维护权限并写入 `market_git_repository_bindings`，本地单进程模式下仅管理员在不启用 CDN 时可直填白名单内的公开仓库地址。
 - **分类与标签限制**：插件分类必须在官方白名单内，标签数量受 `MAX_PLUGIN_TAGS`（默认 8）限制。
 - **Markdown 与预览清洗**：前端先通过 `marked` 渲染 Markdown，再由 `DOMPurify` 清洗输出，并在写入 `v-html` 前再次执行最终 `DOMPurify` 门禁；图片预览强制校验 `http(s)://` 协议。
 - **评论软删除**：删除根评论会同时隐藏其下回复（通过 `deleted` 标记与部分索引 `WHERE deleted = false` 实现），保留服务端审计记录。

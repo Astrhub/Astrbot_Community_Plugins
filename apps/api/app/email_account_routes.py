@@ -672,6 +672,9 @@ def build_email_account_router(
                 str(user["id"]),
                 str(revoked.get("provider_user_id") or ""),
             )
+        cred_ref = str(revoked.get("credential_ref") or "").strip()
+        if cred_ref and hasattr(request.app.state.store, "delete_oauth_credential"):
+            await call_store(request, "delete_oauth_credential", cred_ref)
         refreshed = await call_store(request, "get_user_by_id", user["id"]) or user
         return {
             "revoked": True,

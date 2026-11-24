@@ -148,6 +148,30 @@
                       disabled="关闭 GitHub 登录 / 注册"
                     />
                     <setting-switch
+                      v-model="formData.auth.gitlab_login_enabled"
+                      label="GitLab OAuth"
+                      enabled="允许 GitLab.com 登录 / 注册 / 绑定"
+                      disabled="关闭 GitLab 登录 / 注册"
+                    />
+                    <setting-switch
+                      v-model="formData.auth.gitee_login_enabled"
+                      label="Gitee OAuth"
+                      enabled="允许 Gitee 登录 / 注册 / 绑定"
+                      disabled="关闭 Gitee 登录 / 注册"
+                    />
+                    <setting-switch
+                      v-model="formData.auth.atomgit_login_enabled"
+                      label="AtomGit / GitCode OAuth"
+                      enabled="允许 AtomGit 登录 / 注册 / 绑定"
+                      disabled="关闭 AtomGit 登录 / 注册"
+                    />
+                    <setting-switch
+                      v-model="formData.auth.gitea_login_enabled"
+                      label="Gitea OAuth"
+                      enabled="允许 Gitea (gitea.com) 登录 / 注册 / 绑定"
+                      disabled="关闭 Gitea 登录 / 注册"
+                    />
+                    <setting-switch
                       v-model="formData.auth.login_agreement_enabled"
                       label="登录条款"
                       enabled="登录前确认"
@@ -159,6 +183,22 @@
                       enabled="显示服务条款"
                       disabled="不显示"
                     />
+                  </div>
+                  <div class="secret-status" style="margin-bottom: 12px">
+                    <n-tag
+                      :type="formData.auth.oauth_credential_key_configured ? 'success' : 'error'"
+                      :bordered="false"
+                    >
+                      {{
+                        formData.auth.oauth_credential_key_configured
+                          ? "主加密密钥已配置"
+                          : "主加密密钥未配置"
+                      }}
+                    </n-tag>
+                    <span class="secret-status-text">
+                      启用任意 OAuth 平台（含 GitHub）前，必须在部署环境中配置独立主密钥
+                      OAUTH_CREDENTIAL_KEY（至少 16 位）
+                    </span>
                   </div>
                   <n-form-item
                     v-if="formData.auth.login_agreement_enabled"
@@ -222,6 +262,65 @@
                       <n-input
                         v-model:value="formData.github.scope"
                         placeholder="read:user user:email read:org"
+                      />
+                    </n-form-item>
+                  </div>
+                </section>
+
+                <section
+                  v-for="providerItem in thirdPartyOAuthSections"
+                  :key="providerItem.key"
+                  class="settings-section"
+                >
+                  <div class="section-title">
+                    <h2>{{ providerItem.title }}</h2>
+                    <p>{{ providerItem.description }}</p>
+                  </div>
+                  <div class="form-grid">
+                    <n-form-item label="Client ID" :path="`${providerItem.key}.client_id`">
+                      <n-input v-model:value="formData[providerItem.key].client_id" />
+                    </n-form-item>
+                    <n-form-item label="Client Secret">
+                      <div class="secret-status">
+                        <n-tag
+                          :type="
+                            formData[providerItem.key].client_secret_configured
+                              ? 'success'
+                              : 'warning'
+                          "
+                          :bordered="false"
+                        >
+                          {{
+                            formData[providerItem.key].client_secret_configured
+                              ? "已配置"
+                              : "未配置"
+                          }}
+                        </n-tag>
+                        <span class="secret-status-text">
+                          由部署环境变量 {{ providerItem.secretEnv }} 管理
+                        </span>
+                      </div>
+                    </n-form-item>
+                    <n-form-item label="回调地址" :path="`${providerItem.key}.callback_url`">
+                      <n-input
+                        v-model:value="formData[providerItem.key].callback_url"
+                        :placeholder="providerItem.callbackPlaceholder"
+                      />
+                    </n-form-item>
+                    <n-form-item label="授权范围" :path="`${providerItem.key}.scope`">
+                      <n-input
+                        v-model:value="formData[providerItem.key].scope"
+                        :placeholder="providerItem.scopePlaceholder"
+                      />
+                    </n-form-item>
+                    <n-form-item
+                      v-if="providerItem.key === 'atomgit'"
+                      label="API 端点"
+                      path="atomgit.api_base_url"
+                    >
+                      <n-select
+                        v-model:value="formData.atomgit.api_base_url"
+                        :options="atomgitApiBaseOptions"
                       />
                     </n-form-item>
                   </div>
@@ -810,6 +909,56 @@ function isPublicHttpUrl(value) {
     return false;
   }
 }
+const thirdPartyOAuthSections = [
+  {
+    key: "gitlab",
+    title: "GitLab OAuth (gitlab.com)",
+    description: "用于 GitLab.com 第三方登录、多层子组仓库归属验证与可选 CDN 构建。",
+    secretEnv: "GITLAB_CLIENT_SECRET",
+    callbackPlaceholder: "https://your-domain/v1/auth/oauth/gitlab/callback",
+    scopePlaceholder: "read_user read_api",
+  },
+  {
+    key: "gitee",
+    title: "Gitee OAuth (gitee.com)",
+    description: "用于 Gitee 第三方登录、仓库权限验证与可选 CDN 构建。",
+    secretEnv: "GITEE_CLIENT_SECRET",
+    callbackPlaceholder: "https://your-domain/v1/auth/oauth/gitee/callback",
+    scopePlaceholder: "user_info projects",
+  },
+  {
+    key: "atomgit",
+    title: "AtomGit / GitCode OAuth (atomgit.com)",
+    description: "同时兼容 atomgit.com 与 gitcode.com 仓库地址，支持按部署需要切换官方 API 端点。",
+    secretEnv: "ATOMGIT_CLIENT_SECRET",
+    callbackPlaceholder: "https://your-domain/v1/auth/oauth/atomgit/callback",
+    scopePlaceholder: "read_user read_repository",
+  },
+  {
+    key: "gitea",
+    title: "Gitea OAuth (gitea.com)",
+    description: "用于官方 Gitea 托管平台（gitea.com）登录、仓库归属验证与可选 CDN 构建。",
+    secretEnv: "GITEA_CLIENT_SECRET",
+    callbackPlaceholder: "https://your-domain/v1/auth/oauth/gitea/callback",
+    scopePlaceholder: "read:user read:repository read:organization",
+  },
+];
+
+const atomgitApiBaseOptions = [
+  { label: "https://api.atomgit.com（推荐）", value: "https://api.atomgit.com" },
+  { label: "https://api.gitcode.com（兼容端点）", value: "https://api.gitcode.com" },
+];
+
+function anyOAuthLoginEnabled() {
+  return Boolean(
+    formData.auth.github_login_enabled ||
+    formData.auth.gitlab_login_enabled ||
+    formData.auth.gitee_login_enabled ||
+    formData.auth.atomgit_login_enabled ||
+    formData.auth.gitea_login_enabled,
+  );
+}
+
 const rules = {
   "site.name": [requiredText("请输入站点名称")],
   "site.icon_url": [
@@ -827,8 +976,8 @@ const rules = {
       trigger: "blur",
     },
     {
-      validator: (_, value) => !formData.auth.github_login_enabled || isPublicHttpUrl(value),
-      message: "启用 GitHub 登录后必须填写公网站点访问地址",
+      validator: (_, value) => !anyOAuthLoginEnabled() || isPublicHttpUrl(value),
+      message: "启用 OAuth 登录后必须填写公网站点访问地址",
       trigger: "blur",
     },
   ],
@@ -881,6 +1030,35 @@ const rules = {
       trigger: "blur",
     },
   ],
+  ...Object.fromEntries(
+    thirdPartyOAuthSections.flatMap((item) => [
+      [
+        `${item.key}.client_id`,
+        [
+          {
+            validator: () =>
+              !formData.auth[`${item.key}_login_enabled`] ||
+              Boolean(formData[item.key].client_id.trim()),
+            message: `启用 ${item.title} 后必须填写 Client ID`,
+            trigger: "blur",
+          },
+        ],
+      ],
+      [
+        `${item.key}.callback_url`,
+        [
+          {
+            validator: (_, value) => {
+              if (!formData.auth[`${item.key}_login_enabled`]) return true;
+              return isPublicHttpUrl(value);
+            },
+            message: `启用 ${item.title} 后必须填写公网 http(s) 回调地址`,
+            trigger: "blur",
+          },
+        ],
+      ],
+    ]),
+  ),
   "email.smtp.host": [
     {
       validator: () =>
@@ -940,7 +1118,14 @@ function createSettingsForm() {
     },
     auth: {
       github_login_enabled: false,
+      gitlab_login_enabled: false,
+      gitee_login_enabled: false,
+      atomgit_login_enabled: false,
+      gitea_login_enabled: false,
+      oauth_credential_key_configured: false,
       public_login_enabled: true,
+      email_registration_enabled: false,
+      email_verification_required: true,
       login_agreement_enabled: false,
       login_agreement_text: "",
       service_terms_enabled: false,
@@ -953,6 +1138,35 @@ function createSettingsForm() {
       callback_url: "",
       scope: "read:user user:email read:org",
       admin_org: "",
+    },
+    gitlab: {
+      client_id: "",
+      client_secret: "",
+      client_secret_configured: false,
+      callback_url: "",
+      scope: "read_user read_api",
+    },
+    gitee: {
+      client_id: "",
+      client_secret: "",
+      client_secret_configured: false,
+      callback_url: "",
+      scope: "user_info projects",
+    },
+    atomgit: {
+      client_id: "",
+      client_secret: "",
+      client_secret_configured: false,
+      callback_url: "",
+      scope: "read_user read_repository",
+      api_base_url: "https://api.atomgit.com",
+    },
+    gitea: {
+      client_id: "",
+      client_secret: "",
+      client_secret_configured: false,
+      callback_url: "",
+      scope: "read:user read:repository read:organization",
     },
     market: {
       submissions_enabled: true,
@@ -1000,6 +1214,10 @@ function applySettings(config = {}) {
   Object.assign(formData.site, config.site || {});
   Object.assign(formData.auth, config.auth || {});
   Object.assign(formData.github, config.github || {});
+  Object.assign(formData.gitlab, config.gitlab || {});
+  Object.assign(formData.gitee, config.gitee || {});
+  Object.assign(formData.atomgit, config.atomgit || {});
+  Object.assign(formData.gitea, config.gitea || {});
   Object.assign(formData.market, config.market || {});
   formData.market.api_token = "";
   formData.market.api_token_remove_indexes = [];
@@ -1042,8 +1260,13 @@ function normalizeNumberFields() {
 function settingsPayload() {
   normalizeNumberFields();
   const payload = JSON.parse(JSON.stringify(formData));
-  delete payload.github.client_secret;
-  delete payload.github.client_secret_configured;
+  delete payload.auth.oauth_credential_key_configured;
+  for (const key of ["github", "gitlab", "gitee", "atomgit", "gitea"]) {
+    if (payload[key]) {
+      delete payload[key].client_secret;
+      delete payload[key].client_secret_configured;
+    }
+  }
   payload.market.api_token = secretInputPayload(payload.market.api_token);
   delete payload.market.api_token_configured;
   delete payload.market.api_token_previews;

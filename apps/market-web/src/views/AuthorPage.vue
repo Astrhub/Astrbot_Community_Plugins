@@ -41,7 +41,7 @@
             >
               <n-icon v-if="profile.provider === 'github'"><logo-github /></n-icon>
               <n-icon v-else><link-outline /></n-icon>
-              {{ profile.provider === "github" ? "GitHub 主页" : `${profile.provider} 主页` }}
+              {{ `${getGitProviderLabel(profile.provider)} 主页` }}
             </a>
           </div>
         </div>
@@ -108,7 +108,7 @@ import AppHeader from "@/components/AppHeader.vue";
 import AppFooter from "@/components/AppFooter.vue";
 import PluginCard from "@/components/PluginCard.vue";
 import { useSeo, useSeoContext } from "@/composables/useSeo";
-import { githubRawUrl } from "@/utils/github";
+import { getGitProviderLabel, githubRawUrl } from "@/utils/github";
 import { usePluginStore } from "@/stores/plugins";
 import type { AuthorOAuthProfile, Plugin } from "@/types";
 

@@ -427,4 +427,88 @@ describe("SubmitPlugin repository selection", () => {
     expect(submitButton.attributes("disabled")).toBeDefined();
     wrapper.unmount();
   });
+
+  it("supports switching to third-party OAuth providers and shows AstrBot v4.27.0 direct-clone hint", async () => {
+    const context = setup();
+    context.store.siteConfig.auth.github_login_enabled = true;
+    context.store.siteConfig.auth.gitlab_login_enabled = true;
+    context.store.siteConfig.auth.oauth_providers = [
+      {
+        provider: "github",
+        label: "GitHub",
+        host: "github.com",
+        instance_url: "https://github.com",
+        enabled: true,
+        configured: true,
+        login_path: "/v1/auth/github/login",
+      },
+      {
+        provider: "gitlab",
+        label: "GitLab",
+        host: "gitlab.com",
+        instance_url: "https://gitlab.com",
+        enabled: true,
+        configured: true,
+        login_path: "/v1/auth/oauth/gitlab/login",
+      },
+    ];
+    vi.mocked(context.store.loadProviderRepositories).mockResolvedValue({
+      items: [
+        {
+          id: "gl-1",
+          provider: "gitlab",
+          name: "astrbot_plugin_gl",
+          full_name: "team/sub/astrbot_plugin_gl",
+          repo: "https://gitlab.com/team/sub/astrbot_plugin_gl",
+          owner: "team/sub",
+          owner_type: "Group",
+          description: "GitLab nested plugin",
+        },
+      ],
+      next_page: null,
+    });
+    const wrapper = context.mount();
+    await flushPromises();
+
+    const gitlabBtn = wrapper.findAll("button").find((item) => item.text() === "GitLab");
+    expect(gitlabBtn).toBeDefined();
+    await gitlabBtn!.trigger("click");
+    await flushPromises();
+
+    expect(context.store.loadProviderRepositories).toHaveBeenCalledWith("gitlab", 1);
+    expect(wrapper.text()).toContain("v4.27.0");
+    wrapper.unmount();
+  });
+
+  it("accepts third-party allowlisted HTTPS URLs in local admin direct submit mode", async () => {
+    const context = setup();
+    context.store.siteConfig.storage_mode = "local";
+    context.store.currentUser = {
+      id: "admin-1",
+      internal_username: "owner",
+      role: "core_admin",
+    } as never;
+    vi.mocked(context.store.fetchPluginSubmissionMetadata).mockResolvedValue({
+      name: "astrbot_plugin_nested",
+      display_name: "GitLab 插件",
+      desc: "来自 GitLab 子组",
+      author: "owner",
+    } as never);
+    const wrapper = context.mount();
+    await flushPromises();
+
+    const repoInput = wrapper.get('input[name="plugin-repo"]');
+    await repoInput.setValue("https://gitlab.com/org/sub/astrbot_plugin_nested");
+    const fetchButton = wrapper.findAll("button").find((button) => button.text() === "读取信息");
+    await fetchButton!.trigger("click");
+    await flushPromises();
+
+    expect(context.store.fetchPluginSubmissionMetadata).toHaveBeenCalledWith(
+      "https://gitlab.com/org/sub/astrbot_plugin_nested",
+      "",
+      false,
+    );
+    expect(wrapper.text()).toContain("v4.27.0");
+    wrapper.unmount();
+  });
 });

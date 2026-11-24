@@ -500,6 +500,7 @@ def test_github_callback_binds_logged_in_internal_admin(monkeypatch) -> None:
             "GITHUB_LOGIN_ENABLED": "true",
             "GITHUB_CLIENT_ID": "client-id",
             "GITHUB_CLIENT_SECRET": "client-secret",
+            "OAUTH_CREDENTIAL_KEY": "test-oauth-credential-master-key-01",
             "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
         }
     )
@@ -569,6 +570,7 @@ def test_github_login_works_when_public_login_closed() -> None:
             "GITHUB_LOGIN_ENABLED": "true",
             "GITHUB_CLIENT_ID": "client-id",
             "GITHUB_CLIENT_SECRET": "client-secret",
+            "OAUTH_CREDENTIAL_KEY": "test-oauth-credential-master-key-01",
             "GITHUB_CALLBACK_URL": "http://127.0.0.1:8787/v1/auth/github/callback",
         }
     )
@@ -608,6 +610,7 @@ def test_github_login_uses_env_file_callback_url_over_initial_settings(tmp_path)
                 "GITHUB_LOGIN_ENABLED=true",
                 "GITHUB_CLIENT_ID=file-client",
                 "GITHUB_CLIENT_SECRET=file-secret",
+                "OAUTH_CREDENTIAL_KEY=test-oauth-credential-master-key-01",
                 "GITHUB_CALLBACK_URL=https://market.example.com/v1/auth/github/callback",
                 "",
             ]
@@ -650,6 +653,7 @@ def test_github_login_uses_database_options_over_env_file(tmp_path) -> None:
                 "GITHUB_LOGIN_ENABLED=false",
                 "GITHUB_CLIENT_ID=file-client",
                 "GITHUB_CLIENT_SECRET=file-secret",
+                "OAUTH_CREDENTIAL_KEY=test-oauth-credential-master-key-01",
                 "GITHUB_CALLBACK_URL=http://127.0.0.1:8787/v1/auth/github/callback",
                 "",
             ]
@@ -694,6 +698,7 @@ def test_github_login_ignores_forwarded_host_for_callback_url(tmp_path) -> None:
                 "GITHUB_LOGIN_ENABLED=true",
                 "GITHUB_CLIENT_ID=file-client",
                 "GITHUB_CLIENT_SECRET=file-secret",
+                "OAUTH_CREDENTIAL_KEY=test-oauth-credential-master-key-01",
                 "GITHUB_CALLBACK_URL=http://127.0.0.1:8787/v1/auth/github/callback",
                 "",
             ]
@@ -733,6 +738,7 @@ def test_github_callback_ignores_forwarded_origin_for_loopback_settings(
                 "GITHUB_LOGIN_ENABLED=true",
                 "GITHUB_CLIENT_ID=file-client",
                 "GITHUB_CLIENT_SECRET=file-secret",
+                "OAUTH_CREDENTIAL_KEY=test-oauth-credential-master-key-01",
                 "GITHUB_CALLBACK_URL=http://127.0.0.1:8787/v1/auth/github/callback",
                 "WEB_URL=http://127.0.0.1:8787",
                 "",
@@ -1913,6 +1919,57 @@ def test_public_site_config_uses_settings() -> None:
         "setup_required": True,
         "auth": {
             "github_login_enabled": False,
+            "gitlab_login_enabled": False,
+            "gitee_login_enabled": False,
+            "atomgit_login_enabled": False,
+            "gitea_login_enabled": False,
+            "oauth_providers": [
+                {
+                    "provider": "github",
+                    "label": "GitHub",
+                    "host": "github.com",
+                    "instance_url": "https://github.com",
+                    "enabled": False,
+                    "configured": False,
+                    "login_path": "/v1/auth/github/login",
+                },
+                {
+                    "provider": "gitlab",
+                    "label": "GitLab",
+                    "host": "gitlab.com",
+                    "instance_url": "https://gitlab.com",
+                    "enabled": False,
+                    "configured": False,
+                    "login_path": "/v1/auth/oauth/gitlab/login",
+                },
+                {
+                    "provider": "gitee",
+                    "label": "Gitee",
+                    "host": "gitee.com",
+                    "instance_url": "https://gitee.com",
+                    "enabled": False,
+                    "configured": False,
+                    "login_path": "/v1/auth/oauth/gitee/login",
+                },
+                {
+                    "provider": "atomgit",
+                    "label": "AtomGit",
+                    "host": "atomgit.com",
+                    "instance_url": "https://atomgit.com",
+                    "enabled": False,
+                    "configured": False,
+                    "login_path": "/v1/auth/oauth/atomgit/login",
+                },
+                {
+                    "provider": "gitea",
+                    "label": "Gitea",
+                    "host": "gitea.com",
+                    "instance_url": "https://gitea.com",
+                    "enabled": False,
+                    "configured": False,
+                    "login_path": "/v1/auth/oauth/gitea/login",
+                },
+            ],
             "public_login_enabled": True,
             "email_registration_enabled": False,
             "email_verification_required": True,
@@ -1964,7 +2021,8 @@ def test_core_admin_can_update_system_settings_and_preserve_masked_secrets(tmp_p
     client = make_setup_client(tmp_path)
     client.post("/v1/setup", json=setup_payload())
     client.app.state.settings = client.app.state.settings.with_updates(
-        github_client_secret="env-github-secret"
+        github_client_secret="env-github-secret",
+        oauth_credential_key="test-oauth-credential-master-key-01",
     )
 
     client.post(
@@ -2066,7 +2124,8 @@ def test_core_admin_can_append_and_remove_system_github_api_tokens(tmp_path) -> 
     client = make_setup_client(tmp_path)
     client.post("/v1/setup", json=setup_payload())
     client.app.state.settings = client.app.state.settings.with_updates(
-        github_client_secret="env-github-secret"
+        github_client_secret="env-github-secret",
+        oauth_credential_key="test-oauth-credential-master-key-01",
     )
     client.post(
         "/v1/auth/internal/login",

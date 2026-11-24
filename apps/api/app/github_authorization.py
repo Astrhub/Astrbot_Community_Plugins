@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import inspect
 import json
@@ -13,12 +12,19 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import HTTPException, Request
 
 from .artifacts.archive import normalize_github_repo
 from .auth import is_admin
+from .git_sources.credentials import CredentialStore, oauth_credential_cipher
+from .git_sources.models import (
+    THIRD_PARTY_PROVIDERS,
+    GitSourceError,
+    OAuthTokenSet,
+    normalize_git_repo_url,
+    parse_repository_ref,
+)
+from .git_sources.registry import ensure_valid_provider_token, get_provider_adapter
 
 OAUTH_TTL = 8 * 60 * 60
 
@@ -27,8 +33,8 @@ def auth_error(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status, {"code": code, "error": message})
 
 
-async def store_call(store: Any, method: str, *args: Any) -> Any:
-    result = getattr(store, method)(*args)
+async def store_call(store: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+    result = getattr(store, method)(*args, **kwargs)
     return await result if inspect.isawaitable(result) else result
 
 
@@ -36,13 +42,8 @@ def authorization_reference(session_token: str) -> str:
     return hashlib.sha256(session_token.encode()).hexdigest()
 
 
-def oauth_cipher(client_secret: str) -> Fernet:
-    if not client_secret:
-        raise auth_error(503, "github_oauth_unconfigured", "GitHub 授权服务尚未配置")
-    key = HKDF(
-        algorithm=hashes.SHA256(), length=32, salt=None, info=b"astrhub/github-user-oauth/v1"
-    ).derive(client_secret.encode())
-    return Fernet(base64.urlsafe_b64encode(key))
+def oauth_cipher(master_key: str | None) -> Fernet:
+    return oauth_credential_cipher(master_key, context=b"astrhub/github-user-oauth/v1")
 
 
 async def save_authorization(
@@ -62,7 +63,9 @@ async def save_authorization(
             "access_token": access_token,
         }
     ).encode()
-    ciphertext = oauth_cipher(settings.github_client_secret).encrypt(payload).decode()
+    ciphertext = (
+        oauth_cipher(getattr(settings, "oauth_credential_key", "")).encrypt(payload).decode()
+    )
     await store_call(
         store,
         "set_github_authorization",
@@ -77,6 +80,42 @@ async def save_authorization(
         authorization_reference(session),
         min(OAUTH_TTL, settings.session_max_age_seconds),
     )
+    if (
+        hasattr(store, "upsert_oauth_credential")
+        and hasattr(store, "list_oauth_identities")
+        and getattr(store, "pool", True) is not None
+    ):
+        cred_store = CredentialStore(store, getattr(settings, "oauth_credential_key", ""))
+        identities = await store_call(store, "list_oauth_identities", str(user_id))
+        github_identity = next(
+            (
+                item
+                for item in identities
+                if item.get("provider") == "github"
+                and str(item.get("provider_user_id") or "") == str(github_id)
+                and not item.get("revoked_at")
+            ),
+            None,
+        )
+        existing_ref = str((github_identity or {}).get("credential_ref") or "").strip()
+        cred_ref = await cred_store.save_token_set(
+            user_id=str(user_id),
+            token_set=OAuthTokenSet(
+                provider="github",
+                access_token=access_token,
+                provider_user_id=str(github_id),
+                provider_login=login,
+            ),
+            credential_ref=existing_ref,
+        )
+        if github_identity and hasattr(store, "update_oauth_identity_rotation"):
+            await store_call(
+                store,
+                "update_oauth_identity_rotation",
+                github_identity["id"],
+                credential_ref=cred_ref,
+                rotation_status="active",
+            )
 
 
 async def revoke_github_identity_authorizations(
@@ -96,7 +135,7 @@ async def revoke_github_identity_authorizations(
             continue
         try:
             payload = json.loads(
-                oauth_cipher(settings.github_client_secret).decrypt(
+                oauth_cipher(getattr(settings, "oauth_credential_key", "")).decrypt(
                     encrypted.encode(), ttl=OAUTH_TTL
                 )
             )
@@ -149,7 +188,7 @@ class GithubRepositoryAccess:
             if not encrypted:
                 raise InvalidToken()
             payload = json.loads(
-                oauth_cipher(self.settings.github_client_secret).decrypt(
+                oauth_cipher(getattr(self.settings, "oauth_credential_key", "")).decrypt(
                     encrypted.encode(), ttl=OAUTH_TTL
                 )
             )
@@ -334,6 +373,42 @@ def access_for_request(request: Request, user: Mapping[str, Any]) -> GithubRepos
     return factory(request.app.state.store, settings, user, authorization_reference(session))
 
 
+def _adapter_for_app(app: Any, settings: Any, provider: str) -> Any:
+    factory = getattr(app.state, "git_provider_adapter_factory", None)
+    if factory is not None:
+        return factory(settings, provider)
+    return get_provider_adapter(settings, provider)
+
+
+async def _upsert_repository_binding(
+    store: Any,
+    user_id: str,
+    proof: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not hasattr(store, "upsert_git_repository_binding"):
+        return None
+    normalized_repo = str(proof.get("normalized_repo") or "").strip().lower()
+    repo_url = str(proof.get("repo") or "").strip()
+    provider = str(proof.get("provider") or "github").strip().lower()
+    if not normalized_repo or not repo_url:
+        return None
+    return await store_call(
+        store,
+        "upsert_git_repository_binding",
+        str(user_id),
+        normalized_repo=normalized_repo,
+        repo_url=repo_url,
+        provider=provider,
+        instance_url=f"https://{urlsplit(repo_url).netloc}",
+        repo_external_id=str(proof.get("repo_external_id") or proof.get("id") or ""),
+        owner_id=str(proof.get("owner_id") or ""),
+        permission_level=str(proof.get("permission_level") or "write"),
+        verification_method=str(proof.get("verification_method") or "oauth"),
+        credential_ref=str(proof.get("credential_ref") or ""),
+        verified_at=proof.get("verified_at"),
+    )
+
+
 async def require_repository_access(
     request: Request,
     user: dict[str, Any],
@@ -342,14 +417,83 @@ async def require_repository_access(
     admin_override: bool = False,
     expected_repository_id: str = "",
 ) -> dict[str, Any]:
+    try:
+        ref = parse_repository_ref(repo)
+    except GitSourceError as exc:
+        raise auth_error(exc.status_code, exc.code, exc.message) from exc
+
     if admin_override and is_admin(user):
-        proof = {
+        proof: dict[str, Any] = {
             "mode": "site_admin",
+            "provider": ref.provider,
             "user_id": str(user["id"]),
-            "repo": normalize_github_repo(repo),
+            "repo": ref.repo_url,
+            "normalized_repo": ref.normalized_repo,
         }
-    else:
-        proof = await access_for_request(request, user).verify(repo, expected_repository_id)
+        user["_repository_authorization"] = proof
+        return proof
+
+    store = request.app.state.store
+    if ref.provider == "github":
+        proof = await access_for_request(request, user).verify(ref.repo_url, expected_repository_id)
+        proof = {
+            **proof,
+            "provider": "github",
+            "normalized_repo": ref.normalized_repo,
+            "repo_external_id": str(proof.get("id") or ""),
+            "verification_method": "oauth",
+        }
+        binding = await _upsert_repository_binding(store, str(user["id"]), proof)
+        if binding:
+            proof["binding_generation"] = int(binding.get("binding_generation") or 1)
+        user["_repository_authorization"] = proof
+        return proof
+
+    if ref.provider not in THIRD_PARTY_PROVIDERS:
+        raise auth_error(400, "unsupported_git_provider", "不支持的 Git 仓库平台")
+
+    settings = request.app.state.settings
+    adapter = _adapter_for_app(request.app, settings, ref.provider)
+    identity, token_set = await ensure_valid_provider_token(
+        store, settings, user, ref.provider, adapter=adapter
+    )
+    try:
+        proof_obj = await adapter.verify_repository_access(
+            ref,
+            user_id=str(user["id"]),
+            token_set=token_set,
+            credential_ref=str(identity.get("credential_ref") or ""),
+            expected_repository_id=expected_repository_id,
+        )
+    except GitSourceError as exc:
+        if exc.status_code == 409 and token_set.refresh_token:
+            identity, refreshed = await ensure_valid_provider_token(
+                store,
+                settings,
+                user,
+                ref.provider,
+                adapter=adapter,
+                force_refresh=True,
+            )
+            try:
+                proof_obj = await adapter.verify_repository_access(
+                    ref,
+                    user_id=str(user["id"]),
+                    token_set=refreshed,
+                    credential_ref=str(identity.get("credential_ref") or ""),
+                    expected_repository_id=expected_repository_id,
+                )
+            except GitSourceError as retry_exc:
+                raise auth_error(
+                    retry_exc.status_code, retry_exc.code, retry_exc.message
+                ) from retry_exc
+        else:
+            raise auth_error(exc.status_code, exc.code, exc.message) from exc
+
+    proof = proof_obj.to_dict()
+    binding = await _upsert_repository_binding(store, str(user["id"]), proof)
+    if binding:
+        proof["binding_generation"] = int(binding.get("binding_generation") or 1)
     user["_repository_authorization"] = proof
     return proof
 
@@ -396,6 +540,86 @@ async def _verify_admin_publication(
         raise auth_error(409, "github_repository_changed", "GitHub 仓库身份或所属方已变化")
 
 
+async def _verify_third_party_publication(
+    request: Request,
+    store: Any,
+    user: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    plugin: Mapping[str, Any],
+    proof: Mapping[str, Any],
+    admin_approval: Mapping[str, Any] | None,
+) -> None:
+    try:
+        ref = parse_repository_ref(str(plugin.get("repo") or ""))
+    except GitSourceError as exc:
+        raise auth_error(exc.status_code, exc.code, exc.message) from exc
+
+    if admin_approval is not None:
+        reviewer = await store_call(store, "get_user_by_id", admin_approval.get("reviewer_user_id"))
+        if not reviewer or not is_admin(reviewer):
+            raise auth_error(403, "reviewer_role_changed", "批准人的管理权限已失效")
+        approved_sha = (admin_approval.get("metadata") or {}).get("archive_sha256")
+        if approved_sha and approved_sha != artifact["archive_sha256"]:
+            raise auth_error(409, "artifact_identity_changed", "批准的插件包与当前包不一致")
+
+    if any(
+        normalize_git_repo_url(str(value or "")) != ref.repo_url
+        for value in (proof.get("repo"), artifact.get("source_repo"))
+    ):
+        raise auth_error(409, "git_repository_changed", "提交后仓库地址已变化")
+
+    if hasattr(store, "get_active_git_repository_binding"):
+        binding = await store_call(store, "get_active_git_repository_binding", ref.normalized_repo)
+        if not binding or str(binding.get("user_id") or "") != str(user["id"]):
+            raise auth_error(403, "git_binding_revoked", "仓库归属绑定已失效或已变更")
+        expected_gen = proof.get("binding_generation")
+        if expected_gen and int(binding.get("binding_generation") or 0) != int(expected_gen):
+            raise auth_error(403, "git_binding_changed", "仓库绑定代次已变更，需要重新验证")
+        if proof.get("id") and str(binding.get("repo_external_id") or "") != str(proof["id"]):
+            raise auth_error(409, "git_repository_changed", "仓库外部标识与绑定记录不一致")
+
+    settings = request.app.state.settings
+    adapter = _adapter_for_app(request.app, settings, ref.provider)
+    _, token_set = await ensure_valid_provider_token(
+        store, settings, user, ref.provider, adapter=adapter
+    )
+    try:
+        current = await adapter.verify_repository_access(
+            ref,
+            user_id=str(user["id"]),
+            token_set=token_set,
+            expected_repository_id=str(proof.get("id") or ""),
+        )
+    except GitSourceError as exc:
+        if exc.status_code == 409 and token_set.refresh_token:
+            _, refreshed = await ensure_valid_provider_token(
+                store, settings, user, ref.provider, adapter=adapter, force_refresh=True
+            )
+            try:
+                current = await adapter.verify_repository_access(
+                    ref,
+                    user_id=str(user["id"]),
+                    token_set=refreshed,
+                    expected_repository_id=str(proof.get("id") or ""),
+                )
+            except GitSourceError as retry_exc:
+                raise auth_error(
+                    retry_exc.status_code, retry_exc.code, retry_exc.message
+                ) from retry_exc
+        else:
+            raise auth_error(exc.status_code, exc.code, exc.message) from exc
+
+    if (
+        str(current.repo_external_id) != str(proof.get("id") or "")
+        or str(current.owner_id) != str(proof.get("owner_id") or "")
+        or (
+            proof.get("provider_user_id")
+            and str(current.provider_user_id) != str(proof.get("provider_user_id"))
+        )
+    ):
+        raise auth_error(403, "git_repository_changed", "第三方平台身份或仓库归属已变化")
+
+
 async def verify_publication_access(
     request: Request,
     artifact_id: str,
@@ -408,7 +632,7 @@ async def verify_publication_access(
         raise auth_error(404, "artifact_not_found", "插件版本不存在")
     proof = (artifact.get("submitted_by_snapshot") or {}).get("repository_authorization")
     if not proof:
-        raise auth_error(403, "github_authorization_required", "该版本缺少 GitHub 权限凭据")
+        raise auth_error(403, "github_authorization_required", "该版本缺少仓库权限凭据")
     store = request.app.state.store
     user = await store_call(store, "get_user_by_id", artifact.get("submitted_by"))
     plugin = await store_call(store, "get_plugin", artifact["plugin_id"])
@@ -437,15 +661,27 @@ async def verify_publication_access(
 
     if not cdn_enabled(plugin):
         raise auth_error(409, "cdn_disabled_or_changed", "该插件已关闭 CDN")
+
+    try:
+        plugin_ref = parse_repository_ref(str(plugin.get("repo") or ""))
+        provider = str(proof.get("provider") or plugin_ref.provider).lower()
+    except GitSourceError:
+        provider = str(proof.get("provider") or "github").lower()
+
     if proof.get("mode") == "cdn_subscription":
         subscription = await CdnSubscriptions(store).get(plugin["id"])
-        if (
-            subscription is None
-            or site_repository_loader is None
-            or artifact.get("review_status") != "approved"
-        ):
+        if subscription is None or artifact.get("review_status") != "approved":
             raise auth_error(403, "cdn_authorization_required", "缺少有效的 CDN 授权或批准")
-        actor, _ = await verify_subscription(store, plugin, subscription, site_repository_loader)
+        if provider == "github" and site_repository_loader is None:
+            raise auth_error(403, "cdn_authorization_required", "缺少有效的 CDN 授权或批准")
+        actor, _ = await verify_subscription(
+            store,
+            plugin,
+            subscription,
+            site_repository_loader,
+            settings=request.app.state.settings,
+            adapter_factory=getattr(request.app.state, "git_provider_adapter_factory", None),
+        )
         bound = subscription["authorization"]
         if (
             str(actor["id"]) != str(user["id"])
@@ -469,8 +705,18 @@ async def verify_publication_access(
             "owner_user_id": str(plugin["owner_user_id"]),
         }
     if proof.get("mode") == "site_admin":
-        if not is_admin(user) or normalize_github_repo(plugin["repo"]) != proof["repo"]:
+        try:
+            current_repo = normalize_git_repo_url(plugin["repo"])
+            proof_repo = normalize_git_repo_url(proof["repo"])
+        except GitSourceError:
+            current_repo = normalize_github_repo(plugin["repo"])
+            proof_repo = normalize_github_repo(proof["repo"])
+        if not is_admin(user) or current_repo != proof_repo:
             raise auth_error(403, "github_identity_changed", "管理权限或插件仓库已变化")
+    elif provider in THIRD_PARTY_PROVIDERS:
+        await _verify_third_party_publication(
+            request, store, user, artifact, plugin, proof, admin_approval
+        )
     elif admin_approval is not None:
         await _verify_admin_publication(
             store, user, artifact, plugin, proof, admin_approval, site_repository_loader
