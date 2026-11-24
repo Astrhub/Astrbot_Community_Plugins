@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.config import load_settings
-from app.main import cache_control_for_path, create_app
 from app.store import InMemoryMarketStore
 
 MINIMAL_SSR_INDEX = """<!doctype html>
@@ -54,7 +53,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     )
     store.update_plugin_status(plugin["id"], "listed", None)
     settings = load_settings({"WEB_URL": "https://market.example.test"})
-    return TestClient(create_app(settings=settings, store=store))
+    return TestClient(main_module.create_app(settings=settings, store=store))
 
 
 def test_market_web_files_routes_and_real_404(tmp_path: Path, monkeypatch) -> None:
@@ -140,6 +139,7 @@ def test_market_web_files_routes_and_real_404(tmp_path: Path, monkeypatch) -> No
 
 
 def test_cache_control_classification() -> None:
+    cache_control_for_path = main_module.cache_control_for_path
     assert cache_control_for_path("/v1/plugins") == "public, max-age=60"
     assert cache_control_for_path("/v1/site") == "public, max-age=60"
     assert cache_control_for_path("/v1/authors") == "public, max-age=60"

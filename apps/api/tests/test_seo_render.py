@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.auth import hash_password
 from app.config import load_settings
-from app.main import create_app
 from app.seo_render import (
     EXTERNAL_SITEMAPS,
     FALLBACK_SITE_ORIGIN,
@@ -74,7 +73,7 @@ def _setup_client(
             **(env or {}),
         }
     )
-    app = create_app(settings=settings, store=market_store)
+    app = main_module.create_app(settings=settings, store=market_store)
     return TestClient(app), market_store
 
 
