@@ -186,6 +186,12 @@ describe("InfrastructureStoragePanel", () => {
       ) {
         return jsonResponse({ ...sampleMigrations()[0], status: "queued", failed_count: 0 });
       }
+      if (
+        url.endsWith("/v1/admin/storage/migrations/stmig_demo_1/import-unknown") &&
+        method === "POST"
+      ) {
+        return jsonResponse({ ...sampleMigrations()[0], status: "queued", unknown_objects: [] });
+      }
       return jsonResponse({ error: `Unhandled ${method} ${url}` }, 404);
     });
   }
@@ -226,6 +232,18 @@ describe("InfrastructureStoragePanel", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://api.test/v1/admin/storage/migrations/stmig_demo_1/retry-failed",
+      expect.objectContaining({ method: "POST" }),
+    );
+
+    const importBtn = wrapper
+      .findAll("button")
+      .find((btn) => btn.text().includes("导入未登记对象"));
+    expect(importBtn).toBeDefined();
+    await importBtn!.trigger("click");
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://api.test/v1/admin/storage/migrations/stmig_demo_1/import-unknown",
       expect.objectContaining({ method: "POST" }),
     );
     wrapper.unmount();

@@ -56,10 +56,12 @@ _TINY_PNG_BYTES = (
 class ImgBedProbeResult:
     """Result of probing ImgBed avatar capabilities and optional plugin ZIP acceptance gates."""
 
+    reachable: bool
     upload: bool
     read: bool
     image_variants: bool
     delete: bool
+    write_probe_skipped_no_delete_scope: bool
     plugin_zip_ready: bool
     plugin_zip_checks: dict[str, bool]
     range_read: bool
@@ -211,6 +213,7 @@ class ImgBedObjectStorageDriver:
         allow_private_network: bool = False,
         verify_tls: bool = True,
         timeout_seconds: float = DEFAULT_IMGBED_TIMEOUT_SECONDS,
+        list_page_size: int = 1000,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.profile_id = validate_profile_id(profile_id)
@@ -229,6 +232,7 @@ class ImgBedObjectStorageDriver:
         self.plugin_zip_verified = bool(plugin_zip_verified)
         self.verify_tls = bool(verify_tls)
         self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.list_page_size = max(1, min(1000, int(list_page_size)))
         self._external_client = client is not None
         self._client = client
         self._parsed_base = urlsplit(self.base_url)
@@ -587,61 +591,89 @@ class ImgBedObjectStorageDriver:
             )
         normalized_ns = validate_namespace(namespace)
         base_dir = _join_parts(self.upload_folder, normalized_ns)
-        params: dict[str, Any] = {"count": 1000, "recursive": "true"}
-        if base_dir:
-            params["dir"] = base_dir
-        response = await self._request(
-            "GET",
-            f"{self.base_url}/api/manage/list",
-            params=params,
-            headers=self._auth_headers(),
-        )
-        if response.status_code == 404:
-            return []
-        if response.status_code != 200:
-            raise _imgbed_status_error("imgbed_list_failed", response)
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ObjectStorageError("imgbed_list_invalid", "Invalid ImgBed list JSON") from exc
+        entries_by_key: dict[str, ObjectListingEntry] = {}
+        start = 0
+        page_size = self.list_page_size
+        max_pages = 10_000
 
-        raw_files = payload.get("files") if isinstance(payload, Mapping) else payload
-        if not isinstance(raw_files, list):
-            return []
-
-        entries: list[ObjectListingEntry] = []
-        for item in raw_files:
-            if not isinstance(item, Mapping):
-                continue
-            raw_name = str(item.get("name") or item.get("id") or "").strip().lstrip("/")
-            if raw_name.startswith("file/"):
-                raw_name = raw_name.removeprefix("file/")
-            if not raw_name:
-                continue
-            # Service-layer isolation: never expose files outside this profile's upload_folder.
-            if self.upload_folder and not (
-                raw_name == self.upload_folder or raw_name.startswith(f"{self.upload_folder}/")
-            ):
-                continue
-            key = _strip_prefix(raw_name, base_dir)
-            if not key:
-                continue
-            if prefix and not key.startswith(prefix):
-                continue
-            meta = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
-            raw_size = meta.get("FileSize") or item.get("size") or 0
+        for _ in range(max_pages):
+            params: dict[str, Any] = {
+                "start": start,
+                "count": page_size,
+                "recursive": "true",
+            }
+            if base_dir:
+                params["dir"] = base_dir
+            response = await self._request(
+                "GET",
+                f"{self.base_url}/api/manage/list",
+                params=params,
+                headers=self._auth_headers(),
+            )
+            if response.status_code == 404:
+                break
+            if response.status_code != 200:
+                raise _imgbed_status_error("imgbed_list_failed", response)
             try:
-                size_bytes = max(0, int(raw_size))
-            except (TypeError, ValueError):
-                size_bytes = 0
-            entries.append(
-                ObjectListingEntry(
+                payload = response.json()
+            except ValueError as exc:
+                raise ObjectStorageError("imgbed_list_invalid", "Invalid ImgBed list JSON") from exc
+
+            raw_files = payload.get("files") if isinstance(payload, Mapping) else payload
+            if not isinstance(raw_files, list) or not raw_files:
+                break
+
+            page_new_count = 0
+            for item in raw_files:
+                if not isinstance(item, Mapping):
+                    continue
+                raw_name = str(item.get("name") or item.get("id") or "").strip().lstrip("/")
+                if raw_name.startswith("file/"):
+                    raw_name = raw_name.removeprefix("file/")
+                if not raw_name:
+                    continue
+                # Service-layer isolation: never expose files outside this profile's upload_folder.
+                if self.upload_folder and not (
+                    raw_name == self.upload_folder or raw_name.startswith(f"{self.upload_folder}/")
+                ):
+                    continue
+                key = _strip_prefix(raw_name, base_dir)
+                if not key:
+                    continue
+                if prefix and not key.startswith(prefix):
+                    continue
+                if key not in entries_by_key:
+                    page_new_count += 1
+                meta = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+                size_bytes = _parse_imgbed_size_bytes(meta, item)
+                entries_by_key[key] = ObjectListingEntry(
                     namespace=normalized_ns,
                     key=key,
                     size_bytes=size_bytes,
                     content_type=guess_content_type(key),
                 )
+
+            returned_raw = payload.get("returnedCount") if isinstance(payload, Mapping) else None
+            returned_count = (
+                int(returned_raw)
+                if isinstance(returned_raw, int) and returned_raw >= 0
+                else len(raw_files)
             )
+            total_raw = payload.get("totalCount") if isinstance(payload, Mapping) else None
+            total_count = int(total_raw) if isinstance(total_raw, int) and total_raw >= 0 else None
+
+            if returned_count <= 0:
+                break
+            start += returned_count
+            if total_count is not None:
+                if start >= total_count:
+                    break
+            elif returned_count < page_size:
+                break
+            elif page_new_count == 0 and len(raw_files) == 0:
+                break
+
+        entries = list(entries_by_key.values())
         entries.sort(key=lambda entry: entry.key)
         return entries
 
@@ -651,58 +683,108 @@ class ImgBedObjectStorageDriver:
         probe_prefix: str = "__healthcheck__/",
         test_plugin_zip: bool = False,
     ) -> ImgBedProbeResult:
-        """Probe ImgBed avatar upload/read/variants and (when scopes allow or requested) plugin ZIP gates."""
+        """Probe ImgBed capabilities without leaking persistent files when delete scope is absent."""
         token = os.urandom(8).hex()
-        img_key = f"{probe_prefix}probe-{token}.png"
-        img_sha = hashlib.sha256(_TINY_PNG_BYTES).hexdigest()
+        has_delete = "delete" in self.scopes
+        reachable = False
         upload_ok = False
         read_ok = False
         variants_ok = False
-        delete_ok = "delete" not in self.scopes
+        delete_ok = False
+        write_probe_skipped = not has_delete
         message = "ImgBed 头像上传与公开读取校验通过"
-        uploaded_img_key = ""
 
-        try:
-            stored = await self.put_object(
-                img_key,
-                _TINY_PNG_BYTES,
-                content_type="image/png",
-                expected_sha256=img_sha,
-                if_absent=True,
-            )
-            uploaded_img_key = stored.key
-            src = stored.metadata.get("imgbed_src", "")
-            upload_ok = bool(src.startswith("/file/") and stored.sha256 == img_sha)
-            read_bytes = await self.read_object(stored.key, expected_sha256=img_sha)
-            read_ok = read_bytes == _TINY_PNG_BYTES
-            if self.image_variants_enabled:
-                variant_url = build_imgbed_variant_url(
-                    stored.public_url,
-                    width=256,
-                    height=256,
-                    fit="cover",
-                    fallback="original",
+        if not has_delete:
+            # Never upload a persistent probe object when delete permission is absent.
+            try:
+                if "list" in self.scopes:
+                    list_res = await self._request(
+                        "GET",
+                        f"{self.base_url}/api/manage/list",
+                        params={
+                            "start": 0,
+                            "count": 1,
+                            **({"dir": self.upload_folder} if self.upload_folder else {}),
+                        },
+                        headers=self._auth_headers(),
+                    )
+                    if list_res.status_code != 200:
+                        raise _imgbed_status_error("imgbed_list_failed", list_res)
+                    reachable = True
+                else:
+                    ping_res = await self._request("HEAD", f"{self.base_url}/", headers={})
+                    reachable = ping_res.status_code < 500
+                    if not reachable:
+                        raise _imgbed_status_error("imgbed_unreachable", ping_res)
+
+                sample_path = _join_parts(self.upload_folder, f"{probe_prefix}probe.webp")
+                sample_url = self._file_url(sample_path)
+                if self.image_variants_enabled:
+                    variant_url = build_imgbed_variant_url(
+                        sample_url,
+                        width=256,
+                        height=256,
+                        fit="cover",
+                        fallback="original",
+                    )
+                    variants_ok = (
+                        "/file/" in variant_url
+                        and "width=256" in variant_url
+                        and "height=256" in variant_url
+                        and "fit=cover" in variant_url
+                        and "fallback=original" in variant_url
+                    )
+                else:
+                    variants_ok = True
+                message = "ImgBed 实例可达性与配置校验通过（未授予 delete 权限，已跳过会留下持久文件的上传探针）"
+            except Exception as exc:
+                message = str(exc) or exc.__class__.__name__
+        else:
+            img_key = f"{probe_prefix}probe-{token}.png"
+            img_sha = hashlib.sha256(_TINY_PNG_BYTES).hexdigest()
+            uploaded_img_key = ""
+            try:
+                stored = await self.put_object(
+                    img_key,
+                    _TINY_PNG_BYTES,
+                    content_type="image/png",
+                    expected_sha256=img_sha,
+                    if_absent=True,
                 )
-                variants_ok = (
-                    "/file/" in variant_url
-                    and "width=256" in variant_url
-                    and "height=256" in variant_url
-                    and "fit=cover" in variant_url
-                    and "fallback=original" in variant_url
-                )
-            else:
-                variants_ok = True
-        except Exception as exc:
-            message = str(exc) or exc.__class__.__name__
-        finally:
-            if uploaded_img_key and "delete" in self.scopes:
-                try:
-                    await self.delete_object(uploaded_img_key)
-                    delete_ok = await self.stat_object(uploaded_img_key) is None
-                except Exception as cleanup_exc:
-                    delete_ok = False
-                    if message == "ImgBed 头像上传与公开读取校验通过":
-                        message = f"ImgBed 测试图片清理失败：{cleanup_exc}"
+                reachable = True
+                uploaded_img_key = stored.key
+                src = stored.metadata.get("imgbed_src", "")
+                upload_ok = bool(src.startswith("/file/") and stored.sha256 == img_sha)
+                read_bytes = await self.read_object(stored.key, expected_sha256=img_sha)
+                read_ok = read_bytes == _TINY_PNG_BYTES
+                if self.image_variants_enabled:
+                    variant_url = build_imgbed_variant_url(
+                        stored.public_url,
+                        width=256,
+                        height=256,
+                        fit="cover",
+                        fallback="original",
+                    )
+                    variants_ok = (
+                        "/file/" in variant_url
+                        and "width=256" in variant_url
+                        and "height=256" in variant_url
+                        and "fit=cover" in variant_url
+                        and "fallback=original" in variant_url
+                    )
+                else:
+                    variants_ok = True
+            except Exception as exc:
+                message = str(exc) or exc.__class__.__name__
+            finally:
+                if uploaded_img_key:
+                    try:
+                        await self.delete_object(uploaded_img_key)
+                        delete_ok = await self.stat_object(uploaded_img_key) is None
+                    except Exception as cleanup_exc:
+                        delete_ok = False
+                        if message == "ImgBed 头像上传与公开读取校验通过":
+                            message = f"ImgBed 测试图片清理失败：{cleanup_exc}"
 
         plugin_zip_checks: dict[str, bool] = {
             "scopes": {"upload", "list", "delete"}.issubset(set(self.scopes)),
@@ -791,16 +873,21 @@ class ImgBedObjectStorageDriver:
             if test_plugin_zip:
                 message = "ImgBed 绑定插件公开用途需要 upload、list 与 delete 权限并通过 ZIP 验收"
 
-        if not (upload_ok and read_ok and variants_ok and delete_ok) and message.startswith(
-            "ImgBed 头像"
-        ):
+        base_passed = (
+            reachable and variants_ok
+            if write_probe_skipped
+            else (upload_ok and read_ok and variants_ok and delete_ok)
+        )
+        if not base_passed and message.startswith("ImgBed 头像"):
             message = "ImgBed 基础读写能力校验未通过"
 
         return ImgBedProbeResult(
+            reachable=reachable,
             upload=upload_ok,
             read=read_ok,
             image_variants=variants_ok,
             delete=delete_ok,
+            write_probe_skipped_no_delete_scope=write_probe_skipped,
             plugin_zip_ready=plugin_zip_ready,
             plugin_zip_checks=plugin_zip_checks,
             range_read=range_supported,
@@ -953,6 +1040,46 @@ class ImgBedObjectStorageDriver:
                 "imgbed_folder_scope_violation",
                 "ImgBed object path is outside this profile's upload_folder",
             )
+
+
+def _parse_imgbed_size_bytes(meta: Mapping[str, Any], item: Mapping[str, Any]) -> int:
+    """Parse ImgBed object size preferring exact FileSizeBytes before FileSize (MB or int bytes)."""
+    for candidate in (meta.get("FileSizeBytes"), item.get("size")):
+        if candidate is None or isinstance(candidate, bool):
+            continue
+        try:
+            parsed = int(candidate)
+            if parsed >= 0:
+                return parsed
+        except (TypeError, ValueError):
+            continue
+
+    raw_file_size = meta.get("FileSize")
+    if raw_file_size is None or isinstance(raw_file_size, bool):
+        return 0
+    if isinstance(raw_file_size, int):
+        return max(0, raw_file_size)
+    if isinstance(raw_file_size, float):
+        return max(0, round(raw_file_size * 1024 * 1024))
+    text = str(raw_file_size).strip()
+    if not text:
+        return 0
+    lowered = text.lower()
+    if lowered.endswith("mb"):
+        text = text[:-2].strip()
+        try:
+            return max(0, round(float(text) * 1024 * 1024))
+        except ValueError:
+            return 0
+    if "." in text:
+        try:
+            return max(0, round(float(text) * 1024 * 1024))
+        except ValueError:
+            return 0
+    try:
+        return max(0, int(text))
+    except ValueError:
+        return 0
 
 
 def _join_parts(*parts: str) -> str:

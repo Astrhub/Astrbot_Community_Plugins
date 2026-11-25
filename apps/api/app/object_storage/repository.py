@@ -62,7 +62,30 @@ class ObjectStorageRepository(Protocol):
         *,
         purpose: StoragePurpose,
         key: str,
+        namespace: str | None = None,
     ) -> StorageObjectRecord | None: ...
+
+    async def commit_rebind(
+        self,
+        *,
+        binding: StorageBinding,
+        draining_profile: StorageProfile | None = None,
+        migration: StorageMigration | None = None,
+        items: list[StorageMigrationItem] | tuple[StorageMigrationItem, ...] = (),
+    ) -> tuple[StorageBinding, StorageMigration | None]: ...
+
+    async def decommission_profile(
+        self,
+        profile: StorageProfile,
+        *,
+        secret_ref_to_delete: str = "",
+    ) -> StorageProfile: ...
+
+    async def add_migration_items(
+        self,
+        migration: StorageMigration,
+        new_items: list[StorageMigrationItem],
+    ) -> StorageMigration: ...
 
     async def list_objects(
         self,
@@ -273,6 +296,7 @@ class LocalObjectStorageRepository:
         *,
         purpose: StoragePurpose,
         key: str,
+        namespace: str | None = None,
     ) -> StorageObjectRecord | None:
         candidates = [
             _raw_to_object(raw)
@@ -280,6 +304,7 @@ class LocalObjectStorageRepository:
             if raw.get("status") == StorageObjectStatus.ACTIVE.value
             and raw.get("purpose") == purpose.value
             and raw.get("object_key") == key
+            and (namespace is None or raw.get("namespace") == namespace)
         ]
         if not candidates:
             return None
@@ -410,6 +435,79 @@ class LocalObjectStorageRepository:
         if reset_count:
             self._persist()
         return reset_count
+
+    async def commit_rebind(
+        self,
+        *,
+        binding: StorageBinding,
+        draining_profile: StorageProfile | None = None,
+        migration: StorageMigration | None = None,
+        items: list[StorageMigrationItem] | tuple[StorageMigrationItem, ...] = (),
+    ) -> tuple[StorageBinding, StorageMigration | None]:
+        bucket = self._ensure_bucket()
+        snapshot = deepcopy(bucket)
+        now = utc_now_iso()
+        stored_binding = StorageBinding(
+            purpose=binding.purpose,
+            profile_id=binding.profile_id,
+            generation=binding.generation,
+            updated_by=binding.updated_by,
+            updated_at=binding.updated_at or now,
+        )
+        try:
+            bucket["bindings"][stored_binding.purpose.value] = {
+                "purpose": stored_binding.purpose.value,
+                "profile_id": stored_binding.profile_id,
+                "generation": stored_binding.generation,
+                "updated_by": stored_binding.updated_by,
+                "updated_at": stored_binding.updated_at,
+            }
+            if draining_profile is not None:
+                bucket["profiles"][draining_profile.id] = _profile_to_raw(draining_profile)
+            if migration is not None:
+                bucket["migrations"][migration.id] = _migration_to_raw(migration)
+                for item in items:
+                    bucket["migrationItems"][item.id] = _migration_item_to_raw(item)
+            self._persist()
+        except Exception:
+            self.store.state["objectStorage"] = snapshot
+            raise
+        return stored_binding, migration
+
+    async def decommission_profile(
+        self,
+        profile: StorageProfile,
+        *,
+        secret_ref_to_delete: str = "",
+    ) -> StorageProfile:
+        bucket = self._ensure_bucket()
+        snapshot = deepcopy(bucket)
+        try:
+            bucket["profiles"][profile.id] = _profile_to_raw(profile)
+            if secret_ref_to_delete:
+                bucket["secrets"].pop(secret_ref_to_delete, None)
+            self._persist()
+        except Exception:
+            self.store.state["objectStorage"] = snapshot
+            raise
+        return profile
+
+    async def add_migration_items(
+        self,
+        migration: StorageMigration,
+        new_items: list[StorageMigrationItem],
+    ) -> StorageMigration:
+        bucket = self._ensure_bucket()
+        snapshot = deepcopy(bucket)
+        try:
+            bucket["migrations"][migration.id] = _migration_to_raw(migration)
+            for item in new_items:
+                bucket["migrationItems"][item.id] = _migration_item_to_raw(item)
+            self._persist()
+        except Exception:
+            self.store.state["objectStorage"] = snapshot
+            raise
+        return migration
 
 
 class PgObjectStorageRepository:
@@ -615,17 +713,34 @@ class PgObjectStorageRepository:
         *,
         purpose: StoragePurpose,
         key: str,
+        namespace: str | None = None,
     ) -> StorageObjectRecord | None:
-        row = await self._pool().fetchrow(
-            """
-            SELECT * FROM market_storage_objects
-             WHERE purpose = $1 AND object_key = $2 AND status = 'active'
-             ORDER BY updated_at DESC
-             LIMIT 1
-            """,
-            purpose.value,
-            key,
-        )
+        if namespace is None:
+            row = await self._pool().fetchrow(
+                """
+                SELECT * FROM market_storage_objects
+                 WHERE purpose = $1 AND object_key = $2 AND status = 'active'
+                 ORDER BY updated_at DESC
+                 LIMIT 1
+                """,
+                purpose.value,
+                key,
+            )
+        else:
+            row = await self._pool().fetchrow(
+                """
+                SELECT * FROM market_storage_objects
+                 WHERE purpose = $1
+                   AND namespace = $2
+                   AND object_key = $3
+                   AND status = 'active'
+                 ORDER BY updated_at DESC
+                 LIMIT 1
+                """,
+                purpose.value,
+                namespace,
+                key,
+            )
         return _raw_to_object(dict(row)) if row is not None else None
 
     async def list_objects(
@@ -722,6 +837,202 @@ class PgObjectStorageRepository:
                     migration.created_by,
                 )
                 for item in items:
+                    await conn.execute(
+                        """
+                        INSERT INTO market_storage_migration_items (
+                            id, migration_id, object_id, source_profile_id, source_namespace,
+                            source_key, source_public_url, target_profile_id, target_namespace,
+                            target_key, target_public_url, expected_sha256, status,
+                            attempts, last_error
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+                        )
+                        """,
+                        item.id,
+                        item.migration_id,
+                        item.object_id,
+                        item.source_profile_id,
+                        item.source_namespace,
+                        item.source_key,
+                        item.source_public_url,
+                        item.target_profile_id,
+                        item.target_namespace,
+                        item.target_key,
+                        item.target_public_url,
+                        item.expected_sha256,
+                        item.status.value,
+                        item.attempts,
+                        item.last_error,
+                    )
+        return _raw_to_migration(dict(row))
+
+    async def commit_rebind(
+        self,
+        *,
+        binding: StorageBinding,
+        draining_profile: StorageProfile | None = None,
+        migration: StorageMigration | None = None,
+        items: list[StorageMigrationItem] | tuple[StorageMigrationItem, ...] = (),
+    ) -> tuple[StorageBinding, StorageMigration | None]:
+        async with self._pool().acquire() as conn:
+            async with conn.transaction():
+                binding_row = await conn.fetchrow(
+                    """
+                    INSERT INTO market_storage_bindings (purpose, profile_id, generation, updated_by)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (purpose)
+                    DO UPDATE SET profile_id = EXCLUDED.profile_id,
+                                  generation = EXCLUDED.generation,
+                                  updated_by = EXCLUDED.updated_by,
+                                  updated_at = now()
+                    RETURNING *
+                    """,
+                    binding.purpose.value,
+                    binding.profile_id,
+                    binding.generation,
+                    binding.updated_by,
+                )
+                if draining_profile is not None:
+                    await conn.execute(
+                        """
+                        UPDATE market_storage_profiles
+                           SET status = $2,
+                               updated_by = $3,
+                               updated_at = now()
+                         WHERE id = $1
+                        """,
+                        draining_profile.id,
+                        draining_profile.status.value,
+                        draining_profile.updated_by,
+                    )
+                saved_migration: StorageMigration | None = None
+                if migration is not None:
+                    mig_row = await conn.fetchrow(
+                        """
+                        INSERT INTO market_storage_migrations (
+                            id, purpose, source_profile_id, target_profile_id, binding_generation,
+                            status, total_count, completed_count, failed_count, skipped_count,
+                            unknown_objects, last_error, created_by, completed_at
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13,
+                            NULLIF($14, '')::timestamptz
+                        )
+                        RETURNING *
+                        """,
+                        migration.id,
+                        migration.purpose.value,
+                        migration.source_profile_id,
+                        migration.target_profile_id,
+                        migration.binding_generation,
+                        migration.status.value,
+                        migration.total_count,
+                        migration.completed_count,
+                        migration.failed_count,
+                        migration.skipped_count,
+                        json.dumps([dict(entry) for entry in migration.unknown_objects]),
+                        migration.last_error,
+                        migration.created_by,
+                        migration.completed_at,
+                    )
+                    for item in items:
+                        await conn.execute(
+                            """
+                            INSERT INTO market_storage_migration_items (
+                                id, migration_id, object_id, source_profile_id, source_namespace,
+                                source_key, source_public_url, target_profile_id, target_namespace,
+                                target_key, target_public_url, expected_sha256, status,
+                                attempts, last_error
+                            ) VALUES (
+                                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+                            )
+                            """,
+                            item.id,
+                            item.migration_id,
+                            item.object_id,
+                            item.source_profile_id,
+                            item.source_namespace,
+                            item.source_key,
+                            item.source_public_url,
+                            item.target_profile_id,
+                            item.target_namespace,
+                            item.target_key,
+                            item.target_public_url,
+                            item.expected_sha256,
+                            item.status.value,
+                            item.attempts,
+                            item.last_error,
+                        )
+                    saved_migration = _raw_to_migration(dict(mig_row))
+        return _raw_to_binding(dict(binding_row)), saved_migration
+
+    async def decommission_profile(
+        self,
+        profile: StorageProfile,
+        *,
+        secret_ref_to_delete: str = "",
+    ) -> StorageProfile:
+        async with self._pool().acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    UPDATE market_storage_profiles
+                       SET status = $2,
+                           config = $3::jsonb,
+                           secret_ref = '',
+                           health_status = $4,
+                           health_message = $5,
+                           updated_by = $6,
+                           updated_at = now()
+                     WHERE id = $1
+                    RETURNING *
+                    """,
+                    profile.id,
+                    profile.status.value,
+                    json.dumps(dict(profile.config)),
+                    profile.health_status,
+                    profile.health_message,
+                    profile.updated_by,
+                )
+                if secret_ref_to_delete:
+                    await conn.execute(
+                        "DELETE FROM market_storage_secrets WHERE secret_ref = $1",
+                        secret_ref_to_delete,
+                    )
+        return _raw_to_profile(dict(row))
+
+    async def add_migration_items(
+        self,
+        migration: StorageMigration,
+        new_items: list[StorageMigrationItem],
+    ) -> StorageMigration:
+        async with self._pool().acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    UPDATE market_storage_migrations
+                       SET status = $2,
+                           total_count = $3,
+                           completed_count = $4,
+                           failed_count = $5,
+                           skipped_count = $6,
+                           unknown_objects = $7::jsonb,
+                           last_error = $8,
+                           completed_at = NULLIF($9, '')::timestamptz,
+                           updated_at = now()
+                     WHERE id = $1
+                    RETURNING *
+                    """,
+                    migration.id,
+                    migration.status.value,
+                    migration.total_count,
+                    migration.completed_count,
+                    migration.failed_count,
+                    migration.skipped_count,
+                    json.dumps([dict(entry) for entry in migration.unknown_objects]),
+                    migration.last_error,
+                    migration.completed_at,
+                )
+                for item in new_items:
                     await conn.execute(
                         """
                         INSERT INTO market_storage_migration_items (

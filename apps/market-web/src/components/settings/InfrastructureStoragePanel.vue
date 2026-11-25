@@ -237,6 +237,16 @@
                   重试失败项
                 </n-button>
                 <n-button
+                  v-if="migration.unknown_objects.length > 0 && migration.status !== 'cancelled'"
+                  size="small"
+                  secondary
+                  type="info"
+                  :loading="busyAction === `import-unknown:${migration.id}`"
+                  @click="runMigrationAction(migration.id, 'import-unknown')"
+                >
+                  导入未登记对象
+                </n-button>
+                <n-button
                   size="small"
                   quaternary
                   :loading="busyAction === `detail:${migration.id}`"
@@ -1202,18 +1212,20 @@ async function confirmDecommission() {
 
 async function runMigrationAction(
   migrationId: string,
-  action: "pause" | "resume" | "retry-failed",
+  action: "pause" | "resume" | "retry-failed" | "import-unknown",
 ) {
   const key = action === "retry-failed" ? `retry:${migrationId}` : `${action}:${migrationId}`;
   busyAction.value = key;
   try {
     await apiRequest(`/v1/admin/storage/migrations/${encodeURIComponent(migrationId)}/${action}`, {
       method: "POST",
+      ...(action === "import-unknown" ? { body: JSON.stringify({}) } : {}),
     });
     const labels = {
       pause: "已暂停迁移任务",
       resume: "已恢复迁移任务",
       "retry-failed": "已将失败项重新入队",
+      "import-unknown": "已将未登记对象纳入迁移队列",
     };
     setFeedback("success", `${labels[action]} ${migrationId}。`);
     await loadAll();

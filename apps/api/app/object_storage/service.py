@@ -214,8 +214,13 @@ class ObjectStorageService:
         profile_id: str = "",
         namespace: str = "",
     ) -> StoredObject | None:
-        driver, _ = self._resolve_target(purpose=purpose, profile_id=profile_id)
-        return await driver.stat_object(key, namespace=namespace)
+        driver, resolved_ns, resolved_key = await self._resolve_read_target(
+            purpose=purpose,
+            profile_id=profile_id,
+            namespace=namespace,
+            key=key,
+        )
+        return await driver.stat_object(resolved_key, namespace=resolved_ns)
 
     async def read_object(
         self,
@@ -227,10 +232,15 @@ class ObjectStorageService:
         max_bytes: int | None = None,
         expected_sha256: str = "",
     ) -> bytes:
-        driver, _ = self._resolve_target(purpose=purpose, profile_id=profile_id)
-        return await driver.read_object(
-            key,
+        driver, resolved_ns, resolved_key = await self._resolve_read_target(
+            purpose=purpose,
+            profile_id=profile_id,
             namespace=namespace,
+            key=key,
+        )
+        return await driver.read_object(
+            resolved_key,
+            namespace=resolved_ns,
             max_bytes=max_bytes,
             expected_sha256=expected_sha256,
         )
@@ -248,10 +258,15 @@ class ObjectStorageService:
         expected_size_bytes: int | None = None,
         expected_sha256: str = "",
     ) -> ObjectRange:
-        driver, _ = self._resolve_target(purpose=purpose, profile_id=profile_id)
-        return await driver.read_range(
-            key,
+        driver, resolved_ns, resolved_key = await self._resolve_read_target(
+            purpose=purpose,
+            profile_id=profile_id,
             namespace=namespace,
+            key=key,
+        )
+        return await driver.read_range(
+            resolved_key,
+            namespace=resolved_ns,
             start_byte=start_byte,
             max_bytes=max_bytes,
             max_object_bytes=max_object_bytes,
@@ -268,8 +283,13 @@ class ObjectStorageService:
         profile_id: str = "",
         namespace: str = "",
     ) -> StoredObject:
-        driver, _ = self._resolve_target(purpose=purpose, profile_id=profile_id)
-        return await driver.download_to_path(key, destination, namespace=namespace)
+        driver, resolved_ns, resolved_key = await self._resolve_read_target(
+            purpose=purpose,
+            profile_id=profile_id,
+            namespace=namespace,
+            key=key,
+        )
+        return await driver.download_to_path(resolved_key, destination, namespace=resolved_ns)
 
     async def copy_object(
         self,
@@ -289,15 +309,17 @@ class ObjectStorageService:
         owner_id: str = "",
         register: bool = True,
     ) -> StoredObject:
-        source_driver, _ = self._resolve_target(
-            purpose=source_purpose, profile_id=source_profile_id
+        source_driver, normalized_src_ns, resolved_src_key = await self._resolve_read_target(
+            purpose=source_purpose,
+            profile_id=source_profile_id,
+            namespace=source_namespace,
+            key=source_key,
         )
         target_driver, resolved_target_purpose = self._resolve_target(
             purpose=target_purpose, profile_id=target_profile_id
         )
-        normalized_src_ns = validate_namespace(source_namespace)
         normalized_dst_ns = validate_namespace(target_namespace)
-        validate_object_key(source_key)
+        validate_object_key(resolved_src_key)
         validate_object_key(target_key)
         resolved_type = guess_content_type(target_key, content_type)
         record_id = ""
@@ -315,7 +337,7 @@ class ObjectStorageService:
         try:
             if source_driver.profile_id == target_driver.profile_id:
                 stored = await source_driver.copy_object(
-                    source_key,
+                    resolved_src_key,
                     target_key,
                     source_namespace=normalized_src_ns,
                     target_namespace=normalized_dst_ns,
@@ -326,7 +348,7 @@ class ObjectStorageService:
             else:
                 stored = await self._stream_copy_across_profiles(
                     source_driver=source_driver,
-                    source_key=source_key,
+                    source_key=resolved_src_key,
                     source_namespace=normalized_src_ns,
                     target_driver=target_driver,
                     target_key=target_key,
@@ -351,10 +373,14 @@ class ObjectStorageService:
         profile_id: str = "",
         namespace: str = "",
     ) -> None:
-        driver, _ = self._resolve_target(purpose=purpose, profile_id=profile_id)
-        normalized_ns = validate_namespace(namespace)
-        await driver.delete_object(key, namespace=normalized_ns)
-        index_key = (driver.profile_id, normalized_ns, key)
+        driver, normalized_ns, resolved_key = await self._resolve_read_target(
+            purpose=purpose,
+            profile_id=profile_id,
+            namespace=namespace,
+            key=key,
+        )
+        await driver.delete_object(resolved_key, namespace=normalized_ns)
+        index_key = (driver.profile_id, normalized_ns, resolved_key)
         record_id = self._object_index.pop(index_key, None)
         if record_id and record_id in self._objects:
             existing = self._objects[record_id]
@@ -382,7 +408,7 @@ class ObjectStorageService:
             existing = await self.repository.find_active_object(
                 profile_id=driver.profile_id,
                 namespace=normalized_ns,
-                key=key,
+                key=resolved_key,
             )
             if existing is not None:
                 deleted = StorageObjectRecord(
@@ -483,6 +509,39 @@ class ObjectStorageService:
             "storage_target_missing", "Either purpose or profile_id must be specified"
         )
 
+    async def _resolve_read_target(
+        self,
+        *,
+        purpose: StoragePurpose | None,
+        profile_id: str,
+        namespace: str,
+        key: str,
+    ) -> tuple[ObjectStorageDriver, str, str]:
+        normalized_ns = validate_namespace(namespace)
+        if profile_id:
+            return self.driver_for_profile(profile_id), normalized_ns, key
+        if purpose is None:
+            raise ObjectStorageError(
+                "storage_target_missing", "Either purpose or profile_id must be specified"
+            )
+        if self.repository is not None:
+            record = await self.repository.find_active_object_by_purpose_and_key(
+                purpose=purpose,
+                key=key,
+                namespace=normalized_ns,
+            )
+            if record is None:
+                fallback = await self.repository.find_active_object_by_purpose_and_key(
+                    purpose=purpose,
+                    key=key,
+                    namespace=None,
+                )
+                if fallback is not None and (not normalized_ns or not fallback.namespace):
+                    record = fallback
+            if record is not None and record.profile_id in self._drivers:
+                return self._drivers[record.profile_id], record.namespace, record.key
+        return self.driver_for_purpose(purpose), normalized_ns, key
+
     def _register_pending(
         self,
         *,
@@ -571,7 +630,30 @@ class ObjectStorageService:
                 namespace=namespace,
                 key=key,
             )
-            if existing is not None and existing.status == StorageObjectStatus.ACTIVE:
+            if existing is not None and existing.status in {
+                StorageObjectStatus.ACTIVE,
+                StorageObjectStatus.PENDING,
+            }:
+                if existing.status == StorageObjectStatus.PENDING:
+                    refreshed = StorageObjectRecord(
+                        id=existing.id,
+                        purpose=purpose,
+                        profile_id=existing.profile_id,
+                        backend=backend,
+                        namespace=existing.namespace,
+                        key=existing.key,
+                        size_bytes=existing.size_bytes,
+                        sha256=existing.sha256,
+                        content_type=content_type or existing.content_type,
+                        status=StorageObjectStatus.PENDING,
+                        public_url=existing.public_url,
+                        owner_type=owner_type or existing.owner_type,
+                        owner_id=owner_id or existing.owner_id,
+                        created_at=existing.created_at,
+                        updated_at=utc_now_iso(),
+                    )
+                    await self.repository.upsert_object(refreshed)
+                    existing = refreshed
                 self._objects[existing.id] = existing
                 self._object_index[(profile_id, namespace, key)] = existing.id
                 return existing.id

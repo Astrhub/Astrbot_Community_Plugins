@@ -42,6 +42,13 @@ class StorageBindingUpdatePayload(BaseModel):
     run_immediately: bool = False
 
 
+class StorageMigrationUnknownImportPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keys: list[dict[str, str]] | None = None
+    run_immediately: bool = False
+
+
 def _http_error_for_storage(exc: ObjectStorageError) -> HTTPException:
     if exc.code in {
         "storage_profile_not_found",
@@ -60,6 +67,8 @@ def _http_error_for_storage(exc: ObjectStorageError) -> HTTPException:
         "storage_migration_already_finished",
         "storage_migration_not_paused",
         "storage_migration_no_failed_items",
+        "storage_migration_stale",
+        "storage_migration_no_unknown_objects",
         "object_key_conflict",
         "webdav_capability_check_failed",
         "imgbed_plugin_gate_failed",
@@ -436,6 +445,31 @@ def build_object_storage_router(
         manager = _storage_manager(request)
         try:
             return await manager.resume_migration(migration_id)
+        except ObjectStorageError as exc:
+            raise _http_error_for_storage(exc) from exc
+
+    @router.post(
+        "/v1/admin/storage/migrations/{migration_id}/import-unknown",
+        tags=["core-admin"],
+        summary="人工确认导入未登记对象并纳入迁移",
+        description="将源存储对账发现的未知对象登记入库并加入迁移队列，供后台复制校验。",
+    )
+    async def import_storage_migration_unknown(
+        request: Request,
+        response: Response,
+        migration_id: str,
+        payload: StorageMigrationUnknownImportPayload | None = None,
+    ) -> dict[str, Any]:
+        await require_core_admin(request)
+        response.headers["Cache-Control"] = PRIVATE_NO_STORE
+        manager = _storage_manager(request)
+        body = payload or StorageMigrationUnknownImportPayload()
+        try:
+            return await manager.import_unknown_migration_objects(
+                migration_id,
+                keys=body.keys,
+                run_immediately=body.run_immediately,
+            )
         except ObjectStorageError as exc:
             raise _http_error_for_storage(exc) from exc
 

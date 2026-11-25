@@ -786,13 +786,15 @@ def test_end_to_end_rebind_migration_pause_retry_range_aliases_and_decommission_
     assert client.get(f"/v1/storage/public/{gamma_id}").content == gamma_v2_bytes
 
     # 6. Retry failed items -> ONLY beta retries; alpha stays attempts == 1.
+    # Because orphan/untracked.zip is still in unknown_objects, status stays completed_with_errors.
     retry_res = client.post(f"/v1/admin/storage/migrations/{migration_id}/retry-failed")
     assert retry_res.status_code == 200, retry_res.text
     final_mig = asyncio.run(manager.run_migration(migration_id))
-    assert final_mig.status == StorageMigrationStatus.COMPLETED
+    assert final_mig.status == StorageMigrationStatus.COMPLETED_WITH_ERRORS
     assert final_mig.completed_count == 2
     assert final_mig.skipped_count == 1
     assert final_mig.failed_count == 0
+    assert len(final_mig.unknown_objects) == 1
 
     detail = client.get(f"/v1/admin/storage/migrations/{migration_id}").json()
     items_by_key = {entry["source_key"]: entry for entry in detail["items"]}
@@ -834,10 +836,26 @@ def test_end_to_end_rebind_migration_pause_retry_range_aliases_and_decommission_
     assert client.get("/packages/../etc/passwd").status_code == 404
     assert client.get("/packages/nonexistent/file.zip").status_code == 404
 
-    # 8. Decommission gate: local-fs-a STILL blocked because migration reported unknown_objects!
+    # 8. Decommission gate: local-fs-a STILL blocked because migration holds unknown_objects!
     retire_blocked = client.post("/v1/admin/storage/profiles/local-fs-a/retire")
     assert retire_blocked.status_code == 409
-    assert retire_blocked.json()["code"] == "storage_profile_has_unknown_objects"
+    assert retire_blocked.json()["code"] in {
+        "storage_profile_has_unfinished_migrations",
+        "storage_profile_has_unknown_objects",
+    }
+
+    # Import unknown object via explicit admin action -> migration completes cleanly!
+    import_res = client.post(
+        f"/v1/admin/storage/migrations/{migration_id}/import-unknown",
+        json={"run_immediately": True},
+    )
+    assert import_res.status_code == 200, import_res.text
+    assert import_res.headers["cache-control"] == "private, no-store"
+    assert import_res.json()["status"] == "completed"
+    assert import_res.json()["unknown_objects"] == []
+    orphan_pkg_res = client.get("/packages/orphan/untracked.zip")
+    assert orphan_pkg_res.status_code == 200
+    assert orphan_pkg_res.content == b"untracked-bytes"
 
     # 9. Clean switch sqlite-b -> sqlite-c (zero unknown objects) -> retire & delete sqlite-b succeed!
     clean_rebind = client.put(

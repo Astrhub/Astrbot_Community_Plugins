@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import secrets
+import tempfile
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -60,6 +63,9 @@ LOGGER = logging.getLogger("astrbot_market.object_storage")
 HEALTHCHECK_PREFIX = "__healthcheck__/"
 PUBLIC_PURPOSES = frozenset({StoragePurpose.ARTIFACT_PUBLISHED, StoragePurpose.AVATAR})
 REPO_ROOT = Path(__file__).resolve().parents[4]
+PENDING_OBJECT_TTL_SECONDS = 300
+_STALE_MIGRATION_SENTINEL = "__migration_stale__"
+_UNKNOWN_OBJECTS_HOLD_ERROR = "存在未登记对象，需人工确认导入或清理后方可完成迁移并下线源配置"
 ACTIVE_MIGRATION_STATUSES = frozenset(
     {
         StorageMigrationStatus.QUEUED,
@@ -125,6 +131,7 @@ class StorageManager:
                 self.service.set_binding(binding)
 
         await self._ensure_legacy_artifact_profiles()
+        await self.recover_stale_pending_objects()
         self._initialized = True
 
     async def close(self) -> None:
@@ -161,7 +168,8 @@ class StorageManager:
                 status=StorageObjectStatus.PENDING,
             )
             in_flight = any(
-                m.source_profile_id == profile.id and m.status in ACTIVE_MIGRATION_STATUSES
+                (m.source_profile_id == profile.id or m.target_profile_id == profile.id)
+                and m.status in ACTIVE_MIGRATION_STATUSES
                 for m in migrations
             )
             capabilities: dict[str, Any] = {}
@@ -336,15 +344,21 @@ class StorageManager:
         if isinstance(driver, ImgBedObjectStorageDriver):
             probe = await driver.probe_capabilities(probe_prefix=HEALTHCHECK_PREFIX)
             checks = {
+                "reachable": probe.reachable,
                 "write": probe.upload,
                 "read": probe.read,
                 "image_variants": probe.image_variants,
                 "delete": probe.delete,
+                "write_probe_skipped_no_delete_scope": probe.write_probe_skipped_no_delete_scope,
                 "range": probe.range_read,
                 "plugin_zip_ready": probe.plugin_zip_ready,
                 "public_url": True,
             }
-            base_ok = probe.upload and probe.read and probe.image_variants and probe.delete
+            base_ok = (
+                probe.reachable and probe.image_variants
+                if probe.write_probe_skipped_no_delete_scope
+                else (probe.upload and probe.read and probe.image_variants and probe.delete)
+            )
             health_status = "healthy" if base_ok else "unhealthy"
             health_message = probe.message
             updated_config["range_read_supported"] = probe.range_read
@@ -535,10 +549,14 @@ class StorageManager:
                         "plugin_zip_verified": zip_probe.plugin_zip_ready,
                     }
                     base_ok = (
-                        zip_probe.upload
-                        and zip_probe.read
-                        and zip_probe.image_variants
-                        and zip_probe.delete
+                        zip_probe.reachable and zip_probe.image_variants
+                        if zip_probe.write_probe_skipped_no_delete_scope
+                        else (
+                            zip_probe.upload
+                            and zip_probe.read
+                            and zip_probe.image_variants
+                            and zip_probe.delete
+                        )
                     )
                     updated_target = StorageProfile(
                         id=target.id,
@@ -573,28 +591,45 @@ class StorageManager:
 
         previous = await self.repository.get_binding(purpose)
         generation = (previous.generation + 1) if previous is not None else 1
-        binding = await self.repository.upsert_binding(
-            StorageBinding(
-                purpose=purpose,
-                profile_id=target.id,
-                generation=generation,
-                updated_by=actor_id,
-                updated_at=utc_now_iso(),
-            )
+        pending_binding = StorageBinding(
+            purpose=purpose,
+            profile_id=target.id,
+            generation=generation,
+            updated_by=actor_id,
+            updated_at=utc_now_iso(),
         )
-        self.service.set_binding(binding)
 
-        migration: StorageMigration | None = None
+        draining_profile: StorageProfile | None = None
+        planned_migration: StorageMigration | None = None
+        planned_items: list[StorageMigrationItem] = []
         if previous is not None and previous.profile_id != target.id:
-            migration = await self._plan_migration_after_rebind(
+            (
+                draining_profile,
+                planned_migration,
+                planned_items,
+            ) = await self._prepare_migration_plan(
                 purpose=purpose,
                 source_profile_id=previous.profile_id,
                 target_profile_id=target.id,
-                binding_generation=binding.generation,
+                binding_generation=pending_binding.generation,
                 actor_id=actor_id,
             )
-            if migration is not None and run_immediately:
-                migration = await self.run_migration(migration.id)
+
+        binding, migration = await self.repository.commit_rebind(
+            binding=pending_binding,
+            draining_profile=draining_profile,
+            migration=planned_migration,
+            items=planned_items,
+        )
+        self.service.set_binding(binding)
+        if draining_profile is not None:
+            try:
+                src_driver = self.service.driver_for_profile(draining_profile.id)
+                self.service.register_profile(draining_profile, src_driver)
+            except ObjectStorageError:
+                pass
+        if migration is not None and run_immediately:
+            migration = await self.run_migration(migration.id)
 
         return {
             "binding": {
@@ -764,6 +799,12 @@ class StorageManager:
             }:
                 return migration
 
+            if not await self._is_migration_binding_current(migration):
+                return await self._cancel_stale_migration(
+                    migration,
+                    "用途绑定已变更，旧代次迁移任务已自动取消",
+                )
+
             running = StorageMigration(
                 id=migration.id,
                 purpose=migration.purpose,
@@ -794,12 +835,29 @@ class StorageManager:
                 latest = await self.repository.get_migration(migration_id)
                 if latest is None or latest.status == StorageMigrationStatus.PAUSED:
                     return latest or migration
+                if not await self._is_migration_binding_current(latest):
+                    return await self._cancel_stale_migration(
+                        latest,
+                        "用途绑定已变更，旧代次迁移任务已自动取消",
+                    )
                 if processed_in_batch >= batch_size:
                     break
                 processed_in_batch += 1
                 item_error = await self._migrate_single_item(migration, item)
+                if item_error == _STALE_MIGRATION_SENTINEL:
+                    return await self._cancel_stale_migration(
+                        migration,
+                        "用途绑定在对象提交前已变更，旧代次迁移任务已自动取消",
+                    )
                 if item_error:
                     last_error = item_error
+
+            latest_before_finish = await self.repository.get_migration(migration_id) or migration
+            if not await self._is_migration_binding_current(latest_before_finish):
+                return await self._cancel_stale_migration(
+                    latest_before_finish,
+                    "用途绑定已变更，旧代次迁移任务已自动取消",
+                )
 
             all_items = await self.repository.list_migration_items(migration_id)
             remaining_pending = sum(
@@ -812,16 +870,234 @@ class StorageManager:
                 final_status = StorageMigrationStatus.QUEUED
             elif failed_total > 0:
                 final_status = StorageMigrationStatus.COMPLETED_WITH_ERRORS
+            elif latest_before_finish.unknown_objects:
+                final_status = StorageMigrationStatus.COMPLETED_WITH_ERRORS
+                last_error = last_error or _UNKNOWN_OBJECTS_HOLD_ERROR
             else:
                 final_status = StorageMigrationStatus.COMPLETED
 
             updated = _recompute_migration_counts(
-                migration,
+                latest_before_finish,
                 all_items,
                 status=final_status,
                 last_error=last_error,
             )
             return await self.repository.update_migration(updated)
+
+    async def import_unknown_migration_objects(
+        self,
+        migration_id: str,
+        *,
+        keys: list[dict[str, str]] | None = None,
+        run_immediately: bool = False,
+    ) -> dict[str, Any]:
+        if not self._initialized:
+            await self.initialize()
+        migration = await self.repository.get_migration(migration_id)
+        if migration is None:
+            raise ObjectStorageError(
+                "storage_migration_not_found", f"Unknown migration: {migration_id}"
+            )
+        if migration.status == StorageMigrationStatus.CANCELLED or not (
+            await self._is_migration_binding_current(migration)
+        ):
+            raise ObjectStorageError(
+                "storage_migration_stale",
+                "Stale or cancelled migration cannot import unknown objects",
+            )
+        if not migration.unknown_objects:
+            raise ObjectStorageError(
+                "storage_migration_no_unknown_objects",
+                "Migration has no pending unknown objects to import",
+            )
+
+        requested_set: set[tuple[str, str]] | None = None
+        if keys:
+            requested_set = {
+                (str(entry.get("namespace") or "").strip("/"), str(entry.get("key") or "").strip())
+                for entry in keys
+                if str(entry.get("key") or "").strip()
+            }
+
+        source_driver = self.service.driver_for_profile(migration.source_profile_id)
+        source_profile = await self.repository.get_profile(migration.source_profile_id)
+        source_backend = (
+            source_profile.backend.value
+            if source_profile is not None
+            else source_driver.backend.value
+        )
+
+        selected: list[dict[str, Any]] = []
+        remaining_unknown: list[dict[str, Any]] = []
+        for entry in migration.unknown_objects:
+            locator = (str(entry.get("namespace") or ""), str(entry.get("key") or ""))
+            if requested_set is None or locator in requested_set:
+                selected.append(dict(entry))
+            else:
+                remaining_unknown.append(dict(entry))
+
+        if not selected:
+            raise ObjectStorageError(
+                "storage_migration_no_unknown_objects",
+                "No matching unknown objects found for import",
+            )
+
+        now = utc_now_iso()
+        new_items: list[StorageMigrationItem] = []
+        for entry in selected:
+            ns = str(entry.get("namespace") or "")
+            key = str(entry.get("key") or "")
+            existing = await self.repository.find_active_object(
+                profile_id=migration.source_profile_id,
+                namespace=ns,
+                key=key,
+            )
+            if existing is None or existing.status != StorageObjectStatus.ACTIVE:
+                size_bytes, sha256, content_type, public_url = await self._inspect_object_metadata(
+                    driver=source_driver,
+                    purpose=migration.purpose,
+                    namespace=ns,
+                    key=key,
+                )
+                obj_id = existing.id if existing is not None else f"stobj_{secrets.token_hex(12)}"
+                if not public_url and migration.purpose in PUBLIC_PURPOSES:
+                    public_url = f"/v1/storage/public/{obj_id}"
+                existing = await self.repository.upsert_object(
+                    StorageObjectRecord(
+                        id=obj_id,
+                        purpose=migration.purpose,
+                        profile_id=migration.source_profile_id,
+                        backend=source_backend,
+                        namespace=ns,
+                        key=key,
+                        size_bytes=size_bytes,
+                        sha256=sha256,
+                        content_type=content_type,
+                        status=StorageObjectStatus.ACTIVE,
+                        public_url=public_url,
+                        owner_type="unknown_import",
+                        created_at=existing.created_at if existing is not None else now,
+                        updated_at=now,
+                    )
+                )
+            new_items.append(
+                StorageMigrationItem(
+                    id=f"stmitem_{secrets.token_hex(12)}",
+                    migration_id=migration.id,
+                    object_id=existing.id,
+                    source_profile_id=existing.profile_id,
+                    source_namespace=existing.namespace,
+                    source_key=existing.key,
+                    source_public_url=existing.public_url,
+                    target_profile_id=migration.target_profile_id,
+                    target_namespace=existing.namespace,
+                    target_key=existing.key,
+                    target_public_url="",
+                    expected_sha256=existing.sha256,
+                    status=StorageMigrationItemStatus.PENDING,
+                    attempts=0,
+                    last_error="",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        existing_items = await self.repository.list_migration_items(migration.id)
+        all_items = [*existing_items, *new_items]
+        updated = StorageMigration(
+            id=migration.id,
+            purpose=migration.purpose,
+            source_profile_id=migration.source_profile_id,
+            target_profile_id=migration.target_profile_id,
+            binding_generation=migration.binding_generation,
+            status=StorageMigrationStatus.QUEUED,
+            total_count=len(all_items),
+            completed_count=sum(
+                1 for item in all_items if item.status == StorageMigrationItemStatus.COMPLETED
+            ),
+            failed_count=sum(
+                1 for item in all_items if item.status == StorageMigrationItemStatus.FAILED
+            ),
+            skipped_count=sum(
+                1 for item in all_items if item.status == StorageMigrationItemStatus.SKIPPED
+            ),
+            unknown_objects=tuple(remaining_unknown),
+            last_error="",
+            created_by=migration.created_by,
+            created_at=migration.created_at,
+            updated_at=now,
+            completed_at="",
+        )
+        saved = await self.repository.add_migration_items(updated, new_items)
+        if run_immediately:
+            saved = await self.run_migration(saved.id)
+        return saved.to_dict()
+
+    async def recover_stale_pending_objects(
+        self,
+        *,
+        max_age_seconds: int = PENDING_OBJECT_TTL_SECONDS,
+    ) -> dict[str, int]:
+        """Recover or prune orphaned pending object records left behind by a mid-write crash."""
+        pending_records = await self.repository.list_objects(status=StorageObjectStatus.PENDING)
+        now_dt = datetime.now(UTC)
+        activated = 0
+        deleted = 0
+        for record in pending_records:
+            if max_age_seconds > 0 and record.updated_at:
+                try:
+                    updated_dt = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                    if (now_dt - updated_dt).total_seconds() < max_age_seconds:
+                        continue
+                except ValueError:
+                    pass
+            try:
+                driver = self.service.driver_for_profile(record.profile_id)
+            except ObjectStorageError:
+                await self.repository.delete_object_record(record.id)
+                deleted += 1
+                continue
+            try:
+                stat = await driver.stat_object(record.key, namespace=record.namespace)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Pending recovery stat failed for %s (%s): %s", record.id, record.key, exc
+                )
+                continue
+            if stat is None:
+                await self.repository.delete_object_record(record.id)
+                deleted += 1
+                continue
+            size_bytes, sha256, content_type, public_url = await self._inspect_object_metadata(
+                driver=driver,
+                purpose=record.purpose,
+                namespace=record.namespace,
+                key=record.key,
+                precomputed_stat=stat,
+            )
+            if not public_url and record.purpose in PUBLIC_PURPOSES:
+                public_url = f"/v1/storage/public/{record.id}"
+            await self.repository.upsert_object(
+                StorageObjectRecord(
+                    id=record.id,
+                    purpose=record.purpose,
+                    profile_id=record.profile_id,
+                    backend=record.backend,
+                    namespace=record.namespace,
+                    key=record.key,
+                    size_bytes=size_bytes,
+                    sha256=sha256,
+                    content_type=content_type or record.content_type,
+                    status=StorageObjectStatus.ACTIVE,
+                    public_url=public_url,
+                    owner_type=record.owner_type,
+                    owner_id=record.owner_id,
+                    created_at=record.created_at,
+                    updated_at=utc_now_iso(),
+                )
+            )
+            activated += 1
+        return {"activated": activated, "deleted": deleted}
 
     async def retire_profile(self, profile_id: str, *, actor_id: str = "") -> dict[str, Any]:
         if not self._initialized:
@@ -834,10 +1110,6 @@ class StorageManager:
                 "storage_profile_removed", "Storage profile is already removed"
             )
         await self._enforce_decommission_gates(profile.id)
-
-        if profile.secret_ref:
-            await self.repository.delete_secret(profile.secret_ref)
-        await self._close_and_unregister_driver(profile.id)
 
         retired = StorageProfile(
             id=profile.id,
@@ -855,7 +1127,11 @@ class StorageManager:
             created_at=profile.created_at,
             updated_at=utc_now_iso(),
         )
-        await self.repository.upsert_profile(retired)
+        await self.repository.decommission_profile(
+            retired,
+            secret_ref_to_delete=profile.secret_ref,
+        )
+        await self._close_and_unregister_driver(profile.id)
         return (await self._profile_view(retired.id)) or retired.to_public_dict()
 
     async def delete_profile(self, profile_id: str, *, actor_id: str = "") -> dict[str, Any]:
@@ -867,10 +1143,6 @@ class StorageManager:
         if profile.status == StorageProfileStatus.REMOVED:
             return (await self._profile_view(profile.id)) or profile.to_public_dict()
         await self._enforce_decommission_gates(profile.id)
-
-        if profile.secret_ref:
-            await self.repository.delete_secret(profile.secret_ref)
-        await self._close_and_unregister_driver(profile.id)
 
         removed = StorageProfile(
             id=profile.id,
@@ -888,7 +1160,11 @@ class StorageManager:
             created_at=profile.created_at,
             updated_at=utc_now_iso(),
         )
-        await self.repository.upsert_profile(removed)
+        await self.repository.decommission_profile(
+            removed,
+            secret_ref_to_delete=profile.secret_ref,
+        )
+        await self._close_and_unregister_driver(profile.id)
         return (await self._profile_view(removed.id)) or removed.to_public_dict()
 
     async def resolve_public_object_by_id(self, object_id: str) -> StorageObjectRecord | None:
@@ -948,14 +1224,16 @@ class StorageManager:
             )
         migrations = await self.repository.list_migrations(limit=500)
         for migration in migrations:
-            if migration.source_profile_id != profile_id:
+            is_source = migration.source_profile_id == profile_id
+            is_target = migration.target_profile_id == profile_id
+            if not is_source and not is_target:
                 continue
             if migration.status in ACTIVE_MIGRATION_STATUSES:
                 raise ObjectStorageError(
                     "storage_profile_has_unfinished_migrations",
                     "Storage profile still has unfinished or failed migrations",
                 )
-            if migration.unknown_objects:
+            if is_source and migration.unknown_objects:
                 raise ObjectStorageError(
                     "storage_profile_has_unknown_objects",
                     "Storage profile still has unreconciled unknown objects in migration reports",
@@ -974,7 +1252,30 @@ class StorageManager:
                     await result
         self.service.unregister_profile(profile_id)
 
-    async def _plan_migration_after_rebind(
+    async def _is_migration_binding_current(self, migration: StorageMigration) -> bool:
+        current_binding = await self.repository.get_binding(migration.purpose)
+        if current_binding is None:
+            return False
+        return (
+            current_binding.profile_id == migration.target_profile_id
+            and current_binding.generation == migration.binding_generation
+        )
+
+    async def _cancel_stale_migration(
+        self,
+        migration: StorageMigration,
+        reason: str,
+    ) -> StorageMigration:
+        all_items = await self.repository.list_migration_items(migration.id)
+        updated = _recompute_migration_counts(
+            migration,
+            all_items,
+            status=StorageMigrationStatus.CANCELLED,
+            last_error=reason,
+        )
+        return await self.repository.update_migration(updated)
+
+    async def _prepare_migration_plan(
         self,
         *,
         purpose: StoragePurpose,
@@ -982,12 +1283,12 @@ class StorageManager:
         target_profile_id: str,
         binding_generation: int,
         actor_id: str,
-    ) -> StorageMigration | None:
-        active_objects = await self.repository.list_objects(
+    ) -> tuple[StorageProfile | None, StorageMigration | None, list[StorageMigrationItem]]:
+        all_purpose_active = await self.repository.list_objects(
             purpose=purpose,
-            profile_id=source_profile_id,
             status=StorageObjectStatus.ACTIVE,
         )
+        active_objects = [obj for obj in all_purpose_active if obj.profile_id != target_profile_id]
         all_profile_active = await self.repository.list_objects(
             profile_id=source_profile_id,
             status=StorageObjectStatus.ACTIVE,
@@ -996,11 +1297,29 @@ class StorageManager:
         known_full_keys = {
             f"{obj.namespace}/{obj.key}" if obj.namespace else obj.key for obj in all_profile_active
         }
+        source_profile = await self.repository.get_profile(source_profile_id)
         unknown_objects: list[dict[str, Any]] = []
         seen_unknown_full_keys: set[str] = set()
         try:
             source_driver = self.service.driver_for_profile(source_profile_id)
-            namespaces = sorted({obj.namespace for obj in active_objects} | {""})
+            if (
+                source_profile is not None
+                and source_profile.legacy
+                and source_profile.backend == StorageBackend.LOCAL
+                and source_profile.id == LEGACY_QUARANTINE_PROFILE_ID
+            ):
+                namespaces = sorted(
+                    {
+                        obj.namespace
+                        for obj in all_profile_active
+                        if obj.purpose == purpose and obj.namespace
+                    }
+                    | {"quarantine", "content"}
+                )
+            else:
+                namespaces = sorted(
+                    {obj.namespace for obj in all_profile_active if obj.purpose == purpose} | {""}
+                )
             for ns in namespaces:
                 listed = await source_driver.list_objects(namespace=ns)
                 for entry in listed:
@@ -1028,17 +1347,19 @@ class StorageManager:
             )
 
         if not active_objects and not unknown_objects:
-            return None
+            return None, None, []
 
-        source_profile = await self.repository.get_profile(source_profile_id)
-        remaining_bindings = await self.repository.list_bindings()
-        still_bound_elsewhere = any(b.profile_id == source_profile_id for b in remaining_bindings)
+        draining_profile: StorageProfile | None = None
+        existing_bindings = await self.repository.list_bindings()
+        still_bound_elsewhere = any(
+            b.profile_id == source_profile_id and b.purpose != purpose for b in existing_bindings
+        )
         if (
             source_profile is not None
             and source_profile.status == StorageProfileStatus.ACTIVE
             and not still_bound_elsewhere
         ):
-            draining = StorageProfile(
+            draining_profile = StorageProfile(
                 id=source_profile.id,
                 name=source_profile.name,
                 backend=source_profile.backend,
@@ -1054,7 +1375,6 @@ class StorageManager:
                 created_at=source_profile.created_at,
                 updated_at=utc_now_iso(),
             )
-            await self.repository.upsert_profile(draining)
 
         now = utc_now_iso()
         migration_id = f"stmig_{secrets.token_hex(12)}"
@@ -1063,7 +1383,7 @@ class StorageManager:
                 id=f"stmitem_{secrets.token_hex(12)}",
                 migration_id=migration_id,
                 object_id=obj.id,
-                source_profile_id=source_profile_id,
+                source_profile_id=obj.profile_id,
                 source_namespace=obj.namespace,
                 source_key=obj.key,
                 source_public_url=obj.public_url,
@@ -1080,9 +1400,14 @@ class StorageManager:
             )
             for obj in active_objects
         ]
-        initial_status = (
-            StorageMigrationStatus.QUEUED if items else StorageMigrationStatus.COMPLETED
-        )
+        if items:
+            initial_status = StorageMigrationStatus.QUEUED
+            initial_error = ""
+            completed_at = ""
+        else:
+            initial_status = StorageMigrationStatus.COMPLETED_WITH_ERRORS
+            initial_error = _UNKNOWN_OBJECTS_HOLD_ERROR
+            completed_at = now
         migration = StorageMigration(
             id=migration_id,
             purpose=purpose,
@@ -1095,13 +1420,13 @@ class StorageManager:
             failed_count=0,
             skipped_count=0,
             unknown_objects=tuple(unknown_objects),
-            last_error="",
+            last_error=initial_error,
             created_by=actor_id,
             created_at=now,
             updated_at=now,
-            completed_at=now if initial_status == StorageMigrationStatus.COMPLETED else "",
+            completed_at=completed_at,
         )
-        return await self.repository.create_migration(migration, items)
+        return draining_profile, migration, items
 
     async def _migrate_single_item(
         self,
@@ -1170,6 +1495,9 @@ class StorageManager:
                         "migration_range_verify_failed",
                         "Migrated target object range check returned unexpected length",
                     )
+
+            if not await self._is_migration_binding_current(migration):
+                return _STALE_MIGRATION_SENTINEL
 
             target_public_url = stored.public_url
             if not target_public_url and migration.purpose in PUBLIC_PURPOSES:
@@ -1265,47 +1593,50 @@ class StorageManager:
             return
         q_binding = await self.repository.get_binding(StoragePurpose.ARTIFACT_QUARANTINE)
         p_binding = await self.repository.get_binding(StoragePurpose.ARTIFACT_PUBLISHED)
-        if q_binding is not None and p_binding is not None:
-            return
-        now = utc_now_iso()
-        if artifact_cfg.storage_backend == "local":
-            if not artifact_cfg.local_root:
-                return
-            root = Path(artifact_cfg.local_root).resolve()
-            try:
-                for directory in (root / "quarantine", root / "content", root / "published"):
-                    directory.mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                LOGGER.warning(
-                    "Skipping legacy local artifact profile bootstrap for %s: %s",
-                    root,
-                    exc,
-                )
-                return
-            q_profile = StorageProfile(
-                id=LEGACY_QUARANTINE_PROFILE_ID,
-                name="Legacy Local Quarantine",
-                backend=StorageBackend.LOCAL,
-                config={"mode": "filesystem", "root": str(root)},
-                legacy=True,
-                created_at=now,
-                updated_at=now,
-            )
-            p_profile = StorageProfile(
-                id=LEGACY_PUBLISHED_PROFILE_ID,
-                name="Legacy Local Published",
-                backend=StorageBackend.LOCAL,
-                config={
-                    "mode": "filesystem",
-                    "root": str(root / "published"),
-                    "public_base_url": artifact_cfg.cdn_base_url.rstrip("/"),
-                },
-                legacy=True,
-                created_at=now,
-                updated_at=now,
-            )
-        else:
-            if not all(
+        if q_binding is None or p_binding is None:
+            now = utc_now_iso()
+            q_profile: StorageProfile | None = None
+            p_profile: StorageProfile | None = None
+            if artifact_cfg.storage_backend == "local":
+                if artifact_cfg.local_root:
+                    root = Path(artifact_cfg.local_root).resolve()
+                    try:
+                        for directory in (
+                            root / "quarantine",
+                            root / "content",
+                            root / "published",
+                        ):
+                            directory.mkdir(parents=True, exist_ok=True)
+                    except OSError as exc:
+                        LOGGER.warning(
+                            "Skipping legacy local artifact profile bootstrap for %s: %s",
+                            root,
+                            exc,
+                        )
+                    else:
+                        q_profile = StorageProfile(
+                            id=LEGACY_QUARANTINE_PROFILE_ID,
+                            name="Legacy Local Quarantine",
+                            backend=StorageBackend.LOCAL,
+                            config={"mode": "filesystem", "root": str(root)},
+                            legacy=True,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        p_profile = StorageProfile(
+                            id=LEGACY_PUBLISHED_PROFILE_ID,
+                            name="Legacy Local Published",
+                            backend=StorageBackend.LOCAL,
+                            config={
+                                "mode": "filesystem",
+                                "root": str(root / "published"),
+                                "public_base_url": artifact_cfg.cdn_base_url.rstrip("/"),
+                            },
+                            legacy=True,
+                            created_at=now,
+                            updated_at=now,
+                        )
+            elif all(
                 (
                     artifact_cfg.s3_endpoint_url,
                     artifact_cfg.s3_access_key_id,
@@ -1314,69 +1645,231 @@ class StorageManager:
                     artifact_cfg.published_bucket,
                 )
             ):
-                return
-            q_profile = StorageProfile(
-                id=LEGACY_QUARANTINE_PROFILE_ID,
-                name="Legacy S3 Quarantine",
-                backend=StorageBackend.S3,
-                config={
-                    "endpoint_url": artifact_cfg.s3_endpoint_url,
-                    "region": artifact_cfg.s3_region,
-                    "bucket": artifact_cfg.quarantine_bucket,
-                },
-                legacy=True,
-                created_at=now,
-                updated_at=now,
-            )
-            p_profile = StorageProfile(
-                id=LEGACY_PUBLISHED_PROFILE_ID,
-                name="Legacy S3 Published",
-                backend=StorageBackend.S3,
-                config={
-                    "endpoint_url": artifact_cfg.s3_endpoint_url,
-                    "region": artifact_cfg.s3_region,
-                    "bucket": artifact_cfg.published_bucket,
-                    "public_base_url": artifact_cfg.cdn_base_url.rstrip("/"),
-                },
-                legacy=True,
-                created_at=now,
-                updated_at=now,
-            )
+                q_profile = StorageProfile(
+                    id=LEGACY_QUARANTINE_PROFILE_ID,
+                    name="Legacy S3 Quarantine",
+                    backend=StorageBackend.S3,
+                    config={
+                        "endpoint_url": artifact_cfg.s3_endpoint_url,
+                        "region": artifact_cfg.s3_region,
+                        "bucket": artifact_cfg.quarantine_bucket,
+                    },
+                    legacy=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                p_profile = StorageProfile(
+                    id=LEGACY_PUBLISHED_PROFILE_ID,
+                    name="Legacy S3 Published",
+                    backend=StorageBackend.S3,
+                    config={
+                        "endpoint_url": artifact_cfg.s3_endpoint_url,
+                        "region": artifact_cfg.s3_region,
+                        "bucket": artifact_cfg.published_bucket,
+                        "public_base_url": artifact_cfg.cdn_base_url.rstrip("/"),
+                    },
+                    legacy=True,
+                    created_at=now,
+                    updated_at=now,
+                )
 
-        if q_binding is None and await self.repository.get_profile(q_profile.id) is None:
+            if (
+                q_profile is not None
+                and q_binding is None
+                and await self.repository.get_profile(q_profile.id) is None
+            ):
+                try:
+                    driver_q = await self._build_driver(q_profile)
+                    saved_q = await self.repository.upsert_profile(q_profile)
+                    self.service.register_profile(saved_q, driver_q)
+                    saved_qb = await self.repository.upsert_binding(
+                        StorageBinding(
+                            purpose=StoragePurpose.ARTIFACT_QUARANTINE,
+                            profile_id=saved_q.id,
+                            generation=1,
+                            updated_by="system",
+                            updated_at=now,
+                        )
+                    )
+                    self.service.set_binding(saved_qb)
+                    q_binding = saved_qb
+                except Exception as exc:
+                    LOGGER.warning("Skipping legacy quarantine profile bootstrap: %s", exc)
+            if (
+                p_profile is not None
+                and p_binding is None
+                and await self.repository.get_profile(p_profile.id) is None
+            ):
+                try:
+                    driver_p = await self._build_driver(p_profile)
+                    saved_p = await self.repository.upsert_profile(p_profile)
+                    self.service.register_profile(saved_p, driver_p)
+                    saved_pb = await self.repository.upsert_binding(
+                        StorageBinding(
+                            purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+                            profile_id=saved_p.id,
+                            generation=1,
+                            updated_by="system",
+                            updated_at=now,
+                        )
+                    )
+                    self.service.set_binding(saved_pb)
+                    p_binding = saved_pb
+                except Exception as exc:
+                    LOGGER.warning("Skipping legacy published profile bootstrap: %s", exc)
+
+        # Idempotently backfill pre-existing files on legacy profiles into market_storage_objects.
+        if q_binding is not None and q_binding.profile_id == LEGACY_QUARANTINE_PROFILE_ID:
+            legacy_q = await self.repository.get_profile(LEGACY_QUARANTINE_PROFILE_ID)
+            if legacy_q is not None and legacy_q.status == StorageProfileStatus.ACTIVE:
+                q_namespaces = (
+                    ("quarantine", "content") if legacy_q.backend == StorageBackend.LOCAL else ("",)
+                )
+                await self._backfill_legacy_profile_objects(
+                    profile=legacy_q,
+                    purpose=StoragePurpose.ARTIFACT_QUARANTINE,
+                    namespaces=q_namespaces,
+                )
+        if p_binding is not None and p_binding.profile_id == LEGACY_PUBLISHED_PROFILE_ID:
+            legacy_p = await self.repository.get_profile(LEGACY_PUBLISHED_PROFILE_ID)
+            if legacy_p is not None and legacy_p.status == StorageProfileStatus.ACTIVE:
+                await self._backfill_legacy_profile_objects(
+                    profile=legacy_p,
+                    purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+                    namespaces=("",),
+                )
+
+    async def _backfill_legacy_profile_objects(
+        self,
+        *,
+        profile: StorageProfile,
+        purpose: StoragePurpose,
+        namespaces: tuple[str, ...],
+    ) -> int:
+        try:
+            driver = self.service.driver_for_profile(profile.id)
+        except ObjectStorageError:
+            return 0
+        existing_objs = await self.repository.list_objects(profile_id=profile.id)
+        existing_locators = {
+            (obj.namespace, obj.key)
+            for obj in existing_objs
+            if obj.status != StorageObjectStatus.DELETED
+        }
+        now = utc_now_iso()
+        added = 0
+        for ns in namespaces:
             try:
-                driver_q = await self._build_driver(q_profile)
-                saved_q = await self.repository.upsert_profile(q_profile)
-                self.service.register_profile(saved_q, driver_q)
-                saved_qb = await self.repository.upsert_binding(
-                    StorageBinding(
-                        purpose=StoragePurpose.ARTIFACT_QUARANTINE,
-                        profile_id=saved_q.id,
-                        generation=1,
-                        updated_by="system",
+                listed = await driver.list_objects(namespace=ns)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Legacy backfill listing failed for profile %s namespace %r: %s",
+                    profile.id,
+                    ns,
+                    exc,
+                )
+                continue
+            for entry in listed:
+                if entry.key.startswith(HEALTHCHECK_PREFIX):
+                    continue
+                if (entry.namespace, entry.key) in existing_locators:
+                    continue
+                try:
+                    (
+                        size_bytes,
+                        sha256,
+                        content_type,
+                        public_url,
+                    ) = await self._inspect_object_metadata(
+                        driver=driver,
+                        purpose=purpose,
+                        namespace=entry.namespace,
+                        key=entry.key,
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Legacy backfill inspection failed for %s (%s/%s): %s",
+                        profile.id,
+                        entry.namespace,
+                        entry.key,
+                        exc,
+                    )
+                    continue
+                object_id = f"stobj_{secrets.token_hex(12)}"
+                if not public_url and purpose in PUBLIC_PURPOSES:
+                    public_url = f"/v1/storage/public/{object_id}"
+                await self.repository.upsert_object(
+                    StorageObjectRecord(
+                        id=object_id,
+                        purpose=purpose,
+                        profile_id=profile.id,
+                        backend=profile.backend.value,
+                        namespace=entry.namespace,
+                        key=entry.key,
+                        size_bytes=size_bytes,
+                        sha256=sha256,
+                        content_type=content_type,
+                        status=StorageObjectStatus.ACTIVE,
+                        public_url=public_url,
+                        owner_type="legacy_backfill",
+                        created_at=now,
                         updated_at=now,
                     )
                 )
-                self.service.set_binding(saved_qb)
-            except Exception as exc:
-                LOGGER.warning("Skipping legacy quarantine profile bootstrap: %s", exc)
-        if p_binding is None and await self.repository.get_profile(p_profile.id) is None:
+                if purpose == StoragePurpose.ARTIFACT_PUBLISHED:
+                    for alias_path in _extract_public_alias_paths(
+                        purpose=purpose,
+                        source_public_url=public_url,
+                        source_key=entry.key,
+                    ):
+                        if await self.repository.get_url_alias(alias_path) is None:
+                            await self.repository.upsert_url_alias(
+                                StorageUrlAlias(
+                                    id=f"stalias_{secrets.token_hex(12)}",
+                                    alias_path=alias_path,
+                                    object_id=object_id,
+                                    purpose=purpose,
+                                    created_at=now,
+                                )
+                            )
+                existing_locators.add((entry.namespace, entry.key))
+                added += 1
+        return added
+
+    async def _inspect_object_metadata(
+        self,
+        *,
+        driver: ObjectStorageDriver,
+        purpose: StoragePurpose,
+        namespace: str,
+        key: str,
+        precomputed_stat: Any | None = None,
+    ) -> tuple[int, str, str, str]:
+        stat = precomputed_stat or await driver.stat_object(key, namespace=namespace)
+        if stat is None:
+            raise ObjectStorageError("object_missing", f"Object {key} not found on backend")
+        size_bytes = stat.size_bytes
+        sha256 = stat.sha256
+        content_type = stat.content_type
+        public_url = stat.public_url
+        if not sha256:
+            descriptor, temp_name = tempfile.mkstemp(prefix="obj-inspect-", suffix=".tmp")
+            os.close(descriptor)
+            temporary = Path(temp_name)
             try:
-                driver_p = await self._build_driver(p_profile)
-                saved_p = await self.repository.upsert_profile(p_profile)
-                self.service.register_profile(saved_p, driver_p)
-                saved_pb = await self.repository.upsert_binding(
-                    StorageBinding(
-                        purpose=StoragePurpose.ARTIFACT_PUBLISHED,
-                        profile_id=saved_p.id,
-                        generation=1,
-                        updated_by="system",
-                        updated_at=now,
-                    )
-                )
-                self.service.set_binding(saved_pb)
-            except Exception as exc:
-                LOGGER.warning("Skipping legacy published profile bootstrap: %s", exc)
+                downloaded = await driver.download_to_path(key, temporary, namespace=namespace)
+                size_bytes = downloaded.size_bytes
+                sha256 = downloaded.sha256
+                content_type = downloaded.content_type or content_type
+                public_url = downloaded.public_url or public_url
+            finally:
+                temporary.unlink(missing_ok=True)
+        if not public_url and purpose in PUBLIC_PURPOSES and driver.capabilities().public_read:
+            try:
+                public_url = driver.public_url(key, namespace=namespace)
+            except ObjectStorageError:
+                public_url = ""
+        return size_bytes, sha256, content_type, public_url
 
     async def _build_driver(self, profile: StorageProfile) -> ObjectStorageDriver:
         cfg = dict(profile.config)
@@ -1808,7 +2301,11 @@ def _recompute_migration_counts(
     done_at = (
         now
         if status
-        in {StorageMigrationStatus.COMPLETED, StorageMigrationStatus.COMPLETED_WITH_ERRORS}
+        in {
+            StorageMigrationStatus.COMPLETED,
+            StorageMigrationStatus.COMPLETED_WITH_ERRORS,
+            StorageMigrationStatus.CANCELLED,
+        }
         else ""
     )
     return StorageMigration(
