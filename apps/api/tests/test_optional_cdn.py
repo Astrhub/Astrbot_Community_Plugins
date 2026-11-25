@@ -494,7 +494,11 @@ def test_postgres_cdn_migration_leases_and_publication_fence():
         connection, transaction = await begin_isolated_schema(database_url())
         try:
             migrations = discover_schema_migrations()
-            await apply_schema_migrations(connection, migrations[:-1])
+            cdn_migration = "20260927_007_optional_cdn"
+            await apply_schema_migrations(
+                connection,
+                [item for item in migrations if item.version != cdn_migration],
+            )
             await seed_market(connection)
             store = PgRedisMarketStore("postgresql://unused", "redis://unused", 60)
             store.pool = SingleConnectionPool(connection)
@@ -534,7 +538,7 @@ def test_postgres_cdn_migration_leases_and_publication_fence():
                     "author": "Alice",
                 },
             )
-            await apply_schema_migrations(connection, migrations)
+            assert await apply_schema_migrations(connection, migrations) == [cdn_migration]
             subscription = CdnSubscriptions(store)
             assert (await store.get_plugin("plugin-1"))["cdn_enabled"] is True
             assert (await store.get_plugin("astrbot_plugin_plain"))["cdn_enabled"] is False

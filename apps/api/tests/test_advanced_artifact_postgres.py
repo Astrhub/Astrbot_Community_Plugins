@@ -131,12 +131,7 @@ async def run_p1_upgrade_scenario(url: str) -> None:
             "20260710_002_artifact_advanced_review"
         ]
         assert await apply_schema_migrations(connection, migrations) == [
-            "20260715_003_review_policy_snapshot",
-            "20260717_004_review_observability",
-            "20260910_005_plugin_namespace",
-            "20260927_006_manual_review",
-            "20260927_007_optional_cdn",
-            "20261001_008_plugin_version_updated_at",
+            item.version for item in migrations[2:]
         ]
         assert await apply_schema_migrations(connection, migrations) == []
 
