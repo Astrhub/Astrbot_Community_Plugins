@@ -14,7 +14,9 @@ RUN if [ -n "$PYPI_INDEX_URL" ]; then \
         python -m pip install --no-cache-dir packaging==26.2 pydantic==2.13.4; \
     fi \
     && mkdir -p /opt/runtime-probe/app/artifacts \
+        /opt/runtime-probe/app/git_sources \
         /opt/runtime-probe/app/runtime_runner/probe /runtime/input \
+    && : > /opt/runtime-probe/app/git_sources/__init__.py \
     && chmod 0755 /opt/runtime-probe /runtime /runtime/input
 
 COPY --chown=65532:65532 apps/api/app/__init__.py /opt/runtime-probe/app/__init__.py
@@ -26,6 +28,9 @@ COPY --chown=65532:65532 apps/api/app/artifacts/requirements_parser.py \
     /opt/runtime-probe/app/artifacts/requirements_parser.py
 COPY --chown=65532:65532 apps/api/app/artifacts/sbom.py \
     /opt/runtime-probe/app/artifacts/sbom.py
+# Only the source URL model is packaged without the provider adapters.
+COPY --chown=65532:65532 apps/api/app/git_sources/models.py \
+    /opt/runtime-probe/app/git_sources/models.py
 COPY --chown=65532:65532 apps/api/app/runtime_runner/__init__.py \
     /opt/runtime-probe/app/runtime_runner/__init__.py
 COPY --chown=65532:65532 apps/api/app/runtime_runner/probe/ \
