@@ -179,6 +179,16 @@ def _matches_logical_key(candidate_key: str, logical_key: str) -> str | None:
     return None
 
 
+def _logical_key_from_cas(candidate_key: str) -> str:
+    parent, _, name = candidate_key.rpartition("/")
+    stem, ext = _logical_stem_and_ext(name)
+    match = CAS_SUFFIX_PATTERN.fullmatch(stem)
+    if match is None:
+        return candidate_key
+    logical_name = f"{match.group(1)}{ext}"
+    return f"{parent}/{logical_name}" if parent else logical_name
+
+
 def _reject_private_host(hostname: str) -> None:
     lowered = hostname.strip().lower().rstrip(".")
     if lowered == "localhost" or any(lowered.endswith(sfx) for sfx in PRIVATE_HOST_SUFFIXES):
@@ -267,6 +277,7 @@ class WebDavObjectStorageDriver:
         self._external_client = client is not None
         self._client = client
         self._created_dirs: set[str] = set()
+        self._cas_physical_keys: dict[tuple[str, str], str] = {}
         self._parsed_base = urlsplit(self.base_url)
 
     def capabilities(self) -> StorageCapabilities:
@@ -369,10 +380,59 @@ class WebDavObjectStorageDriver:
         finally:
             temporary.unlink(missing_ok=True)
 
+    async def _resolve_physical_key(
+        self,
+        key: str,
+        namespace: str,
+        *,
+        expected_sha256: str = "",
+    ) -> str:
+        if self.conditional_create_supported:
+            return key
+        cache_key = (namespace, key)
+        cached = self._cas_physical_keys.get(cache_key)
+        if cached is not None:
+            return cached
+
+        exact_url = self._url_for_object(key, namespace)
+        exact_response = await self._request("HEAD", exact_url, headers=self._auth_headers())
+        if exact_response.status_code in {200, 204}:
+            self._cas_physical_keys[cache_key] = key
+            return key
+        if exact_response.status_code != 404:
+            raise _status_error("webdav_stat_failed", exact_response)
+
+        parent_key, _, _ = key.rpartition("/")
+        parent_rel = _join_segments(self.root_path, namespace, parent_key)
+        base_rel = _join_segments(self.root_path, namespace)
+        candidates: list[str] = []
+        siblings = await self._propfind_depth_one(parent_rel)
+        expected_prefix = expected_sha256.strip().lower()[:12]
+        for rel_path, is_collection, _, _ in siblings:
+            if is_collection:
+                continue
+            candidate_key = _strip_prefix_segments(rel_path, base_rel)
+            match_kind = _matches_logical_key(candidate_key, key)
+            if not match_kind:
+                continue
+            if expected_prefix and match_kind != expected_prefix:
+                continue
+            candidates.append(candidate_key)
+        if len(candidates) > 1:
+            raise ObjectStorageError(
+                "object_key_conflict",
+                "Multiple WebDAV CAS objects match the logical key",
+            )
+        if candidates:
+            self._cas_physical_keys[cache_key] = candidates[0]
+            return candidates[0]
+        return key
+
     async def stat_object(self, key: str, *, namespace: str = "") -> StoredObject | None:
         validate_object_key(key)
         normalized_ns = validate_namespace(namespace)
-        url = self._url_for_object(key, normalized_ns)
+        physical_key = await self._resolve_physical_key(key, normalized_ns)
+        url = self._url_for_object(physical_key, normalized_ns)
         response = await self._request("HEAD", url, headers=self._auth_headers())
         if response.status_code == 404:
             return None
@@ -390,7 +450,7 @@ class WebDavObjectStorageDriver:
             size_bytes=size_bytes,
             sha256=sha_header,
             content_type=content_type or guess_content_type(key),
-            public_url=self._optional_public_url(key, normalized_ns),
+            public_url=self._optional_public_url(physical_key, normalized_ns),
         )
 
     async def read_object(
@@ -403,7 +463,12 @@ class WebDavObjectStorageDriver:
     ) -> bytes:
         validate_object_key(key)
         normalized_ns = validate_namespace(namespace)
-        url = self._url_for_object(key, normalized_ns)
+        physical_key = await self._resolve_physical_key(
+            key,
+            normalized_ns,
+            expected_sha256=expected_sha256,
+        )
+        url = self._url_for_object(physical_key, normalized_ns)
         await self._guard_runtime_dns()
         client = await self._ensure_client()
         digest = hashlib.sha256()
@@ -472,7 +537,12 @@ class WebDavObjectStorageDriver:
                 truncated=end_byte < stat.size_bytes,
             )
 
-        url = self._url_for_object(key, normalized_ns)
+        physical_key = await self._resolve_physical_key(
+            key,
+            normalized_ns,
+            expected_sha256=expected_sha256,
+        )
+        url = self._url_for_object(physical_key, normalized_ns)
         range_header = f"bytes={start_byte}-{end_byte - 1}"
         response = await self._request(
             "GET",
@@ -537,7 +607,8 @@ class WebDavObjectStorageDriver:
         validate_object_key(key)
         normalized_ns = validate_namespace(namespace)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        url = self._url_for_object(key, normalized_ns)
+        physical_key = await self._resolve_physical_key(key, normalized_ns)
+        url = self._url_for_object(physical_key, normalized_ns)
         await self._guard_runtime_dns()
         client = await self._ensure_client()
         descriptor, temp_name = tempfile.mkstemp(
@@ -589,7 +660,7 @@ class WebDavObjectStorageDriver:
             size_bytes=written,
             sha256=digest.hexdigest(),
             content_type=content_type,
-            public_url=self._optional_public_url(key, normalized_ns),
+            public_url=self._optional_public_url(physical_key, normalized_ns),
         )
 
     async def copy_object(
@@ -629,16 +700,35 @@ class WebDavObjectStorageDriver:
     async def delete_object(self, key: str, *, namespace: str = "") -> None:
         validate_object_key(key)
         normalized_ns = validate_namespace(namespace)
-        url = self._url_for_object(key, normalized_ns)
+        physical_key = await self._resolve_physical_key(key, normalized_ns)
+        url = self._url_for_object(physical_key, normalized_ns)
         response = await self._request("DELETE", url, headers=self._auth_headers())
         if response.status_code in {200, 202, 204, 404}:
+            self._cas_physical_keys.pop((normalized_ns, key), None)
             return
         raise _status_error("webdav_delete_failed", response)
 
     def public_url(self, key: str, *, namespace: str = "") -> str:
         validate_object_key(key)
         normalized_ns = validate_namespace(namespace)
-        full_key = f"{normalized_ns}/{key}" if normalized_ns else key
+        physical_key = self._cas_physical_keys.get((normalized_ns, key), key)
+        full_key = f"{normalized_ns}/{physical_key}" if normalized_ns else physical_key
+        return build_public_url(self.public_base_url, full_key)
+
+    def public_url_for_sha256(
+        self,
+        key: str,
+        *,
+        namespace: str = "",
+        sha256: str,
+    ) -> str:
+        validate_object_key(key)
+        normalized_ns = validate_namespace(namespace)
+        physical_key = (
+            key if self.conditional_create_supported else content_addressed_key(key, sha256)
+        )
+        self._cas_physical_keys[(normalized_ns, key)] = physical_key
+        full_key = f"{normalized_ns}/{physical_key}" if normalized_ns else physical_key
         return build_public_url(self.public_base_url, full_key)
 
     async def list_objects(
@@ -653,6 +743,8 @@ class WebDavObjectStorageDriver:
         entries: list[ObjectListingEntry] = []
         for rel_path, size_bytes, content_type in files:
             key = _strip_prefix_segments(rel_path, base_rel)
+            if not self.conditional_create_supported:
+                key = _logical_key_from_cas(key)
             if not key:
                 continue
             if prefix and not key.startswith(prefix):
@@ -828,11 +920,12 @@ class WebDavObjectStorageDriver:
             existing_bytes = await self.read_object(sibling_key, namespace=namespace)
             existing_sha = hashlib.sha256(existing_bytes).hexdigest()
             if existing_sha == sha256:
+                self._cas_physical_keys[(namespace, key)] = sibling_key
                 return StoredObject(
                     profile_id=self.profile_id,
                     backend=self.backend.value,
                     namespace=namespace,
-                    key=sibling_key,
+                    key=key,
                     size_bytes=len(existing_bytes),
                     sha256=existing_sha,
                     content_type=content_type,
@@ -866,11 +959,12 @@ class WebDavObjectStorageDriver:
             expected_size=size_bytes,
             expected_sha256=sha256,
         )
+        self._cas_physical_keys[(namespace, key)] = actual_key
         return StoredObject(
             profile_id=self.profile_id,
             backend=self.backend.value,
             namespace=namespace,
-            key=actual_key,
+            key=key,
             size_bytes=size_bytes,
             sha256=sha256,
             content_type=content_type,

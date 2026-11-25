@@ -94,6 +94,12 @@ class ObjectStorageRepository(Protocol):
         profile_id: str = "",
         status: StorageObjectStatus | None = None,
     ) -> list[StorageObjectRecord]: ...
+    async def count_objects(
+        self,
+        *,
+        profile_id: str,
+        status: StorageObjectStatus,
+    ) -> int: ...
 
     async def upsert_url_alias(self, alias: StorageUrlAlias) -> StorageUrlAlias: ...
 
@@ -329,6 +335,18 @@ class LocalObjectStorageRepository:
             results.append(_raw_to_object(raw))
         results.sort(key=lambda item: (item.created_at, item.id))
         return results
+
+    async def count_objects(
+        self,
+        *,
+        profile_id: str,
+        status: StorageObjectStatus,
+    ) -> int:
+        return sum(
+            1
+            for raw in self._ensure_bucket()["objects"].values()
+            if raw.get("profile_id") == profile_id and raw.get("status") == status.value
+        )
 
     async def upsert_url_alias(self, alias: StorageUrlAlias) -> StorageUrlAlias:
         bucket = self._ensure_bucket()
@@ -767,6 +785,23 @@ class PgObjectStorageRepository:
             *args,
         )
         return [_raw_to_object(dict(row)) for row in rows]
+
+    async def count_objects(
+        self,
+        *,
+        profile_id: str,
+        status: StorageObjectStatus,
+    ) -> int:
+        row = await self._pool().fetchrow(
+            """
+            SELECT count(*) AS object_count
+              FROM market_storage_objects
+             WHERE profile_id = $1 AND status = $2
+            """,
+            profile_id,
+            status.value,
+        )
+        return int(row["object_count"] or 0)
 
     async def upsert_url_alias(self, alias: StorageUrlAlias) -> StorageUrlAlias:
         row = await self._pool().fetchrow(

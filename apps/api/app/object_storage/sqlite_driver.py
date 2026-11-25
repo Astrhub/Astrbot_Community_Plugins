@@ -104,8 +104,14 @@ class SqliteObjectStorageDriver:
         self.db_path = validate_sqlite_db_path(db_path)
         self.public_base_url = str(public_base_url or "").strip().rstrip("/")
         self.chunk_size = max(1024, int(chunk_size))
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_schema()
+        except (OSError, sqlite3.Error) as exc:
+            raise ObjectStorageError(
+                "sqlite_storage_unavailable",
+                f"SQLite object storage is unavailable: {exc}",
+            ) from exc
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)

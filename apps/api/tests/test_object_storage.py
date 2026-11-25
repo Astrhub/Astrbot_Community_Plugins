@@ -94,7 +94,7 @@ class FakeS3Client:
         content, _, _ = self.objects[location]
         Path(filename).write_bytes(content)
 
-    def get_object(self, *, Bucket: str, Key: str):
+    def get_object(self, *, Bucket: str, Key: str, **kwargs):
         location = (Bucket, Key)
         if location not in self.objects:
             raise ClientError(
@@ -105,6 +105,24 @@ class FakeS3Client:
                 "GetObject",
             )
         content, _, _ = self.objects[location]
+        range_header = str(kwargs.get("Range") or "")
+        if range_header:
+            start_s, end_s = range_header.removeprefix("bytes=").split("-", 1)
+            start = int(start_s)
+            end = int(end_s) if end_s else len(content) - 1
+            end = min(end, len(content) - 1)
+            if start >= len(content) or end < start:
+                raise ClientError(
+                    {
+                        "Error": {"Code": "InvalidRange", "Message": "invalid range"},
+                        "ResponseMetadata": {"HTTPStatusCode": 416},
+                    },
+                    "GetObject",
+                )
+            return {
+                "Body": io.BytesIO(content[start : end + 1]),
+                "ContentRange": f"bytes {start}-{end}/{len(content)}",
+            }
         return {"Body": io.BytesIO(content)}
 
     def delete_object(self, *, Bucket: str, Key: str):

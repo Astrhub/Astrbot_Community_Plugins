@@ -63,6 +63,7 @@ class ArtifactRuntime:
     repository: Any | None = None
     storage: Any | None = None
     object_storage: Any | None = None
+    storage_refresh: Any | None = None
     service: Any | None = None
     job_runner: Any | None = None
     _component_errors: list[str] = field(default_factory=list)
@@ -177,6 +178,7 @@ class ArtifactRuntime:
                         self.settings.artifact_authorization_url,
                         self.settings.artifact_authorization_token,
                     ),
+                    storage_refresh=self.storage_refresh,
                 )
                 self.attach_components(
                     repository=repository,
@@ -499,6 +501,7 @@ def build_artifact_runtime(
     allow_in_memory_artifacts: bool = True,
     worker_execution_enabled: bool = False,
     object_storage: Any | None = None,
+    storage_refresh: Any | None = None,
 ) -> ArtifactRuntime:
     """Build the shared runtime shell without starting an in-process worker."""
     return ArtifactRuntime(
@@ -510,6 +513,7 @@ def build_artifact_runtime(
         allow_in_memory_artifacts=allow_in_memory_artifacts,
         worker_execution_enabled=worker_execution_enabled,
         object_storage=object_storage,
+        storage_refresh=storage_refresh,
     )
 
 

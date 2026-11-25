@@ -7,6 +7,7 @@ from contextlib import suppress
 
 from ..config import load_settings
 from ..store import PgRedisMarketStore
+from ..object_storage.manager import StorageManager
 from .runtime import build_artifact_runtime
 
 LOGGER = logging.getLogger(__name__)
@@ -28,24 +29,33 @@ async def run_worker() -> None:
         session_ttl_seconds=settings.session_max_age_seconds,
     )
     await store.connect()
-    runtime = build_artifact_runtime(settings, store, worker_execution_enabled=True)
-    await runtime.start(store)
-    if not runtime.available or runtime.job_runner is None:
-        await runtime.close()
-        await store.close()
-        raise RuntimeError(
-            "Artifact runtime is unavailable: " + ", ".join(runtime.configuration_errors)
-        )
-
-    loop = asyncio.get_running_loop()
-    for name in (signal.SIGINT, signal.SIGTERM):
-        with suppress(NotImplementedError):
-            loop.add_signal_handler(name, runtime.job_runner.stop)
-    LOGGER.info("Artifact worker started")
+    storage_manager = StorageManager(store=store, settings=settings)
+    runtime = None
     try:
+        await storage_manager.initialize()
+        runtime = build_artifact_runtime(
+            settings,
+            store,
+            worker_execution_enabled=True,
+            object_storage=storage_manager.service,
+            storage_refresh=storage_manager.refresh,
+        )
+        await runtime.start(store)
+        if not runtime.available or runtime.job_runner is None:
+            raise RuntimeError(
+                "Artifact runtime is unavailable: " + ", ".join(runtime.configuration_errors)
+            )
+
+        loop = asyncio.get_running_loop()
+        for name in (signal.SIGINT, signal.SIGTERM):
+            with suppress(NotImplementedError):
+                loop.add_signal_handler(name, runtime.job_runner.stop)
+        LOGGER.info("Artifact worker started")
         await runtime.job_runner.run_forever()
     finally:
-        await runtime.close()
+        if runtime is not None:
+            await runtime.close()
+        await storage_manager.close()
         await store.close()
 
 

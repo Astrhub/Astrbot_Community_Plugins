@@ -413,6 +413,7 @@ def create_app(
         app.state.store,
         allow_in_memory_artifacts=store is not None,
         object_storage=app.state.storage_manager.service,
+        storage_refresh=app.state.storage_manager.refresh,
     )
     app.state.email_daily_counter = {"date": "", "count": 0}
     app.state.github_api_token_index = 0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import asyncio
 import hashlib
 import logging
@@ -23,7 +24,7 @@ from .imgbed_driver import (
     validate_imgbed_folder,
     validate_imgbed_scopes,
 )
-from .local_fs import LocalFilesystemDriver
+from .local_fs import LocalFilesystemDriver, validate_local_filesystem_root
 from .models import (
     PURPOSE_ALLOWED_BACKENDS,
     ObjectStorageError,
@@ -103,6 +104,7 @@ class StorageManager:
         self._pg_pool_override = pg_pool_override
         self._initialized = False
         self._migration_lock = asyncio.Lock()
+        self._refresh_lock = asyncio.Lock()
 
     def update_settings(self, settings: Settings) -> None:
         self.settings = settings
@@ -115,24 +117,127 @@ class StorageManager:
         self._initialized = False
 
     async def initialize(self) -> None:
+        if self._initialized:
+            return
+        async with self._refresh_lock:
+            if self._initialized:
+                return
+            await self._sync_service_from_repository()
+            await self._ensure_legacy_artifact_profiles()
+            await self._sync_service_from_repository()
+            await self.recover_stale_pending_objects()
+            await self._recover_running_migrations()
+            await self._sync_service_from_repository()
+            self._initialized = True
+
+    async def refresh(self) -> None:
+        if not self._initialized:
+            await self.initialize()
+            return
+        async with self._refresh_lock:
+            await self._sync_service_from_repository()
+
+    async def _sync_service_from_repository(self) -> None:
         profiles = await self.repository.list_profiles(include_removed=True)
+        active_profile_ids: set[str] = set()
         for profile in profiles:
             if profile.status in {StorageProfileStatus.RETIRED, StorageProfileStatus.REMOVED}:
-                self.service.unregister_profile(profile.id)
+                if self.service.get_profile(profile.id) is not None:
+                    await self._close_and_unregister_driver(profile.id)
                 continue
+            active_profile_ids.add(profile.id)
+            existing = self.service.get_profile(profile.id)
+            try:
+                current_driver = self.service.driver_for_profile(profile.id)
+            except ObjectStorageError:
+                current_driver = None
+            if existing == profile and current_driver is not None:
+                continue
+            if current_driver is not None:
+                await self._close_and_unregister_driver(profile.id)
             try:
                 driver = await self._build_driver(profile)
-                self.service.register_profile(profile, driver)
             except Exception as exc:
                 LOGGER.warning("Skipping driver activation for profile %s: %s", profile.id, exc)
-        bindings = await self.repository.list_bindings()
-        for binding in bindings:
-            if self.service.get_profile(binding.profile_id) is not None:
-                self.service.set_binding(binding)
+                continue
+            self.service.register_profile(profile, driver)
 
-        await self._ensure_legacy_artifact_profiles()
-        await self.recover_stale_pending_objects()
-        self._initialized = True
+        for profile in list(self.service.list_profiles()):
+            if profile.id not in active_profile_ids:
+                await self._close_and_unregister_driver(profile.id)
+
+        self.service.replace_bindings(await self.repository.list_bindings())
+        self.service.replace_object_records(await self.repository.list_objects())
+
+    async def _recover_running_migrations(self) -> None:
+        migrations = await self.repository.list_migrations(
+            status=StorageMigrationStatus.RUNNING,
+            limit=500,
+        )
+        for migration in migrations:
+            now = utc_now_iso()
+            running_items = await self.repository.list_migration_items(
+                migration.id,
+                status=StorageMigrationItemStatus.RUNNING,
+            )
+            for item in running_items:
+                await self.repository.update_migration_item(
+                    replace(item, status=StorageMigrationItemStatus.PENDING, updated_at=now)
+                )
+            await self.repository.update_migration(
+                replace(
+                    migration,
+                    status=StorageMigrationStatus.QUEUED,
+                    last_error="服务重启后恢复迁移",
+                    updated_at=now,
+                    completed_at="",
+                )
+            )
+
+    async def _reconcile_unknown_objects(
+        self,
+        migration: StorageMigration,
+    ) -> StorageMigration:
+        if not migration.unknown_objects:
+            return migration
+        try:
+            source_driver = self.service.driver_for_profile(migration.source_profile_id)
+        except ObjectStorageError:
+            return migration
+        remaining: list[Mapping[str, Any]] = []
+        changed = False
+        for entry in migration.unknown_objects:
+            namespace = str(entry.get("namespace") or "")
+            key = str(entry.get("key") or "")
+            try:
+                stat = await source_driver.stat_object(key, namespace=namespace)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Unknown object reconciliation failed for %s (%s/%s): %s",
+                    migration.id,
+                    namespace,
+                    key,
+                    exc,
+                )
+                remaining.append(dict(entry))
+                continue
+            if stat is None:
+                changed = True
+                continue
+            refreshed = dict(entry)
+            refreshed["size_bytes"] = stat.size_bytes
+            remaining.append(refreshed)
+            if refreshed != dict(entry):
+                changed = True
+        if not changed:
+            return migration
+        updated = replace(
+            migration,
+            unknown_objects=tuple(remaining),
+            last_error="" if not remaining else migration.last_error,
+            updated_at=utc_now_iso(),
+        )
+        return await self.repository.update_migration(updated)
 
     async def close(self) -> None:
         for profile in list(self.service.list_profiles()):
@@ -159,11 +264,11 @@ class StorageManager:
             )
         items: list[dict[str, Any]] = []
         for profile in profiles:
-            active_objs = await self.repository.list_objects(
+            active_count = await self.repository.count_objects(
                 profile_id=profile.id,
                 status=StorageObjectStatus.ACTIVE,
             )
-            pending_objs = await self.repository.list_objects(
+            pending_count = await self.repository.count_objects(
                 profile_id=profile.id,
                 status=StorageObjectStatus.PENDING,
             )
@@ -187,8 +292,8 @@ class StorageManager:
                     capabilities = {}
             data = profile.to_public_dict()
             data["bound_purposes"] = sorted(bound_purposes_by_profile.get(profile.id, []))
-            data["active_object_count"] = len(active_objs)
-            data["pending_object_count"] = len(pending_objs)
+            data["active_object_count"] = active_count
+            data["pending_object_count"] = pending_count
             data["has_active_migrations"] = in_flight
             data["capabilities"] = capabilities
             items.append(data)
@@ -290,23 +395,32 @@ class StorageManager:
             secret=secret or {},
             existing_secret_ref=existing.secret_ref,
         )
+        if existing.backend == StorageBackend.IMGBED:
+            bindings = await self.repository.list_bindings()
+            published_bound = any(
+                binding.purpose == StoragePurpose.ARTIFACT_PUBLISHED
+                and binding.profile_id == existing.id
+                for binding in bindings
+            )
+            if published_bound:
+                scopes = set(sanitized_config.get("scopes") or ())
+                if not {"list", "delete"}.issubset(scopes):
+                    raise ObjectStorageError(
+                        "imgbed_scope_missing",
+                        "ImgBed Profile bound to published artifacts must retain list and delete scopes",
+                    )
+
         secret_ref = existing.secret_ref
+        merged_secret: dict[str, Any] | None = None
+        previous_ciphertext: tuple[str, str] | None = None
         if cleaned_secret:
             previous_secret: dict[str, Any] = {}
             if secret_ref:
                 previous_secret = await self._load_secret(existing)
+                previous_ciphertext = await self.repository.get_secret(secret_ref)
             merged_secret = {**previous_secret, **cleaned_secret}
             secret_ref = secret_ref or f"storage_secret_{secrets.token_hex(16)}"
-            ciphertext = encrypt_storage_secret(
-                self.settings.oauth_credential_key,
-                profile_id=existing.id,
-                secret_payload=merged_secret,
-            )
-            await self.repository.save_secret(
-                secret_ref,
-                profile_id=existing.id,
-                ciphertext=ciphertext,
-            )
+
         config_changed = sanitized_config != dict(existing.config) or bool(cleaned_secret)
         updated = StorageProfile(
             id=existing.id,
@@ -324,9 +438,62 @@ class StorageManager:
             created_at=existing.created_at,
             updated_at=utc_now_iso(),
         )
-        driver = await self._build_driver(updated)
-        saved = await self.repository.upsert_profile(updated)
+        driver = await self._build_driver(updated, secret_override=merged_secret)
+        try:
+            if cleaned_secret:
+                ciphertext = encrypt_storage_secret(
+                    self.settings.oauth_credential_key,
+                    profile_id=existing.id,
+                    secret_payload=merged_secret or {},
+                )
+                await self.repository.save_secret(
+                    secret_ref,
+                    profile_id=existing.id,
+                    ciphertext=ciphertext,
+                )
+            saved = await self.repository.upsert_profile(updated)
+        except Exception:
+            close_fn = getattr(driver, "close", None)
+            if callable(close_fn):
+                close_result = close_fn()
+                if asyncio.iscoroutine(close_result):
+                    await close_result
+            if cleaned_secret:
+                try:
+                    if previous_ciphertext is not None and existing.secret_ref:
+                        await self.repository.save_secret(
+                            existing.secret_ref,
+                            profile_id=previous_ciphertext[0],
+                            ciphertext=previous_ciphertext[1],
+                        )
+                        if secret_ref != existing.secret_ref:
+                            await self.repository.delete_secret(secret_ref)
+                    elif secret_ref:
+                        await self.repository.delete_secret(secret_ref)
+                except Exception as rollback_exc:
+                    LOGGER.error(
+                        "Failed to restore storage secret for profile %s after update failure: %s",
+                        existing.id,
+                        rollback_exc,
+                    )
+            raise
+
+        try:
+            old_driver = self.service.driver_for_profile(existing.id)
+        except ObjectStorageError:
+            old_driver = None
         self.service.register_profile(saved, driver)
+        if old_driver is not None and old_driver is not driver:
+            close_fn = getattr(old_driver, "close", None)
+            if callable(close_fn):
+                try:
+                    close_result = close_fn()
+                    if asyncio.iscoroutine(close_result):
+                        await close_result
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Failed to close replaced storage driver %s: %s", existing.id, exc
+                    )
         return (await self._profile_view(saved.id)) or saved.to_public_dict()
 
     async def test_profile(self, profile_id: str) -> dict[str, Any]:
@@ -843,6 +1010,13 @@ class StorageManager:
                 if processed_in_batch >= batch_size:
                     break
                 processed_in_batch += 1
+                await self.repository.update_migration_item(
+                    replace(
+                        item,
+                        status=StorageMigrationItemStatus.RUNNING,
+                        updated_at=utc_now_iso(),
+                    )
+                )
                 item_error = await self._migrate_single_item(migration, item)
                 if item_error == _STALE_MIGRATION_SENTINEL:
                     return await self._cancel_stale_migration(
@@ -853,6 +1027,7 @@ class StorageManager:
                     last_error = item_error
 
             latest_before_finish = await self.repository.get_migration(migration_id) or migration
+            latest_before_finish = await self._reconcile_unknown_objects(latest_before_finish)
             if not await self._is_migration_binding_current(latest_before_finish):
                 return await self._cancel_stale_migration(
                     latest_before_finish,
@@ -882,7 +1057,10 @@ class StorageManager:
                 status=final_status,
                 last_error=last_error,
             )
-            return await self.repository.update_migration(updated)
+            saved = await self.repository.update_migration(updated)
+            if final_status == StorageMigrationStatus.COMPLETED:
+                await self._restore_draining_profile_if_ready(saved)
+            return saved
 
     async def import_unknown_migration_objects(
         self,
@@ -905,14 +1083,30 @@ class StorageManager:
                 "storage_migration_stale",
                 "Stale or cancelled migration cannot import unknown objects",
             )
+        migration = await self._reconcile_unknown_objects(migration)
         if not migration.unknown_objects:
+            all_items = await self.repository.list_migration_items(migration.id)
+            if not any(
+                item.status
+                in {StorageMigrationItemStatus.PENDING, StorageMigrationItemStatus.FAILED}
+                for item in all_items
+            ):
+                completed = _recompute_migration_counts(
+                    migration,
+                    all_items,
+                    status=StorageMigrationStatus.COMPLETED,
+                    last_error="",
+                )
+                saved = await self.repository.update_migration(completed)
+                await self._restore_draining_profile_if_ready(saved)
+                return saved.to_dict()
             raise ObjectStorageError(
                 "storage_migration_no_unknown_objects",
                 "Migration has no pending unknown objects to import",
             )
 
         requested_set: set[tuple[str, str]] | None = None
-        if keys:
+        if keys is not None:
             requested_set = {
                 (str(entry.get("namespace") or "").strip("/"), str(entry.get("key") or "").strip())
                 for entry in keys
@@ -1171,11 +1365,23 @@ class StorageManager:
         if not self._initialized:
             await self.initialize()
         record = await self.repository.get_object(object_id)
-        if record is None or record.status != StorageObjectStatus.ACTIVE:
+        if (
+            record is not None
+            and record.status == StorageObjectStatus.ACTIVE
+            and record.purpose in PUBLIC_PURPOSES
+        ):
+            return record
+        alias = await self.repository.get_url_alias(f"/v1/storage/public/{object_id}")
+        if alias is None or alias.purpose not in PUBLIC_PURPOSES:
             return None
-        if record.purpose not in PUBLIC_PURPOSES:
-            return None
-        return record
+        target = await self.repository.get_object(alias.object_id)
+        if (
+            target is not None
+            and target.status == StorageObjectStatus.ACTIVE
+            and target.purpose in PUBLIC_PURPOSES
+        ):
+            return target
+        return None
 
     async def resolve_public_alias(self, alias_path: str) -> StorageObjectRecord | None:
         if not self._initialized:
@@ -1202,6 +1408,46 @@ class StorageManager:
             )
         return None
 
+    async def _restore_draining_profile_if_ready(
+        self,
+        migration: StorageMigration,
+    ) -> None:
+        profile = await self.repository.get_profile(migration.source_profile_id)
+        if profile is None or profile.status != StorageProfileStatus.DRAINING:
+            return
+        try:
+            driver = self.service.driver_for_profile(profile.id)
+        except ObjectStorageError:
+            return
+        active_objects = await self.repository.list_objects(
+            profile_id=profile.id,
+            status=StorageObjectStatus.ACTIVE,
+        )
+        pending_objects = await self.repository.list_objects(
+            profile_id=profile.id,
+            status=StorageObjectStatus.PENDING,
+        )
+        if active_objects or pending_objects:
+            return
+        migrations = await self.repository.list_migrations(limit=500)
+        for other in migrations:
+            if other.id == migration.id or other.source_profile_id != profile.id:
+                continue
+            if other.status in ACTIVE_MIGRATION_STATUSES or other.unknown_objects:
+                return
+        if any(
+            binding.profile_id == profile.id for binding in await self.repository.list_bindings()
+        ):
+            return
+        restored = replace(
+            profile,
+            status=StorageProfileStatus.ACTIVE,
+            updated_by="system",
+            updated_at=utc_now_iso(),
+        )
+        await self.repository.upsert_profile(restored)
+        self.service.register_profile(restored, driver)
+
     async def _enforce_decommission_gates(self, profile_id: str) -> None:
         bindings = await self.repository.list_bindings()
         if any(binding.profile_id == profile_id for binding in bindings):
@@ -1209,15 +1455,15 @@ class StorageManager:
                 "storage_profile_still_bound",
                 "Storage profile still has an active purpose binding",
             )
-        active_objects = await self.repository.list_objects(
+        active_count = await self.repository.count_objects(
             profile_id=profile_id,
             status=StorageObjectStatus.ACTIVE,
         )
-        pending_objects = await self.repository.list_objects(
+        pending_count = await self.repository.count_objects(
             profile_id=profile_id,
             status=StorageObjectStatus.PENDING,
         )
-        if active_objects or pending_objects:
+        if active_count or pending_count:
             raise ObjectStorageError(
                 "storage_profile_has_unmigrated_objects",
                 "Storage profile still owns unmigrated or pending objects",
@@ -1428,6 +1674,54 @@ class StorageManager:
         )
         return draining_profile, migration, items
 
+    async def _skip_for_existing_target(
+        self,
+        *,
+        migration: StorageMigration,
+        item: StorageMigrationItem,
+        current: StorageObjectRecord,
+        target: StorageObjectRecord,
+        attempts: int,
+        now: str,
+    ) -> str:
+        deleted = replace(current, status=StorageObjectStatus.DELETED, updated_at=now)
+        await self.repository.upsert_object(deleted)
+        self.service.cache_object_record(deleted)
+        if migration.purpose in PUBLIC_PURPOSES:
+            alias_paths = set(
+                _extract_public_alias_paths(
+                    purpose=migration.purpose,
+                    source_public_url=item.source_public_url,
+                    source_key=item.source_key,
+                )
+            )
+            alias_paths.add(f"/v1/storage/public/{current.id}")
+            for alias_path in alias_paths:
+                await self.repository.upsert_url_alias(
+                    StorageUrlAlias(
+                        id=f"stalias_{secrets.token_hex(12)}",
+                        alias_path=alias_path,
+                        object_id=target.id,
+                        purpose=migration.purpose,
+                        created_at=now,
+                    )
+                )
+        await self.repository.update_migration_item(
+            replace(
+                item,
+                target_profile_id=target.profile_id,
+                target_namespace=target.namespace,
+                target_key=target.key,
+                target_public_url=target.public_url,
+                expected_sha256=target.sha256,
+                status=StorageMigrationItemStatus.SKIPPED,
+                attempts=attempts,
+                last_error="目标 Profile 已存在当前对象，已保留目标版本",
+                updated_at=now,
+            )
+        )
+        return ""
+
     async def _migrate_single_item(
         self,
         migration: StorageMigration,
@@ -1440,6 +1734,7 @@ class StorageManager:
             current is None
             or current.status != StorageObjectStatus.ACTIVE
             or current.profile_id != item.source_profile_id
+            or current.namespace != item.source_namespace
             or current.key != item.source_key
             or (item.expected_sha256 and current.sha256 != item.expected_sha256)
         ):
@@ -1465,6 +1760,21 @@ class StorageManager:
                 )
             )
             return ""
+
+        target_existing = await self.repository.find_active_object(
+            profile_id=item.target_profile_id,
+            namespace=item.target_namespace,
+            key=item.target_key,
+        )
+        if target_existing is not None and target_existing.id != current.id:
+            return await self._skip_for_existing_target(
+                migration=migration,
+                item=item,
+                current=current,
+                target=target_existing,
+                attempts=attempts,
+                now=now,
+            )
 
         try:
             stored = await self.service.copy_object(
@@ -1497,6 +1807,17 @@ class StorageManager:
                     )
 
             if not await self._is_migration_binding_current(migration):
+                target_existing = await self.repository.find_active_object(
+                    profile_id=item.target_profile_id,
+                    namespace=item.target_namespace,
+                    key=item.target_key,
+                )
+                if target_existing is None:
+                    await self.service.delete_object(
+                        profile_id=item.target_profile_id,
+                        namespace=stored.namespace,
+                        key=stored.key,
+                    )
                 return _STALE_MIGRATION_SENTINEL
 
             target_public_url = stored.public_url
@@ -1521,6 +1842,7 @@ class StorageManager:
                 updated_at=now,
             )
             await self.repository.upsert_object(updated_object)
+            self.service.cache_object_record(updated_object)
 
             if migration.purpose in PUBLIC_PURPOSES:
                 for alias_path in _extract_public_alias_paths(
@@ -1561,6 +1883,21 @@ class StorageManager:
             )
             return ""
         except Exception as exc:
+            if isinstance(exc, ObjectStorageError) and exc.code == "object_key_conflict":
+                target_existing = await self.repository.find_active_object(
+                    profile_id=item.target_profile_id,
+                    namespace=item.target_namespace,
+                    key=item.target_key,
+                )
+                if target_existing is not None and target_existing.id != current.id:
+                    return await self._skip_for_existing_target(
+                        migration=migration,
+                        item=item,
+                        current=current,
+                        target=target_existing,
+                        attempts=attempts,
+                        now=now,
+                    )
             err_msg = str(exc) or exc.__class__.__name__
             await self.repository.update_migration_item(
                 StorageMigrationItem(
@@ -1871,17 +2208,26 @@ class StorageManager:
                 public_url = ""
         return size_bytes, sha256, content_type, public_url
 
-    async def _build_driver(self, profile: StorageProfile) -> ObjectStorageDriver:
+    async def _build_driver(
+        self,
+        profile: StorageProfile,
+        *,
+        secret_override: Mapping[str, Any] | None = None,
+    ) -> ObjectStorageDriver:
         cfg = dict(profile.config)
         if profile.backend == StorageBackend.LOCAL:
             mode = str(cfg.get("mode") or "filesystem").strip().lower()
             public_base_url = str(cfg.get("public_base_url") or "").strip().rstrip("/")
             if mode == "filesystem":
-                root = str(cfg.get("root") or "").strip()
-                if not root:
-                    raise ObjectStorageError(
-                        "local_root_missing", "Local filesystem root is required"
-                    )
+                root = validate_local_filesystem_root(
+                    str(cfg.get("root") or ""),
+                    forbidden_roots=(REPO_ROOT,),
+                    forbidden_files=(
+                        (Path(self.settings.local_data_path),)
+                        if self.settings.local_data_path
+                        else ()
+                    ),
+                )
                 return LocalFilesystemDriver(
                     profile_id=profile.id,
                     root=root,
@@ -1920,7 +2266,11 @@ class StorageManager:
                         schema=schema,
                         public_base_url=public_base_url,
                     )
-                secret = await self._load_secret(profile)
+                secret = (
+                    dict(secret_override)
+                    if secret_override is not None
+                    else await self._load_secret(profile)
+                )
                 dsn = str(secret.get("dsn") or "").strip()
                 return PostgresObjectStorageDriver(
                     profile_id=profile.id,
@@ -1939,7 +2289,11 @@ class StorageManager:
                 access_key_id = self.settings.artifacts.s3_access_key_id
                 secret_access_key = self.settings.artifacts.s3_secret_access_key
             else:
-                secret = await self._load_secret(profile)
+                secret = (
+                    dict(secret_override)
+                    if secret_override is not None
+                    else await self._load_secret(profile)
+                )
                 access_key_id = str(secret.get("access_key_id") or "")
                 secret_access_key = str(secret.get("secret_access_key") or "")
             client = (
@@ -1968,7 +2322,11 @@ class StorageManager:
             verify_tls = bool(cfg.get("verify_tls", True))
             conditional_create = bool(cfg.get("conditional_create_supported", True))
             range_read = bool(cfg.get("range_read_supported", True))
-            secret = await self._load_secret(profile)
+            secret = (
+                dict(secret_override)
+                if secret_override is not None
+                else await self._load_secret(profile)
+            )
             client = (
                 self._webdav_client_factory(profile, cfg)
                 if callable(self._webdav_client_factory)
@@ -2002,7 +2360,11 @@ class StorageManager:
             range_read = bool(cfg.get("range_read_supported", False))
             plugin_zip_verified = bool(cfg.get("plugin_zip_verified", False))
             verify_tls = bool(cfg.get("verify_tls", True))
-            secret = await self._load_secret(profile)
+            secret = (
+                dict(secret_override)
+                if secret_override is not None
+                else await self._load_secret(profile)
+            )
             token = str(secret.get("token") or "").strip()
             client = (
                 self._imgbed_client_factory(profile, cfg)
@@ -2177,12 +2539,6 @@ class StorageManager:
                 "verify_tls": verify_tls,
                 "public_base_url": public_base_url,
             }
-            if "conditional_create_supported" in config:
-                sanitized_webdav["conditional_create_supported"] = bool(
-                    config["conditional_create_supported"]
-                )
-            if "range_read_supported" in config:
-                sanitized_webdav["range_read_supported"] = bool(config["range_read_supported"])
             return sanitized_webdav, cleaned_secret
 
         if backend == StorageBackend.IMGBED:
@@ -2212,10 +2568,6 @@ class StorageManager:
                 "allow_private_network": allow_private,
                 "verify_tls": verify_tls,
             }
-            if "range_read_supported" in config:
-                sanitized_imgbed["range_read_supported"] = bool(config["range_read_supported"])
-            if "plugin_zip_verified" in config:
-                sanitized_imgbed["plugin_zip_verified"] = bool(config["plugin_zip_verified"])
             return sanitized_imgbed, cleaned_secret
 
         raise ObjectStorageError(

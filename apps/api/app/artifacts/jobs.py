@@ -106,9 +106,11 @@ class ArtifactJobRunner:
         runtime_result_storage: object | None = None,
         dependency_provider: DependencyAdvisoryProvider | None = None,
         publication_authorizer: PublicationAuthorizationClient | None = None,
+        storage_refresh: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.repository = repository
         self.publication_authorizer = publication_authorizer
+        self.storage_refresh = storage_refresh
         self.storage = storage
         self.prechecker = prechecker
         self.scanner = scanner
@@ -281,6 +283,12 @@ class ArtifactJobRunner:
     async def run_once(self, *, limit: int = 1) -> int:
         self._heartbeat_capacity = max(1, int(limit))
         await self._publish_worker_heartbeat(capacity=limit)
+        if self.storage_refresh is not None:
+            try:
+                await self.storage_refresh()
+            except Exception as exc:
+                LOGGER.warning("Artifact storage refresh failed; leaving jobs unclaimed: %s", exc)
+                return 0
         jobs = await self.repository.claim_jobs(
             self.worker_id,
             limit,

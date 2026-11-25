@@ -19,7 +19,6 @@ from .models import (
     StoredObject,
     build_public_url,
     guess_content_type,
-    slice_object_range,
     validate_expected_sha256,
     validate_expected_size,
     validate_namespace,
@@ -29,6 +28,33 @@ from .models import (
 )
 
 COPY_CHUNK_SIZE = 1024 * 1024
+
+
+def validate_local_filesystem_root(
+    root: str | Path,
+    *,
+    forbidden_roots: tuple[Path, ...] = (),
+    forbidden_files: tuple[Path, ...] = (),
+) -> Path:
+    raw = str(root or "").strip()
+    if not raw:
+        raise ObjectStorageError("local_root_missing", "Local filesystem root is required")
+    resolved = Path(raw).expanduser().resolve()
+    for forbidden_root in forbidden_roots:
+        root_path = forbidden_root.resolve()
+        if resolved == root_path or root_path in resolved.parents:
+            raise ObjectStorageError(
+                "local_root_inside_forbidden",
+                "Local filesystem root must be outside the source repository",
+            )
+    for forbidden_file in forbidden_files:
+        file_path = forbidden_file.resolve()
+        if resolved == file_path or resolved in file_path.parents:
+            raise ObjectStorageError(
+                "local_root_conflicts_with_market_state",
+                "Local filesystem root must not contain the market state file",
+            )
+    return resolved
 
 
 class LocalFilesystemDriver:
@@ -43,10 +69,16 @@ class LocalFilesystemDriver:
         file_mode: int = 0o640,
     ) -> None:
         self.profile_id = validate_profile_id(profile_id)
-        self.root = Path(root).resolve()
+        self.root = validate_local_filesystem_root(root)
         self.public_base_url = str(public_base_url or "").strip().rstrip("/")
         self.file_mode = file_mode
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ObjectStorageError(
+                "local_root_unavailable",
+                f"Local filesystem root is unavailable: {exc}",
+            ) from exc
 
     def capabilities(self) -> StorageCapabilities:
         return StorageCapabilities(
@@ -184,18 +216,31 @@ class LocalFilesystemDriver:
         source = self.resolve_object_path(key, namespace=normalized_ns)
         if not source.is_file():
             raise ObjectStorageError("object_missing", "Object not found")
-        if max_object_bytes is not None and source.stat().st_size > max_object_bytes:
+        size_bytes = source.stat().st_size
+        if max_object_bytes is not None and size_bytes > max_object_bytes:
             raise ObjectStorageError("object_too_large", "Object exceeds limit")
-        content = await asyncio.to_thread(_read_file_limited, source, max_object_bytes)
-        sha256 = hashlib.sha256(content).hexdigest()
-        validate_expected_size(expected_size_bytes, len(content))
-        validate_expected_sha256(expected_sha256, sha256)
-        return slice_object_range(
-            content,
-            sha256=sha256,
+        validate_expected_size(expected_size_bytes, size_bytes)
+        if start_byte > size_bytes:
+            raise ObjectStorageError("object_range_invalid", "Object range is invalid")
+        end_byte = min(size_bytes, start_byte + max_bytes)
+        if expected_sha256:
+            _, sha256 = await asyncio.to_thread(_file_size_and_sha256, source)
+            validate_expected_sha256(expected_sha256, sha256)
+        else:
+            sha256 = ""
+        with source.open("rb") as handle:
+            handle.seek(start_byte)
+            content = await asyncio.to_thread(handle.read, end_byte - start_byte)
+        if len(content) != end_byte - start_byte:
+            raise ObjectStorageError("object_range_invalid", "Object range is invalid")
+        return ObjectRange(
+            content=content,
+            size_bytes=size_bytes,
+            sha256=sha256 or expected_sha256,
             content_type=guess_content_type(key),
             start_byte=start_byte,
-            max_bytes=max_bytes,
+            end_byte=end_byte,
+            truncated=end_byte < size_bytes,
         )
 
     async def download_to_path(
@@ -390,7 +435,8 @@ def _walk_directory(base: Path, namespace: str, prefix: str) -> list[ObjectListi
         rel_key = path.relative_to(base).as_posix()
         if prefix and not rel_key.startswith(prefix):
             continue
-        size, sha256 = _file_size_and_sha256(path)
+        size = path.stat().st_size
+        sha256 = ""
         entries.append(
             ObjectListingEntry(
                 namespace=namespace,

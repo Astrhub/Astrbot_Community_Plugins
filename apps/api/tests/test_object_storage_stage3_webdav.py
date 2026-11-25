@@ -452,7 +452,7 @@ def test_webdav_non_conditional_server_uses_cas_key_and_rejects_same_name_confli
                 payload_a,
                 if_absent=True,
             )
-            assert stored.key == expected_cas_key
+            assert stored.key == "alice/mod/1.0.0/mod.zip"
             assert stored.sha256 == sha_a
 
             # Same logical key + same bytes -> idempotent return of CAS key.
@@ -461,7 +461,7 @@ def test_webdav_non_conditional_server_uses_cas_key_and_rejects_same_name_confli
                 payload_a,
                 if_absent=True,
             )
-            assert same.key == expected_cas_key
+            assert same.key == "alice/mod/1.0.0/mod.zip"
 
             # Same logical key + different bytes -> conflict, original bytes untouched!
             with pytest.raises(ObjectStorageError) as exc:
@@ -471,7 +471,12 @@ def test_webdav_non_conditional_server_uses_cas_key_and_rejects_same_name_confli
                     if_absent=True,
                 )
             assert exc.value.code == "object_key_conflict"
+            assert await driver.read_object("alice/mod/1.0.0/mod.zip") == payload_a
             assert await driver.read_object(expected_cas_key) == payload_a
+            stat = await driver.stat_object("alice/mod/1.0.0/mod.zip")
+            assert stat is not None and stat.key == "alice/mod/1.0.0/mod.zip"
+            await driver.delete_object("alice/mod/1.0.0/mod.zip")
+            assert await driver.stat_object("alice/mod/1.0.0/mod.zip") is None
         finally:
             await client.aclose()
 

@@ -149,9 +149,39 @@ class ObjectArtifactStorage:
         published_namespace: str = "",
     ) -> None:
         self.object_storage = object_storage
-        self._quarantine_namespace = quarantine_namespace
-        self._content_namespace = content_namespace
-        self._published_namespace = published_namespace
+        self._legacy_quarantine_namespace = quarantine_namespace
+        self._legacy_content_namespace = content_namespace
+        self._legacy_published_namespace = published_namespace
+
+    def _dynamic_namespace(self, purpose: StoragePurpose, fallback: str) -> str:
+        binding = self.object_storage.get_binding(purpose)
+        if binding is None:
+            return fallback
+        profile = self.object_storage.get_profile(binding.profile_id)
+        if profile is not None and profile.legacy and profile.backend == StorageBackend.LOCAL:
+            return fallback
+        return ""
+
+    @property
+    def _quarantine_namespace(self) -> str:
+        return self._dynamic_namespace(
+            StoragePurpose.ARTIFACT_QUARANTINE,
+            self._legacy_quarantine_namespace,
+        )
+
+    @property
+    def _content_namespace(self) -> str:
+        return self._dynamic_namespace(
+            StoragePurpose.ARTIFACT_QUARANTINE,
+            self._legacy_content_namespace,
+        )
+
+    @property
+    def _published_namespace(self) -> str:
+        return self._dynamic_namespace(
+            StoragePurpose.ARTIFACT_PUBLISHED,
+            self._legacy_published_namespace,
+        )
 
     async def put_quarantine(
         self,

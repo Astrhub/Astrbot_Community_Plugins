@@ -18,6 +18,14 @@ from app.config import load_settings
 from app.main import create_app
 from app.object_storage import (
     ImgBedObjectStorageDriver,
+    LocalFilesystemDriver,
+    ObjectStorageService,
+    StorageBackend,
+    StorageBinding,
+    StorageMigration,
+    StorageMigrationItem,
+    StorageMigrationItemStatus,
+    StorageProfile,
     StorageManager,
     StorageObjectRecord,
     StorageObjectStatus,
@@ -586,3 +594,364 @@ def test_p2_3_decommission_persistence_failure_preserves_secret_and_active_drive
         assert manager.service.driver_for_profile("dav-rollback") is not None
 
     asyncio.run(verify_rollback())
+
+
+def test_p1_1_refresh_loads_persisted_objects_and_public_urls(tmp_path: Path) -> None:
+    """P1-1/P1-4: A fresh manager loads persisted bindings, records, and same-origin URLs."""
+    store = InMemoryMarketStore()
+    settings = load_settings(
+        {
+            "ARTIFACTS_ENABLED": "false",
+            "OAUTH_CREDENTIAL_KEY": "stage1-refresh-master-key",
+        }
+    )
+    profile = StorageProfile(
+        id="persisted-published",
+        name="Persisted Published",
+        backend=StorageBackend.LOCAL,
+        config={"mode": "filesystem", "root": str(tmp_path / "published")},
+    )
+    binding = StorageBinding(
+        purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+        profile_id=profile.id,
+        generation=1,
+        updated_by="core-1",
+    )
+
+    async def scenario() -> None:
+        manager_1 = StorageManager(store=store, settings=settings)
+        await manager_1.repository.upsert_profile(profile)
+        await manager_1.repository.upsert_binding(binding)
+        await manager_1.initialize()
+        stored = await manager_1.service.put_object(
+            purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+            key="alice/demo/1.0.0/demo.zip",
+            data=b"published-bytes",
+            content_type="application/zip",
+        )
+
+        manager_2 = StorageManager(store=store, settings=settings)
+        await manager_2.initialize()
+        loaded_binding = manager_2.service.get_binding(StoragePurpose.ARTIFACT_PUBLISHED)
+        assert loaded_binding is not None
+        assert loaded_binding.profile_id == binding.profile_id
+        assert loaded_binding.generation == binding.generation
+        record = manager_2.service.find_active_record_by_purpose_and_key(
+            purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+            key=stored.key,
+        )
+        assert record is not None
+        assert record.sha256 == stored.sha256
+        assert (
+            manager_2.service.public_url(
+                purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+                key=stored.key,
+            )
+            == f"/v1/storage/public/{record.id}"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_p1_4_artifact_facade_switches_legacy_namespace_with_binding(
+    tmp_path: Path,
+) -> None:
+    """P1-4: The facade uses legacy namespaces only while the binding targets the legacy profile."""
+    service = ObjectStorageService()
+    legacy_root = tmp_path / "legacy"
+    modern_root = tmp_path / "modern"
+    service.register_profile(
+        StorageProfile(
+            id="legacy-quarantine",
+            name="Legacy Quarantine",
+            backend=StorageBackend.LOCAL,
+            config={"mode": "filesystem", "root": str(legacy_root)},
+            legacy=True,
+        ),
+        LocalFilesystemDriver(profile_id="legacy-quarantine", root=legacy_root),
+    )
+    service.register_profile(
+        StorageProfile(
+            id="modern-quarantine",
+            name="Modern Quarantine",
+            backend=StorageBackend.LOCAL,
+            config={"mode": "filesystem", "root": str(modern_root)},
+        ),
+        LocalFilesystemDriver(profile_id="modern-quarantine", root=modern_root),
+    )
+    service.bind_purpose(StoragePurpose.ARTIFACT_QUARANTINE, "legacy-quarantine")
+    facade = create_artifact_storage(
+        load_settings({"ARTIFACTS_ENABLED": "false"}).artifacts,
+        object_storage=service,
+    )
+
+    async def scenario() -> None:
+        await facade.put_quarantine(b"legacy", "artifacts/legacy.zip", 1024)
+        assert (legacy_root / "quarantine" / "artifacts/legacy.zip").is_file()
+
+        service.bind_purpose(StoragePurpose.ARTIFACT_QUARANTINE, "modern-quarantine")
+        await facade.put_quarantine(b"modern", "artifacts/modern.zip", 1024)
+        assert (modern_root / "artifacts/modern.zip").is_file()
+        assert not (modern_root / "quarantine" / "artifacts/modern.zip").exists()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("target_payload", [b"same-version", b"new-version"])
+def test_p1_2_target_write_wins_and_preserves_public_alias(
+    tmp_path: Path,
+    target_payload: bytes,
+) -> None:
+    """P1-2: A target write wins over the stale migration snapshot without a locator conflict."""
+    client, app = _make_app()
+    manager: StorageManager = app.state.storage_manager
+
+    for profile_id in ("migration-source", "migration-target"):
+        response = client.post(
+            "/v1/admin/storage/profiles",
+            json={
+                "id": profile_id,
+                "name": profile_id,
+                "backend": "local",
+                "config": {"mode": "filesystem", "root": str(tmp_path / profile_id)},
+            },
+        )
+        assert response.status_code == 201, response.text
+
+    source_key = "alice/target-write/1.0.0/target-write.zip"
+    old_payload = b"same-version" if target_payload == b"same-version" else b"old-version"
+
+    async def seed_source() -> str:
+        await manager.service.put_object(
+            purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+            key=source_key,
+            data=old_payload,
+            content_type="application/zip",
+        )
+        record = await manager.repository.find_active_object(
+            profile_id="migration-source",
+            namespace="",
+            key=source_key,
+        )
+        assert record is not None
+        return record.id
+
+    assert (
+        client.put(
+            "/v1/admin/storage/bindings/artifact-published",
+            json={"profile_id": "migration-source"},
+        ).status_code
+        == 200
+    )
+    source_object_id = asyncio.run(seed_source())
+
+    rebind = client.put(
+        "/v1/admin/storage/bindings/artifact-published",
+        json={"profile_id": "migration-target", "run_immediately": False},
+    )
+    assert rebind.status_code == 200, rebind.text
+    migration_id = rebind.json()["migration"]["id"]
+
+    async def seed_target() -> None:
+        await manager.service.put_object(
+            purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+            key=source_key,
+            data=target_payload,
+            content_type="application/zip",
+        )
+
+    asyncio.run(seed_target())
+    migration = asyncio.run(manager.run_migration(migration_id))
+    assert migration.status == StorageMigrationStatus.COMPLETED
+    assert migration.skipped_count == 1
+
+    detail = client.get(f"/v1/admin/storage/migrations/{migration_id}")
+    assert detail.status_code == 200
+    assert detail.json()["items"][0]["status"] == "skipped"
+
+    target_record = asyncio.run(
+        manager.repository.find_active_object(
+            profile_id="migration-target",
+            namespace="",
+            key=source_key,
+        )
+    )
+    assert target_record is not None
+    assert target_record.sha256 == hashlib.sha256(target_payload).hexdigest()
+    old_record = asyncio.run(manager.repository.get_object(source_object_id))
+    assert old_record is not None and old_record.status == StorageObjectStatus.DELETED
+    assert client.get(f"/v1/storage/public/{source_object_id}").content == target_payload
+
+    retired = client.post("/v1/admin/storage/profiles/migration-source/retire")
+    assert retired.status_code == 200, retired.text
+
+
+def test_p1_5_deleted_unknown_object_reconciles_and_restores_source(
+    tmp_path: Path,
+) -> None:
+    """P1-5: Deleting an unknown source file clears the migration hold and restores active status."""
+    client, app = _make_app()
+    source_root = tmp_path / "unknown-source"
+
+    for profile_id, root in (
+        ("unknown-source", source_root),
+        ("unknown-target", tmp_path / "unknown-target"),
+    ):
+        response = client.post(
+            "/v1/admin/storage/profiles",
+            json={
+                "id": profile_id,
+                "name": profile_id,
+                "backend": "local",
+                "config": {"mode": "filesystem", "root": str(root)},
+            },
+        )
+        assert response.status_code == 201, response.text
+
+    unknown_file = source_root / "orphan.zip"
+    unknown_file.write_bytes(b"unregistered")
+    assert (
+        client.put(
+            "/v1/admin/storage/bindings/artifact-published",
+            json={"profile_id": "unknown-source"},
+        ).status_code
+        == 200
+    )
+    rebind = client.put(
+        "/v1/admin/storage/bindings/artifact-published",
+        json={"profile_id": "unknown-target", "run_immediately": False},
+    )
+    assert rebind.status_code == 200, rebind.text
+    migration_id = rebind.json()["migration"]["id"]
+    assert rebind.json()["migration"]["unknown_objects"]
+
+    unknown_file.unlink()
+    imported = client.post(
+        f"/v1/admin/storage/migrations/{migration_id}/import-unknown",
+        json={"run_immediately": True},
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["status"] == "completed"
+    assert imported.json()["unknown_objects"] == []
+
+    profiles = client.get("/v1/admin/storage/profiles").json()["items"]
+    source_profile = next(item for item in profiles if item["id"] == "unknown-source")
+    assert source_profile["status"] == "active"
+
+
+def test_p2_1_initialize_requeues_running_migrations() -> None:
+    """P2-1: Startup recovery requeues interrupted migration tasks and items."""
+    store = InMemoryMarketStore()
+    settings = load_settings(
+        {
+            "ARTIFACTS_ENABLED": "false",
+            "OAUTH_CREDENTIAL_KEY": "stage1-recovery-master-key",
+        }
+    )
+    migration = StorageMigration(
+        id="stmig_restart",
+        purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+        source_profile_id="restart-source",
+        target_profile_id="restart-target",
+        binding_generation=1,
+        status=StorageMigrationStatus.RUNNING,
+        total_count=1,
+    )
+    item = StorageMigrationItem(
+        id="stmitem_restart",
+        migration_id=migration.id,
+        object_id="stobj_restart",
+        source_profile_id=migration.source_profile_id,
+        source_namespace="",
+        source_key="restart/file.zip",
+        source_public_url="",
+        target_profile_id=migration.target_profile_id,
+        target_namespace="",
+        target_key="restart/file.zip",
+        target_public_url="",
+        expected_sha256="",
+        status=StorageMigrationItemStatus.RUNNING,
+        attempts=1,
+    )
+
+    async def scenario() -> None:
+        manager = StorageManager(store=store, settings=settings)
+        await manager.repository.create_migration(migration, [item])
+        await manager.initialize()
+        recovered = await manager.repository.get_migration(migration.id)
+        assert recovered is not None
+        assert recovered.status == StorageMigrationStatus.QUEUED
+        recovered_items = await manager.repository.list_migration_items(migration.id)
+        assert recovered_items[0].status == StorageMigrationItemStatus.PENDING
+
+    asyncio.run(scenario())
+
+
+def test_p2_2_profile_update_resets_probe_fields_and_preserves_secret_on_failure(
+    tmp_path: Path,
+) -> None:
+    """P2-2: Profile edits cannot inject probes and failed rebuilds keep the old secret and driver."""
+    client, app = _make_app()
+    manager: StorageManager = app.state.storage_manager
+    create_res = client.post(
+        "/v1/admin/storage/profiles",
+        json={
+            "id": "webdav-edit",
+            "name": "WebDAV Edit",
+            "backend": "webdav",
+            "config": {
+                "base_url": "https://dav.example.com/dav",
+                "root_path": "packages",
+                "auth_type": "bearer",
+            },
+            "secret": {"token": "old-token"},
+        },
+    )
+    assert create_res.status_code == 201, create_res.text
+
+    probes = client.patch(
+        "/v1/admin/storage/profiles/webdav-edit",
+        json={
+            "config": {
+                "conditional_create_supported": False,
+                "range_read_supported": False,
+            }
+        },
+    )
+    assert probes.status_code == 200, probes.text
+    profile = asyncio.run(manager.repository.get_profile("webdav-edit"))
+    assert profile is not None
+    assert "conditional_create_supported" not in profile.config
+    assert "range_read_supported" not in profile.config
+    driver = manager.service.driver_for_profile("webdav-edit")
+    assert driver.capabilities().conditional_create is True
+    assert driver.capabilities().range_read is True
+
+    profile_model = asyncio.run(manager.repository.get_profile("webdav-edit"))
+    assert profile_model is not None
+    before_secret = asyncio.run(manager._load_secret(profile_model))
+    invalid = client.patch(
+        "/v1/admin/storage/profiles/webdav-edit",
+        json={
+            "config": {"base_url": "http://invalid.example.com/dav"},
+            "secret": {"token": "new-token"},
+        },
+    )
+    assert invalid.status_code == 400, invalid.text
+    profile_model = asyncio.run(manager.repository.get_profile("webdav-edit"))
+    assert profile_model is not None
+    after_secret = asyncio.run(manager._load_secret(profile_model))
+    assert after_secret == before_secret
+    assert manager.service.driver_for_profile("webdav-edit") is driver
+
+    forbidden = client.post(
+        "/v1/admin/storage/profiles",
+        json={
+            "id": "repo-root-profile",
+            "name": "Repository Root",
+            "backend": "local",
+            "config": {"mode": "filesystem", "root": str(Path(__file__).resolve().parents[2])},
+        },
+    )
+    assert forbidden.status_code == 400, forbidden.text
+    assert forbidden.json()["code"] == "local_root_inside_forbidden"

@@ -188,16 +188,70 @@ class S3ObjectStorageDriver:
         validate_expected_size(expected_size_bytes, stored.size_bytes)
         if expected_sha256 and stored.sha256:
             validate_expected_sha256(expected_sha256, stored.sha256)
-        content = await self._get_object_bytes(object_key, max_bytes=max_object_bytes)
-        validate_expected_size(stored.size_bytes, len(content))
-        sha256 = hashlib.sha256(content).hexdigest()
-        validate_expected_sha256(expected_sha256, sha256)
-        return slice_object_range(
-            content,
-            sha256=sha256,
+        end_byte = min(stored.size_bytes, start_byte + max_bytes)
+        if start_byte > stored.size_bytes:
+            raise ObjectStorageError("object_range_invalid", "Object range is invalid")
+        if start_byte == end_byte:
+            return ObjectRange(
+                content=b"",
+                size_bytes=stored.size_bytes,
+                sha256=stored.sha256 or expected_sha256,
+                content_type=stored.content_type or guess_content_type(key),
+                start_byte=start_byte,
+                end_byte=end_byte,
+                truncated=end_byte < stored.size_bytes,
+            )
+        if expected_sha256 and not stored.sha256:
+            content = await self._get_object_bytes(object_key, max_bytes=max_object_bytes)
+            validate_expected_size(expected_size_bytes, len(content))
+            sha256 = hashlib.sha256(content).hexdigest()
+            validate_expected_sha256(expected_sha256, sha256)
+            return slice_object_range(
+                content,
+                sha256=sha256,
+                content_type=stored.content_type or guess_content_type(key),
+                start_byte=start_byte,
+                max_bytes=max_bytes,
+            )
+        try:
+            response = await asyncio.to_thread(
+                self.client.get_object,
+                Bucket=self.bucket,
+                Key=object_key,
+                Range=f"bytes={start_byte}-{end_byte - 1}",
+            )
+            body = response["Body"]
+            try:
+                content = await asyncio.to_thread(body.read)
+            finally:
+                close = getattr(body, "close", None)
+                if close:
+                    close()
+        except ClientError as exc:
+            if _is_not_found(exc):
+                raise ObjectStorageError("object_missing", "Object not found") from exc
+            raise
+        total_size = stored.size_bytes
+        content_range = str(response.get("ContentRange") or response.get("content-range") or "")
+        if "/" in content_range:
+            raw_total = content_range.rsplit("/", 1)[1]
+            if raw_total.isdigit():
+                total_size = int(raw_total)
+        validate_expected_size(expected_size_bytes, total_size)
+        expected_length = min(total_size, start_byte + max_bytes) - start_byte
+        if len(content) != expected_length:
+            raise ObjectStorageError(
+                "s3_range_length_mismatch",
+                "S3 range response length does not match the requested byte slice",
+            )
+        return ObjectRange(
+            content=content,
+            size_bytes=total_size,
+            sha256=stored.sha256 or expected_sha256,
             content_type=stored.content_type or guess_content_type(key),
             start_byte=start_byte,
-            max_bytes=max_bytes,
+            end_byte=start_byte + len(content),
+            truncated=start_byte + len(content) < total_size,
         )
 
     async def download_to_path(

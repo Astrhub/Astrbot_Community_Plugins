@@ -89,7 +89,7 @@ export interface StorageMigrationEntry {
   target_key: string;
   target_public_url: string;
   expected_sha256: string;
-  status: "pending" | "completed" | "failed" | "skipped";
+  status: "pending" | "running" | "completed" | "failed" | "skipped";
   attempts: number;
   last_error: string;
   created_at: string;

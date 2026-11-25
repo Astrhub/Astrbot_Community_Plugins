@@ -6,7 +6,7 @@ import asyncio
 import os
 import secrets
 import tempfile
-from collections.abc import AsyncIterable, Mapping
+from collections.abc import AsyncIterable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +70,63 @@ class ObjectStorageService:
         self._bindings.clear()
         self._objects.clear()
         self._object_index.clear()
+
+    def replace_bindings(self, bindings: Iterable[StorageBinding]) -> None:
+        self._bindings = {binding.purpose: binding for binding in bindings}
+
+    def replace_object_records(self, records: Iterable[StorageObjectRecord]) -> None:
+        objects = {record.id: record for record in records}
+        index: dict[tuple[str, str, str], str] = {}
+        for record in objects.values():
+            if record.status == StorageObjectStatus.DELETED:
+                continue
+            locator = (record.profile_id, record.namespace, record.key)
+            previous_id = index.get(locator)
+            if previous_id is None:
+                index[locator] = record.id
+                continue
+            previous = objects[previous_id]
+            if (
+                record.status == StorageObjectStatus.ACTIVE
+                and previous.status != StorageObjectStatus.ACTIVE
+            ):
+                index[locator] = record.id
+            elif record.status == previous.status and (record.updated_at, record.id) > (
+                previous.updated_at,
+                previous.id,
+            ):
+                index[locator] = record.id
+        self._objects = objects
+        self._object_index = index
+
+    def cache_object_record(self, record: StorageObjectRecord) -> None:
+        self._objects[record.id] = record
+        locator = (record.profile_id, record.namespace, record.key)
+        if record.status == StorageObjectStatus.DELETED:
+            if self._object_index.get(locator) == record.id:
+                self._object_index.pop(locator, None)
+            return
+        self._object_index[locator] = record.id
+
+    def find_active_record_by_purpose_and_key(
+        self,
+        *,
+        purpose: StoragePurpose,
+        key: str,
+        namespace: str | None = None,
+    ) -> StorageObjectRecord | None:
+        candidates = [
+            record
+            for record in self._objects.values()
+            if record.status == StorageObjectStatus.ACTIVE
+            and record.purpose == purpose
+            and record.key == key
+            and (namespace is None or record.namespace == namespace)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item.updated_at, item.id), reverse=True)
+        return candidates[0]
 
     def set_binding(self, binding: StorageBinding) -> StorageBinding:
         self._bindings[binding.purpose] = binding
@@ -438,6 +495,44 @@ class ObjectStorageService:
         profile_id: str = "",
         namespace: str = "",
     ) -> str:
+        record = None
+        if purpose is not None:
+            record = self.find_active_record_by_purpose_and_key(
+                purpose=purpose,
+                key=key,
+                namespace=namespace,
+            )
+            if record is None and not namespace:
+                record = self.find_active_record_by_purpose_and_key(
+                    purpose=purpose,
+                    key=key,
+                    namespace=None,
+                )
+        if record is not None:
+            try:
+                record_driver = self.driver_for_profile(record.profile_id)
+            except ObjectStorageError:
+                record_driver = None
+            if record_driver is not None:
+                public_url_for_sha256 = getattr(record_driver, "public_url_for_sha256", None)
+                if record.sha256 and callable(public_url_for_sha256):
+                    try:
+                        return public_url_for_sha256(
+                            record.key,
+                            namespace=record.namespace,
+                            sha256=record.sha256,
+                        )
+                    except ObjectStorageError as exc:
+                        if exc.code != "public_url_unconfigured":
+                            raise
+                try:
+                    return record_driver.public_url(record.key, namespace=record.namespace)
+                except ObjectStorageError as exc:
+                    if exc.code != "public_url_unconfigured":
+                        raise
+            if record.public_url:
+                return record.public_url
+
         driver, _ = self._resolve_target(purpose=purpose, profile_id=profile_id)
         try:
             return driver.public_url(key, namespace=namespace)

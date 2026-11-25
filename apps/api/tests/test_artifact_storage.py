@@ -61,8 +61,18 @@ class FakeS3Client:
         content, _ = self.objects[(bucket, key)]
         Path(filename).write_bytes(content)
 
-    def get_object(self, *, Bucket: str, Key: str):
+    def get_object(self, *, Bucket: str, Key: str, **kwargs):
         content, _ = self.objects[(Bucket, Key)]
+        range_header = str(kwargs.get("Range") or "")
+        if range_header:
+            start_s, end_s = range_header.removeprefix("bytes=").split("-", 1)
+            start = int(start_s)
+            end = int(end_s) if end_s else len(content) - 1
+            end = min(end, len(content) - 1)
+            return {
+                "Body": io.BytesIO(content[start : end + 1]),
+                "ContentRange": f"bytes {start}-{end}/{len(content)}",
+            }
         return {"Body": io.BytesIO(content)}
 
     def delete_object(self, *, Bucket: str, Key: str):
