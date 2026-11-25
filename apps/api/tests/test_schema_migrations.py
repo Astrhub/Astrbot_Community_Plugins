@@ -157,6 +157,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20261122_010_plugin_author_name_identity",
         "20261124_011_email_accounts_and_oauth_identities",
         "20261124_012_git_providers_and_oauth_credentials",
+        "20261125_013_object_storage",
     ]
     sql = migrations[0].sql
     for table in (
@@ -248,6 +249,26 @@ def test_git_providers_migration_declares_credentials_bindings_and_git_source_ty
     assert "CHECK (source_type IN ('upload', 'github', 'git'))" in sql
 
 
+def test_object_storage_migration_declares_profiles_migrations_aliases_and_blobs() -> None:
+    sql = discover_schema_migrations()[12].sql
+
+    for table in (
+        "market_storage_secrets",
+        "market_storage_profiles",
+        "market_storage_bindings",
+        "market_storage_objects",
+        "market_storage_url_aliases",
+        "market_storage_migrations",
+        "market_storage_migration_items",
+        "market_storage_blob_objects",
+        "market_storage_blob_chunks",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    assert "CHECK (purpose IN ('artifact-published', 'avatar'))" in sql
+    assert "market_storage_objects_active_locator_idx" in sql
+    assert "REFERENCES market_storage_blob_objects(id) ON DELETE CASCADE" in sql
+
+
 def test_artifact_migrations_against_postgres() -> None:
     database_url = os.getenv("ASTRBOT_TEST_DATABASE_URL", "")
     if not database_url:
@@ -280,6 +301,7 @@ async def run_artifact_migrations(database_url: str) -> None:
             "20261122_010_plugin_author_name_identity",
             "20261124_011_email_accounts_and_oauth_identities",
             "20261124_012_git_providers_and_oauth_credentials",
+            "20261125_013_object_storage",
         ]
         assert second == []
         table_names = await connection.fetch(

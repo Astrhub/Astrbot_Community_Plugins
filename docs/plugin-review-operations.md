@@ -79,6 +79,7 @@ Compose 默认将 Runner 指向 `/run/user/10001/docker.sock`、UID/GID `10001:1
 - **管理员白名单直发（`cdn_whitelist`）**：仅限 `admin` / `core_admin` 在提交或 `PATCH /v1/plugins/{id}/cdn` 中为本人名下的 CDN 插件启用。启用后仍会完整执行 `PrecheckStage` 压缩包完整性与元数据校验，随后由 `artifact-worker` 实时复核插件所有者与提交者的管理员角色并写入 `review_decisions`（`action="auto_approve"`、`metadata={"cdn_whitelist": true}`），直接进入 `publish` 阶段；若管理员被降权或关闭白名单，将自动回到常规包审查流程。
 - **自动跟踪与发布复核**：后台元数据同步发现新版本后会自动送审；GitHub 优先抓取正式 Release ZIP 资产，第三方 OAuth 平台（GitLab.com / Gitee / AtomGit / Gitea）在通过持久凭据自动刷新并复核 `market_git_repository_bindings` 有效性与代次后，固定默认分支 40 位 commit SHA 拉取官方 HTTPS 归档（`source_type='git'`）。任务按版本去重；若管理员通过 `/v1/admin/git-bindings/{id}/revoke` 或 `transfer` 撤销或转移仓库绑定，旧代次待发布任务会被立即阻断。发布事务提交前会再次核对 CDN 开关、授权代次与绑定状态。
 - **历史迁移兼容**：迁移 `20260927_007_optional_cdn` 为既有已发布 artifact 的插件保留开启状态，其余插件默认关闭；缺少完整授权快照的历史订阅保留既有包，后续新版本送审需重新开启并完成仓库权限授权。
+- **多存储后端切换与旧服务退役**：核心管理员可在 `/admin/settings` 的“基础设施”标签页管理多套对象存储 Profile（本地文件系统 / SQLite / PostgreSQL、S3/R2、WebDAV、CloudFlare ImgBed）并按 `artifact-quarantine`、`artifact-published`、`avatar` 三个用途独立绑定。切换绑定后，新写入立即切向目标 Profile，历史对象由市场后台迁移队列逐项复制、校验 SHA-256 与 Range，并为公开对象写入 `market_storage_url_aliases` 以保持 `/packages/...` 历史下载链接可用。迁移中遇到异常可暂停/继续或仅重试失败项；如需回滚，停止新批次后未迁移对象留在源 Profile，已迁移对象可按迁移条目记录逐项切回。旧服务下线前必须先确认无活动绑定、无未迁移对象、无未完成任务且已人工处理所有 `unknown_objects`，再通过 `retire` 撤销凭据与停止市场访问（不会自动删除远端历史文件），外部旧服务停机与清理作为独立部署步骤执行。
 
 ## 人工审查、重跑与 ClamAV 时区
 

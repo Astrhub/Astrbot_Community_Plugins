@@ -14,6 +14,7 @@ from ..config import (
     Settings,
     runtime_image_digest,
 )
+from ..object_storage.models import StoragePurpose
 from ..runtime_runner.storage import LocalRuntimeResultWriter
 from .advisory import (
     DependencyAdvisoryProvider,
@@ -61,6 +62,8 @@ class ArtifactRuntime:
     generation: int = 0
     repository: Any | None = None
     storage: Any | None = None
+    object_storage: Any | None = None
+    storage_refresh: Any | None = None
     service: Any | None = None
     job_runner: Any | None = None
     _component_errors: list[str] = field(default_factory=list)
@@ -100,7 +103,19 @@ class ArtifactRuntime:
                     if hasattr(store, "_pool")
                     else InMemoryArtifactRepository(store)
                 )
-                storage = create_artifact_storage(self.config)
+                shared_object_storage = self.object_storage
+                if shared_object_storage is not None and not (
+                    shared_object_storage.get_binding(StoragePurpose.ARTIFACT_QUARANTINE)
+                    is not None
+                    and shared_object_storage.get_binding(StoragePurpose.ARTIFACT_PUBLISHED)
+                    is not None
+                ):
+                    shared_object_storage = None
+                storage = create_artifact_storage(
+                    self.config,
+                    object_storage=shared_object_storage,
+                    master_key=self.settings.oauth_credential_key,
+                )
                 service = ArtifactService(
                     repository=repository,
                     storage=storage,
@@ -163,6 +178,7 @@ class ArtifactRuntime:
                         self.settings.artifact_authorization_url,
                         self.settings.artifact_authorization_token,
                     ),
+                    storage_refresh=self.storage_refresh,
                 )
                 self.attach_components(
                     repository=repository,
@@ -211,9 +227,15 @@ class ArtifactRuntime:
         storage: Any,
         service: Any,
         job_runner: Any,
+        object_storage: Any | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
+        self.object_storage = (
+            object_storage
+            if object_storage is not None
+            else getattr(storage, "object_storage", None)
+        )
         self.service = service
         self.job_runner = job_runner
         self._component_errors.clear()
@@ -478,6 +500,8 @@ def build_artifact_runtime(
     *,
     allow_in_memory_artifacts: bool = True,
     worker_execution_enabled: bool = False,
+    object_storage: Any | None = None,
+    storage_refresh: Any | None = None,
 ) -> ArtifactRuntime:
     """Build the shared runtime shell without starting an in-process worker."""
     return ArtifactRuntime(
@@ -488,6 +512,8 @@ def build_artifact_runtime(
         github_api_token=settings.github_api_token,
         allow_in_memory_artifacts=allow_in_memory_artifacts,
         worker_execution_enabled=worker_execution_enabled,
+        object_storage=object_storage,
+        storage_refresh=storage_refresh,
     )
 
 

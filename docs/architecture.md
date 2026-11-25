@@ -76,6 +76,7 @@ flowchart LR
 | `env_file.py` | `.env` 文件解析与写回工具（供一次性 `/v1/setup` 使用） |
 | `schema_migrations.py` / `migrations/` | 带 SHA-256 checksum 校验与 PostgreSQL advisory lock 的版本化数据库迁移 |
 | `artifacts/` | 不可变插件包状态机、存储抽象、预检、静态/恶意软件/依赖/LLM 审查、人工复核、发布、通知与独立 `artifact-worker` |
+| `object_storage/` | 多 Profile 通用对象存储层（本地文件系统 / SQLite / PostgreSQL 分块、S3/R2、WebDAV、CloudFlare ImgBed）、HKDF 凭据加密、用途绑定、后台迁移队列、同源公开读取与 `/packages` 历史别名兼容 |
 | `runtime_runner/` | 独立 `runtime-runner` 服务、Docker 执行器、受限安装网络校验与一次性探针入口 |
 
 ### 启动与生命周期
@@ -96,9 +97,9 @@ create_app(settings, store)
 
 `lifespan` 负责管理启动与关闭顺序：
 
-- **API 启动**：执行 `store.connect()`（PostgreSQL 模式下同步执行版本化迁移，本地模式下加载或初始化 JSON 文件并清理过期会话）→ 初始化 artifact 控制面组件（不启动进程内审查循环）→ 引导或加载核心管理员账号 → 启动后台 GitHub 元数据同步任务。
+- **API 启动**：执行 `store.connect()`（PostgreSQL 模式下同步执行版本化迁移，本地模式下加载或初始化 JSON 文件并清理过期会话）→ 初始化 `StorageManager` 对象存储注册与遗留配置映射 → 初始化 artifact 控制面组件（不启动进程内审查循环）→ 引导或加载核心管理员账号 → 启动后台 GitHub 元数据同步任务与存储迁移工作循环。
 - **独立 Worker**：`python -m app.artifacts.worker` 通过 PostgreSQL lease 与 `FOR UPDATE SKIP LOCKED` 领取待处理任务；租约超时后可由其他实例接管。
-- **优雅关闭**：API 取消元数据同步任务并关闭 artifact 运行时与存储连接；Worker 停止领取新任务并释放连接。
+- **优雅关闭**：API 取消元数据同步与存储迁移任务并关闭 artifact 运行时、`StorageManager` 与存储连接；Worker 停止领取新任务并释放连接。
 
 ### 存储模式与热切换
 
@@ -129,7 +130,7 @@ create_app(settings, store)
 | `market_api_keys` | `id` | `name`、`user_id`（FK）、`scopes`（`jsonb`）、`key`（UNIQUE） |
 | `market_options` | `option_key` | `option_value`，存储运行时站点、OAuth、市场策略与邮件配置 |
 
-版本化迁移另建账号扩展与插件包审查体系表，包括 `market_oauth_identities`、`market_oauth_credentials`（由 `OAUTH_CREDENTIAL_KEY` 加密保存各平台 OAuth 访问与刷新令牌）、`market_git_repository_bindings`（记录第三方仓库归属绑定、代次与撤销/转移审计）、`plugin_artifacts`（`source_type` 支持 `upload` / `github` / `git`）、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`review_comments`、`review_policies`、`plugin_cdn_subscriptions`、`artifact_jobs`、`outbox_events` 与 `market_schema_migrations`。`market_plugins.repo_version` 随仓库元数据更新，`current_artifact_id` 仅由发布或下架事务更新。历史迁移脚本的 checksum 一旦被篡改，服务将拒绝启动。
+版本化迁移另建账号扩展、通用对象存储与插件包审查体系表，包括 `market_oauth_identities`、`market_oauth_credentials`（由 `OAUTH_CREDENTIAL_KEY` 加密保存各平台 OAuth 访问与刷新令牌）、`market_git_repository_bindings`（记录第三方仓库归属绑定、代次与撤销/转移审计）、`market_storage_secrets`、`market_storage_profiles`、`market_storage_bindings`、`market_storage_objects`、`market_storage_url_aliases`、`market_storage_migrations`、`market_storage_migration_items`、`market_storage_blob_objects` / `market_storage_blob_chunks`（分块对象表）、`plugin_artifacts`（`source_type` 支持 `upload` / `github` / `git`）、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`review_comments`、`review_policies`、`plugin_cdn_subscriptions`、`artifact_jobs`、`outbox_events` 与 `market_schema_migrations`。`market_plugins.repo_version` 随仓库元数据更新，`current_artifact_id` 仅由发布或下架事务更新。历史迁移脚本的 checksum 一旦被篡改，服务将拒绝启动。
 
 关键不变式包括：`(plugin_id, archive_sha256)` 幂等、已发布 `(plugin_id, normalized_version)` 唯一、隔离与发布对象 key 唯一、人工决策与任务 `idempotency_key` 唯一。发布事务提交前会再次锁定插件与 artifact 记录，并校验仓库版本与 CDN 开关。
 
@@ -163,6 +164,7 @@ create_app(settings, store)
 | `GET` | `/v1/plugins/{id}/logo` · `/v1/plugins/{id}/readme-asset` | 代理海外平台（`GitLab.com` / `Gitea`）插件 Logo 与 README 仓库内图片（`public, max-age=3600`） |
 | `GET` | `/v1/authors` | 获取公开作者名及是否有已上架插件 |
 | `GET` | `/v1/authors/{username}/plugins` | 获取指定作者的已上架插件列表 |
+| `GET` / `HEAD` | `/v1/storage/public/{object_id}` · `/packages/{alias_key}` | 同源公开对象与历史插件包别名读取（支持 `Range`、`ETag` 与 `public, max-age=3600`，拒绝隔离区与路径穿越） |
 | `GET` | `/v1/authors/{username}/avatar` | 代理海外来源公开作者头像（严格域名白名单与栅格图片校验，`public, max-age=3600`） |
 | `GET` | `/v1/announcements` | 公告列表 |
 | `GET` | `/plugins.json` · `/plugins-md5.json` | AstrBot 插件源 Feed 与 MD5 摘要 |
