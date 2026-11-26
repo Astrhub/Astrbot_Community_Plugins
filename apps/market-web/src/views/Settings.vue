@@ -662,7 +662,7 @@
                     </div>
                     <div class="infra-item">
                       <span>数据文件</span>
-                      <n-tag type="info" :bordered="false">
+                      <n-tag type="info" :bordered="false" :title="setupStatus.local_data_path">
                         {{ setupStatus.local_data_path || "本地数据文件" }}
                       </n-tag>
                     </div>
@@ -1540,9 +1540,15 @@ h1 {
   min-height: 46px;
 }
 
+.settings-tabs :deep(.n-tabs-pane-wrapper),
+.settings-tabs :deep(.n-tab-pane) {
+  min-width: 0;
+}
 .settings-tab-content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
+  min-width: 0;
 }
 
 .settings-section {
@@ -1551,6 +1557,8 @@ h1 {
   border: 1px solid var(--border-base);
   border-radius: 8px;
   box-shadow: var(--shadow-sm);
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .section-title {
@@ -1607,6 +1615,22 @@ h1 {
   background: var(--bg-hover);
   border: 1px solid var(--border-base);
   border-radius: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.infra-item :deep(.n-tag) {
+  max-width: 100%;
+  height: auto;
+  min-height: var(--n-height);
+  padding-block: 4px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.infra-item :deep(.n-tag__content) {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .infra-note {
@@ -1729,6 +1753,8 @@ h1 {
   gap: 10px;
   color: var(--text-secondary);
   line-height: 1.5;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .secret-status-text {
@@ -1736,6 +1762,10 @@ h1 {
 }
 
 @media (max-width: 760px) {
+  .settings-section {
+    padding: 16px;
+  }
+
   .header-content {
     align-items: flex-start;
     flex-direction: column;

@@ -382,6 +382,11 @@ onBeforeUnmount(releaseObjectUrl);
   flex-direction: column;
 }
 
+.avatar-cropper-modal > .n-card-header,
+.avatar-cropper-modal > .n-card__footer {
+  flex-shrink: 0;
+}
+
 .avatar-cropper-modal > .n-card__content {
   overflow-y: auto;
   min-height: 0;

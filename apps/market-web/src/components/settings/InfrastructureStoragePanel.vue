@@ -299,7 +299,7 @@
       v-model:show="profileModalOpen"
       preset="card"
       :title="editingProfile ? `编辑存储配置：${editingProfile.id}` : '新增存储配置'"
-      style="max-width: 560px"
+      class="storage-modal"
     >
       <div class="modal-form">
         <n-form-item v-if="!editingProfile" label="配置 ID">
@@ -504,7 +504,7 @@
       v-model:show="bindConfirmOpen"
       preset="card"
       title="确认切换存储用途绑定"
-      style="max-width: 480px"
+      class="storage-modal storage-modal--compact"
     >
       <div v-if="pendingBindPurpose" class="confirm-body">
         <p>
@@ -536,7 +536,7 @@
       v-model:show="decommissionConfirmOpen"
       preset="card"
       :title="decommissionAction === 'retire' ? '确认退役存储配置' : '确认移除存储配置'"
-      style="max-width: 480px"
+      class="storage-modal storage-modal--compact"
     >
       <div v-if="decommissionTarget" class="confirm-body">
         <p v-if="decommissionAction === 'retire'">
@@ -1280,9 +1280,20 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.settings-section {
+  padding: 22px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  min-width: 0;
+}
+
 .storage-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 20px;
+  min-width: 0;
 }
 
 .storage-header {
@@ -1305,8 +1316,10 @@ onMounted(() => {
 
 .storage-subsection {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   margin-top: 12px;
+  min-width: 0;
 }
 
 .storage-subsection h3 {
@@ -1317,7 +1330,7 @@ onMounted(() => {
 
 .binding-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -1329,12 +1342,16 @@ onMounted(() => {
   padding: 14px;
   background: var(--bg-surface);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+  min-width: 0;
 }
 
 .binding-meta {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
+  min-width: 0;
 }
 
 .binding-title {
@@ -1352,6 +1369,9 @@ onMounted(() => {
   margin: 0;
   font-size: 12px;
   color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .binding-controls {
@@ -1370,12 +1390,16 @@ onMounted(() => {
 
 .backend-groups {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
 }
 
 .backend-group {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
+  min-width: 0;
 }
 
 .backend-group-header {
@@ -1398,7 +1422,9 @@ onMounted(() => {
 .profile-list,
 .migration-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+  min-width: 0;
 }
 
 .profile-card {
@@ -1409,6 +1435,7 @@ onMounted(() => {
 
 .profile-main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
 }
@@ -1419,12 +1446,21 @@ onMounted(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.profile-title-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .profile-id {
   font-family: var(--font-family-mono);
   font-size: 12px;
   color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .profile-actions,
@@ -1440,26 +1476,37 @@ onMounted(() => {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .migration-route {
   font-family: var(--font-family-mono);
   font-size: 12px;
   color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .migration-error {
   margin: 0;
   font-size: 12px;
   color: var(--error-color);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .migration-detail {
   border-top: 1px solid var(--border-base);
   padding-top: 10px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   font-size: 12px;
+  min-width: 0;
+  max-height: 360px;
+  overflow-y: auto;
 }
 
 .detail-block ul {
@@ -1467,34 +1514,74 @@ onMounted(() => {
   padding-left: 18px;
 }
 
-.modal-form {
-  display: grid;
-  gap: 4px;
+.detail-block {
+  min-width: 0;
 }
 
-.modal-footer-actions {
+.detail-block code,
+.detail-block li {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+:global(.storage-modal) {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+
+:global(.storage-modal--compact) {
+  width: min(480px, calc(100vw - 32px));
+}
+
+:global(.storage-modal > .n-card-header),
+:global(.storage-modal > .n-card__footer) {
+  flex-shrink: 0;
+}
+
+:global(.storage-modal > .n-card__content) {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+:global(.storage-modal .modal-form) {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+:global(.storage-modal .modal-footer-actions) {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.confirm-body {
+:global(.storage-modal .confirm-body) {
   display: grid;
   gap: 8px;
   line-height: 1.6;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.confirm-body p {
+:global(.storage-modal .confirm-body p) {
   margin: 0;
 }
 
 @media (max-width: 760px) {
+  .settings-section {
+    padding: 16px;
+  }
   .profile-card {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .binding-controls {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

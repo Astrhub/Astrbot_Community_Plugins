@@ -217,6 +217,8 @@ const emit = defineEmits(["save"]);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--card-color);
+  box-shadow: var(--shadow-sm);
+  min-width: 0;
 }
 
 .section-heading,
@@ -264,6 +266,8 @@ const emit = defineEmits(["save"]);
 .preference-panel,
 .preference-group {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
 }
 
 .preference-panel {
@@ -333,13 +337,19 @@ const emit = defineEmits(["save"]);
   margin-top: 18px;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   .email-target {
     grid-template-columns: 32px minmax(0, 1fr);
   }
 
   .email-target :deep(.n-input) {
     grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 640px) {
+  .settings-section {
+    padding: 16px;
   }
 
   .preference-row {

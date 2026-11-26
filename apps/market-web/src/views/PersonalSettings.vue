@@ -658,9 +658,16 @@ onMounted(async () => {
   min-height: 46px;
 }
 
+.profile-tabs :deep(.n-tabs-pane-wrapper),
+.profile-tabs :deep(.n-tab-pane) {
+  min-width: 0;
+}
+
 .profile-tab-content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
+  min-width: 0;
 }
 
 @media (max-width: 640px) {

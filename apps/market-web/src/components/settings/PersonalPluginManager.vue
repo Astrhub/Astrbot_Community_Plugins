@@ -447,7 +447,13 @@ function savePlugin(plugin: Plugin): void {
 
 <style scoped>
 .plugin-manager {
+  padding: 22px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
   min-width: 0;
+  box-sizing: border-box;
 }
 
 .plugin-toolbar {
@@ -467,6 +473,8 @@ function savePlugin(plugin: Plugin): void {
 .pm-row {
   padding: 16px 0;
   border-bottom: 1px solid var(--border-base);
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .pm-head {
@@ -619,9 +627,12 @@ function savePlugin(plugin: Plugin): void {
   margin: 0;
   color: var(--text-tertiary);
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .pm-editor {
+  min-width: 0;
+  box-sizing: border-box;
   margin-top: 14px;
   padding: 2px 18px 14px;
   background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-card));
@@ -630,6 +641,8 @@ function savePlugin(plugin: Plugin): void {
 }
 
 .field {
+  min-width: 0;
+  box-sizing: border-box;
   padding: 12px 0;
   border-bottom: 1px solid color-mix(in srgb, var(--border-base) 72%, transparent);
 }
@@ -660,6 +673,12 @@ function savePlugin(plugin: Plugin): void {
   .pm-actions {
     grid-column: 2;
     flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .plugin-manager {
+    padding: 16px;
   }
 }
 
