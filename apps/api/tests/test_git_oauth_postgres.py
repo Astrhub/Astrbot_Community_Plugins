@@ -173,6 +173,32 @@ def test_gitlab_oauth_timestamps_against_postgres() -> None:
             assert muted is not None
             assert muted["muted_until"] == mute_until.isoformat().replace("+00:00", "Z")
 
+            stored_cred = await store.get_oauth_credential(credential_ref)
+            assert stored_cred is not None
+            assert (
+                await store.invalidate_oauth_credential(
+                    identity["id"],
+                    credential_ref,
+                    expected_ciphertext="stale-ciphertext",
+                )
+                is False
+            )
+            assert await store.get_oauth_credential(credential_ref) is not None
+            assert (
+                await store.invalidate_oauth_credential(
+                    identity["id"],
+                    credential_ref,
+                    expected_ciphertext=str(stored_cred["ciphertext"]),
+                )
+                is True
+            )
+            assert await store.get_oauth_credential(credential_ref) is None
+            identities_after = await store.list_oauth_identities("owner-1")
+            updated_identity = next(
+                item for item in identities_after if item["id"] == identity["id"]
+            )
+            assert updated_identity["rotation_status"] == "reauth_required"
+
     asyncio.run(scenario())
 
 
@@ -323,14 +349,16 @@ def test_pg_store_converts_iso_timestamps_for_asyncpg() -> None:
             args for query, args in conn.calls if "INSERT INTO market_users" in query
         )
         assert isinstance(create_user_call[3], datetime)
+        assert create_user_call[3] == datetime(2026, 11, 26, 23, 10, 0, tzinfo=UTC)
 
         await store.set_user_password(
             "user-1",
             "hash-2",
-            verify_email_at="2026-11-26T23:11:00Z",
+            verify_email_at="2026-11-27T07:11:00+08:00",
         )
         set_pw_call = next(args for query, args in conn.calls if "SET password_hash = $2" in query)
         assert isinstance(set_pw_call[3], datetime)
+        assert set_pw_call[3] == datetime(2026, 11, 26, 23, 11, 0, tzinfo=UTC)
 
         await store.update_user_email(
             "user-1",
@@ -339,6 +367,7 @@ def test_pg_store_converts_iso_timestamps_for_asyncpg() -> None:
         )
         update_email_call = next(args for query, args in conn.calls if "SET email = $2" in query)
         assert isinstance(update_email_call[2], datetime)
+        assert update_email_call[2] == datetime(2026, 11, 26, 23, 12, 0, tzinfo=UTC)
 
         await store.mute_user(
             "user-1",
@@ -348,6 +377,7 @@ def test_pg_store_converts_iso_timestamps_for_asyncpg() -> None:
         )
         mute_call = next(args for query, args in conn.calls if "SET muted_until" in query)
         assert isinstance(mute_call[1], datetime)
+        assert mute_call[1] == datetime(2026, 11, 27, 23, 12, 0, tzinfo=UTC)
 
         with pytest.raises(ValueError, match="Invalid OAuth timestamp"):
             await store.upsert_git_repository_binding(
@@ -357,5 +387,95 @@ def test_pg_store_converts_iso_timestamps_for_asyncpg() -> None:
                 provider="github",
                 verified_at="not-a-timestamp",
             )
+
+    asyncio.run(scenario())
+
+
+def test_pg_store_invalidate_oauth_credential_is_atomic_and_checks_ciphertext() -> None:
+    class FakeTransaction:
+        def __init__(self, conn: FakeConnection) -> None:
+            self._conn = conn
+
+        async def __aenter__(self) -> None:
+            self._conn.tx_depth += 1
+
+        async def __aexit__(self, *args: object) -> None:
+            self._conn.tx_depth -= 1
+
+    class FakeConnection:
+        def __init__(self, current_ciphertext: str) -> None:
+            self.current_ciphertext = current_ciphertext
+            self.tx_depth = 0
+            self.calls: list[tuple[int, str, tuple[object, ...]]] = []
+
+        def transaction(self) -> FakeTransaction:
+            return FakeTransaction(self)
+
+        async def fetchval(self, query: str, *args: object) -> object:
+            self.calls.append((self.tx_depth, query, args))
+            if "DELETE FROM market_oauth_credentials" in query:
+                ref, expected = args
+                if self.current_ciphertext == expected:
+                    self.current_ciphertext = ""
+                    return ref
+                return None
+            return None
+
+        async def execute(self, query: str, *args: object) -> str:
+            self.calls.append((self.tx_depth, query, args))
+            return "UPDATE 1"
+
+    class FakeAcquire:
+        def __init__(self, conn: FakeConnection) -> None:
+            self._conn = conn
+
+        async def __aenter__(self) -> FakeConnection:
+            return self._conn
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakePool:
+        def __init__(self, conn: FakeConnection) -> None:
+            self.conn = conn
+
+        def acquire(self) -> FakeAcquire:
+            return FakeAcquire(self.conn)
+
+    async def scenario() -> None:
+        conn = FakeConnection("cipher-v2")
+        store = PgRedisMarketStore("postgresql://unused", "redis://unused", 60)
+        store.pool = FakePool(conn)
+
+        # Mismatched ciphertext leaves credential untouched and skips status update.
+        assert (
+            await store.invalidate_oauth_credential(
+                "oauth-1",
+                "cred-1",
+                expected_ciphertext="cipher-v1",
+            )
+            is False
+        )
+        assert conn.current_ciphertext == "cipher-v2"
+        assert len(conn.calls) == 1
+        assert conn.calls[0][0] == 1
+        assert "DELETE FROM market_oauth_credentials" in conn.calls[0][1]
+
+        # Matching ciphertext deletes and updates rotation_status inside the same transaction.
+        assert (
+            await store.invalidate_oauth_credential(
+                "oauth-1",
+                "cred-1",
+                expected_ciphertext="cipher-v2",
+            )
+            is True
+        )
+        assert conn.current_ciphertext == ""
+        assert len(conn.calls) == 3
+        assert conn.calls[1][0] == 1
+        assert "DELETE FROM market_oauth_credentials" in conn.calls[1][1]
+        assert conn.calls[2][0] == 1
+        assert "UPDATE market_oauth_identities" in conn.calls[2][1]
+        assert conn.calls[2][2] == ("oauth-1", "reauth_required", "cred-1")
 
     asyncio.run(scenario())

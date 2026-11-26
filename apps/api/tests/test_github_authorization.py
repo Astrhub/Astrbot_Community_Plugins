@@ -210,6 +210,86 @@ def test_github_401_does_not_revoke_newer_rotated_persistent_credential(tmp_path
     asyncio.run(run())
 
 
+def test_github_401_preserves_undecryptable_persistent_credential(tmp_path):
+    async def run():
+        store, cfg, user, session, access = await authorized(
+            tmp_path, lambda request: httpx.Response(401, json={})
+        )
+        identity = store.list_oauth_identities(user["id"])[0]
+        cred_ref = identity["credential_ref"]
+        # Pre-load cached credential, then corrupt the stored ciphertext (e.g. rotated master key).
+        assert (await access.credential())["access_token"] == "user-oauth-token"
+        store.upsert_oauth_credential(
+            cred_ref,
+            user_id=user["id"],
+            provider="github",
+            ciphertext="not-a-valid-fernet-token",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await access.verify("https://github.com/my-org/astrbot_plugin_demo")
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail["code"] == "oauth_credential_decrypt_failed"
+        preserved = store.get_oauth_credential(cred_ref)
+        assert preserved is not None
+        assert preserved["ciphertext"] == "not-a-valid-fernet-token"
+        assert store.list_oauth_identities(user["id"])[0]["rotation_status"] == "active"
+
+    asyncio.run(run())
+
+
+def test_github_401_atomic_invalidation_preserves_concurrent_login(tmp_path):
+    async def run():
+        store, cfg, user, session, access = await authorized(
+            tmp_path, lambda request: httpx.Response(401, json={})
+        )
+        identity = store.list_oauth_identities(user["id"])[0]
+        cred_ref = identity["credential_ref"]
+        assert (await access.credential())["access_token"] == "user-oauth-token"
+
+        original_invalidate = store.invalidate_oauth_credential
+        rotated_once = False
+
+        async def racing_invalidate(
+            identity_id: str,
+            ref: str,
+            *,
+            expected_ciphertext: str,
+            rotation_status: str = "reauth_required",
+        ) -> bool:
+            nonlocal rotated_once
+            if not rotated_once:
+                rotated_once = True
+                # Simulate a concurrent GitHub login overwriting the same credential_ref
+                # after the rejected token was compared but before deletion runs.
+                new_session = store.create_session(user["id"])
+                await save_authorization(
+                    store, cfg, new_session["token"], user["id"], "1", "alice", "fresh-oauth-token"
+                )
+            return original_invalidate(
+                identity_id,
+                ref,
+                expected_ciphertext=expected_ciphertext,
+                rotation_status=rotation_status,
+            )
+
+        store.invalidate_oauth_credential = racing_invalidate  # type: ignore[method-assign]
+
+        with pytest.raises(HTTPException) as exc_info:
+            await access.verify("https://github.com/my-org/astrbot_plugin_demo")
+        assert exc_info.value.status_code == 409
+        assert rotated_once is True
+        assert store.get_oauth_credential(cred_ref) is not None
+        assert store.list_oauth_identities(user["id"])[0]["rotation_status"] == "active"
+
+        # Subsequent request with expired Redis cache recovers the fresh persistent credential.
+        fresh_access = GithubRepositoryAccess(store, cfg, user, "expired-session-ref")
+        recovered = await fresh_access.credential()
+        assert recovered["access_token"] == "fresh-oauth-token"
+
+    asyncio.run(run())
+
+
 def test_github_409_message_distinguishes_unbound_vs_expired_user(tmp_path):
     async def run():
         store = InMemoryMarketStore()

@@ -247,7 +247,7 @@ class GithubRepositoryAccess:
         if (
             not identities
             or not hasattr(self.store, "get_oauth_credential")
-            or not hasattr(self.store, "delete_oauth_credential")
+            or not hasattr(self.store, "invalidate_oauth_credential")
         ):
             return
         user_id = str(self.user["id"])
@@ -260,24 +260,30 @@ class GithubRepositoryAccess:
             cred_ref = str(identity.get("credential_ref") or "").strip()
             if not cred_ref:
                 continue
-            try:
-                stored = await cred_store.load_token_set(
-                    cred_ref,
-                    expected_user_id=user_id,
-                    expected_provider="github",
-                )
-            except HTTPException:
-                stored = None
-            if stored is not None and dead_token and stored.access_token != dead_token:
+            record = await store_call(self.store, "get_oauth_credential", cred_ref)
+            if not record:
                 continue
-            await cred_store.revoke(cred_ref)
-            if hasattr(self.store, "update_oauth_identity_rotation"):
-                await store_call(
-                    self.store,
-                    "update_oauth_identity_rotation",
-                    identity["id"],
-                    rotation_status="reauth_required",
-                )
+            expected_ciphertext = str(record.get("ciphertext") or "")
+            if not expected_ciphertext:
+                continue
+            # Let decryption errors surface so undecryptable rows remain intact for recovery.
+            stored = cred_store.decrypt_record(
+                record,
+                expected_user_id=user_id,
+                expected_provider="github",
+            )
+            if stored is None:
+                continue
+            if dead_token and stored.access_token != dead_token:
+                continue
+            await store_call(
+                self.store,
+                "invalidate_oauth_credential",
+                identity["id"],
+                cred_ref,
+                expected_ciphertext=expected_ciphertext,
+                rotation_status="reauth_required",
+            )
 
     async def credential(self) -> dict[str, Any]:
         if self._credential is not None:

@@ -864,6 +864,37 @@ class InMemoryMarketStore:
             self.state.setdefault("oauthCredentials", {}).pop(str(credential_ref), None) is not None
         )
 
+    def invalidate_oauth_credential(
+        self,
+        identity_id: str,
+        credential_ref: str,
+        *,
+        expected_ciphertext: str,
+        rotation_status: str = "reauth_required",
+    ) -> bool:
+        ref = str(credential_ref or "").strip()
+        if not ref or not expected_ciphertext:
+            return False
+        creds = self.state.setdefault("oauthCredentials", {})
+        record = creds.get(ref)
+        if not record or str(record.get("ciphertext") or "") != expected_ciphertext:
+            return False
+        creds.pop(ref, None)
+        target = next(
+            (
+                item
+                for item in self.state["oauthIdentities"]
+                if item.get("id") == identity_id
+                and str(item.get("credential_ref") or "").strip() == ref
+                and item.get("revoked_at") is None
+            ),
+            None,
+        )
+        if target is not None:
+            target["rotation_status"] = str(rotation_status or "reauth_required")
+            target["updated_at"] = utc_now()
+        return True
+
     def upsert_git_repository_binding(
         self,
         user_id: str,
@@ -2635,6 +2666,22 @@ class LocalFileMarketStore(InMemoryMarketStore):
         with self._persist():
             return super().delete_oauth_credential(credential_ref)
 
+    def invalidate_oauth_credential(
+        self,
+        identity_id: str,
+        credential_ref: str,
+        *,
+        expected_ciphertext: str,
+        rotation_status: str = "reauth_required",
+    ) -> bool:
+        with self._persist():
+            return super().invalidate_oauth_credential(
+                identity_id,
+                credential_ref,
+                expected_ciphertext=expected_ciphertext,
+                rotation_status=rotation_status,
+            )
+
     def upsert_git_repository_binding(
         self,
         user_id: str,
@@ -4182,6 +4229,46 @@ class PgRedisMarketStore(InMemoryMarketStore):
             str(credential_ref),
         )
         return int(result.rsplit(" ", 1)[-1]) > 0
+
+    async def invalidate_oauth_credential(
+        self,
+        identity_id: str,
+        credential_ref: str,
+        *,
+        expected_ciphertext: str,
+        rotation_status: str = "reauth_required",
+    ) -> bool:
+        ref = str(credential_ref or "").strip()
+        if not ref or not expected_ciphertext:
+            return False
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                deleted = await connection.fetchval(
+                    """
+                    DELETE FROM market_oauth_credentials
+                     WHERE credential_ref = $1
+                       AND ciphertext = $2
+                 RETURNING credential_ref
+                    """,
+                    ref,
+                    str(expected_ciphertext),
+                )
+                if not deleted:
+                    return False
+                await connection.execute(
+                    """
+                    UPDATE market_oauth_identities
+                       SET rotation_status = $2,
+                           updated_at = now()
+                     WHERE id = $1
+                       AND credential_ref = $3
+                       AND revoked_at IS NULL
+                    """,
+                    identity_id,
+                    str(rotation_status or "reauth_required"),
+                    ref,
+                )
+                return True
 
     @plugin_identity_write
     async def upsert_git_repository_binding(

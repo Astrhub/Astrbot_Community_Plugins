@@ -105,19 +105,16 @@ class CredentialStore:
         )
         return ref
 
-    async def load_token_set(
+    def decrypt_record(
         self,
-        credential_ref: str,
+        record: dict[str, Any] | None,
         *,
         expected_user_id: str,
         expected_provider: str,
     ) -> OAuthTokenSet | None:
-        ref = str(credential_ref or "").strip()
-        if not ref:
-            return None
-        record = await _store_call(self.store, "get_oauth_credential", ref)
         if not record:
             return None
+        ref = str(record.get("credential_ref") or "").strip()
         ciphertext = str(record.get("ciphertext") or "")
         if not ciphertext:
             return None
@@ -153,6 +150,23 @@ class CredentialStore:
             expires_at=data.get("expires_at"),
             provider_user_id=str(data.get("provider_user_id") or ""),
             provider_login=str(data.get("provider_login") or ""),
+        )
+
+    async def load_token_set(
+        self,
+        credential_ref: str,
+        *,
+        expected_user_id: str,
+        expected_provider: str,
+    ) -> OAuthTokenSet | None:
+        ref = str(credential_ref or "").strip()
+        if not ref:
+            return None
+        record = await _store_call(self.store, "get_oauth_credential", ref)
+        return self.decrypt_record(
+            record,
+            expected_user_id=expected_user_id,
+            expected_provider=expected_provider,
         )
 
     async def rebind_user_credentials(self, *, from_user_id: str, to_user_id: str) -> int:
