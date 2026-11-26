@@ -383,6 +383,7 @@ def build_plugin_detail_page(ctx: SiteSeoContext, plugin: Mapping[str, Any]) -> 
     )
     likes = int(plugin.get("likes") or 0)
     comments_count = int(plugin.get("comments_count") or 0)
+    download_count = int(plugin.get("download_count") or 0)
     date_modified = _plugin_timestamp(plugin)
 
     json_ld: dict[str, Any] = {
@@ -405,6 +406,11 @@ def build_plugin_detail_page(ctx: SiteSeoContext, plugin: Mapping[str, Any]) -> 
                 "interactionType": "https://schema.org/CommentAction",
                 "userInteractionCount": comments_count,
             },
+            {
+                "@type": "InteractionCounter",
+                "interactionType": "https://schema.org/DownloadAction",
+                "userInteractionCount": download_count,
+            },
         ],
     }
     if version:
@@ -420,6 +426,7 @@ def build_plugin_detail_page(ctx: SiteSeoContext, plugin: Mapping[str, Any]) -> 
         f"<span>分类：{escape_html(category_label)}</span>",
         f"<span>点赞：{likes}</span>",
         f"<span>评论：{comments_count}</span>",
+        f"<span>下载：{download_count}</span>",
     ]
     if version:
         facts.insert(1, f"<span>版本：{escape_html(version)}</span>")

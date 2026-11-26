@@ -18,6 +18,7 @@ from app.artifacts.service import ArtifactService
 from app.artifacts.static_scan import StaticScanner
 from app.artifacts.storage import LocalArtifactStorage
 from app.config import load_settings
+from app.downloads import normalize_publication_download_url
 from app.main import format_astrbot_plugin
 from app.store import InMemoryMarketStore
 
@@ -375,6 +376,7 @@ def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: P
                 "ARTIFACT_LOCAL_ROOT": str(tmp_path / "storage"),
                 "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
                 "DATABASE_URL": "postgresql://example.invalid/market",
+                "WEB_URL": "https://plugins.example.test",
             }
         )
         store = InMemoryMarketStore()
@@ -432,10 +434,11 @@ def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: P
             assert await runner.run_once() == 1
             published = await repository.get_artifact(submitted["id"])
             assert published and published["publication_status"] == "published"
-            assert published["download_url"].startswith(
-                f"https://cdn.example.test/{owner['id']}/astrbot_plugin_demo/v1.0.0/"
+            assert published["download_url"] is None
+            package_url = normalize_publication_download_url(published, settings.web_url)
+            assert package_url == (
+                f"https://plugins.example.test/packages/{plugin['id']}/{submitted['id']}"
             )
-            assert published["download_url"].endswith(".zip")
 
             await repository.enqueue_job(
                 {
@@ -467,7 +470,7 @@ def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: P
                     "_artifact_publication_checked": True,
                     "published_version": published["version"],
                     "artifact_publication_status": published["publication_status"],
-                    "artifact_download_url": published["download_url"],
+                    "artifact_download_url": package_url,
                 },
                 plugin["name"],
             )
@@ -481,7 +484,7 @@ def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: P
                     "_artifact_publication_checked": True,
                     "published_version": published["version"],
                     "artifact_publication_status": published["publication_status"],
-                    "artifact_download_url": published["download_url"],
+                    "artifact_download_url": package_url,
                 },
                 plugin["name"],
             )
@@ -492,7 +495,9 @@ def test_full_p1_pipeline_publishes_immutable_version_and_gates_feed(tmp_path: P
     stable_feed, changed_feed, published = asyncio.run(scenario())
 
     assert stable_feed["version"] == "v1.0.0"
-    assert stable_feed["download_url"] == published["download_url"]
+    assert stable_feed["download_url"] == (
+        f"https://plugins.example.test/packages/{published['plugin_id']}/{published['id']}"
+    )
     assert changed_feed["version"] == "v1.1.0"
     assert changed_feed["repo"] == "https://github.com/alice/astrbot_plugin_demo"
     assert "download_url" not in changed_feed

@@ -9,7 +9,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..downloads import record_download_success
+from ..downloads import (
+    record_download_success,
+    requester_hash,
+    should_count_in_memory,
+)
 from .models import StoragePurpose
 from .manager import StorageManager
 from .models import ObjectStorageError, StorageObjectRecord
@@ -511,45 +515,89 @@ def build_object_storage_router(
         if ".." in alias_key or alias_key.startswith("/") or "\\" in alias_key:
             raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
         manager = _storage_manager(request)
-        if alias_key.count("/") == 1 and alias_key.split("/", 1)[1].startswith("artifact_"):
-            plugin_id, artifact_id = alias_key.split("/", 1)
-            runtime = getattr(request.app.state, "artifact_runtime", None)
-            repository = getattr(runtime, "repository", None)
+        runtime = getattr(request.app.state, "artifact_runtime", None)
+        repository = getattr(runtime, "repository", None)
+
+        async def resolve_published_package(
+            plugin_id: str,
+            artifact_id: str,
+            object_key: str | None = None,
+        ):
             if repository is None:
-                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+                return None
             artifact = await repository.get_artifact(artifact_id)
-            if artifact is None:
-                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
-            if (
-                artifact.get("publication_status") != "published"
-                or str(artifact.get("plugin_id") or "") != plugin_id
-            ):
-                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+            if artifact is None or artifact.get("publication_status") != "published":
+                return None
+            if plugin_id and str(artifact.get("plugin_id") or "") != plugin_id:
+                return None
+            key = object_key if object_key is not None else str(artifact.get("published_key") or "")
+            if not key:
+                return None
             record = await manager.repository.find_active_object_by_purpose_and_key(
                 purpose=StoragePurpose.ARTIFACT_PUBLISHED,
-                key=str(artifact.get("published_key") or ""),
+                key=key,
             )
             if record is None:
-                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+                return None
+            return artifact, record
+
+        async def serve_published_package(
+            plugin_id: str,
+            artifact_id: str,
+            object_key: str | None,
+            record: StorageObjectRecord,
+        ) -> Response:
             try:
                 response = await _serve_public_object(request, manager, record)
             except ObjectStorageError as exc:
                 raise _http_error_for_storage(exc) from exc
+
+            latest = await resolve_published_package(plugin_id, artifact_id, object_key)
+            if latest is None or latest[1].id != record.id:
+                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+            if response.status_code in {200, 206}:
+                response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
             if request.method == "GET" and response.status_code in {200, 206}:
-                if hasattr(manager.store, "increment_plugin_downloads"):
-                    counted = await manager.store.increment_plugin_downloads(plugin_id)
-                    if counted:
-                        response.headers["X-Download-Count"] = "1"
+                requester = requester_hash(request, plugin_id)
+                persist_count = getattr(manager.store, "record_plugin_download", None)
+                if callable(persist_count):
+                    counted = bool(await persist_count(plugin_id, requester))
                 else:
-                    record_download_success(manager.store.state.get("plugins", []), plugin_id)
-                    persist = getattr(manager.store, "persist_object_storage", None)
-                    if callable(persist):
-                        persist()
+                    counted = await should_count_in_memory(plugin_id, requester)
+                    if counted:
+                        counted = record_download_success(
+                            manager.store.state.get("plugins", []), plugin_id
+                        )
+                        if counted:
+                            persist = getattr(manager.store, "persist_object_storage", None)
+                            if callable(persist):
+                                persist()
+                if counted:
                     response.headers["X-Download-Count"] = "1"
             return response
+
+        if alias_key.count("/") == 1:
+            plugin_id, artifact_id = alias_key.split("/", 1)
+            resolved = await resolve_published_package(plugin_id, artifact_id)
+            if resolved is not None:
+                _, record = resolved
+                return await serve_published_package(plugin_id, artifact_id, None, record)
+
         record = await manager.resolve_public_alias(f"/packages/{alias_key}")
         if record is None:
             raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+        if record.purpose == StoragePurpose.ARTIFACT_PUBLISHED and repository is not None:
+            artifact = await repository.get_artifact_by_published_key(record.key)
+            if artifact is not None:
+                artifact_id = str(artifact.get("id") or "")
+                plugin_id = str(artifact.get("plugin_id") or "")
+                resolved = await resolve_published_package(plugin_id, artifact_id, record.key)
+                if resolved is None or resolved[1].id != record.id:
+                    raise HTTPException(
+                        404, {"code": "object_not_found", "error": "Package not found"}
+                    )
+                _, record = resolved
+                return await serve_published_package(plugin_id, artifact_id, record.key, record)
         try:
             return await _serve_public_object(request, manager, record)
         except ObjectStorageError as exc:

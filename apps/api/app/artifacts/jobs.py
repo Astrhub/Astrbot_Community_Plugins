@@ -782,7 +782,7 @@ class ArtifactJobRunner:
                 expected_repo_version=current_repo_version,
                 expected_cdn_generation=expected_cdn_generation,
                 published_key=published_key,
-                download_url=self.storage.public_url(published_key),
+                download_url="",
                 **(
                     {
                         "expected_repo": authorization["repo"],

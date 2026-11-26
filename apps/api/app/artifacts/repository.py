@@ -42,6 +42,8 @@ class ArtifactRepository(Protocol):
 
     async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None: ...
 
+    async def get_artifact_by_published_key(self, published_key: str) -> dict[str, Any] | None: ...
+
     async def get_artifact_by_sha(
         self, plugin_id: str, archive_sha256: str
     ) -> dict[str, Any] | None: ...
@@ -566,6 +568,13 @@ class PgArtifactRepository(PgManualReviewMixin, PgAdvancedReviewRepositoryMixin)
              WHERE a.id = $1
             """,
             artifact_id,
+        )
+        return _record(row) if row else None
+
+    async def get_artifact_by_published_key(self, published_key: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            "SELECT * FROM plugin_artifacts WHERE published_key = $1",
+            published_key,
         )
         return _record(row) if row else None
 
@@ -2272,7 +2281,7 @@ class PgArtifactRepository(PgManualReviewMixin, PgAdvancedReviewRepositoryMixin)
                     UPDATE plugin_artifacts
                        SET publication_status = 'published',
                            published_key = $2,
-                           download_url = $3,
+                           download_url = NULL,
                            published_at = now(),
                            updated_at = now()
                      WHERE id = $1
@@ -2280,7 +2289,6 @@ class PgArtifactRepository(PgManualReviewMixin, PgAdvancedReviewRepositoryMixin)
                     """,
                     artifact_id,
                     published_key,
-                    download_url,
                 )
                 await connection.execute(
                     """
@@ -2653,6 +2661,17 @@ class InMemoryArtifactRepository(InMemoryManualReviewMixin, InMemoryAdvancedRevi
 
     async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         artifact = self.artifacts.get(artifact_id)
+        return deepcopy(self._with_plugin(artifact)) if artifact else None
+
+    async def get_artifact_by_published_key(self, published_key: str) -> dict[str, Any] | None:
+        artifact = next(
+            (
+                item
+                for item in self.artifacts.values()
+                if str(item.get("published_key") or "") == published_key
+            ),
+            None,
+        )
         return deepcopy(self._with_plugin(artifact)) if artifact else None
 
     async def get_artifact_by_sha(
@@ -3959,7 +3978,7 @@ class InMemoryArtifactRepository(InMemoryManualReviewMixin, InMemoryAdvancedRevi
             {
                 "publication_status": PublicationStatus.PUBLISHED.value,
                 "published_key": published_key,
-                "download_url": download_url,
+                "download_url": None,
                 "published_at": _utc_now(),
                 "updated_at": _utc_now(),
             }
