@@ -2323,6 +2323,16 @@ def _parse_utc_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _oauth_timestamp(value: Any) -> datetime | None:
+    """Convert an optional OAuth timestamp for asyncpg."""
+    if value in {None, ""}:
+        return None
+    parsed = _parse_utc_timestamp(value)
+    if parsed is None:
+        raise ValueError("Invalid OAuth timestamp")
+    return parsed
+
+
 class LocalFileMarketStore(InMemoryMarketStore):
     """Single-process store persisting market state and sessions in one atomic JSON file."""
 
@@ -3512,7 +3522,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 str(avatar_url or ""),
                 str(scopes or ""),
                 str(credential_ref or ""),
-                expires_at,
+                _oauth_timestamp(expires_at),
             )
             return serialize_value(dict(row))
         row = await connection.fetchrow(
@@ -3535,7 +3545,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
             str(avatar_url or ""),
             str(scopes or ""),
             str(credential_ref or ""),
-            expires_at,
+            _oauth_timestamp(expires_at),
         )
         return serialize_value(dict(row))
 
@@ -4108,9 +4118,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
             """,
             identity_id,
             str(credential_ref or ""),
-            expires_at,
+            _oauth_timestamp(expires_at),
             str(rotation_status or ""),
-            token_refreshed_at,
+            _oauth_timestamp(token_refreshed_at),
         )
         return serialize_value(dict(row)) if row else None
 
@@ -4141,7 +4151,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
             str(user_id),
             str(provider or "").strip().lower(),
             str(ciphertext),
-            expires_at,
+            _oauth_timestamp(expires_at),
         )
         return serialize_value(dict(row))
 
