@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.config import load_settings
+from app.git_sources.routes import normalize_oauth_return_path
 from app.main import create_app
 from app.store import InMemoryMarketStore
 
@@ -41,3 +42,49 @@ def test_public_authors_feed_distinguishes_listed_plugins_without_private_fields
     assert items["pending_author"]["has_listed_plugins"] is False
     assert items["empty_author"]["has_listed_plugins"] is False
     assert all(set(item) == {"username", "has_listed_plugins"} for item in items.values())
+
+
+def test_author_plugins_resolves_legacy_internal_only_user_without_exposing_distinct_internal_name():
+    store = InMemoryMarketStore()
+    internal_only = store.create_internal_admin("legacy_admin", "hashed-pass")
+    for user in store.state["users"]:
+        if user["id"] == internal_only["id"]:
+            user["public_username"] = ""
+            user["github_login"] = ""
+    distinct = store.create_internal_admin("secret_internal", "hashed-pass")
+    for user in store.state["users"]:
+        if user["id"] == distinct["id"]:
+            user["public_username"] = "public_handle"
+
+    app = create_app(settings=load_settings({"ENABLE_DEV_AUTH": "false"}), store=store)
+    with TestClient(app) as client:
+        legacy_resp = client.get("/v1/authors/legacy_admin/plugins")
+        distinct_internal_resp = client.get("/v1/authors/secret_internal/plugins")
+        distinct_public_resp = client.get("/v1/authors/public_handle/plugins")
+
+    assert legacy_resp.status_code == 200
+    assert legacy_resp.json()["username"] == "legacy_admin"
+    assert distinct_internal_resp.status_code == 404
+    assert distinct_public_resp.status_code == 200
+    assert distinct_public_resp.json()["username"] == "public_handle"
+
+
+def test_normalize_oauth_return_path_allows_single_segment_author_paths_only():
+    assert normalize_oauth_return_path("/settings/personal") == "/settings/personal"
+    assert normalize_oauth_return_path("/author/Alice") == "/author/Alice"
+    assert normalize_oauth_return_path("/author/小明") == "/author/%E5%B0%8F%E6%98%8E"
+    assert normalize_oauth_return_path("/author/%E5%B0%8F%E6%98%8E") == "/author/%E5%B0%8F%E6%98%8E"
+    for invalid in (
+        "",
+        "/",
+        "//evil.example",
+        "https://evil.example/author/Alice",
+        "/author/",
+        "/author/..",
+        "/author/Alice/extra",
+        "/author/Alice?next=https://evil.example",
+        "/author/Alice#frag",
+        "/author/Alice%2F..%2Fadmin",
+        "/admin/settings",
+    ):
+        assert normalize_oauth_return_path(invalid) is None, invalid

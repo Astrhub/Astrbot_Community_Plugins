@@ -330,8 +330,8 @@ describe("AuthorPage visitor vs owner views and external link aggregation", () =
     wrapper.unmount();
   });
 
-  it("skips /v1/me/plugins for non-developer owners and shows onboarding prompt", async () => {
-    const { wrapper, fetchMock } = await mountAuthorPage({
+  it("skips /v1/me/plugins for non-developer owners and returns OAuth bind to author page", async () => {
+    const { wrapper, fetchMock, store } = await mountAuthorPage({
       currentUser: {
         id: "u2",
         public_username: "Alice",
@@ -345,6 +345,9 @@ describe("AuthorPage visitor vs owner views and external link aggregation", () =
         items: [],
       },
     });
+    store.siteConfig.auth.github_login_enabled = true;
+    const oauthSpy = vi.spyOn(store, "loginWithOAuth").mockImplementation(() => undefined);
+    await nextTick();
 
     expect(wrapper.get(".owner-badge").text()).toBe("本人主页");
     expect(wrapper.text()).toContain("绑定至少一个 OAuth 账号成为开发者");
@@ -352,6 +355,361 @@ describe("AuthorPage visitor vs owner views and external link aggregation", () =
       expect.stringContaining("/v1/me/plugins"),
       expect.anything(),
     );
+
+    const bindBtn = wrapper.findAll("button").find((btn) => btn.text().includes("绑定 GitHub"));
+    expect(bindBtn).toBeTruthy();
+    await bindBtn!.trigger("click");
+    expect(oauthSpy).toHaveBeenCalledWith("github", "/author/Alice");
+    wrapper.unmount();
+  });
+
+  it("renders public author page without waiting for slow /v1/me and allows retry on 5xx", async () => {
+    let resolveMe: (value: Response) => void = () => undefined;
+    let meCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/v1/me")) {
+        meCalls += 1;
+        if (meCalls === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveMe = resolve;
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            id: "u1",
+            public_username: "Alice",
+            role: "user",
+            is_developer: true,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/v1/authors/Alice/plugins")) {
+        return new Response(
+          JSON.stringify({
+            username: "Alice",
+            display_name: "Alice Dev",
+            oauth_profiles: [],
+            items: [listedPlugin],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/v1/me/plugins")) {
+        return new Response(JSON.stringify({ items: [listedPlugin, pendingPlugin] }), {
+          status: 200,
+        });
+      }
+      return new Response("{}", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: "/", name: "Home", component: { template: "<div />" } },
+        { path: "/author/:username", name: "AuthorPage", component: { template: "<div />" } },
+        {
+          path: "/plugin/:username/:name",
+          name: "PluginDetails",
+          component: { template: "<div />" },
+        },
+        { path: "/submit", name: "SubmitPlugin", component: { template: "<div />" } },
+        {
+          path: "/settings/personal",
+          name: "PersonalSettings",
+          component: { template: "<div />" },
+        },
+      ],
+    });
+    await router.push("/author/Alice");
+    await router.isReady();
+
+    const Host = defineComponent({
+      components: { NConfigProvider, NDialogProvider, NMessageProvider, AuthorPage },
+      template: `
+        <n-config-provider>
+          <n-message-provider>
+            <n-dialog-provider>
+              <author-page />
+            </n-dialog-provider>
+          </n-message-provider>
+        </n-config-provider>
+      `,
+    });
+    const wrapper = mount(Host, {
+      global: {
+        plugins: [pinia, router],
+        stubs: { AppHeader: { template: "<header />" }, AppFooter: { template: "<footer />" } },
+      },
+    });
+    await flushPromises();
+    await nextTick();
+
+    // Public author page renders immediately while /v1/me is still pending.
+    expect(wrapper.text()).toContain("Alice Dev");
+    expect(wrapper.text()).toContain("Alpha Plugin");
+
+    // Transient 500 surfaces retry alert instead of silently hiding auth failure.
+    resolveMe(new Response("{}", { status: 500 }));
+    await flushPromises();
+    await nextTick();
+    expect(wrapper.text()).toContain("重试验证");
+
+    const retryBtn = wrapper.findAll("button").find((btn) => btn.text().includes("重试验证"));
+    await retryBtn!.trigger("click");
+    await flushPromises();
+    await nextTick();
+
+    expect(wrapper.get(".owner-badge").text()).toBe("本人主页");
+    expect(wrapper.text()).toContain("Beta Plugin");
+    wrapper.unmount();
+  });
+
+  it("ignores stale refresh results that started before a plugin mutation", async () => {
+    let resolveDelayedRefresh: (value: Response) => void = () => undefined;
+    let myPluginsCall = 0;
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/v1/me")) {
+        return new Response(
+          JSON.stringify({
+            id: "u1",
+            public_username: "Alice",
+            role: "user",
+            is_developer: true,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/v1/authors/Alice/plugins")) {
+        return new Response(
+          JSON.stringify({
+            username: "Alice",
+            display_name: "Alice Dev",
+            oauth_profiles: [],
+            items: [listedPlugin],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/v1/me/plugins")) {
+        myPluginsCall += 1;
+        if (myPluginsCall === 1) {
+          return new Response(JSON.stringify({ items: [listedPlugin] }), { status: 200 });
+        }
+        return new Promise<Response>((resolve) => {
+          resolveDelayedRefresh = resolve;
+        });
+      }
+      if (url.includes("/v1/plugins/p1") && init?.method === "PATCH") {
+        return new Response(JSON.stringify({ ...listedPlugin, display_name: "Mutated Name" }), {
+          status: 200,
+        });
+      }
+      return new Response("{}", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: "/", name: "Home", component: { template: "<div />" } },
+        { path: "/author/:username", name: "AuthorPage", component: { template: "<div />" } },
+        {
+          path: "/plugin/:username/:name",
+          name: "PluginDetails",
+          component: { template: "<div />" },
+        },
+        { path: "/submit", name: "SubmitPlugin", component: { template: "<div />" } },
+        {
+          path: "/settings/personal",
+          name: "PersonalSettings",
+          component: { template: "<div />" },
+        },
+      ],
+    });
+    await router.push("/author/Alice");
+    await router.isReady();
+
+    const Host = defineComponent({
+      components: { NConfigProvider, NDialogProvider, NMessageProvider, AuthorPage },
+      template: `
+        <n-config-provider>
+          <n-message-provider>
+            <n-dialog-provider>
+              <author-page />
+            </n-dialog-provider>
+          </n-message-provider>
+        </n-config-provider>
+      `,
+    });
+    const wrapper = mount(Host, {
+      global: {
+        plugins: [pinia, router],
+        stubs: { AppHeader: { template: "<header />" }, AppFooter: { template: "<footer />" } },
+      },
+    });
+    await flushPromises();
+    await nextTick();
+
+    // Start a slow refresh BEFORE editing.
+    await wrapper.get('button[aria-label="刷新插件列表"]').trigger("click");
+    const editBtn = wrapper.findAll("button").find((btn) => btn.text().trim() === "编辑");
+    await editBtn!.trigger("click");
+    await vi.dynamicImportSettled();
+    await flushPromises();
+    await nextTick();
+
+    await wrapper.get("input#edit-display-name-p1").setValue("Mutated Name");
+    const saveBtn = wrapper.findAll("button").find((btn) => btn.text().includes("保存修改"));
+    await saveBtn!.trigger("click");
+    await flushPromises();
+    await nextTick();
+    expect(wrapper.text()).toContain("Mutated Name");
+
+    // Stale refresh returns older data afterward and must NOT revert the saved name.
+    resolveDelayedRefresh(new Response(JSON.stringify({ items: [listedPlugin] }), { status: 200 }));
+    await flushPromises();
+    await nextTick();
+    expect(wrapper.text()).toContain("Mutated Name");
+    expect(wrapper.text()).not.toContain("Alpha Plugin");
+    wrapper.unmount();
+  });
+
+  it("does not leak an in-flight mutation onto another author page after navigation", async () => {
+    let resolvePatch: (value: Response) => void = () => undefined;
+    const bobPlugin: Plugin = {
+      ...listedPlugin,
+      id: "bob-1",
+      name: "astrbot_plugin_bob",
+      display_name: "Bob Plugin",
+      author: "Bob",
+      owner_username: "Bob",
+    };
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/v1/me")) {
+        return new Response(
+          JSON.stringify({
+            id: "u1",
+            public_username: "Alice",
+            role: "user",
+            is_developer: true,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/v1/authors/Alice/plugins")) {
+        return new Response(
+          JSON.stringify({
+            username: "Alice",
+            display_name: "Alice Dev",
+            oauth_profiles: [],
+            items: [listedPlugin],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes("/v1/authors/Bob/plugins")) {
+        return new Response(
+          JSON.stringify({
+            username: "Bob",
+            display_name: "Bob Dev",
+            oauth_profiles: [],
+            items: [bobPlugin],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/v1/me/plugins")) {
+        return new Response(JSON.stringify({ items: [listedPlugin] }), { status: 200 });
+      }
+      if (url.includes("/v1/plugins/p1") && init?.method === "PATCH") {
+        return new Promise<Response>((resolve) => {
+          resolvePatch = resolve;
+        });
+      }
+      return new Response("{}", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: "/", name: "Home", component: { template: "<div />" } },
+        { path: "/author/:username", name: "AuthorPage", component: { template: "<div />" } },
+        {
+          path: "/plugin/:username/:name",
+          name: "PluginDetails",
+          component: { template: "<div />" },
+        },
+        { path: "/submit", name: "SubmitPlugin", component: { template: "<div />" } },
+        {
+          path: "/settings/personal",
+          name: "PersonalSettings",
+          component: { template: "<div />" },
+        },
+      ],
+    });
+    await router.push("/author/Alice");
+    await router.isReady();
+
+    const Host = defineComponent({
+      components: { NConfigProvider, NDialogProvider, NMessageProvider, AuthorPage },
+      template: `
+        <n-config-provider>
+          <n-message-provider>
+            <n-dialog-provider>
+              <author-page />
+            </n-dialog-provider>
+          </n-message-provider>
+        </n-config-provider>
+      `,
+    });
+    const wrapper = mount(Host, {
+      global: {
+        plugins: [pinia, router],
+        stubs: { AppHeader: { template: "<header />" }, AppFooter: { template: "<footer />" } },
+      },
+    });
+    await flushPromises();
+    await nextTick();
+
+    const editBtn = wrapper.findAll("button").find((btn) => btn.text().trim() === "编辑");
+    await editBtn!.trigger("click");
+    await vi.dynamicImportSettled();
+    await flushPromises();
+    await nextTick();
+    await wrapper.get("input#edit-display-name-p1").setValue("Alice Late Save");
+    const saveBtn = wrapper.findAll("button").find((btn) => btn.text().includes("保存修改"));
+    await saveBtn!.trigger("click");
+
+    // Navigate to Bob while Alice's PATCH is still pending.
+    await router.push("/author/Bob");
+    await flushPromises();
+    await nextTick();
+    expect(wrapper.text()).toContain("Bob Plugin");
+
+    resolvePatch(
+      new Response(JSON.stringify({ ...listedPlugin, display_name: "Alice Late Save" }), {
+        status: 200,
+      }),
+    );
+    await flushPromises();
+    await nextTick();
+
+    expect(wrapper.text()).toContain("Bob Plugin");
+    expect(wrapper.text()).not.toContain("Alice Late Save");
     wrapper.unmount();
   });
 });

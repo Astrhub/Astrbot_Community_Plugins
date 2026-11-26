@@ -165,6 +165,20 @@
         </div>
 
         <n-alert
+          v-if="showAuthRetryNotice"
+          type="warning"
+          :bordered="false"
+          class="developer-onboarding-alert"
+        >
+          {{ currentUserError }}，当前暂以访客视图展示。
+          <div class="onboarding-actions">
+            <n-button size="small" :loading="retryingAuth" @click="retryCurrentUser">
+              重试验证
+            </n-button>
+          </div>
+        </n-alert>
+
+        <n-alert
           v-if="isOwnProfile && !isDeveloper && !ownerPlugins.length"
           type="info"
           :bordered="false"
@@ -446,7 +460,7 @@ const message = useMessage();
 const dialog = useDialog();
 const { confirmExternalOpen } = useExternalOpenConfirm();
 const pluginStore = usePluginStore();
-const { currentUser, siteConfig } = storeToRefs(pluginStore);
+const { currentUser, currentUserError, siteConfig } = storeToRefs(pluginStore);
 const { brandName, absoluteSiteUrl } = useSeoContext();
 
 const username = computed(() => String(route.params.username || "").trim());
@@ -469,9 +483,11 @@ const pluginBusyIds = reactive<Record<string, string>>({});
 const editingPluginId = shallowRef("");
 const editModalLoaded = shallowRef(false);
 const editModalOpen = shallowRef(false);
+const retryingAuth = shallowRef(false);
 
 let authorRequestId = 0;
 let ownerRequestId = 0;
+let ownerMutationVersion = 0;
 
 function parseHttpUrl(rawUrl: unknown): URL | null {
   const value = String(rawUrl || "").trim();
@@ -497,12 +513,7 @@ function formatExternalLinkLabel(parsed: URL): string {
 }
 
 const myPublicUsername = computed(() =>
-  String(
-    currentUser.value?.public_username ||
-      currentUser.value?.github_login ||
-      currentUser.value?.internal_username ||
-      "",
-  ).trim(),
+  String(currentUser.value?.public_username || currentUser.value?.github_login || "").trim(),
 );
 
 const isOwnProfile = computed(() => {
@@ -511,6 +522,11 @@ const isOwnProfile = computed(() => {
   }
   return myPublicUsername.value.toLowerCase() === canonicalUsername.value.toLowerCase();
 });
+
+const showAuthRetryNotice = computed(
+  () =>
+    !isLoading.value && !notFound.value && !currentUser.value && Boolean(currentUserError.value),
+);
 
 const isAdminUser = computed(() =>
   ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
@@ -827,13 +843,23 @@ async function withPluginBusy(
   plugin: Plugin,
   action: string,
   task: () => Promise<Plugin>,
-): Promise<Plugin> {
+): Promise<{ updated: Plugin; applied: boolean }> {
   const key = String(plugin.id);
+  const expectedAuthorReqId = authorRequestId;
+  const expectedCanonical = canonicalUsername.value.toLowerCase();
+  ownerMutationVersion += 1;
   pluginBusyIds[key] = action;
   try {
     const updated = await task();
-    replacePlugin(updated);
-    return updated;
+    const applied =
+      authorRequestId === expectedAuthorReqId &&
+      canonicalUsername.value.toLowerCase() === expectedCanonical &&
+      isOwnProfile.value;
+    if (applied) {
+      ownerMutationVersion += 1;
+      replacePlugin(updated);
+    }
+    return { updated, applied };
   } finally {
     delete pluginBusyIds[key];
   }
@@ -842,14 +868,23 @@ async function withPluginBusy(
 async function refreshOwnerPlugins(): Promise<void> {
   if (!isOwnProfile.value || !isDeveloper.value) return;
   const reqId = ++ownerRequestId;
+  const expectedAuthorReqId = authorRequestId;
+  const mutationVersionAtStart = ownerMutationVersion;
   loadingOwnerPlugins.value = true;
   ownerPluginsError.value = "";
   try {
     const items = await pluginStore.loadMyPlugins();
-    if (reqId !== ownerRequestId) return;
+    if (
+      reqId !== ownerRequestId ||
+      authorRequestId !== expectedAuthorReqId ||
+      !isOwnProfile.value ||
+      mutationVersionAtStart !== ownerMutationVersion
+    ) {
+      return;
+    }
     ownerPlugins.value = items;
   } catch (error) {
-    if (reqId !== ownerRequestId) return;
+    if (reqId !== ownerRequestId || authorRequestId !== expectedAuthorReqId) return;
     const msg = error instanceof Error ? error.message : "插件加载失败";
     ownerPluginsError.value = msg;
     message.error(msg);
@@ -862,11 +897,13 @@ async function refreshOwnerPlugins(): Promise<void> {
 
 async function savePluginMetadata({ plugin, changes }: SavePluginPayload): Promise<void> {
   try {
-    await withPluginBusy(plugin, "save", () =>
+    const { applied } = await withPluginBusy(plugin, "save", () =>
       pluginStore.updatePluginMetadata(plugin.id, changes),
     );
     message.success("插件信息已保存");
-    editModalOpen.value = false;
+    if (applied) {
+      editModalOpen.value = false;
+    }
   } catch (error) {
     message.error(error instanceof Error ? error.message : "保存插件信息失败");
   }
@@ -883,7 +920,7 @@ async function togglePluginCdn({
 }): Promise<void> {
   if (isPluginBusy(plugin)) return;
   try {
-    const updated = await withPluginBusy(plugin, "cdn", () =>
+    const { updated } = await withPluginBusy(plugin, "cdn", () =>
       pluginStore.updatePluginCdn(plugin.id, enabled, whitelist),
     );
     if (whitelist !== undefined && updated.cdn_enabled) {
@@ -925,7 +962,7 @@ function unlistPlugin(plugin: Plugin): void {
 
 async function requestListPlugin(plugin: Plugin): Promise<void> {
   try {
-    const updated = await withPluginBusy(plugin, "request", () =>
+    const { updated } = await withPluginBusy(plugin, "request", () =>
       pluginStore.requestPluginListing(plugin.id),
     );
     message.success(updated.status === "listed" ? "插件已重新上架" : "已提交上架申请");
@@ -935,7 +972,16 @@ async function requestListPlugin(plugin: Plugin): Promise<void> {
 }
 
 function handleConnectOAuth(provider: OAuthProviderKey): void {
-  pluginStore.loginWithOAuth(provider, "/settings/personal");
+  pluginStore.loginWithOAuth(provider, authorPath.value);
+}
+
+async function retryCurrentUser(): Promise<void> {
+  retryingAuth.value = true;
+  try {
+    await pluginStore.loadCurrentUser({ force: true });
+  } finally {
+    retryingAuth.value = false;
+  }
 }
 
 function resetOwnerState(): void {
@@ -962,14 +1008,15 @@ async function loadAuthorPage(): Promise<void> {
   oauthProfiles.value = [];
   publicPlugins.value = [];
   resetOwnerState();
+  void pluginStore.loadCurrentUser();
 
   try {
-    const [response] = await Promise.all([
-      fetch(`${pluginStore.apiBaseUrl}/v1/authors/${encodeURIComponent(username.value)}/plugins`),
-      pluginStore.loadCurrentUser().catch(() => undefined),
-    ]);
+    const response = await fetch(
+      `${pluginStore.apiBaseUrl}/v1/authors/${encodeURIComponent(username.value)}/plugins`,
+    );
     if (reqId !== authorRequestId) return;
     const data = await response.json().catch(() => ({}));
+    if (reqId !== authorRequestId) return;
     if (response.status === 404) {
       notFound.value = true;
       publicPlugins.value = [];

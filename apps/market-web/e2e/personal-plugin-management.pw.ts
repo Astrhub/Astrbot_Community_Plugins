@@ -100,6 +100,18 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
       });
     }
     if (pathname === "/v1/me/notifications/unread-count") return json(route, { count: 0 });
+    if (pathname === "/v1/authors/reviewer/plugins") {
+      return json(route, {
+        username: "reviewer",
+        display_name: "reviewer",
+        avatar_url: "https://raw.githubusercontent.com/demo/profile/main/avatar.png",
+        github_url: "https://github.com/reviewer",
+        oauth_profiles: [
+          { provider: "github", login: "reviewer", url: "https://github.com/reviewer" },
+        ],
+        items: unlistRequested ? [] : [savedPayload ? { ...plugin, ...savedPayload } : plugin],
+      });
+    }
     if (pathname === "/v1/me/plugins") return json(route, { items: [plugin] });
     if (pathname === "/v1/me/api-keys") return json(route, { items: [] });
     if (pathname === "/v1/plugins") return json(route, { items: [] });
@@ -146,19 +158,34 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
     "src",
     "https://cdn.jsdelivr.net/gh/demo/profile@main/avatar.png",
   );
-  await page.locator(".n-tabs-tab__label").getByText("我的插件", { exact: true }).click();
+  await expect(
+    page.locator(".n-tabs-tab__label").getByText("我的插件", { exact: true }),
+  ).toHaveCount(0);
 
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "账户：reviewer" }).click();
+  const myPluginsLink = page.locator('a[href="/author/reviewer"]', { hasText: "我的插件" });
+  await expect(myPluginsLink).toBeVisible();
+  await myPluginsLink.click();
+  await expect(page).toHaveURL(/\/author\/reviewer$/);
+
+  await expect(page.getByText("本人主页", { exact: true })).toBeVisible();
   await expect(page.getByText("我的测试插件", { exact: true })).toBeVisible();
-  await expect(page.getByText("astrbot_plugin_owned", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "仓库 ↗" })).toBeVisible();
-  await expect(page.locator(".pm-logo")).toHaveAttribute("src", "/plugin_default.png?v=20260725");
+  await expect(page.locator(".plugin-logo")).toHaveAttribute(
+    "src",
+    "/plugin_default.png?v=20260725",
+  );
   expect(synthesizedLogoRequests).toBe(0);
 
   await page.getByRole("button", { name: "编辑" }).click();
-  await expect(page.getByText("展示名称", { exact: true })).toBeVisible();
-  const editor = page.locator(".pm-editor");
-  await editor.getByRole("textbox").first().fill("预览版插件名称");
-  await editor.getByRole("button", { name: "保存修改" }).click();
+  const modal = page.locator(".plugin-edit-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal.getByText("展示名称", { exact: true })).toBeVisible();
+  await expect(modal.getByText("astrbot_plugin_owned", { exact: true })).toBeVisible();
+  await expect(modal.getByRole("button", { name: /仓库 ↗/ })).toBeVisible();
+  await modal.locator("input#edit-display-name-astrbot_plugin_owned").fill("预览版插件名称");
+  await modal.getByRole("button", { name: "保存修改" }).click();
+  await expect(modal).toBeHidden();
   await expect(page.getByText("预览版插件名称", { exact: true })).toBeVisible();
   expect(savedPayload).toMatchObject({
     display_name: "预览版插件名称",
@@ -170,7 +197,7 @@ test("authors keep plugin editing while admins have one review entry", async ({ 
 
   await page.getByRole("button", { name: "下架" }).click();
   await page.locator(".n-dialog").getByRole("button", { name: "下架" }).click();
-  await expect(page.getByText("已下架", { exact: true })).toBeVisible();
+  await expect(page.locator(".owner-status-tag", { hasText: "已下架" })).toBeVisible();
   await expect(page.getByRole("button", { name: "申请上架" })).toBeVisible();
   expect(unlistRequested).toBe(true);
 

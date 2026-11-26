@@ -25,6 +25,15 @@ async function mockMarket(page: Page) {
     else if (path === "/v1/me")
       body = { id: "alice", role: "user", github_login: "alice", username: "alice" };
     else if (path === "/v1/me/notifications/unread-count") body = { count: 0 };
+    else if (path === "/v1/authors/alice/plugins")
+      body = {
+        username: "alice",
+        display_name: "Alice",
+        avatar_url: "",
+        github_url: "https://github.com/alice",
+        oauth_profiles: [{ provider: "github", login: "alice", url: "https://github.com/alice" }],
+        items: [plugin],
+      };
     else if (path === "/v1/me/plugins") body = { items: [plugin] };
     else if (path === "/v1/me/github/repositories")
       body = {
@@ -82,14 +91,16 @@ test("personal CDN switch preserves listing and follows server state on mobile",
 }, testInfo) => {
   const writes = await mockMarket(page);
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/settings/personal");
-  await page.getByText("我的插件", { exact: true }).click();
-  const control = page.getByRole("switch", { name: "社区源 CDN" });
+  await page.goto("/author/alice");
+  await expect(page.getByText("本人主页", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "编辑" }).click();
+  const modal = page.locator(".plugin-edit-modal");
+  await expect(modal).toBeVisible();
+  const control = modal.getByRole("switch", { name: "社区源 CDN" });
   await expect(control).toHaveAttribute("aria-checked", "true");
   await control.click();
   await expect(control).toHaveAttribute("aria-checked", "false");
-  await expect(page.getByText("已上架", { exact: true })).toBeVisible();
-  await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", "noindex,nofollow");
+  await expect(modal.getByText("已上架", { exact: true })).toBeVisible();
   expect(writes).toEqual([{ path: "/v1/plugins/cdn-demo/cdn", body: { enabled: false } }]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("personal-mobile.png"), fullPage: true });

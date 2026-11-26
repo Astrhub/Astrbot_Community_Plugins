@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { useRouter } from "vue-router";
+import { RouterLink, useRouter } from "vue-router";
 import { NDropdown, NIcon, useMessage } from "naive-ui";
 import {
   ExtensionPuzzleOutline,
@@ -46,12 +46,10 @@ const isAdminUser = computed(() =>
 );
 const hasUnreadNotifications = computed(() => unreadNotificationCount.value > 0);
 const myPublicUsername = computed(() =>
-  String(
-    currentUser.value?.public_username ||
-      currentUser.value?.github_login ||
-      currentUser.value?.internal_username ||
-      "",
-  ).trim(),
+  String(currentUser.value?.public_username || currentUser.value?.github_login || "").trim(),
+);
+const myAuthorPath = computed(() =>
+  myPublicUsername.value ? `/author/${encodeURIComponent(myPublicUsername.value)}` : "",
 );
 const displayUserName = computed(
   () =>
@@ -90,25 +88,25 @@ watch(currentUser, (user) => {
 });
 
 const userMenuOptions = computed(() => [
-  ...(myPublicUsername.value
+  ...(myAuthorPath.value
     ? [
         {
           key: "my-plugins",
-          label: "我的插件",
+          label: renderMenuLink(myAuthorPath.value, "我的插件"),
           icon: renderIcon(ExtensionPuzzleOutline),
         },
       ]
     : []),
   {
     key: "profile",
-    label: "个人设置",
+    label: renderMenuLink("/settings/personal", "个人设置"),
     icon: renderIcon(PersonOutline),
   },
   ...(isAdminUser.value
     ? [
         {
           key: "workbench",
-          label: "审查工作台",
+          label: renderMenuLink("/plugin-workbench", "审查工作台"),
           icon: renderIcon(ShieldCheckmarkOutline),
         },
       ]
@@ -117,7 +115,7 @@ const userMenuOptions = computed(() => [
     ? [
         {
           key: "settings",
-          label: "系统设置",
+          label: renderMenuLink("/admin/settings", "系统设置"),
           icon: renderIcon(SettingsOutline),
         },
       ]
@@ -135,6 +133,20 @@ const userMenuOptions = computed(() => [
 
 function renderIcon(icon: unknown) {
   return () => h(NIcon, null, { default: () => h(icon as never) });
+}
+
+function renderMenuLink(to: string, label: string) {
+  return () =>
+    h(
+      RouterLink,
+      {
+        to,
+        class: "user-menu-link",
+        style: { color: "inherit", textDecoration: "none", display: "block" },
+        onClick: closeUserMenu,
+      },
+      () => label,
+    );
 }
 
 function clearHoverCloseTimer(): void {
@@ -209,20 +221,17 @@ function openLoginModal(): void {
 
 async function handleUserMenuSelect(key: string): Promise<void> {
   closeUserMenu();
-  if (key === "my-plugins" && myPublicUsername.value) {
-    await router.push(`/author/${encodeURIComponent(myPublicUsername.value)}`);
-    return;
-  }
-  if (key === "profile") {
-    await router.push("/settings/personal");
-    return;
-  }
-  if (key === "workbench") {
-    await router.push("/plugin-workbench");
-    return;
-  }
-  if (key === "settings") {
-    await router.push("/admin/settings");
+  const routeTargets: Record<string, string> = {
+    ...(myAuthorPath.value ? { "my-plugins": myAuthorPath.value } : {}),
+    profile: "/settings/personal",
+    workbench: "/plugin-workbench",
+    settings: "/admin/settings",
+  };
+  const targetPath = routeTargets[key];
+  if (targetPath) {
+    if (router.currentRoute.value.path !== targetPath) {
+      await router.push(targetPath);
+    }
     return;
   }
   if (key !== "logout") return;

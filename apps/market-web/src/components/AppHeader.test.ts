@@ -7,6 +7,7 @@ import { NConfigProvider, NDialogProvider, NMessageProvider } from "naive-ui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import AppHeader from "./AppHeader.vue";
 import { usePluginStore } from "@/stores/plugins";
+import type { User } from "@/types";
 
 vi.mock("naive-ui", async (importOriginal) => {
   const original = await importOriginal<typeof import("naive-ui")>();
@@ -24,18 +25,24 @@ vi.mock("naive-ui", async (importOriginal) => {
       setup(props, { slots, emit }) {
         return () => {
           const menuHandlers = props.menuProps ? props.menuProps() : {};
-          const items = (props.options as Array<{ key: string; label?: string; type?: string }>)
+          const items = (
+            props.options as Array<{
+              key: string;
+              label?: string | (() => import("vue").VNodeChild);
+              type?: string;
+            }>
+          )
             .filter((opt) => opt.type !== "divider")
             .map((opt) =>
               h(
-                "button",
+                "div",
                 {
                   key: opt.key,
-                  type: "button",
+                  role: "menuitem",
                   "data-key": opt.key,
                   onClick: () => emit("select", opt.key),
                 },
-                opt.label,
+                typeof opt.label === "function" ? [opt.label()] : opt.label,
               ),
             );
           return h("div", { class: "dropdown-stub" }, [
@@ -58,11 +65,11 @@ vi.mock("naive-ui", async (importOriginal) => {
   };
 });
 
-async function createTestApp() {
+async function createTestApp(userOverride?: User) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = usePluginStore();
-  store.currentUser = {
+  store.currentUser = userOverride || {
     id: "u1",
     public_username: "AlicePublic",
     github_login: "AliceGH",
@@ -165,21 +172,40 @@ describe("AppHeader user dropdown", () => {
     wrapper.unmount();
   });
 
-  it("navigates to /author/:username when selecting 我的插件", async () => {
+  it("renders 我的插件 as a crawlable router-link and navigates to /author/:username", async () => {
     const { wrapper, router } = await createTestApp();
     const trigger = wrapper.get(".user-trigger");
 
     await trigger.trigger("click");
     await nextTick();
 
-    const myPluginsItem = wrapper.get('[data-key="my-plugins"]');
-    expect(myPluginsItem.text()).toBe("我的插件");
-    await myPluginsItem.trigger("click");
+    const myPluginsLink = wrapper.get('[data-key="my-plugins"] a.user-menu-link');
+    expect(myPluginsLink.text()).toBe("我的插件");
+    expect(myPluginsLink.attributes("href")).toBe("/author/AlicePublic");
+
+    await myPluginsLink.trigger("click");
     await flushPromises();
     await nextTick();
 
     expect(router.currentRoute.value.path).toBe("/author/AlicePublic");
     expect(wrapper.find(".dropdown-menu-stub").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("omits 我的插件 when user has only an internal_username without public handle", async () => {
+    const { wrapper } = await createTestApp({
+      id: "u-internal",
+      internal_username: "internal_only",
+      role: "core_admin",
+    });
+
+    await wrapper.get(".user-trigger").trigger("click");
+    await nextTick();
+
+    expect(wrapper.find('[data-key="my-plugins"]').exists()).toBe(false);
+    expect(wrapper.get('[data-key="profile"] a.user-menu-link').attributes("href")).toBe(
+      "/settings/personal",
+    );
     wrapper.unmount();
   });
 });

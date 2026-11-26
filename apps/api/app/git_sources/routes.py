@@ -6,6 +6,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -30,6 +31,29 @@ from .registry import (
 
 LOGGER = logging.getLogger(__name__)
 ALLOWED_RETURN_PATHS = frozenset({"/submit", "/settings/personal", "/plugin-workbench"})
+
+
+def normalize_oauth_return_path(path: str) -> str | None:
+    candidate = str(path or "").strip()
+    if candidate in ALLOWED_RETURN_PATHS:
+        return candidate
+    if not candidate.startswith("/author/"):
+        return None
+    raw_segment = candidate.removeprefix("/author/")
+    if (
+        not raw_segment
+        or "/" in raw_segment
+        or "\\" in raw_segment
+        or "?" in raw_segment
+        or "#" in raw_segment
+    ):
+        return None
+    segment = unquote(raw_segment).strip()
+    if not segment or segment in {".", ".."} or "/" in segment or "\\" in segment:
+        return None
+    if any(ord(ch) < 32 or ch.isspace() for ch in segment):
+        return None
+    return f"/author/{quote(segment, safe='')}"
 
 
 class GitBindingRevokePayload(BaseModel):
@@ -94,7 +118,8 @@ def build_git_provider_router(
     ) -> Response:
         key = provider.strip().lower()
         if key == "github":
-            query = f"?next={next}" if next in ALLOWED_RETURN_PATHS else ""
+            safe_next = normalize_oauth_return_path(next)
+            query = f"?next={quote(safe_next, safe='')}" if safe_next else ""
             return RedirectResponse(f"/v1/auth/github/login{query}", status_code=302)
         if key not in THIRD_PARTY_PROVIDERS:
             raise HTTPException(
@@ -123,7 +148,7 @@ def build_git_provider_router(
         authorize_url = adapter.build_authorize_url(state=state)
         response = RedirectResponse(authorize_url, status_code=302)
         set_cookie(response, _state_cookie_name(settings, key), state, settings, max_age=600)
-        destination = next if next in ALLOWED_RETURN_PATHS else "/"
+        destination = normalize_oauth_return_path(next) or "/"
         set_cookie(response, _return_cookie_name(key), destination, settings, max_age=600)
         return response
 
@@ -263,9 +288,9 @@ def build_git_provider_router(
                 raise
 
         session = await call_store(request, "create_session", user["id"])
-        destination = request.cookies.get(_return_cookie_name(key), "/")
-        if destination not in ALLOWED_RETURN_PATHS:
-            destination = ""
+        destination = (
+            normalize_oauth_return_path(request.cookies.get(_return_cookie_name(key), "")) or ""
+        )
         response = RedirectResponse(settings.web_url.rstrip("/") + destination, status_code=302)
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         response.delete_cookie(_state_cookie_name(settings, key), path="/")
