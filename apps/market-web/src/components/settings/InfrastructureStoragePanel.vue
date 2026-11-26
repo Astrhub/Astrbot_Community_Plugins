@@ -1342,13 +1342,16 @@ onMounted(() => {
   padding: 14px;
   background: var(--bg-surface);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   min-width: 0;
 }
 
 .binding-meta {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
+  min-width: 0;
 }
 
 .binding-title {
@@ -1432,6 +1435,7 @@ onMounted(() => {
 
 .profile-main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
 }
@@ -1442,6 +1446,12 @@ onMounted(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.profile-title-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .profile-id {
@@ -1466,6 +1476,7 @@ onMounted(() => {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .migration-route {
@@ -1524,7 +1535,12 @@ onMounted(() => {
   width: min(480px, calc(100vw - 32px));
 }
 
-:global(.storage-modal .n-card__content) {
+:global(.storage-modal > .n-card-header),
+:global(.storage-modal > .n-card__footer) {
+  flex-shrink: 0;
+}
+
+:global(.storage-modal > .n-card__content) {
   overflow-y: auto;
   min-height: 0;
 }
@@ -1561,11 +1577,11 @@ onMounted(() => {
     padding: 16px;
   }
   .profile-card {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .binding-controls {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

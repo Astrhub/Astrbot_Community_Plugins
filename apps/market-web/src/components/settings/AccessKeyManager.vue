@@ -215,6 +215,7 @@ function isBusy(key) {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--card-color);
+  box-shadow: var(--shadow-sm);
   min-width: 0;
 }
 
@@ -292,6 +293,7 @@ function isBusy(key) {
 
 .scope-group {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   width: 100%;
   min-width: 0;
@@ -332,6 +334,7 @@ function isBusy(key) {
 
 .key-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   min-width: 0;
 }
@@ -374,6 +377,10 @@ function isBusy(key) {
 }
 
 @media (max-width: 640px) {
+  .settings-section {
+    padding: 16px;
+  }
+
   .section-heading {
     align-items: flex-start;
     flex-wrap: wrap;

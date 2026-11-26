@@ -658,6 +658,7 @@ onMounted(async () => {
   min-height: 46px;
 }
 
+.profile-tabs :deep(.n-tabs-pane-wrapper),
 .profile-tabs :deep(.n-tab-pane) {
   min-width: 0;
 }

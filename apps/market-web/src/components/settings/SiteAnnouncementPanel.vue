@@ -361,7 +361,9 @@ onMounted(async () => {
 
 .announcement-form {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 4px;
+  min-width: 0;
 }
 
 .image-tools,
@@ -371,6 +373,10 @@ onMounted(async () => {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.announcement-item-actions {
+  flex-shrink: 0;
 }
 
 .image-url-input {
@@ -422,6 +428,7 @@ onMounted(async () => {
 
 .announcement-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   min-width: 0;
 }
@@ -450,10 +457,13 @@ onMounted(async () => {
   border: 0;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   .settings-section {
     padding: 16px;
   }
+}
+
+@media (max-width: 640px) {
   .image-tools,
   .announcement-item-header {
     align-items: stretch;

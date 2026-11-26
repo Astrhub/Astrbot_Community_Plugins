@@ -1621,6 +1621,10 @@ h1 {
 
 .infra-item :deep(.n-tag) {
   max-width: 100%;
+  height: auto;
+  min-height: var(--n-height);
+  padding-block: 4px;
+  line-height: 1.4;
   white-space: normal;
 }
 
@@ -1758,6 +1762,10 @@ h1 {
 }
 
 @media (max-width: 760px) {
+  .settings-section {
+    padding: 16px;
+  }
+
   .header-content {
     align-items: flex-start;
     flex-direction: column;

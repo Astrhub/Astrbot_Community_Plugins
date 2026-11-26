@@ -676,6 +676,12 @@ function savePlugin(plugin: Plugin): void {
   }
 }
 
+@media (max-width: 640px) {
+  .plugin-manager {
+    padding: 16px;
+  }
+}
+
 @media (max-width: 480px) {
   .pm-actions {
     grid-column: 1 / -1;
@@ -683,12 +689,6 @@ function savePlugin(plugin: Plugin): void {
 
   .pm-editor {
     padding-inline: 12px;
-  }
-}
-
-@media (max-width: 640px) {
-  .plugin-manager {
-    padding: 16px;
   }
 }
 </style>

@@ -679,6 +679,7 @@ function confirmUnbind(identity: OAuthIdentity): void {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--card-color);
+  box-shadow: var(--shadow-sm);
   min-width: 0;
 }
 
@@ -738,6 +739,7 @@ function confirmUnbind(identity: OAuthIdentity): void {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--body-color);
+  min-width: 0;
 }
 
 .github-summary {
@@ -747,14 +749,19 @@ function confirmUnbind(identity: OAuthIdentity): void {
 .github-main,
 .oauth-info {
   gap: 10px;
+  min-width: 0;
+  flex: 1;
 }
 
 .oauth-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+  min-width: 0;
 }
 
 .oauth-provider-icon {
+  flex: none;
   font-size: 20px;
   color: var(--text-color-2);
 }
@@ -878,6 +885,12 @@ function confirmUnbind(identity: OAuthIdentity): void {
 
   .section-actions :deep(.n-button) {
     width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .settings-section {
+    padding: 16px;
   }
 }
 

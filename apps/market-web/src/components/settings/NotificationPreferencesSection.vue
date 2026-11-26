@@ -217,6 +217,7 @@ const emit = defineEmits(["save"]);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--card-color);
+  box-shadow: var(--shadow-sm);
   min-width: 0;
 }
 
@@ -265,6 +266,7 @@ const emit = defineEmits(["save"]);
 .preference-panel,
 .preference-group {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
 }
 
@@ -346,6 +348,10 @@ const emit = defineEmits(["save"]);
 }
 
 @media (max-width: 640px) {
+  .settings-section {
+    padding: 16px;
+  }
+
   .preference-row {
     align-items: flex-start;
   }

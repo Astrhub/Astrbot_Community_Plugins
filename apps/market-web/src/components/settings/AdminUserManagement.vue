@@ -590,7 +590,12 @@ function confirmDelete(user) {
   flex-direction: column;
 }
 
-:global(.management-modal .n-card__content) {
+:global(.management-modal > .n-card-header),
+:global(.management-modal > .n-card__footer) {
+  flex-shrink: 0;
+}
+
+:global(.management-modal > .n-card__content) {
   overflow-y: auto;
   min-height: 0;
 }
@@ -624,10 +629,13 @@ function confirmDelete(user) {
   }
 }
 
-@media (max-width: 680px) {
+@media (max-width: 760px) {
   .settings-section {
     padding: 16px;
   }
+}
+
+@media (max-width: 680px) {
   .row-title,
   .user-toolbar {
     align-items: flex-start;
