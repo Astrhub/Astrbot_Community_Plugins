@@ -465,6 +465,7 @@ def create_app(
             response.headers["Cache-Control"] = cache_control_for_path(
                 request.url.path,
                 response.headers.get("content-type", ""),
+                response.status_code,
             )
         return response
 
@@ -3030,7 +3031,11 @@ def resolve_market_web_file(full_path: str) -> Path | None:
     return candidate
 
 
-def cache_control_for_path(path: str, content_type: str = "") -> str:
+def cache_control_for_path(path: str, content_type: str = "", status_code: int = 200) -> str:
+    if status_code >= 400:
+        if "text/html" in content_type:
+            return "public, max-age=0, must-revalidate"
+        return "private, no-store"
     normalized = "/" + path.lstrip("/")
     if normalized.startswith("/assets/"):
         return "public, max-age=31536000, immutable"

@@ -1684,8 +1684,7 @@ function updateCommentInDetail(updated) {
   font-size: 0.9em;
 }
 
-.markdown-content :deep(pre code *),
-.markdown-content :deep(pre code .hljs) {
+.markdown-content :deep(pre code *) {
   border: 0;
   background: transparent;
   padding: 0;

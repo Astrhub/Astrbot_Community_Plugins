@@ -75,4 +75,78 @@ describe("multi-tag filtering", () => {
     store.searchQuery = "alice";
     expect(store.filteredPlugins).toHaveLength(1);
   });
+
+  it("reuses HTTP cache for default loadPlugins and reloads cache when force is true", async () => {
+    setActivePinia(createPinia());
+    const fetchMock = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ items: [] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const store = usePluginStore();
+      await store.loadPlugins();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[1]).toBeUndefined();
+
+      await store.loadPlugins({ force: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1]?.[1]).toEqual({ cache: "reload" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not coalesce a forced refresh with an in-flight load and ignores stale responses", async () => {
+    setActivePinia(createPinia());
+    let resolveInitial: ((value: unknown) => void) | undefined;
+    let resolveForced: ((value: unknown) => void) | undefined;
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInitial = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveForced = resolve;
+          }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const store = usePluginStore();
+      const initialLoad = store.loadPlugins();
+      const coalescedLoad = store.loadPlugins();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const forcedLoad = store.loadPlugins({ force: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1]?.[1]).toEqual({ cache: "reload" });
+
+      resolveForced?.({
+        ok: true,
+        json: async () => ({
+          items: [{ id: "fresh", name: "astrbot_plugin_fresh", display_name: "新插件" }],
+        }),
+      });
+      await forcedLoad;
+      expect(store.plugins.map((plugin) => plugin.id)).toEqual(["fresh"]);
+      expect(store.isLoading).toBe(false);
+
+      resolveInitial?.({
+        ok: true,
+        json: async () => ({
+          items: [{ id: "stale", name: "astrbot_plugin_stale", display_name: "旧插件" }],
+        }),
+      });
+      await Promise.all([initialLoad, coalescedLoad]);
+      expect(store.plugins.map((plugin) => plugin.id)).toEqual(["fresh"]);
+      expect(store.isLoading).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

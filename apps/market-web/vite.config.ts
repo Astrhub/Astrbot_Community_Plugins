@@ -7,6 +7,24 @@ type VitePlusConfig = Parameters<typeof defineConfig>[0];
 
 const communityRepoUrl = process.env.VITE_COMMUNITY_REPO_URL || readGitRemoteUrl();
 
+function escapeHtmlAttr(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+const syncBootRepoMetaPlugin = {
+  name: "sync-boot-repo-meta",
+  transformIndexHtml(html: string): string {
+    return html.replace(
+      /(<meta\s+name="astrhub-repo-url"\s+content=")[^"]*(")/,
+      `$1${escapeHtmlAttr(communityRepoUrl)}$2`,
+    );
+  },
+};
+
 // vite-plus 的 UserConfig 类型递归较深，tsgo 直接比较会触发 excessive stack depth；
 // 此处经由 unknown 断言跳过深度比较（库类型边界，非外部输入）。
 const config = {
@@ -19,7 +37,7 @@ const config = {
   staged: {
     "**/*.{js,ts,tsx,vue,svelte,css,md}": "vp check --fix",
   },
-  plugins: [vue()],
+  plugins: [vue(), syncBootRepoMetaPlugin],
   define: {
     "import.meta.env.VITE_COMMUNITY_REPO_URL": JSON.stringify(communityRepoUrl),
   },

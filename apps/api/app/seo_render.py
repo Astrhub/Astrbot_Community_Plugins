@@ -75,6 +75,7 @@ class SiteSeoContext:
     site_subtitle: str
     site_description: str
     default_og_image: str
+    contact_email: str = ""
 
 
 @dataclass(frozen=True)
@@ -177,12 +178,19 @@ def build_site_seo_context(
         str(config.get("SITE_DESCRIPTION") or settings.site_description or "").strip()
         or DEFAULT_SITE_DESCRIPTION
     )
+    raw_contact_email = (
+        config["SITE_CONTACT_EMAIL"]
+        if "SITE_CONTACT_EMAIL" in config
+        else settings.site_contact_email
+    )
+    contact_email = str(raw_contact_email or "").strip()
     return SiteSeoContext(
         origin=origin,
         brand_name=brand_name,
         site_subtitle=site_subtitle,
         site_description=site_description,
         default_og_image=f"{origin}/og-cover.png",
+        contact_email=contact_email,
     )
 
 
@@ -268,6 +276,10 @@ def render_head_html(ctx: SiteSeoContext, page: PageSpec) -> str:
         f'<meta property="og:image" content="{escape_html(og_image)}" />',
         '<meta name="twitter:card" content="summary_large_image" />',
     ]
+    if ctx.contact_email:
+        tags.append(
+            f'<meta name="astrhub-contact-email" content="{escape_html(ctx.contact_email)}" />'
+        )
     if page.json_ld is not None:
         tags.append(
             f'<script id="{escape_html(page.json_ld_id)}" type="application/ld+json">'

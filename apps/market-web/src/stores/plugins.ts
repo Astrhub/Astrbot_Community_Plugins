@@ -349,6 +349,7 @@ export const usePluginStore = defineStore("plugins", () => {
   let announcementsMutationVersion = 0;
   let currentUserLoaded = false;
   let loadPluginsPromise: Promise<Plugin[]> | null = null;
+  let loadPluginsVersion = 0;
   let loadAnnouncementsPromise: Promise<Announcement[]> | null = null;
   let loadCurrentUserPromise: Promise<void> | null = null;
 
@@ -584,31 +585,43 @@ export const usePluginStore = defineStore("plugins", () => {
 
   async function loadPlugins(options: { force?: boolean } = {}): Promise<Plugin[]> {
     const { force = false } = options;
-    if (loadPluginsPromise) return loadPluginsPromise;
+    if (!force && loadPluginsPromise) return loadPluginsPromise;
     if (pluginsLoaded && !force) return plugins.value;
+    const requestVersion = ++loadPluginsVersion;
     isLoading.value = true;
-    loadPluginsPromise = (async () => {
+    const requestPromise = (async () => {
       try {
-        const response = await fetch(`${apiBaseUrl}/v1/plugins`, { cache: "no-store" });
+        const response = await fetch(
+          `${apiBaseUrl}/v1/plugins`,
+          force ? { cache: "reload" } : undefined,
+        );
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         const items: unknown[] = Array.isArray(data) ? data : data.items || [];
-        plugins.value = items.map((plugin, index) =>
+        const normalized = items.map((plugin, index) =>
           normalizePluginItem(plugin as RawPlugin, index),
         );
-        pluginsLoaded = true;
+        if (requestVersion === loadPluginsVersion) {
+          plugins.value = normalized;
+          pluginsLoaded = true;
+        }
         return plugins.value;
       } catch (error) {
         console.error("Error loading plugins:", error);
-        plugins.value = [];
-        pluginsLoaded = false;
+        if (requestVersion === loadPluginsVersion) {
+          plugins.value = [];
+          pluginsLoaded = false;
+        }
         return plugins.value;
       } finally {
-        isLoading.value = false;
-        loadPluginsPromise = null;
+        if (requestVersion === loadPluginsVersion) {
+          isLoading.value = false;
+          loadPluginsPromise = null;
+        }
       }
     })();
-    return loadPluginsPromise;
+    loadPluginsPromise = requestPromise;
+    return requestPromise;
   }
 
   async function loadAnnouncements(options: { force?: boolean } = {}): Promise<Announcement[]> {

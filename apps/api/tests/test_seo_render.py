@@ -17,6 +17,7 @@ from app.seo_render import (
     EXTERNAL_SITEMAPS,
     FALLBACK_SITE_ORIGIN,
     TemplateMarkerError,
+    build_site_seo_context,
     clear_template_cache,
     get_cached_sitemap_xml,
     load_index_template,
@@ -924,3 +925,76 @@ def test_ownerless_plugin_omits_two_segment_canonical_path_and_links(
 
     legacy_404 = client.get(f"/plugin/{orphan['id']}", follow_redirects=False)
     assert legacy_404.status_code == 404
+
+
+def test_contact_email_meta_and_boot_overlay_template_invariants(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    default_client, _ = _setup_client(tmp_path / "default", monkeypatch)
+    default_home = default_client.get("/")
+    assert default_home.status_code == 200
+    assert 'name="astrhub-contact-email"' not in default_home.text
+
+    configured_client, _ = _setup_client(
+        tmp_path / "configured",
+        monkeypatch,
+        env={"SITE_CONTACT_EMAIL": 'ops+"support"@example.org'},
+    )
+    configured_home = configured_client.get("/")
+    assert configured_home.status_code == 200
+    expected_meta = (
+        '<meta name="astrhub-contact-email" content="ops+&quot;support&quot;@example.org" />'
+    )
+    assert expected_meta in configured_home.text
+
+    # An explicitly cleared runtime SITE_CONTACT_EMAIL must override a non-empty env default.
+    env_with_email = load_settings(
+        {
+            "WEB_URL": "https://market.example.org",
+            "SITE_CONTACT_EMAIL": "env-only@example.org",
+            "ENABLE_DEV_AUTH": "false",
+        }
+    )
+    cleared_ctx = build_site_seo_context(env_with_email, {"SITE_CONTACT_EMAIL": ""})
+    assert cleared_ctx.contact_email == ""
+    inherited_ctx = build_site_seo_context(env_with_email, {})
+    assert inherited_ctx.contact_email == "env-only@example.org"
+
+    # Render against the real index.html template to ensure SSR markers, boot overlay,
+    # unique H1, and absence of static error copy in the initial HTML body.
+    real_index = Path(__file__).resolve().parents[2] / "market-web" / "index.html"
+    dist = tmp_path / "real-dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    (dist / "index.html").write_text(real_index.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(main_module, "MARKET_WEB_DIST", dist)
+    clear_template_cache()
+    settings = load_settings(
+        {
+            "WEB_URL": "https://market.example.org",
+            "SITE_NAME": "测试插件市场",
+            "SITE_DESCRIPTION": "自定义市场描述",
+            "SITE_CONTACT_EMAIL": "support@example.org",
+            "ENABLE_DEV_AUTH": "false",
+        }
+    )
+    real_app = main_module.create_app(settings=settings, store=InMemoryMarketStore())
+    real_home = TestClient(real_app).get("/")
+    assert real_home.status_code == 200
+    assert _count_h1(real_home.text) == 1
+    assert 'id="boot-overlay"' in real_home.text
+    hides_ssr_shell = re.search(
+        r"html\.js\s+\.ssr-shell\s*\{[^}]*display\s*:\s*none", real_home.text
+    )
+    assert hides_ssr_shell is not None
+    hides_overlay_no_js = re.search(
+        r"html:not\(\.js\)\s+#boot-overlay\s*\{[^}]*display\s*:\s*none", real_home.text
+    )
+    assert hides_overlay_no_js is not None
+    hides_overlay_mounted = re.search(
+        r"#app\[data-v-app\]\s*~\s*#boot-overlay:not\(\.is-error\)\s*\{[^}]*display\s*:\s*none",
+        real_home.text,
+    )
+    assert hides_overlay_mounted is not None
+    assert '<meta name="astrhub-contact-email" content="support@example.org" />' in real_home.text
+    body_start = real_home.text.index("<body>")
+    assert "页面暂时无法加载" not in real_home.text[body_start:]

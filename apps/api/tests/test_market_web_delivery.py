@@ -160,3 +160,9 @@ def test_cache_control_classification() -> None:
         "public, max-age=0, must-revalidate"
     )
     assert cache_control_for_path("/health") == "private, no-store"
+    assert cache_control_for_path("/v1/plugins", "application/json", 503) == "private, no-store"
+    assert cache_control_for_path("/v1/plugins", "application/json", 500) == "private, no-store"
+    assert cache_control_for_path("/plugins.json", "application/json", 502) == "private, no-store"
+    assert cache_control_for_path("/does-not-exist", "text/html; charset=utf-8", 404) == (
+        "public, max-age=0, must-revalidate"
+    )

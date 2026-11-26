@@ -7,7 +7,6 @@ import { darkTheme, NConfigProvider, NDialogProvider, NMessageProvider } from "n
 import BackToTop from "./components/BackToTop.vue";
 import IrisMask from "./components/IrisMask.vue";
 import { darkThemeOverrides, lightThemeOverrides } from "./config/darkTheme";
-import { highlightConfig } from "./plugins/highlight";
 import { usePluginStore } from "./stores/plugins";
 
 import type { SiteConfig } from "./types";
@@ -47,13 +46,11 @@ onMounted(async () => {
     if (route.path !== "/setup") await router.replace("/setup");
     return;
   }
-  const pluginsPromise = store.loadPlugins();
   try {
     await store.loadCurrentUser();
   } finally {
     document.documentElement.classList.remove("auth-session-loading");
   }
-  await pluginsPromise;
 });
 </script>
 
@@ -61,7 +58,6 @@ onMounted(async () => {
   <n-config-provider
     :theme="isDarkMode ? darkTheme : null"
     :theme-overrides="isDarkMode ? darkThemeOverrides : lightThemeOverrides"
-    :hljs="highlightConfig.hljs"
   >
     <n-message-provider>
       <n-dialog-provider>
