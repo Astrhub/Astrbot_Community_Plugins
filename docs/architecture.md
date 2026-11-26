@@ -336,12 +336,12 @@ create_app(settings, store)
 | --- | --- | --- |
 | `/` | `Home.vue` | 插件市场首页（支持分页与瀑布流切换、筛选与排序） |
 | `/plugin/:username/:name` | `PluginDetailsPage.vue` | 规范插件详情页（含运行时与客户端 SEO、JSON-LD、README 与评论；大小写或历史登录名别名 301 重定向） |
-| `/author/:username` | `AuthorPage.vue` | 作者公开插件页（大小写或历史登录名别名 301 重定向） |
+| `/author/:username` | `AuthorPage.vue` | 作者个人主页（公开访客视图展示已上架插件与聚合外链；本人访问时展示全部状态插件并支持弹窗编辑、CDN 开关与上下架管理；大小写或历史登录名别名 301 重定向） |
 | `/submit` | `SubmitPlugin.vue` | 插件提交页（社区模式顶部切换受支持 Git 平台，GitHub 侧支持持久批量一键导入已有插件；本地模式支持管理员直填 URL） |
 | `/setup` | `Setup.vue` | 首次安装向导（`noindex,nofollow`） |
 | `/admin` | `AdminLogin.vue` | 内部管理员登录页（`noindex,nofollow`） |
 | `/admin/settings` | `Settings.vue` | 核心管理员系统设置页（`/settings` 重定向至此，`noindex,nofollow`） |
-| `/settings/personal` | `PersonalSettings.vue` | 个人设置、个人插件管理与 API Key（`noindex,nofollow`） |
+| `/settings/personal` | `PersonalSettings.vue` | 个人账号资料、通知偏好与 API Key 设置（`noindex,nofollow`） |
 | `/notifications` | `Notifications.vue` | 站内通知中心（`noindex,nofollow`） |
 | `/plugin-workbench` | `PluginWorkbench.vue` | 插件版本历史与审查工作台（`/admin/plugins` 重定向至此，需登录，`noindex,nofollow`） |
 | `/docs/rest` | `RestDocs.vue` | REST API 文档与在线试用页 |
@@ -351,8 +351,8 @@ create_app(settings, store)
 
 ### 关键组件
 
-- 公共与市场视图：`AppHeader`、`AppFooter`、`GitProviderIcon`、`PluginCard`、`PluginDetails`（含站内 README 渲染与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`。
-- 个人与后台设置（`components/settings/`）：`AccessKeyManager`、`AdminUserManagement`、`NotificationPreferencesSection`、`PersonalPluginManager`、`ProfileAccountSection`。
+- 公共与市场视图：`AppHeader`、`AppFooter`、`GitProviderIcon`、`PluginCard`、`PluginEditModal`、`PluginDetails`（含站内 README 渲染与仓库文件导航）、`PluginComment`、`SearchToolbar`、`AppPagination`、`ThemeModeButton`、`IrisMask`。
+- 个人与后台设置（`components/settings/`）：`AccessKeyManager`、`AdminUserManagement`、`NotificationPreferencesSection`、`ProfileAccountSection`。
 - 审查工作台（`components/workbench/`）：`ArtifactSubmissionPanel`、`PluginReviewWorkspace`、`ReviewSummaryPanel`、`ReviewFileBrowser`、`ReviewDiffViewer`、`ReviewCommentThread`、`ReviewManualPanel`、`ReviewDecisionPanel`、`ReviewHistoryTimeline`、`ReviewPolicyPanel`。
 
 ### 构建与运行时 SEO 注入

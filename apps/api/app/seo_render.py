@@ -46,7 +46,7 @@ EXTERNAL_SITEMAPS: tuple[str, ...] = (
 PRIVATE_ROUTE_TITLES: dict[str, str] = {
     "/setup": "安装向导",
     "/settings": "系统设置",
-    "/settings/personal": "账号与插件",
+    "/settings/personal": "账号设置",
     "/notifications": "消息中心",
     "/admin": "后台登录",
     "/admin/settings": "系统设置",

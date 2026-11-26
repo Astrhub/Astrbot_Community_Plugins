@@ -3,7 +3,6 @@ import { computed, onMounted, reactive, shallowRef } from "vue";
 import { useRouter } from "vue-router";
 import { storeToRefs } from "pinia";
 import {
-  NAlert,
   NButton,
   NIcon,
   NLayoutHeader,
@@ -15,13 +14,10 @@ import {
 } from "naive-ui";
 import { ArrowBack } from "@vicons/ionicons5";
 import AccessKeyManager from "@/components/settings/AccessKeyManager.vue";
-import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import NotificationPreferencesSection from "@/components/settings/NotificationPreferencesSection.vue";
-import PersonalPluginManager from "@/components/settings/PersonalPluginManager.vue";
 import ProfileAccountSection from "@/components/settings/ProfileAccountSection.vue";
 import { usePluginStore } from "@/stores/plugins";
-import { getGitProviderLabel } from "@/utils/github";
-import type { OAuthIdentity, OAuthProviderKey, Plugin } from "@/types";
+import type { ApiKey, OAuthIdentity, OAuthProviderKey } from "@/types";
 
 const router = useRouter();
 const message = useMessage();
@@ -35,16 +31,10 @@ const {
   deleteMyAvatar,
   loadCurrentUser,
   loadMyApiKeys,
-  loadMyPlugins,
-  loginWithGithub,
   loginWithOAuth,
   requestEmailChange,
-  requestPluginListing,
   unbindMyOAuthIdentity,
-  unlistOwnPlugin,
   updateMyPassword,
-  updatePluginMetadata,
-  updatePluginCdn,
   updateProfile,
   verifyEmailChange,
 } = store;
@@ -55,15 +45,12 @@ const savingPassword = shallowRef(false);
 const savingEmail = shallowRef(false);
 const oauthBusyId = shallowRef("");
 const savingNotifications = shallowRef(false);
-const loadingPlugins = shallowRef(false);
 const loadingAccessKeys = shallowRef(false);
 const creatingAccessKey = shallowRef(false);
 const avatarBusy = shallowRef(false);
-const myPlugins = shallowRef([]);
-const accessKeys = shallowRef([]);
+const accessKeys = shallowRef<ApiKey[]>([]);
 const newAccessKey = shallowRef("");
-const pluginBusyIds = reactive({});
-const accessKeyBusyIds = reactive({});
+const accessKeyBusyIds = reactive<Record<string, string>>({});
 const formData = reactive({
   github_name: "",
   github_token: "",
@@ -82,7 +69,6 @@ const formData = reactive({
   email_notify_unlist: true,
 });
 
-const maxPluginTags = computed(() => Number(siteConfig.value.market?.max_plugin_tags || 8));
 const isAdminUser = computed(() =>
   ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
 );
@@ -100,8 +86,9 @@ const fallbackNotificationEmail = computed(() => {
 function applyCurrentUser() {
   formData.github_name = currentUser.value?.github_name || "";
   formData.github_token = "";
-  formData.github_refresh_interval_seconds =
-    currentUser.value?.github_refresh_interval_seconds || 3600;
+  formData.github_refresh_interval_seconds = Number(
+    currentUser.value?.github_refresh_interval_seconds || 3600,
+  );
   formData.notification_email = currentUser.value?.notification_email || "";
   formData.notify_plugin_review = currentUser.value?.notify_plugin_review !== false;
   formData.notify_comments = currentUser.value?.notify_comments !== false;
@@ -144,7 +131,7 @@ async function handleRemoveAvatar() {
 async function saveProfile() {
   savingProfile.value = true;
   try {
-    const payload = {
+    const payload: Record<string, unknown> = {
       github_name: formData.github_name.trim(),
       github_refresh_interval_seconds: Number(formData.github_refresh_interval_seconds || 3600),
     };
@@ -155,7 +142,7 @@ async function saveProfile() {
     applyCurrentUser();
     message.success("个人资料已保存");
   } catch (error) {
-    message.error(error.message || "保存失败");
+    message.error(error instanceof Error ? error.message : "保存失败");
   } finally {
     savingProfile.value = false;
   }
@@ -181,20 +168,9 @@ async function saveNotificationPreferences() {
     applyCurrentUser();
     message.success("通知设置已保存");
   } catch (error) {
-    message.error(error.message || "保存失败");
+    message.error(error instanceof Error ? error.message : "保存失败");
   } finally {
     savingNotifications.value = false;
-  }
-}
-
-async function refreshMyPlugins() {
-  loadingPlugins.value = true;
-  try {
-    myPlugins.value = await loadMyPlugins();
-  } catch (error) {
-    message.error(error.message || "插件加载失败");
-  } finally {
-    loadingPlugins.value = false;
   }
 }
 
@@ -203,146 +179,55 @@ async function refreshAccessKeys() {
   try {
     accessKeys.value = await loadMyApiKeys();
   } catch (error) {
-    message.error(error.message || "访问密钥加载失败");
+    message.error(error instanceof Error ? error.message : "访问密钥加载失败");
   } finally {
     loadingAccessKeys.value = false;
   }
 }
 
-async function createAccessKey(payload) {
+async function createAccessKey(payload: Record<string, unknown>) {
   creatingAccessKey.value = true;
   newAccessKey.value = "";
   try {
-    const apiKey = await createMyApiKey(payload);
+    const apiKey = (await createMyApiKey(payload)) as ApiKey;
     newAccessKey.value = apiKey.key || "";
     accessKeys.value = [apiKey, ...accessKeys.value.filter((item) => item.id !== apiKey.id)];
     message.success("访问密钥已生成");
   } catch (error) {
-    message.error(error.message || "生成访问密钥失败");
+    message.error(error instanceof Error ? error.message : "生成访问密钥失败");
   } finally {
     creatingAccessKey.value = false;
   }
 }
 
-function deleteAccessKey(apiKey) {
+function deleteAccessKey(apiKey: ApiKey) {
   dialog.warning({
     title: "删除访问密钥",
     content: `${apiKey.name || "这个访问密钥"} 删除后，正在使用它的插件或脚本会立刻失效。`,
     positiveText: "删除",
     negativeText: "取消",
     onPositiveClick: async () => {
-      accessKeyBusyIds[apiKey.id] = "delete";
+      const keyId = String(apiKey.id);
+      accessKeyBusyIds[keyId] = "delete";
       try {
         await deleteMyApiKey(apiKey.id);
         accessKeys.value = accessKeys.value.filter((item) => item.id !== apiKey.id);
         message.success("访问密钥已删除");
       } catch (error) {
-        message.error(error.message || "删除访问密钥失败");
+        message.error(error instanceof Error ? error.message : "删除访问密钥失败");
       } finally {
-        delete accessKeyBusyIds[apiKey.id];
+        delete accessKeyBusyIds[keyId];
       }
     },
   });
 }
 
-async function copyAccessKey(key) {
+async function copyAccessKey(key: string) {
   try {
     await navigator.clipboard.writeText(key);
     message.success("访问密钥已复制");
   } catch {
     message.error("复制失败，请手动复制");
-  }
-}
-
-function replacePlugin(updatedPlugin) {
-  myPlugins.value = myPlugins.value.map((plugin) =>
-    plugin.id === updatedPlugin.id ? { ...plugin, ...updatedPlugin } : plugin,
-  );
-}
-
-async function withPluginBusy(plugin, action, task) {
-  pluginBusyIds[plugin.id] = action;
-  try {
-    const updated = await task();
-    replacePlugin(updated);
-    return updated;
-  } finally {
-    delete pluginBusyIds[plugin.id];
-  }
-}
-
-async function togglePluginCdn({
-  plugin,
-  enabled,
-  whitelist,
-}: {
-  plugin: Plugin;
-  enabled: boolean;
-  whitelist?: boolean;
-}) {
-  if (pluginBusyIds[plugin.id]) return;
-  try {
-    const updated = await withPluginBusy(plugin, "cdn", () =>
-      updatePluginCdn(plugin.id, enabled, whitelist),
-    );
-    if (whitelist !== undefined && updated.cdn_enabled) {
-      message.success(
-        updated.cdn_whitelist
-          ? "已开启管理员 CDN 白名单直发，后续发版将跳过审查直接发布"
-          : "已关闭管理员 CDN 白名单直发，后续发版将按正常流程审查",
-      );
-      return;
-    }
-    message.success(
-      updated.cdn_enabled
-        ? "已开启 CDN，未审查的新版本会自动送审"
-        : "已关闭 CDN，插件仍可通过原 Git 仓库安装",
-    );
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : "更新 CDN 设置失败");
-  }
-}
-
-async function savePluginMetadata({
-  plugin,
-  changes,
-}: {
-  plugin: Plugin;
-  changes: Partial<Plugin> & Record<string, unknown>;
-}) {
-  try {
-    await withPluginBusy(plugin, "save", () => updatePluginMetadata(plugin.id, changes));
-    message.success("插件信息已保存");
-  } catch (error) {
-    message.error(error.message || "保存插件信息失败");
-  }
-}
-
-function unlistPlugin(plugin) {
-  dialog.warning({
-    title: "下架插件",
-    content: `${plugin.display_name || plugin.name} 下架后将从公开市场隐藏。`,
-    positiveText: "下架",
-    negativeText: "取消",
-    onPositiveClick: async () => {
-      try {
-        await withPluginBusy(plugin, "unlist", () =>
-          unlistOwnPlugin(plugin.id, { reason: "作者主动下架" }),
-        );
-        message.success("插件已下架");
-      } catch (error) {
-        message.error(error.message || "下架失败");
-      }
-    },
-  });
-}
-
-async function requestListPlugin(plugin) {
-  try {
-    await withPluginBusy(plugin, "request", () => requestPluginListing(plugin.id));
-    message.success("已提交上架申请");
-  } catch (error) {
-    message.error(error.message || "申请上架失败");
   }
 }
 
@@ -405,30 +290,9 @@ async function handleVerifyEmailChange(payload: {
   }
 }
 
-function handleConnectGithub() {
-  loginWithGithub("/settings/personal");
-}
-
 function handleConnectOAuth(provider: OAuthProviderKey) {
   loginWithOAuth(provider, "/settings/personal");
 }
-
-const enabledOAuthProviders = computed(() => {
-  const configured = siteConfig.value.auth.oauth_providers;
-  if (Array.isArray(configured) && configured.length > 0) {
-    return configured.filter((item) => item.enabled);
-  }
-  const fallback: Array<{ provider: OAuthProviderKey; enabled: boolean }> = [
-    { provider: "github", enabled: Boolean(siteConfig.value.auth.github_login_enabled) },
-    { provider: "gitlab", enabled: Boolean(siteConfig.value.auth.gitlab_login_enabled) },
-    { provider: "gitee", enabled: Boolean(siteConfig.value.auth.gitee_login_enabled) },
-    { provider: "atomgit", enabled: Boolean(siteConfig.value.auth.atomgit_login_enabled) },
-    { provider: "gitea", enabled: Boolean(siteConfig.value.auth.gitea_login_enabled) },
-  ];
-  return fallback
-    .filter((item) => item.enabled)
-    .map((item) => ({ provider: item.provider, label: getGitProviderLabel(item.provider) }));
-});
 
 async function handleUnbindOAuth(identity: OAuthIdentity) {
   oauthBusyId.value = identity.id;
@@ -454,7 +318,7 @@ onMounted(async () => {
     return;
   }
   applyCurrentUser();
-  await Promise.all([refreshMyPlugins(), refreshAccessKeys()]);
+  await refreshAccessKeys();
   loading.value = false;
 });
 </script>
@@ -471,7 +335,7 @@ onMounted(async () => {
           </NButton>
           <div class="header-copy">
             <p class="eyebrow">个人设置</p>
-            <h1 class="page-title">账号与插件</h1>
+            <h1 class="page-title">账号设置</h1>
           </div>
         </div>
       </div>
@@ -524,44 +388,6 @@ onMounted(async () => {
                 :show-pending-review-email="isAdminUser"
                 :saving="savingNotifications"
                 @save="saveNotificationPreferences"
-              />
-            </div>
-          </NTabPane>
-
-          <NTabPane name="plugins" tab="我的插件" display-directive="show">
-            <div class="profile-tab-content">
-              <NAlert v-if="!isDeveloper && !myPlugins.length" type="info" :bordered="false">
-                当前账号为注册用户，绑定至少一个 OAuth 账号成为开发者后即可提交与上架插件。
-                <template v-if="enabledOAuthProviders.length">
-                  <NButton
-                    v-for="item in enabledOAuthProviders"
-                    :key="item.provider"
-                    size="small"
-                    :type="
-                      item.provider === enabledOAuthProviders[0]?.provider ? 'primary' : 'default'
-                    "
-                    style="margin-left: 8px; margin-top: 4px"
-                    @click="handleConnectOAuth(item.provider)"
-                  >
-                    <template #icon>
-                      <GitProviderIcon :provider="item.provider" :size="14" />
-                    </template>
-                    绑定 {{ item.label }}
-                  </NButton>
-                </template>
-              </NAlert>
-              <PersonalPluginManager
-                :plugins="myPlugins"
-                :loading="loadingPlugins"
-                :busy-ids="pluginBusyIds"
-                :max-tags="maxPluginTags"
-                :is-admin-user="isAdminUser"
-                :api-base-url="store.apiBaseUrl"
-                @refresh="refreshMyPlugins"
-                @save-plugin="savePluginMetadata"
-                @toggle-cdn="togglePluginCdn"
-                @request-list="requestListPlugin"
-                @unlist="unlistPlugin"
               />
             </div>
           </NTabPane>

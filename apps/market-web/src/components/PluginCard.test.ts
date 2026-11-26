@@ -71,6 +71,7 @@ describe("PluginCard", () => {
     expect(wrapper.find(".metric-item--comment").text()).toContain("3");
     expect(wrapper.find(".metric-item--download").text()).toContain("42");
     expect(wrapper.find(".new-badge").text()).toBe("NEW");
+    expect(wrapper.get(".author-profile-action").attributes("href")).toBe("/author/Alice");
     expect(wrapper.get(".description").text()).toBe("卡片短描述");
     cardPlugin.value.short_desc = "";
     await nextTick();
@@ -78,6 +79,45 @@ describe("PluginCard", () => {
     cardPlugin.value.desc = "";
     await nextTick();
     expect(wrapper.get(".description").text()).toBe("");
+    wrapper.unmount();
+  });
+
+  it("hides the author profile action when showSocialLink is false", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: "/", component: { template: "<div />" } },
+        { path: "/author/:username", name: "AuthorPage", component: { template: "<div />" } },
+        {
+          path: "/plugin/:username/:name",
+          name: "PluginDetails",
+          component: { template: "<div />" },
+        },
+      ],
+    });
+    await router.push("/");
+    await router.isReady();
+
+    const Host = defineComponent({
+      components: {
+        NConfigProvider,
+        NDialogProvider,
+        NMessageProvider,
+        PluginCard,
+      },
+      setup: () => ({ plugin }),
+      template: `
+        <n-config-provider>
+          <n-message-provider>
+            <n-dialog-provider>
+              <plugin-card :plugin="plugin" :show-social-link="false" />
+            </n-dialog-provider>
+          </n-message-provider>
+        </n-config-provider>
+      `,
+    });
+    const wrapper = mount(Host, { global: { plugins: [createPinia(), router] } });
+    expect(wrapper.find(".author-profile-action").exists()).toBe(false);
     wrapper.unmount();
   });
 
