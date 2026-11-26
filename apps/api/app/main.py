@@ -22,7 +22,16 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 import aiosmtplib
 import httpx
 import asyncpg
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, Response
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -112,6 +121,8 @@ from .object_storage import (
     build_object_storage_router,
     storage_migration_worker,
 )
+from .object_storage.models import ObjectStorageError, StoragePurpose
+from .media_proxy import detect_safe_image_mime
 from .plugin_identity import PluginIdentityConflict, plugin_canonical_path
 from .seo_render import (
     CRAWLER_CACHE_CONTROL,
@@ -143,6 +154,7 @@ from .seo_render import (
 from .schemas import (
     PluginCdnPayload,
     AnnouncementCreate,
+    AnnouncementUpdate,
     ApiKeyCreate,
     CommentCreate,
     GithubTokenVerifyPayload,
@@ -2490,6 +2502,119 @@ def register_routes(app: FastAPI) -> None:
         return await call_store(
             request, "publish_announcement", payload.title, payload.body, user["id"]
         )
+
+    @app.patch(
+        "/v1/core/announcements/{announcement_id}",
+        tags=["core-admin"],
+        summary="编辑公告",
+        description="更新公告标题或正文。仅核心管理员可用。",
+        responses={404: {"description": "公告不存在"}, 403: {"description": "需要核心管理员权限"}},
+    )
+    async def update_announcement(
+        request: Request,
+        announcement_id: str,
+        payload: AnnouncementUpdate,
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        if not can_publish_announcement(user):
+            raise error(403, "Forbidden")
+        if payload.title is None and payload.body is None:
+            raise error(400, "至少提供标题或正文")
+        if payload.title == "" or payload.body == "":
+            raise error(400, "公告标题和正文不能为空")
+        updated = await call_store(
+            request,
+            "update_announcement",
+            announcement_id,
+            title=payload.title,
+            body=payload.body,
+        )
+        if updated is None:
+            raise error(404, "Announcement not found")
+        return updated
+
+    @app.delete(
+        "/v1/core/announcements/{announcement_id}",
+        tags=["core-admin"],
+        summary="删除公告",
+        description="删除一条全站公告。仅核心管理员可用。",
+        responses={404: {"description": "公告不存在"}, 403: {"description": "需要核心管理员权限"}},
+    )
+    async def delete_announcement(request: Request, announcement_id: str) -> dict[str, bool]:
+        user = await require_user(request)
+        if not can_publish_announcement(user):
+            raise error(403, "Forbidden")
+        deleted = await call_store(request, "delete_announcement", announcement_id)
+        if not deleted:
+            raise error(404, "Announcement not found")
+        return {"deleted": True}
+
+    @app.post(
+        "/v1/core/announcements/images",
+        status_code=201,
+        tags=["core-admin"],
+        summary="上传公告图片",
+        description="上传 PNG、JPEG、GIF、WebP 或 AVIF 图片，单张不超过 5 MB。仅核心管理员可用。",
+        responses={413: {"description": "图片超过 5 MB"}, 415: {"description": "图片格式不支持"}},
+    )
+    async def upload_announcement_image(
+        request: Request,
+        image: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        user = await require_user(request)
+        if not can_publish_announcement(user):
+            raise error(403, "Forbidden")
+        max_bytes = 5 * 1024 * 1024
+        try:
+            content = await image.read(max_bytes + 1)
+        finally:
+            await image.close()
+        if len(content) > max_bytes:
+            raise error(413, "图片不能超过 5 MB")
+        content_type = detect_safe_image_mime(content)
+        if content_type is None:
+            raise error(415, "仅支持 PNG、JPEG、GIF、WebP 或 AVIF 图片")
+
+        extension = {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/gif": "gif",
+            "image/webp": "webp",
+            "image/avif": "avif",
+        }[content_type]
+        namespace = "announcements"
+        key = f"{uuid.uuid4().hex}.{extension}"
+        manager = request.app.state.storage_manager
+        await manager.initialize()
+        try:
+            stored = await manager.service.put_object(
+                purpose=StoragePurpose.AVATAR,
+                namespace=namespace,
+                key=key,
+                data=content,
+                content_type=content_type,
+                owner_type="announcement_image",
+                owner_id=str(user["id"]),
+                if_absent=True,
+            )
+        except ObjectStorageError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": exc.code, "error": str(exc)},
+            ) from exc
+        record = manager.service.find_active_record_by_purpose_and_key(
+            purpose=StoragePurpose.AVATAR,
+            namespace=namespace,
+            key=key,
+        )
+        if record is None:
+            raise error(500, "图片存储记录未生成")
+        return {
+            "url": f"/v1/storage/public/{record.id}",
+            "content_type": stored.content_type,
+            "size_bytes": stored.size_bytes,
+            "sha256": stored.sha256,
+        }
 
     @app.get(
         "/v1/announcements",

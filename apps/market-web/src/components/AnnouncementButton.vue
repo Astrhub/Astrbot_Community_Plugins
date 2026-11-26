@@ -3,6 +3,7 @@ import { computed, onMounted, shallowRef, watch } from "vue";
 import { storeToRefs } from "pinia";
 import { NButton, NIcon, NModal } from "naive-ui";
 import { MegaphoneOutline } from "@vicons/ionicons5";
+import AnnouncementBody from "./AnnouncementBody.vue";
 import { usePluginStore } from "../stores/plugins";
 
 const store = usePluginStore();
@@ -12,7 +13,12 @@ const storageKey = "astrhub_announcements_seen_v1";
 const revision = computed(() =>
   announcements.value.length
     ? JSON.stringify(
-        announcements.value.map(({ id, title, body, created_at }) => [id, title, body, created_at]),
+        announcements.value.map(({ id, title, body, created_at, updated_at }) => [
+          id,
+          title,
+          body,
+          updated_at || created_at,
+        ]),
       )
     : "",
 );
@@ -77,7 +83,7 @@ function formatTime(value: string): string {
         <time v-if="announcement.created_at" :datetime="announcement.created_at">{{
           formatTime(announcement.created_at)
         }}</time>
-        <p v-if="announcement.body">{{ announcement.body }}</p>
+        <AnnouncementBody v-if="announcement.body" :body="announcement.body" />
       </article>
     </div>
     <template #footer>
@@ -133,11 +139,5 @@ function formatTime(value: string): string {
 .announcement-item time {
   color: var(--text-tertiary);
   font-size: 12px;
-}
-
-.announcement-item p {
-  margin: 12px 0 0;
-  white-space: pre-wrap;
-  line-height: 1.8;
 }
 </style>

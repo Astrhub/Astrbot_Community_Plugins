@@ -238,7 +238,8 @@ create_app(settings, store)
 | `GET` | `/v1/admin/setup/status` | 查询初始化与基础设施状态 |
 | `POST` / `DELETE` | `/v1/core/users[/{id}]` | 创建或删除内部用户 |
 | `POST` | `/v1/core/admins/{id}` | 调整普通用户与管理员角色 |
-| `POST` | `/v1/core/announcements` | 发布全站公告 |
+| `POST` / `PATCH` / `DELETE` | `/v1/core/announcements[/{id}]` | 发布、编辑或删除全站公告 |
+| `POST` | `/v1/core/announcements/images` | 上传公告图片（同源公开读取，最大 5 MB） |
 
 ### 前端静态文件与 404 分发
 

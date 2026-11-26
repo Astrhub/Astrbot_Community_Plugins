@@ -716,6 +716,57 @@ paths:
           description: 公告已创建
         "403":
           description: 需要 core_admin
+  /v1/core/announcements/{announcement_id}:
+    patch:
+      tags: [Core]
+      summary: 编辑公告标题或正文
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 公告已更新
+        "403":
+          description: 需要 core_admin
+        "404":
+          description: 公告不存在
+    delete:
+      tags: [Core]
+      summary: 删除公告
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: 公告已删除
+        "403":
+          description: 需要 core_admin
+        "404":
+          description: 公告不存在
+  /v1/core/announcements/images:
+    post:
+      tags: [Core]
+      summary: 上传公告图片（PNG/JPEG/GIF/WebP/AVIF，最大 5 MB）
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: 图片已上传，返回同源公开 URL
+        "403":
+          description: 需要 core_admin
+        "413":
+          description: 图片超过 5 MB
+        "415":
+          description: 图片格式不支持
   /v1/api-keys:
     post:
       tags: [API Keys]

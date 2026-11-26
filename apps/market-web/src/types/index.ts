@@ -208,7 +208,15 @@ export interface Announcement {
   author_user_id?: number | string;
   author?: Partial<User>;
   created_at?: string;
+  updated_at?: string;
   [key: string]: unknown;
+}
+
+export interface AnnouncementImageUpload {
+  url: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
 }
 
 /** 当前登录用户。 */

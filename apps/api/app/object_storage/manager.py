@@ -2055,6 +2055,25 @@ class StorageManager:
                 except Exception as exc:
                     LOGGER.warning("Skipping legacy published profile bootstrap: %s", exc)
 
+        if (
+            p_binding is not None
+            and await self.repository.get_binding(StoragePurpose.AVATAR) is None
+        ):
+            published_profile = await self.repository.get_profile(p_binding.profile_id)
+            if (
+                published_profile is not None
+                and published_profile.status == StorageProfileStatus.ACTIVE
+            ):
+                await self.repository.upsert_binding(
+                    StorageBinding(
+                        purpose=StoragePurpose.AVATAR,
+                        profile_id=p_binding.profile_id,
+                        generation=1,
+                        updated_by="system",
+                        updated_at=utc_now_iso(),
+                    )
+                )
+
         # Idempotently backfill pre-existing files on legacy profiles into market_storage_objects.
         if q_binding is not None and q_binding.profile_id == LEGACY_QUARANTINE_PROFILE_ID:
             legacy_q = await self.repository.get_profile(LEGACY_QUARANTINE_PROFILE_ID)

@@ -259,13 +259,23 @@ class EmailChangeVerifyPayload(BaseModel):
 
 
 class AnnouncementCreate(BaseModel):
-    title: str
-    body: str
+    title: str = Field(min_length=1, max_length=80)
+    body: str = Field(min_length=1, max_length=10000)
 
     @field_validator("title", "body")
     @classmethod
-    def strip_required(cls, value: str) -> str:
+    def strip_fields(cls, value: str) -> str:
         return value.strip()
+
+
+class AnnouncementUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=80)
+    body: str | None = Field(default=None, max_length=10000)
+
+    @field_validator("title", "body")
+    @classmethod
+    def strip_fields(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
 
 
 class ApiKeyCreate(BaseModel):
