@@ -113,8 +113,10 @@ def normalize_avatar(data: bytes) -> NormalizedAvatar:
     # EXIF orientation is applied first so a rotated portrait photo crops on the right axis.
     oriented = ImageOps.exif_transpose(image)
     if oriented.mode != "RGB":
-        # Palette and grayscale sources lose nothing; alpha is preserved for transparent PNG/WebP.
-        oriented = oriented.convert("RGBA" if "A" in oriented.getbands() else "RGB")
+        # getbands() hides alpha on palette images, so consult the transparency chunk
+        # before flattening palettes and grayscale sources onto an opaque canvas.
+        transparent = "A" in oriented.getbands() or "transparency" in oriented.info
+        oriented = oriented.convert("RGBA" if transparent else "RGB")
 
     width, height = oriented.size
     edge = min(width, height)

@@ -70,18 +70,41 @@ async def _read_upload(request: Request, upload: UploadFile) -> bytes:
     return content
 
 
-async def _discard_failed_object(manager: Any, namespace: str, key: str) -> None:
+def _was_adopted(object_id: str, current_user: dict[str, Any] | None) -> bool:
+    # A concurrent winner or a committed-but-unreported update can adopt this very object
+    # because upload keys are content-addressed; the user row is the source of truth.
+    return current_user is not None and str(
+        current_user.get("uploaded_avatar_object_id") or ""
+    ) == str(object_id)
+
+
+async def _delete_unadopted_object(
+    manager: Any,
+    *,
+    object_id: str,
+    namespace: str,
+    key: str,
+    previous_object_id: str,
+    call_store: Callable[..., Awaitable[Any]],
+    request: Request,
+    user_id: str,
+) -> None:
+    # Content-addressed keys mean an upload may reuse an existing object (if_absent); deleting
+    # it would break whoever else references the same bytes. Only drop objects this request
+    # actually created and that no user row points at any more.
+    current = None
     try:
-        await manager.service.discard_failed_object(
-            purpose=StoragePurpose.AVATAR,
-            namespace=namespace,
-            key=key,
-        )
+        current = await call_store(request, "get_user_by_id", user_id)
     except Exception:
-        LOGGER.exception("Failed to clean up avatar object %s/%s", namespace, key)
-
-
-async def _delete_object_safely(manager: Any, namespace: str, key: str) -> None:
+        LOGGER.exception("Failed to reread user %s before avatar cleanup", user_id)
+        current = None
+    if _was_adopted(object_id, current):
+        return
+    record = manager.service.get_object_record(object_id)
+    # An upload whose content equals the previous avatar reuses the same content-addressed key
+    # (if_absent), so deleting it would drop the live avatar; only remove truly new objects.
+    if record is None or str(record.id) == str(previous_object_id):
+        return
     try:
         await manager.service.delete_object(
             purpose=StoragePurpose.AVATAR,
@@ -121,7 +144,9 @@ async def _store_avatar(
         )
     except ObjectStorageError as exc:
         LOGGER.warning("Avatar storage write failed for user %s: %s", user["id"], exc.code)
-        await _discard_failed_object(manager, namespace, key)
+        await manager.service.discard_failed_object(
+            purpose=StoragePurpose.AVATAR, namespace=namespace, key=key
+        )
         raise _error(503, exc.code, "头像写入存储失败") from exc
 
     record = manager.service.find_active_record_by_purpose_and_key(
@@ -220,15 +245,33 @@ def build_avatar_router(
                 expected_object_id=expected_object_id,
             )
         except Exception as exc:
-            # The object exists remotely but the user row never adopted it, so remove it to
-            # keep the previous avatar intact and avoid an unreachable orphan.
+            # The write may land while the update's response is lost; the cleanup guard rechecks the
+            # user row before touching any remote object.
             LOGGER.exception("Avatar database update failed for user %s", user["id"])
-            await _delete_object_safely(manager, record.namespace, record.key)
+            await _delete_unadopted_object(
+                manager,
+                object_id=record.id,
+                namespace=record.namespace,
+                key=record.key,
+                previous_object_id=expected_object_id,
+                call_store=call_store,
+                request=request,
+                user_id=str(user["id"]),
+            )
             raise _error(503, "avatar_persist_failed", "头像保存失败") from exc
         if updated is None:
             # Another upload landed between the read and the write; drop this object and report
             # the conflict instead of silently pointing the user at an older image.
-            await _delete_object_safely(manager, record.namespace, record.key)
+            await _delete_unadopted_object(
+                manager,
+                object_id=record.id,
+                namespace=record.namespace,
+                key=record.key,
+                previous_object_id=expected_object_id,
+                call_store=call_store,
+                request=request,
+                user_id=str(user["id"]),
+            )
             raise _error(409, "avatar_upload_conflict", "头像正在被另一请求更新，请重试")
 
         return {

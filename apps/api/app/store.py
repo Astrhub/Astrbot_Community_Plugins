@@ -1763,6 +1763,17 @@ class InMemoryMarketStore:
         for user in self.state["users"]:
             if user.get("muted_by") == from_user_id:
                 user["muted_by"] = to_user_id
+        # An uploaded avatar is a first-class profile field: carry it over when the surviving
+        # account has none, so a merge never silently degrades the target to the fallback image.
+        if not (target.get("uploaded_avatar_object_id") or "") and source.get(
+            "uploaded_avatar_object_id"
+        ):
+            target["uploaded_avatar_url"] = source["uploaded_avatar_url"]
+            target["uploaded_avatar_profile_id"] = source["uploaded_avatar_profile_id"]
+            target["uploaded_avatar_object_id"] = source["uploaded_avatar_object_id"]
+            target["uploaded_avatar_sha256"] = source["uploaded_avatar_sha256"]
+            target["uploaded_avatar_updated_at"] = source.get("uploaded_avatar_updated_at")
+            target["updated_at"] = utc_now()
         self.state["users"] = [user for user in self.state["users"] if user["id"] != from_user_id]
         return deepcopy(target)
 
@@ -5445,6 +5456,23 @@ class PgRedisMarketStore(InMemoryMarketStore):
                       ) counts
                      WHERE c.id = counts.comment_id
                     """
+                )
+                # Keep the custom avatar when only the source account had one.
+                await connection.execute(
+                    """
+                    UPDATE market_users
+                       SET uploaded_avatar_url = source.uploaded_avatar_url,
+                           uploaded_avatar_profile_id = source.uploaded_avatar_profile_id,
+                           uploaded_avatar_object_id = source.uploaded_avatar_object_id,
+                           uploaded_avatar_sha256 = source.uploaded_avatar_sha256,
+                           uploaded_avatar_updated_at = source.uploaded_avatar_updated_at,
+                           updated_at = now()
+                      FROM (SELECT * FROM market_users WHERE id = $1) AS source
+                     WHERE market_users.id = $2
+                       AND COALESCE(market_users.uploaded_avatar_object_id, '') = ''
+                    """,
+                    from_user_id,
+                    to_user_id,
                 )
                 await connection.execute("DELETE FROM market_users WHERE id = $1", from_user_id)
                 return self._user_from_record(target)

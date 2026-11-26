@@ -83,21 +83,72 @@ def _upload(
 
 
 def test_normalize_avatar_orients_crops_strips_metadata_and_reencodes() -> None:
-    # EXIF orientation 6 rotates 90° CW; a 400x200 landscape becomes 200x400, then cropped to
-    # 200x200 around the center. UserComment must not survive the re-encode.
+    # EXIF orientation 6 rotates 90° CCW; a 400x200 landscape becomes 200x400, then cropped to
+    # 200x200 around the center. UserComment must not survive the re-encode, and an asymmetric
+    # left/right color split proves the pixels actually rotated rather than just the dimensions.
     exif = Image.Exif()
     exif[0x0112] = 6
     exif[0x9286] = "private note"
-    oriented_jpeg = _png(400, 200, exif=exif.tobytes())
+    split = Image.new("RGB", (400, 200))
+    split.paste(Image.new("RGB", (200, 200), (255, 0, 0)), (0, 0))
+    split.paste(Image.new("RGB", (200, 200), (0, 0, 255)), (200, 0))
+    split.paste(Image.new("RGB", (400, 100), (255, 255, 0)), (0, 100))
+    buf = io.BytesIO()
+    split.save(buf, format="PNG", exif=exif.tobytes())
 
-    result = normalize_avatar(oriented_jpeg)
+    result = normalize_avatar(buf.getvalue())
     assert result.width == 200 and result.height == 200
     assert result.content_type == "image/webp"
     decoded = Image.open(io.BytesIO(result.content))
     assert decoded.format == "WEBP"
     assert dict(decoded.getexif()) == {}
     assert "exif" not in decoded.info
+    # Orientation 6 turns the 400x200 image into 200x400: the original red left half
+    # fills the whole upper band, the crop line cuts the yellow strip away, and the blue
+    # right half lands at the bottom-right of the 200x200 center crop. Skipping the rotation
+    # would sample the red/blue halves side by side instead, so these probes pin it down.
+    pixels = decoded.convert("RGB")
+    assert pixels.getpixel((50, 50))[0] > 200 and pixels.getpixel((50, 50))[2] < 60
+    assert pixels.getpixel((150, 50))[0] > 200 and pixels.getpixel((150, 50))[2] < 60
+    assert pixels.getpixel((50, 150))[0] > 200 and pixels.getpixel((50, 150))[2] < 60
+    assert pixels.getpixel((150, 150))[2] > 200 and pixels.getpixel((150, 150))[0] < 60
 
+    large = normalize_avatar(_png(1024, 768))
+    assert (large.width, large.height) == (512, 512)
+
+    small = normalize_avatar(_png(64, 48))
+    assert (small.width, small.height) == (48, 48)
+
+    transparent = io.BytesIO()
+    Image.new("RGBA", (30, 30), (0, 0, 0, 0)).save(transparent, format="PNG")
+    assert Image.open(io.BytesIO(normalize_avatar(transparent.getvalue()).content)).mode == "RGBA"
+
+
+def test_normalize_avatar_preserves_palette_transparency() -> None:
+    # P-mode getbands() does not report alpha, but a transparency chunk must still become one.
+    palette = Image.new("P", (64, 64))
+    palette.putpalette([255, 0, 0, 0, 0, 0, 0, 0, 0] + [0] * (256 - 3) * 3)
+    for y in range(32):
+        for x in range(64):
+            palette.putpixel((x, y), 1)
+    buf = io.BytesIO()
+    palette.save(buf, format="PNG", transparency=1)
+
+    result = normalize_avatar(buf.getvalue())
+    decoded = Image.open(io.BytesIO(result.content))
+    assert decoded.mode == "RGBA"
+    upper = decoded.convert("RGBA").getpixel((32, 8))
+    lower = decoded.convert("RGBA").getpixel((32, 56))
+    assert upper[3] == 0
+    assert lower[3] == 255 and lower[:3] == (255, 1, 0)
+
+    # A palette without a transparency chunk flattens to opaque RGB as before.
+    opaque = Image.new("P", (64, 64))
+    opaque.putpalette([255, 0, 0] + [0] * 765)
+    buf2 = io.BytesIO()
+    opaque.save(buf2, format="PNG")
+    out2 = Image.open(io.BytesIO(normalize_avatar(buf2.getvalue()).content))
+    assert out2.mode == "RGB"
     large = normalize_avatar(_png(1024, 768))
     assert (large.width, large.height) == (512, 512)
 
@@ -278,11 +329,16 @@ def test_upload_rate_limit_counts_rejected_requests_too(tmp_path: Path) -> None:
     client = TestClient(app)
     _login(client, "alice")
 
+    # A rejected upload still burns a quota slot: the first request carries a forged MIME
+    # type and answers 415, so only AVATAR_UPLOADS_PER_HOUR - 1 valid uploads may succeed
+    # afterwards and the very last one must hit the 429 wall.
+    rejected = _upload(client, b"GIF89a" + b"0" * 64, name="forged.webp", mime="image/webp")
+    assert rejected.status_code == 415
     statuses = [
         _upload(client, _webp(20 + index, 20), name=f"{index}.webp", mime="image/webp").status_code
-        for index in range(AVATAR_UPLOADS_PER_HOUR)
+        for index in range(AVATAR_UPLOADS_PER_HOUR - 1)
     ]
-    assert statuses == [201] * AVATAR_UPLOADS_PER_HOUR
+    assert statuses == [201] * (AVATAR_UPLOADS_PER_HOUR - 1)
     limited = _upload(client, _webp(64, 64), name="over.webp", mime="image/webp")
     assert limited.status_code == 429
     assert limited.json()["code"] == "avatar_upload_rate_limited"
@@ -356,6 +412,81 @@ def test_database_failure_removes_uploaded_object(tmp_path: Path) -> None:
     assert store.get_user_by_id(alice["id"])["uploaded_avatar_url"] == ""
 
 
+def test_reuploaded_same_content_keeps_existing_object(tmp_path: Path) -> None:
+    app, store = _make_app(tmp_path)
+    owner = TestClient(app)
+    _login(owner, "owner")
+    _bind_avatar_profile(owner, tmp_path)
+    client = TestClient(app)
+    _login(client, "alice")
+
+    # The second upload carries the same content: the storage layer reuses the object and the
+    # cleanup guard must not delete what the user row still points at.
+    _upload(client, _png(50, 50))
+    stale = store.get_user_by_id(client.get("/v1/me").json()["id"])
+
+    original_set = store.set_user_uploaded_avatar
+
+    def failing_set(*_args, **_kwargs):
+        raise RuntimeError("connection dropped")
+
+    store.set_user_uploaded_avatar = failing_set  # type: ignore[method-assign]
+    try:
+        second = _upload(client, _png(50, 50))
+    finally:
+        store.set_user_uploaded_avatar = original_set  # type: ignore[method-assign]
+    assert second.status_code == 503
+    assert second.json()["code"] == "avatar_persist_failed"
+
+    async def assert_object_alive() -> None:
+        driver = app.state.storage_manager.service.driver_for_purpose(StoragePurpose.AVATAR)
+        active = await app.state.storage_manager.repository.list_objects(
+            status=StorageObjectStatus.ACTIVE, purpose=StoragePurpose.AVATAR
+        )
+        assert len(active) == 1
+        assert await driver.stat_object(active[0].key, namespace=active[0].namespace) is not None
+
+    asyncio.run(assert_object_alive())
+    # The first avatar is still fully intact on the user row.
+    assert store.get_user_by_id(stale["id"])["uploaded_avatar_url"] == stale["uploaded_avatar_url"]
+
+
+def test_ambiguous_commit_keeps_object(tmp_path: Path) -> None:
+    app, store = _make_app(tmp_path)
+    owner = TestClient(app)
+    _login(owner, "owner")
+    _bind_avatar_profile(owner, tmp_path)
+    client = TestClient(app)
+    _login(client, "alice")
+    user_id = client.get("/v1/me").json()["id"]
+
+    # The database commit lands but its response is lost: the user already points at the new
+    # object, so the cleanup guard must keep the remote object instead of deleting it.
+    original_set = store.set_user_uploaded_avatar
+
+    def committing_set(*args, **kwargs):
+        original_set(*args, **kwargs)
+        raise RuntimeError("response lost")
+
+    store.set_user_uploaded_avatar = committing_set  # type: ignore[method-assign]
+    try:
+        response = _upload(client, _png(44, 44))
+    finally:
+        store.set_user_uploaded_avatar = original_set  # type: ignore[method-assign]
+    assert response.status_code == 503
+
+    async def assert_kept() -> None:
+        active = await app.state.storage_manager.repository.list_objects(
+            status=StorageObjectStatus.ACTIVE, purpose=StoragePurpose.AVATAR
+        )
+        assert len(active) == 1
+        driver = app.state.storage_manager.service.driver_for_purpose(StoragePurpose.AVATAR)
+        assert await driver.stat_object(active[0].key, namespace=active[0].namespace) is not None
+
+    asyncio.run(assert_kept())
+    assert store.get_user_by_id(user_id)["uploaded_avatar_url"]
+
+
 def test_concurrent_uploads_only_one_lands_and_other_reports_conflict(tmp_path: Path) -> None:
     app, store = _make_app(tmp_path)
     owner = TestClient(app)
@@ -396,3 +527,32 @@ def test_profile_patch_rejects_avatar_url(tmp_path: Path) -> None:
     ok = client.patch("/v1/me/profile", json={"github_name": "Alice"})
     assert ok.status_code == 200
     assert ok.json()["github_name"] == "Alice"
+
+
+def test_merge_transfers_uploaded_avatar_when_target_has_none(tmp_path: Path) -> None:
+    app, store = _make_app(tmp_path)
+    owner = TestClient(app)
+    _login(owner, "owner")
+    _bind_avatar_profile(owner, tmp_path)
+    client = TestClient(app)
+    _login(client, "alice")
+    alice_id = client.get("/v1/me").json()["id"]
+
+    uploaded = _upload(client, _png(60, 60)).json()
+    assert uploaded["user"]["uploaded_avatar_url"]
+
+    bob = store.upsert_github_user(
+        {
+            "id": "9999",
+            "login": "bob",
+            "name": "Bob",
+            "email": "",
+            "avatar_url": "",
+        }
+    )
+    merged = store.merge_user_into_user(alice_id, bob["id"])
+    assert merged is not None
+    assert merged["uploaded_avatar_url"] == uploaded["user"]["uploaded_avatar_url"]
+    assert merged["uploaded_avatar_object_id"]
+    assert merged["uploaded_avatar_object_id"] != ""
+    assert store.get_user_by_id(alice_id) is None
