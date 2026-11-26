@@ -35,6 +35,7 @@ def requester_hash(request: Request, plugin_id: str) -> str:
         try:
             client_ip = str(ip_address(candidate))
         except ValueError:
+            # Keep the direct address when proxy headers are malformed.
             pass
     return hashlib.sha256(f"{plugin_id}\0{client_ip}".encode()).hexdigest()
 

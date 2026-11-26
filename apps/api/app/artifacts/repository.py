@@ -42,7 +42,8 @@ class ArtifactRepository(Protocol):
 
     async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None: ...
 
-    async def get_artifact_by_published_key(self, published_key: str) -> dict[str, Any] | None: ...
+    async def get_artifact_by_published_key(self, published_key: str) -> dict[str, Any] | None:
+        """Return an artifact using its unique published key."""
 
     async def get_artifact_by_sha(
         self, plugin_id: str, archive_sha256: str
