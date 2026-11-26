@@ -24,6 +24,7 @@ from app.object_storage import (
     StoragePurpose,
     build_imgbed_variant_url,
     validate_imgbed_base_url,
+    validate_imgbed_expire,
     validate_imgbed_folder,
     validate_imgbed_scopes,
 )
@@ -168,12 +169,76 @@ class FakeImgBedServer(httpx.AsyncBaseTransport):
         return httpx.Response(404, json={"error": "Unhandled route"}, request=request)
 
 
+class MissingDirectoryImgBedServer(FakeImgBedServer):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        path = unquote(request.url.path)
+        directory = str(request.url.params.get("dir") or "").strip("/")
+        if (
+            path == "/api/manage/list"
+            and request.method.upper() == "GET"
+            and directory
+            and not any(name.startswith(f"{directory}/") for name in self.files)
+        ):
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            self.request_log.append((request.method, str(request.url), headers))
+            return httpx.Response(400, json={"error": "Directory not found"}, request=request)
+        return await super().handle_async_request(request)
+
+
+def test_imgbed_probe_upload_creates_missing_folder_before_list_acceptance() -> None:
+    server = MissingDirectoryImgBedServer(
+        expected_token="tok-missing-folder",
+        granted_scopes={"upload", "list", "delete"},
+    )
+    client = httpx.AsyncClient(transport=server)
+    driver = ImgBedObjectStorageDriver(
+        profile_id="imgbed-new-folder",
+        base_url="https://imgbed.example.com",
+        token="tok-missing-folder",
+        upload_folder="astrhub/new-plugins",
+        expire="12h",
+        scopes=("upload", "list", "delete"),
+        client=client,
+    )
+
+    async def run() -> None:
+        try:
+            probe = await driver.probe_capabilities(test_plugin_zip=True)
+
+            assert probe.reachable is True
+            assert probe.upload is True
+            assert probe.read is True
+            assert probe.delete is True
+            assert probe.plugin_zip_ready is True
+            assert all(probe.plugin_zip_checks.values())
+            assert probe.message == "ImgBed 头像与插件 ZIP 能力验收全部通过"
+            upload_urls = [
+                httpx.URL(url)
+                for method, url, _headers in server.request_log
+                if method == "POST" and httpx.URL(url).path == "/upload"
+            ]
+            assert len(upload_urls) == 2
+            assert all(url.params.get("expire") == "12h" for url in upload_urls)
+            assert server.files == {}
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_imgbed_validators_and_variant_url_helper() -> None:
     assert AVATAR_VARIANT_SIZES == frozenset({64, 128, 256})
     assert validate_imgbed_base_url("https://imgbed.example.com/") == "https://imgbed.example.com"
     assert validate_imgbed_folder("/astrhub/avatars/") == "astrhub/avatars"
     assert validate_imgbed_scopes(["upload"]) == ("upload",)
     assert validate_imgbed_scopes(["upload", "list", "delete"]) == ("upload", "list", "delete")
+    assert validate_imgbed_expire(" 7d ") == "7d"
+    assert validate_imgbed_expire("87600h") == "87600h"
+    assert validate_imgbed_expire("forever") == "forever"
+    assert validate_imgbed_expire("") == ""
+    with pytest.raises(ObjectStorageError) as expire_exc:
+        validate_imgbed_expire("3651d")
+    assert expire_exc.value.code == "imgbed_expire_invalid"
 
     with pytest.raises(ObjectStorageError) as http_exc:
         validate_imgbed_base_url("http://imgbed.example.com")
@@ -220,6 +285,7 @@ def test_imgbed_driver_src_preservation_folder_isolation_and_conflict_detection(
         base_url="https://imgbed.example.com",
         token="tok-imgbed-full",
         upload_folder="astrhub/plugins",
+        expire="7d",
         scopes=("upload", "list", "delete"),
         client=client,
     )
@@ -251,6 +317,13 @@ def test_imgbed_driver_src_preservation_folder_isolation_and_conflict_detection(
             for _method, req_url, _hdrs in server.request_log:
                 assert "tok-imgbed-full" not in req_url
 
+            upload_urls = [
+                httpx.URL(url)
+                for method, url, _headers in server.request_log
+                if method == "POST" and httpx.URL(url).path == "/upload"
+            ]
+            assert upload_urls
+            assert all(url.params.get("expire") == "7d" for url in upload_urls)
             # Idempotent re-put with same bytes succeeds.
             same = await driver.put_object(
                 "alice/demo/1.0.0/demo-1.0.0-aabbccdd.zip",
@@ -384,6 +457,7 @@ def test_imgbed_purpose_gates_migration_history_url_and_controlled_decommission_
             "config": {
                 "base_url": "https://pkg-imgbed.example.com",
                 "upload_folder": "astrhub/plugins",
+                "expire": "30d",
                 "scopes": ["upload", "list", "delete"],
             },
             "secret": {"token": "tok-plugins-full"},
@@ -484,6 +558,13 @@ def test_imgbed_purpose_gates_migration_history_url_and_controlled_decommission_
     assert plugins_test.status_code == 200
     assert plugins_test.json()["ok"] is True
     assert plugins_test.json()["checks"]["plugin_zip_ready"] is True
+    plugin_upload_urls = [
+        httpx.URL(url)
+        for method, url, _headers in plugins_server.request_log
+        if method == "POST" and httpx.URL(url).path == "/upload"
+    ]
+    assert plugin_upload_urls
+    assert all(url.params.get("expire") == "30d" for url in plugin_upload_urls)
 
     migrate_res = client.put(
         "/v1/admin/storage/bindings/artifact-published",

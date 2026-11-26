@@ -445,6 +445,12 @@
               placeholder="astrhub/avatars 或 astrhub/plugins"
             />
           </n-form-item>
+          <n-form-item label="文件有效期（expire，可选）">
+            <n-input
+              v-model:value="profileForm.imgbedExpire"
+              placeholder="留空使用图床默认，如 12h、7d、forever"
+            />
+          </n-form-item>
           <n-form-item label="Token 权限范围">
             <n-select
               v-model:value="profileForm.imgbedScopes"
@@ -709,6 +715,7 @@ const profileForm = reactive({
   webdavVerifyTls: true,
   imgbedBaseUrl: "",
   imgbedUploadFolder: "",
+  imgbedExpire: "",
   imgbedScopes: ["upload"] as string[],
   imgbedToken: "",
   imgbedImageVariants: true,
@@ -918,10 +925,12 @@ function summarizeProfileConfig(profile: StorageProfileItem): string {
   }
   if (profile.backend === "imgbed") {
     const folder = String(cfg.upload_folder || "").trim();
+    const expire = String(cfg.expire || "").trim();
     const base = String(cfg.base_url || "-");
     const scopes = Array.isArray(cfg.scopes) ? cfg.scopes.join("+") : "upload";
     const loc = folder ? `${base}/file/${folder}` : `${base}/file`;
-    return `ImgBed · ${loc} · scopes=${scopes}`;
+    const expiry = expire ? ` · expire=${expire}` : "";
+    return `ImgBed · ${loc} · scopes=${scopes}${expiry}`;
   }
   return profile.backend;
 }
@@ -967,6 +976,7 @@ function resetProfileForm() {
   profileForm.webdavVerifyTls = true;
   profileForm.imgbedBaseUrl = "";
   profileForm.imgbedUploadFolder = "";
+  profileForm.imgbedExpire = "";
   profileForm.imgbedScopes = ["upload"];
   profileForm.imgbedToken = "";
   profileForm.imgbedImageVariants = true;
@@ -1009,6 +1019,7 @@ function openEditModal(profile: StorageProfileItem) {
   } else if (profile.backend === "imgbed") {
     profileForm.imgbedBaseUrl = String(cfg.base_url || "");
     profileForm.imgbedUploadFolder = String(cfg.upload_folder || "");
+    profileForm.imgbedExpire = String(cfg.expire || "");
     profileForm.imgbedScopes = Array.isArray(cfg.scopes)
       ? cfg.scopes.map((item) => String(item))
       : ["upload"];
@@ -1070,6 +1081,7 @@ function buildConfigAndSecret(): {
     delete config.public_base_url;
     config.base_url = profileForm.imgbedBaseUrl.trim();
     config.upload_folder = profileForm.imgbedUploadFolder.trim();
+    config.expire = profileForm.imgbedExpire.trim();
     config.scopes = [...profileForm.imgbedScopes];
     config.image_variants_enabled = profileForm.imgbedImageVariants;
     config.allow_private_network = profileForm.imgbedAllowPrivateNetwork;

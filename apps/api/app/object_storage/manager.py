@@ -21,6 +21,7 @@ from .driver import ObjectStorageDriver
 from .imgbed_driver import (
     ImgBedObjectStorageDriver,
     validate_imgbed_base_url,
+    validate_imgbed_expire,
     validate_imgbed_folder,
     validate_imgbed_scopes,
 )
@@ -2377,6 +2378,7 @@ class StorageManager:
                 allow_private_network=allow_private,
             )
             upload_folder = validate_imgbed_folder(cfg.get("upload_folder"))
+            expire = validate_imgbed_expire(cfg.get("expire"))
             scopes = validate_imgbed_scopes(cfg.get("scopes"))
             image_variants = bool(cfg.get("image_variants_enabled", True))
             range_read = bool(cfg.get("range_read_supported", False))
@@ -2398,6 +2400,7 @@ class StorageManager:
                 base_url=base_url,
                 token=token,
                 upload_folder=upload_folder,
+                expire=expire,
                 scopes=scopes,
                 image_variants_enabled=image_variants,
                 range_read_supported=range_read,
@@ -2570,6 +2573,7 @@ class StorageManager:
                 allow_private_network=allow_private,
             )
             upload_folder = validate_imgbed_folder(config.get("upload_folder"))
+            expire = validate_imgbed_expire(config.get("expire"))
             scopes = validate_imgbed_scopes(config.get("scopes"))
             image_variants = bool(config.get("image_variants_enabled", True))
             verify_tls = bool(config.get("verify_tls", True))
@@ -2585,6 +2589,7 @@ class StorageManager:
             sanitized_imgbed: dict[str, Any] = {
                 "base_url": base_url,
                 "upload_folder": upload_folder,
+                "expire": expire,
                 "scopes": list(scopes),
                 "image_variants_enabled": image_variants,
                 "allow_private_network": allow_private,
