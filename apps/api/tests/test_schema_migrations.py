@@ -158,6 +158,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20261124_011_email_accounts_and_oauth_identities",
         "20261124_012_git_providers_and_oauth_credentials",
         "20261125_013_object_storage",
+        "20261126_014_announcement_management",
     ]
     sql = migrations[0].sql
     for table in (

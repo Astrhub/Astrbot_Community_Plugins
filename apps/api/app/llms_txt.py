@@ -121,6 +121,9 @@ _CORE_ADMIN_SECTION = """\
 - 删除用户：DELETE /v1/core/users/{user_id}
 - 修改管理员角色：POST /v1/core/admins/{user_id}
 - 发布公告：POST /v1/core/announcements
+- 编辑公告：PATCH /v1/core/announcements/{announcement_id}
+- 删除公告：DELETE /v1/core/announcements/{announcement_id}
+- 上传公告图片：POST /v1/core/announcements/images
 """
 
 _BOUNDARIES = """\

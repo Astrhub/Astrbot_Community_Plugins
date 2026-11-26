@@ -26,6 +26,10 @@ from .schema_migrations import apply_schema_migrations
 from .plugin_identity import PluginIdentityConflict
 
 
+class AnnouncementConflict(ValueError):
+    pass
+
+
 class GithubIdentityConflict(ValueError):
     pass
 
@@ -1724,15 +1728,49 @@ class InMemoryMarketStore:
         body: str,
         author_user_id: str,
     ) -> dict[str, Any]:
+        now = utc_now()
         announcement = {
             "id": self._next_id("announcement"),
             "title": title,
             "body": body,
             "author_user_id": author_user_id,
-            "created_at": utc_now(),
+            "created_at": now,
+            "updated_at": now,
         }
         self.state["announcements"].insert(0, announcement)
         return deepcopy(announcement)
+
+    def update_announcement(
+        self,
+        announcement_id: str | int,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        expected_updated_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        for announcement in self.state["announcements"]:
+            if str(announcement["id"]) == str(announcement_id):
+                current_updated_at = announcement.get("updated_at") or announcement.get(
+                    "created_at"
+                )
+                if expected_updated_at is not None and current_updated_at != expected_updated_at:
+                    raise AnnouncementConflict("Announcement was updated by another administrator")
+                if title is not None:
+                    announcement["title"] = title
+                if body is not None:
+                    announcement["body"] = body
+                announcement["updated_at"] = utc_now()
+                return deepcopy(announcement)
+        return None
+
+    def delete_announcement(self, announcement_id: str | int) -> bool:
+        before = len(self.state["announcements"])
+        self.state["announcements"] = [
+            announcement
+            for announcement in self.state["announcements"]
+            if str(announcement["id"]) != str(announcement_id)
+        ]
+        return len(self.state["announcements"]) != before
 
     def list_announcements(self) -> list[dict[str, Any]]:
         return deepcopy(self.state["announcements"])
@@ -2704,6 +2742,26 @@ class LocalFileMarketStore(InMemoryMarketStore):
         with self._persist():
             return super().publish_announcement(title, body, author_user_id)
 
+    def update_announcement(
+        self,
+        announcement_id: str | int,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        expected_updated_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().update_announcement(
+                announcement_id,
+                title=title,
+                body=body,
+                expected_updated_at=expected_updated_at,
+            )
+
+    def delete_announcement(self, announcement_id: str | int) -> bool:
+        with self._persist():
+            return super().delete_announcement(announcement_id)
+
     def create_notification(
         self,
         user_id: str,
@@ -3031,7 +3089,8 @@ CREATE TABLE IF NOT EXISTS market_announcements (
     title text NOT NULL,
     body text NOT NULL,
     author_user_id text NOT NULL REFERENCES market_users(id) ON DELETE CASCADE,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS market_announcements_created_idx
     ON market_announcements(created_at DESC);
@@ -5273,6 +5332,45 @@ class PgRedisMarketStore(InMemoryMarketStore):
         )
         return self._announcement_from_record(row)
 
+    async def update_announcement(
+        self,
+        announcement_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        expected_updated_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_announcements
+            SET title = COALESCE($2, title),
+                body = COALESCE($3, body),
+                updated_at = now()
+            WHERE id = $1
+              AND ($4::text IS NULL OR updated_at = $4::timestamptz)
+            RETURNING *
+            """,
+            announcement_id,
+            title,
+            body,
+            expected_updated_at,
+        )
+        if row is None and expected_updated_at is not None:
+            exists = await self._pool().fetchval(
+                "SELECT EXISTS(SELECT 1 FROM market_announcements WHERE id = $1)",
+                announcement_id,
+            )
+            if exists:
+                raise AnnouncementConflict("Announcement was updated by another administrator")
+        return self._announcement_from_record(row) if row is not None else None
+
+    async def delete_announcement(self, announcement_id: str) -> bool:
+        row = await self._pool().fetchrow(
+            "DELETE FROM market_announcements WHERE id = $1 RETURNING id",
+            announcement_id,
+        )
+        return row is not None
+
     async def list_announcements(self) -> list[dict[str, Any]]:
         rows = await self._pool().fetch(
             "SELECT * FROM market_announcements ORDER BY created_at DESC"
@@ -5835,7 +5933,9 @@ return 0
         return serialize_value(dict(row))
 
     def _announcement_from_record(self, row: asyncpg.Record) -> dict[str, Any]:
-        return serialize_value(dict(row))
+        data = serialize_value(dict(row))
+        data["updated_at"] = data.get("updated_at") or data["created_at"]
+        return data
 
     def _notification_from_record(self, row: asyncpg.Record) -> dict[str, Any]:
         return serialize_value(dict(row))

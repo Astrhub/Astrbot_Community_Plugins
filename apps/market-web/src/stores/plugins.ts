@@ -2,6 +2,7 @@ import { ref, shallowRef, computed, watch } from "vue";
 import { defineStore } from "pinia";
 import type {
   Announcement,
+  AnnouncementImageUpload,
   GithubPluginRepository,
   AdminUser,
   ApiKey,
@@ -345,6 +346,7 @@ export const usePluginStore = defineStore("plugins", () => {
   let mediaQuery: MediaQueryList | null = null;
   let pluginsLoaded = false;
   let announcementsLoaded = false;
+  let announcementsMutationVersion = 0;
   let currentUserLoaded = false;
   let loadPluginsPromise: Promise<Plugin[]> | null = null;
   let loadAnnouncementsPromise: Promise<Announcement[]> | null = null;
@@ -612,11 +614,14 @@ export const usePluginStore = defineStore("plugins", () => {
     const { force = false } = options;
     if (loadAnnouncementsPromise) return loadAnnouncementsPromise;
     if (announcementsLoaded && !force) return announcements.value;
+    const mutationVersion = announcementsMutationVersion;
     loadAnnouncementsPromise = (async () => {
       const response = await fetch(`${apiBaseUrl}/v1/announcements`, { cache: "no-store" });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "加载公告失败");
-      announcements.value = Array.isArray(data.items) ? data.items : [];
+      if (mutationVersion === announcementsMutationVersion) {
+        announcements.value = Array.isArray(data.items) ? data.items : [];
+      }
       announcementsLoaded = true;
       return announcements.value;
     })();
@@ -1271,7 +1276,9 @@ export const usePluginStore = defineStore("plugins", () => {
     return data;
   }
 
-  async function publishAnnouncement(payload: Record<string, unknown>): Promise<Announcement> {
+  async function publishAnnouncement(
+    payload: Pick<Announcement, "title" | "body">,
+  ): Promise<Announcement> {
     const response = await fetch(`${apiBaseUrl}/v1/core/announcements`, {
       method: "POST",
       credentials: "include",
@@ -1279,10 +1286,57 @@ export const usePluginStore = defineStore("plugins", () => {
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "发布公告失败");
+    if (!response.ok) throw new Error(apiErrorMessage(data, "发布公告失败"));
+    announcementsMutationVersion += 1;
     announcements.value = [data, ...announcements.value];
     announcementsLoaded = true;
     return data;
+  }
+
+  async function updateAnnouncement(
+    id: Announcement["id"],
+    payload: Partial<Pick<Announcement, "title" | "body">> & { expected_updated_at?: string },
+  ): Promise<Announcement> {
+    const response = await fetch(`${apiBaseUrl}/v1/core/announcements/${id}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "更新公告失败"));
+    announcementsMutationVersion += 1;
+    const index = announcements.value.findIndex((item) => String(item.id) === String(id));
+    if (index >= 0) announcements.value.splice(index, 1, data);
+    else announcements.value.unshift(data);
+    announcementsLoaded = true;
+    return data;
+  }
+
+  async function deleteAnnouncement(id: Announcement["id"]): Promise<void> {
+    const response = await fetch(`${apiBaseUrl}/v1/core/announcements/${id}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok && response.status !== 404)
+      throw new Error(apiErrorMessage(data, "删除公告失败"));
+    announcementsMutationVersion += 1;
+    announcements.value = announcements.value.filter((item) => String(item.id) !== String(id));
+    announcementsLoaded = true;
+  }
+
+  async function uploadAnnouncementImage(file: File): Promise<AnnouncementImageUpload> {
+    const formData = new FormData();
+    formData.append("image", file);
+    const response = await fetch(`${apiBaseUrl}/v1/core/announcements/images`, {
+      method: "POST",
+      credentials: "include",
+      body: formData,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "上传图片失败"));
+    return data as AnnouncementImageUpload;
   }
 
   async function loadCurrentUser(options: { force?: boolean } = {}): Promise<void> {
@@ -1796,6 +1850,9 @@ export const usePluginStore = defineStore("plugins", () => {
     verifySystemGithubToken,
     sendTestEmail,
     publishAnnouncement,
+    updateAnnouncement,
+    deleteAnnouncement,
+    uploadAnnouncementImage,
     submitPlugin,
     fetchPluginSubmissionMetadata,
     loadGithubRepositories,

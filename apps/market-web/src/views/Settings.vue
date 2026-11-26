@@ -77,41 +77,7 @@
                   </div>
                 </section>
 
-                <section class="settings-section">
-                  <div class="section-title">
-                    <h2>站点公告</h2>
-                    <p>发布后会显示在市场首页。</p>
-                  </div>
-                  <div class="form-grid">
-                    <n-form-item label="公告标题">
-                      <n-input
-                        v-model:value="announcementForm.title"
-                        :maxlength="80"
-                        show-count
-                        placeholder="例如：维护通知"
-                      />
-                    </n-form-item>
-                    <n-form-item label="公告内容" class="form-row-full">
-                      <n-input
-                        v-model:value="announcementForm.body"
-                        type="textarea"
-                        :maxlength="1000"
-                        show-count
-                        :autosize="{ minRows: 3, maxRows: 6 }"
-                        placeholder="输入需要展示给用户的公告内容"
-                      />
-                    </n-form-item>
-                  </div>
-                  <div class="announcement-actions">
-                    <n-button
-                      type="primary"
-                      :loading="publishingAnnouncement"
-                      @click="publishSiteAnnouncement"
-                    >
-                      发布公告
-                    </n-button>
-                  </div>
-                </section>
+                <site-announcement-panel />
               </div>
             </n-tab-pane>
 
@@ -782,6 +748,7 @@ import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import ThemeModeButton from "@/components/ThemeModeButton.vue";
 import AdminUserManagement from "@/components/settings/AdminUserManagement.vue";
 import InfrastructureStoragePanel from "@/components/settings/InfrastructureStoragePanel.vue";
+import SiteAnnouncementPanel from "@/components/settings/SiteAnnouncementPanel.vue";
 
 const SettingSwitch = {
   props: {
@@ -818,7 +785,6 @@ const {
   saveSystemSettings,
   verifySystemGithubToken,
   sendTestEmail,
-  publishAnnouncement,
   createInternalUser,
   updateAdminUserRole,
   muteAdminUser,
@@ -830,7 +796,6 @@ const formRef = ref(null);
 const loading = ref(true);
 const saving = ref(false);
 const testingEmail = ref(false);
-const publishingAnnouncement = ref(false);
 const verifyingTokenIndex = shallowRef<number | null>(null);
 const loadingUsers = shallowRef(false);
 const creatingUser = shallowRef(false);
@@ -838,7 +803,6 @@ const adminUsers = shallowRef([]);
 const userBusyIds = reactive({});
 const isCoreAdmin = computed(() => currentUser.value?.role === "core_admin");
 const testEmail = reactive({ to: "" });
-const announcementForm = reactive({ title: "", body: "" });
 
 const formData = reactive(createSettingsForm());
 const marketTokenPreviewRows = computed(() => {
@@ -1473,30 +1437,6 @@ function save() {
       saving.value = false;
     }
   });
-}
-
-async function publishSiteAnnouncement() {
-  if (!isCoreAdmin.value) {
-    message.warning("只有核心管理员可以发布公告");
-    return;
-  }
-  const title = announcementForm.title.trim();
-  const body = announcementForm.body.trim();
-  if (!title || !body) {
-    message.warning("请填写公告标题和内容");
-    return;
-  }
-  publishingAnnouncement.value = true;
-  try {
-    await publishAnnouncement({ title, body });
-    announcementForm.title = "";
-    announcementForm.body = "";
-    message.success("公告已发布");
-  } catch (error) {
-    message.error(error.message || "发布公告失败");
-  } finally {
-    publishingAnnouncement.value = false;
-  }
 }
 
 async function sendEmailTest() {
