@@ -15,6 +15,7 @@ from .imgbed_driver import (
     ImgBedProbeResult,
     build_imgbed_variant_url,
     validate_imgbed_base_url,
+    validate_imgbed_expire,
     validate_imgbed_folder,
     validate_imgbed_scopes,
 )
@@ -124,6 +125,7 @@ __all__ = [
     "require_storage_credential_key",
     "storage_migration_worker",
     "validate_imgbed_base_url",
+    "validate_imgbed_expire",
     "validate_imgbed_folder",
     "validate_imgbed_scopes",
     "validate_namespace",

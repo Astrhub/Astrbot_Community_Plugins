@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import os
+import re
 import tempfile
 import zipfile
 from collections.abc import AsyncIterable, Mapping
@@ -123,6 +124,32 @@ def validate_imgbed_folder(value: Any) -> str:
     return "/".join(parts)
 
 
+def validate_imgbed_expire(value: Any) -> str:
+    """Validate an ImgBed expire option using the upstream h/d and 3650-day contract."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ObjectStorageError(
+            "imgbed_expire_invalid",
+            "ImgBed expire must be forever or a positive integer with h/d, up to 3650d",
+        )
+    raw = value.strip()
+    if not raw:
+        return ""
+    if raw == "forever":
+        return raw
+    match = re.fullmatch(r"([1-9]\d{0,5})([hd])", raw)
+    if match:
+        amount = int(match.group(1))
+        limit = 3650 * 24 if match.group(2) == "h" else 3650
+        if amount <= limit:
+            return raw
+    raise ObjectStorageError(
+        "imgbed_expire_invalid",
+        "ImgBed expire must be forever or a positive integer with h/d, up to 3650d",
+    )
+
+
 def validate_imgbed_scopes(value: Any) -> tuple[str, ...]:
     """Validate explicit Token permission scopes declared on an ImgBed profile."""
     if value is None:
@@ -206,6 +233,7 @@ class ImgBedObjectStorageDriver:
         base_url: str,
         token: str,
         upload_folder: str = "",
+        expire: str = "",
         scopes: tuple[str, ...] | list[str] = ("upload",),
         image_variants_enabled: bool = True,
         range_read_supported: bool = False,
@@ -226,6 +254,7 @@ class ImgBedObjectStorageDriver:
         if not self._token:
             raise ObjectStorageError("imgbed_token_missing", "ImgBed Bearer token is required")
         self.upload_folder = validate_imgbed_folder(upload_folder)
+        self.expire = validate_imgbed_expire(expire)
         self.scopes = validate_imgbed_scopes(scopes)
         self.image_variants_enabled = bool(image_variants_enabled)
         self.range_read_supported = bool(range_read_supported)
@@ -286,6 +315,8 @@ class ImgBedObjectStorageDriver:
             }
             if folder:
                 params["uploadFolder"] = folder
+            if self.expire:
+                params["expire"] = self.expire
 
             raw_bytes = await asyncio.to_thread(temporary.read_bytes)
             response = await self._request(
@@ -742,14 +773,15 @@ class ImgBedObjectStorageDriver:
         else:
             img_key = f"{probe_prefix}probe-{token}.png"
             img_sha = hashlib.sha256(_TINY_PNG_BYTES).hexdigest()
-            uploaded_img_key = ""
+            uploaded_img_key = img_key
             try:
                 stored = await self.put_object(
                     img_key,
                     _TINY_PNG_BYTES,
                     content_type="image/png",
                     expected_sha256=img_sha,
-                    if_absent=True,
+                    # Unique probe keys let the upload create a missing uploadFolder.
+                    if_absent=False,
                 )
                 reachable = True
                 uploaded_img_key = stored.key
@@ -804,14 +836,14 @@ class ImgBedObjectStorageDriver:
             zip_key = f"{probe_prefix}probe-plugin-{token}.zip"
             zip_bytes = _build_probe_zip_bytes()
             zip_sha = hashlib.sha256(zip_bytes).hexdigest()
-            uploaded_zip_key = ""
+            uploaded_zip_key = zip_key
             try:
                 stored_zip = await self.put_object(
                     zip_key,
                     zip_bytes,
                     content_type="application/zip",
                     expected_sha256=zip_sha,
-                    if_absent=True,
+                    if_absent=False,
                 )
                 uploaded_zip_key = stored_zip.key
                 plugin_zip_checks["upload_zip"] = (

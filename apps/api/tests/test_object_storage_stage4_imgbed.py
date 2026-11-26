@@ -20,10 +20,14 @@ from app.object_storage import (
     AVATAR_VARIANT_SIZES,
     ImgBedObjectStorageDriver,
     ObjectStorageError,
+    StorageBackend,
     StorageManager,
     StoragePurpose,
+    StorageObjectRecord,
+    StorageObjectStatus,
     build_imgbed_variant_url,
     validate_imgbed_base_url,
+    validate_imgbed_expire,
     validate_imgbed_folder,
     validate_imgbed_scopes,
 )
@@ -168,12 +172,235 @@ class FakeImgBedServer(httpx.AsyncBaseTransport):
         return httpx.Response(404, json={"error": "Unhandled route"}, request=request)
 
 
+class MissingDirectoryImgBedServer(FakeImgBedServer):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        path = unquote(request.url.path)
+        directory = str(request.url.params.get("dir") or "").strip("/")
+        if (
+            path == "/api/manage/list"
+            and request.method.upper() == "GET"
+            and directory
+            and not any(name.startswith(f"{directory}/") for name in self.files)
+        ):
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            self.request_log.append((request.method, str(request.url), headers))
+            return httpx.Response(400, json={"error": "Directory not found"}, request=request)
+        return await super().handle_async_request(request)
+
+
+def test_imgbed_probe_upload_creates_missing_folder_before_list_acceptance() -> None:
+    server = MissingDirectoryImgBedServer(
+        expected_token="tok-missing-folder",
+        granted_scopes={"upload", "list", "delete"},
+    )
+    client = httpx.AsyncClient(transport=server)
+    driver = ImgBedObjectStorageDriver(
+        profile_id="imgbed-new-folder",
+        base_url="https://imgbed.example.com",
+        token="tok-missing-folder",
+        upload_folder="astrhub/new-plugins",
+        expire="12h",
+        scopes=("upload", "list", "delete"),
+        client=client,
+    )
+
+    async def run() -> None:
+        try:
+            probe = await driver.probe_capabilities(test_plugin_zip=True)
+
+            assert probe.reachable is True
+            assert probe.upload is True
+            assert probe.read is True
+            assert probe.delete is True
+            assert probe.plugin_zip_ready is True
+            assert all(probe.plugin_zip_checks.values())
+            assert probe.message == "ImgBed 头像与插件 ZIP 能力验收全部通过"
+            upload_urls = [
+                httpx.URL(url)
+                for method, url, _headers in server.request_log
+                if method == "POST" and httpx.URL(url).path == "/upload"
+            ]
+            assert len(upload_urls) == 2
+            assert all(url.params.get("expire") == "12h" for url in upload_urls)
+            assert server.files == {}
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+class FailingReadImgBedServer(FakeImgBedServer):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if unquote(request.url.path).startswith("/file/") and request.method.upper() == "GET":
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            self.request_log.append((request.method, str(request.url), headers))
+            return httpx.Response(500, json={"error": "Read failed"}, request=request)
+        return await super().handle_async_request(request)
+
+
+def test_imgbed_probe_cleans_preassigned_keys_after_post_upload_failure() -> None:
+    server = FailingReadImgBedServer(
+        expected_token="tok-probe-cleanup",
+        granted_scopes={"upload", "list", "delete"},
+    )
+    client = httpx.AsyncClient(transport=server)
+    driver = ImgBedObjectStorageDriver(
+        profile_id="imgbed-probe-cleanup",
+        base_url="https://imgbed.example.com",
+        token="tok-probe-cleanup",
+        upload_folder="astrhub/plugins",
+        scopes=("upload", "list", "delete"),
+        client=client,
+    )
+
+    async def run() -> None:
+        try:
+            probe = await driver.probe_capabilities(test_plugin_zip=True)
+
+            assert probe.reachable is False
+            assert probe.plugin_zip_ready is False
+            assert server.files == {}
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+async def _create_imgbed_manager(
+    client: httpx.AsyncClient,
+    *,
+    profile_id: str,
+    expire: str,
+) -> StorageManager:
+    store = InMemoryMarketStore()
+    settings = load_settings().with_updates(oauth_credential_key="imgbed-stage4-master-key")
+    manager = StorageManager(store=store, settings=settings)
+    manager._imgbed_client_factory = lambda _profile, _cfg: client
+    await manager.create_profile(
+        profile_id=profile_id,
+        name=profile_id,
+        backend=StorageBackend.IMGBED,
+        config={
+            "base_url": "https://imgbed.example.com",
+            "upload_folder": "astrhub/expiring",
+            "scopes": ["upload", "list", "delete"],
+            "expire": expire,
+        },
+        secret={"token": "tok-imgbed-manager"},
+        actor_id="test",
+    )
+    return manager
+
+
+def test_imgbed_profile_test_rejects_concurrent_expiry_edit() -> None:
+    server = FakeImgBedServer(
+        expected_token="tok-imgbed-manager",
+        granted_scopes={"upload", "list", "delete"},
+    )
+    client = httpx.AsyncClient(transport=server)
+
+    async def run() -> None:
+        manager = await _create_imgbed_manager(
+            client,
+            profile_id="imgbed-concurrent",
+            expire="7d",
+        )
+        try:
+            driver = manager.service.driver_for_profile("imgbed-concurrent")
+            original_probe = driver.probe_capabilities
+
+            async def concurrent_probe(**kwargs):
+                await manager.update_profile(
+                    "imgbed-concurrent",
+                    config={"expire": "30d"},
+                    actor_id="editor",
+                )
+                return await original_probe(**kwargs)
+
+            driver.probe_capabilities = concurrent_probe
+            with pytest.raises(ObjectStorageError) as conflict:
+                await manager.test_profile("imgbed-concurrent")
+
+            assert conflict.value.code == "storage_profile_changed"
+            latest = await manager.repository.get_profile("imgbed-concurrent")
+            assert latest is not None
+            assert latest.config["expire"] == "30d"
+        finally:
+            await manager.close()
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_imgbed_expired_objects_are_reconciled_before_migration_and_retire() -> None:
+    server = FakeImgBedServer(
+        expected_token="tok-imgbed-manager",
+        granted_scopes={"upload", "list", "delete"},
+    )
+    client = httpx.AsyncClient(transport=server)
+
+    async def run() -> None:
+        manager = await _create_imgbed_manager(
+            client,
+            profile_id="imgbed-expiring",
+            expire="1h",
+        )
+        try:
+            expired = StorageObjectRecord(
+                id="expired-object-1",
+                purpose=StoragePurpose.AVATAR,
+                profile_id="imgbed-expiring",
+                backend="imgbed",
+                namespace="",
+                key="users/u1/expired.png",
+                size_bytes=68,
+                sha256="a" * 64,
+                content_type="image/png",
+                status=StorageObjectStatus.ACTIVE,
+                public_url="https://imgbed.example.com/file/astrhub/expiring/users/u1/expired.png",
+            )
+            await manager.repository.upsert_object(expired)
+            manager.service.cache_object_record(expired)
+
+            plan = await manager._prepare_migration_plan(
+                purpose=StoragePurpose.AVATAR,
+                source_profile_id="imgbed-expiring",
+                target_profile_id="legacy-market-published",
+                binding_generation=1,
+                actor_id="test",
+            )
+            assert plan == (None, None, [])
+            reconciled = await manager.repository.get_object(expired.id)
+            assert reconciled is not None
+            assert reconciled.status == StorageObjectStatus.DELETED
+            assert reconciled.public_url == ""
+
+            retired = await manager.retire_profile("imgbed-expiring", actor_id="test")
+            assert retired["status"] == "retired"
+        finally:
+            await manager.close()
+            await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_imgbed_validators_and_variant_url_helper() -> None:
     assert AVATAR_VARIANT_SIZES == frozenset({64, 128, 256})
     assert validate_imgbed_base_url("https://imgbed.example.com/") == "https://imgbed.example.com"
     assert validate_imgbed_folder("/astrhub/avatars/") == "astrhub/avatars"
     assert validate_imgbed_scopes(["upload"]) == ("upload",)
     assert validate_imgbed_scopes(["upload", "list", "delete"]) == ("upload", "list", "delete")
+    assert validate_imgbed_expire(" 7d ") == "7d"
+    assert validate_imgbed_expire("87600h") == "87600h"
+    assert validate_imgbed_expire("forever") == "forever"
+    assert validate_imgbed_expire("") == ""
+    with pytest.raises(ObjectStorageError) as expire_exc:
+        validate_imgbed_expire("3651d")
+    assert expire_exc.value.code == "imgbed_expire_invalid"
+    for invalid in (0, False, 7):
+        with pytest.raises(ObjectStorageError) as invalid_type_exc:
+            validate_imgbed_expire(invalid)
+        assert invalid_type_exc.value.code == "imgbed_expire_invalid"
 
     with pytest.raises(ObjectStorageError) as http_exc:
         validate_imgbed_base_url("http://imgbed.example.com")
@@ -220,6 +447,7 @@ def test_imgbed_driver_src_preservation_folder_isolation_and_conflict_detection(
         base_url="https://imgbed.example.com",
         token="tok-imgbed-full",
         upload_folder="astrhub/plugins",
+        expire="7d",
         scopes=("upload", "list", "delete"),
         client=client,
     )
@@ -251,6 +479,13 @@ def test_imgbed_driver_src_preservation_folder_isolation_and_conflict_detection(
             for _method, req_url, _hdrs in server.request_log:
                 assert "tok-imgbed-full" not in req_url
 
+            upload_urls = [
+                httpx.URL(url)
+                for method, url, _headers in server.request_log
+                if method == "POST" and httpx.URL(url).path == "/upload"
+            ]
+            assert upload_urls
+            assert all(url.params.get("expire") == "7d" for url in upload_urls)
             # Idempotent re-put with same bytes succeeds.
             same = await driver.put_object(
                 "alice/demo/1.0.0/demo-1.0.0-aabbccdd.zip",
@@ -384,6 +619,7 @@ def test_imgbed_purpose_gates_migration_history_url_and_controlled_decommission_
             "config": {
                 "base_url": "https://pkg-imgbed.example.com",
                 "upload_folder": "astrhub/plugins",
+                "expire": "30d",
                 "scopes": ["upload", "list", "delete"],
             },
             "secret": {"token": "tok-plugins-full"},
@@ -484,6 +720,13 @@ def test_imgbed_purpose_gates_migration_history_url_and_controlled_decommission_
     assert plugins_test.status_code == 200
     assert plugins_test.json()["ok"] is True
     assert plugins_test.json()["checks"]["plugin_zip_ready"] is True
+    plugin_upload_urls = [
+        httpx.URL(url)
+        for method, url, _headers in plugins_server.request_log
+        if method == "POST" and httpx.URL(url).path == "/upload"
+    ]
+    assert plugin_upload_urls
+    assert all(url.params.get("expire") == "30d" for url in plugin_upload_urls)
 
     migrate_res = client.put(
         "/v1/admin/storage/bindings/artifact-published",

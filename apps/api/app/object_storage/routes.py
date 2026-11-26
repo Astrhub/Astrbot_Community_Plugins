@@ -74,6 +74,7 @@ def _http_error_for_storage(exc: ObjectStorageError) -> HTTPException:
         "imgbed_plugin_gate_failed",
         "imgbed_capability_check_failed",
         "imgbed_scope_missing",
+        "storage_profile_changed",
     }:
         return HTTPException(409, {"code": exc.code, "error": str(exc)})
     if exc.code in {

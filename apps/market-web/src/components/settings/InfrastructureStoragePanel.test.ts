@@ -409,6 +409,7 @@ describe("InfrastructureStoragePanel", () => {
       config: {
         base_url: "https://imgbed.example.com",
         upload_folder: "astrhub/avatars",
+        expire: "7d",
         scopes: ["upload"],
         image_variants_enabled: true,
         allow_private_network: false,
@@ -457,7 +458,7 @@ describe("InfrastructureStoragePanel", () => {
     const wrapper = mountPanel();
     await flushPromises();
     expect(wrapper.text()).toContain(
-      "ImgBed · https://imgbed.example.com/file/astrhub/avatars · scopes=upload",
+      "ImgBed · https://imgbed.example.com/file/astrhub/avatars · scopes=upload · expire=7d",
     );
 
     const card = wrapper
@@ -468,6 +469,7 @@ describe("InfrastructureStoragePanel", () => {
     await flushPromises();
 
     const dialog = wrapper.get('[role="dialog"]');
+    await dialog.find('input[placeholder*="forever"]').setValue("30d");
     const saveBtn = dialog.findAll("button").find((btn) => btn.text().includes("保存修改"));
     await saveBtn!.trigger("click");
     await flushPromises();
@@ -486,6 +488,7 @@ describe("InfrastructureStoragePanel", () => {
       expect.objectContaining({
         base_url: "https://imgbed.example.com",
         upload_folder: "astrhub/avatars",
+        expire: "30d",
         scopes: ["upload"],
         image_variants_enabled: true,
       }),
