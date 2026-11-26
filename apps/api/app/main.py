@@ -110,6 +110,7 @@ from .github_authorization import (
 )
 from .llms_txt import build_llms_txt
 from .media_proxy import build_media_proxy_router
+from .avatar_routes import build_avatar_router
 from .oauth_identities import (
     GITHUB_INSTANCE_URL,
     GITHUB_PROVIDER,
@@ -502,6 +503,14 @@ def create_app(
         build_media_proxy_router(
             current_user_fn=current_user,
             runtime_settings_fn=runtime_settings_for_app,
+        )
+    )
+    app.include_router(
+        build_avatar_router(
+            runtime_settings_for_app=runtime_settings_for_app,
+            call_store=call_store,
+            require_user=require_user,
+            enrich_private_user=enrich_private_user,
         )
     )
     app.include_router(build_object_storage_router(require_core_admin=require_core_admin))
@@ -972,10 +981,10 @@ def register_routes(app: FastAPI) -> None:
         "/v1/me/profile",
         tags=["user"],
         summary="更新个人资料",
-        description="更新当前用户的资料，包括显示名、头像、GitHub Token、通知偏好等。",
+        description="更新当前用户的资料，包括显示名、GitHub Token、通知偏好等。",
         responses={
             401: {"description": "未登录"},
-            400: {"description": "无更新字段或头像 URL 无效"},
+            400: {"description": "无更新字段或包含不允许直接修改的字段"},
             404: {"description": "用户不存在"},
         },
     )
@@ -984,12 +993,10 @@ def register_routes(app: FastAPI) -> None:
         profile = {key: value for key, value in payload.model_dump().items() if value is not None}
         if not profile:
             raise error(400, "No fields to update")
-        if (
-            "avatar_url" in profile
-            and profile["avatar_url"]
-            and not is_valid_public_url(profile["avatar_url"])
-        ):
-            raise error(400, "Avatar URL must be http(s)")
+        if "avatar_url" in profile:
+            # Uploaded avatars are managed only through POST/DELETE /v1/me/avatar; the OAuth
+            # avatar_url column is owned by the login flow and must not be hand-edited.
+            raise error(400, "avatar_url cannot be updated directly; use POST /v1/me/avatar")
         if (
             "notification_email" in profile
             and profile["notification_email"]
@@ -1522,7 +1529,7 @@ def register_routes(app: FastAPI) -> None:
         return {
             "username": canonical_username,
             "display_name": user_display_name(author) if author else username,
-            "avatar_url": str(author.get("avatar_url") or "") if author else "",
+            "avatar_url": effective_avatar_url(author) if author else "",
             "github_url": github_url,
             "oauth_profiles": oauth_profiles,
             "items": [public_market_plugin(plugin) for plugin in plugins],
@@ -3318,6 +3325,21 @@ async def require_user(request: Request) -> dict[str, Any]:
     return user
 
 
+UPLOADED_AVATAR_INTERNAL_FIELDS = frozenset(
+    {
+        "uploaded_avatar_profile_id",
+        "uploaded_avatar_object_id",
+        "uploaded_avatar_sha256",
+        "uploaded_avatar_updated_at",
+    }
+)
+
+
+def effective_avatar_url(user: dict[str, Any]) -> str:
+    """Uploaded avatars win over the OAuth provider avatar."""
+    return str(user.get("uploaded_avatar_url") or user.get("avatar_url") or "").strip()
+
+
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
     public_username = str(
         user.get("public_username")
@@ -3334,8 +3356,16 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
                 "has_github_token": bool(user.get("github_token")),
                 "email_verified": bool(user.get("email_verified_at")),
                 "has_password": bool(str(user.get("password_hash") or "").strip()),
+                "effective_avatar_url": effective_avatar_url(user),
+                "avatar_backend": "uploaded" if user.get("uploaded_avatar_url") else "oauth",
             }.items()
-            if key not in {"password_hash", "github_token", *PRIVATE_USER_FIELDS}
+            if key
+            not in {
+                "password_hash",
+                "github_token",
+                *PRIVATE_USER_FIELDS,
+                *UPLOADED_AVATAR_INTERNAL_FIELDS,
+            }
         },
     }
 

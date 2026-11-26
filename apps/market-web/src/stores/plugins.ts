@@ -886,6 +886,35 @@ export const usePluginStore = defineStore("plugins", () => {
     return data;
   }
 
+  async function uploadMyAvatar(file: File): Promise<User> {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch(`${apiBaseUrl}/v1/me/avatar`, {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "上传头像失败");
+    currentUser.value = data.user;
+    currentUserPreview.value = writeCachedUserPreview(data.user);
+    currentUserLoaded = true;
+    return data.user;
+  }
+
+  async function deleteMyAvatar(): Promise<User> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/avatar`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "清除头像失败");
+    currentUser.value = data.user;
+    currentUserPreview.value = writeCachedUserPreview(data.user);
+    currentUserLoaded = true;
+    return data.user;
+  }
+
   function updatePluginInList(plugin: Plugin): void {
     const pluginId = plugin?.id;
     if (!pluginId) return;
@@ -1825,6 +1854,8 @@ export const usePluginStore = defineStore("plugins", () => {
     loadMyApiKeys,
     createMyApiKey,
     deleteMyApiKey,
+    uploadMyAvatar,
+    deleteMyAvatar,
     updatePluginMetadata,
     updatePluginCdn,
     requestPluginListing,

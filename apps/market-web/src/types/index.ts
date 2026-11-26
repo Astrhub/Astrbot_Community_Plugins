@@ -242,6 +242,11 @@ export interface User {
   email_verified_at?: string | null;
   avatar?: string;
   avatar_url?: string;
+  /** 当前生效的头像：上传头像优先，否则为 OAuth 提供的头像。 */
+  effective_avatar_url?: string;
+  /** `uploaded` 表示用户上传的头像，`oauth` 表示来自 OAuth 提供方。 */
+  avatar_backend?: "uploaded" | "oauth";
+  uploaded_avatar_url?: string;
   muted_until?: string | null;
   muted_by?: number | string | null;
   muted_reason?: string | null;

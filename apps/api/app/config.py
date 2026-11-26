@@ -281,6 +281,7 @@ class Settings:
     github_login_enabled: bool
     public_login_enabled: bool
     email_registration_enabled: bool
+    avatar_upload_enabled: bool
     email_verification_required: bool
     login_agreement_enabled: bool
     login_agreement_text: str
@@ -459,6 +460,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         github_login_enabled=_bool(merged.get("GITHUB_LOGIN_ENABLED")),
         public_login_enabled=_bool(merged.get("PUBLIC_LOGIN_ENABLED"), default=True),
         email_registration_enabled=_bool(merged.get("EMAIL_REGISTRATION_ENABLED"), default=False),
+        avatar_upload_enabled=_bool(merged.get("AVATAR_UPLOAD_ENABLED"), default=True),
         email_verification_required=_bool(merged.get("EMAIL_VERIFICATION_REQUIRED"), default=True),
         login_agreement_enabled=_bool(merged.get("LOGIN_AGREEMENT_ENABLED")),
         login_agreement_text=merged.get("LOGIN_AGREEMENT_TEXT", DEFAULT_LOGIN_AGREEMENT_TEXT),

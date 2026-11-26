@@ -219,12 +219,16 @@ def test_user_can_update_own_profile() -> None:
 
     response = client.patch(
         "/v1/me/profile",
-        json={"github_name": "Alice Dev", "avatar_url": "https://example.com/avatar.webp"},
+        json={"github_name": "Alice Dev"},
     )
 
     assert response.status_code == 200
     assert response.json()["github_name"] == "Alice Dev"
-    assert response.json()["avatar_url"] == "https://example.com/avatar.webp"
+    # Hand-edited avatar URLs are refused; avatars are managed via POST/DELETE /v1/me/avatar.
+    rejected = client.patch(
+        "/v1/me/profile", json={"avatar_url": "https://example.com/avatar.webp"}
+    )
+    assert rejected.status_code == 400
 
 
 def test_admin_can_store_github_token_without_public_echo() -> None:

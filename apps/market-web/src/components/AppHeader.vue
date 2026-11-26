@@ -28,7 +28,7 @@ import ThemeModeButton from "./ThemeModeButton.vue";
 import AnnouncementButton from "./AnnouncementButton.vue";
 import GitProviderIcon from "./GitProviderIcon.vue";
 import { usePluginStore } from "../stores/plugins";
-import { getGitProviderLabel, resolveMyAvatarUrl } from "../utils/github";
+import { avatarVariantUrl, getGitProviderLabel, resolveMyAvatarUrl } from "../utils/github";
 import type { OAuthProviderKey, PublicOAuthProviderInfo } from "../types";
 
 const router = useRouter();
@@ -117,9 +117,17 @@ const displayUserName = computed(
     "已登录",
 );
 const userAvatarUrl = computed(() =>
-  resolveMyAvatarUrl(
-    String(headerUser.value?.avatar_url || headerUser.value?.avatar || "").trim(),
-    store.apiBaseUrl,
+  avatarVariantUrl(
+    resolveMyAvatarUrl(
+      String(
+        headerUser.value?.effective_avatar_url ||
+          headerUser.value?.avatar_url ||
+          headerUser.value?.avatar ||
+          "",
+      ).trim(),
+      store.apiBaseUrl,
+    ),
+    64,
   ),
 );
 const showUserAvatar = computed(() => Boolean(userAvatarUrl.value) && !avatarLoadFailed.value);

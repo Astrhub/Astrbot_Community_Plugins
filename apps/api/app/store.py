@@ -1673,6 +1673,50 @@ class InMemoryMarketStore:
         user["updated_at"] = utc_now()
         return deepcopy(user)
 
+    def set_user_uploaded_avatar(
+        self,
+        user_id: str,
+        *,
+        url: str,
+        profile_id: str,
+        object_id: str,
+        sha256: str,
+        expected_object_id: str,
+    ) -> dict[str, Any] | None:
+        """Point the user at a new uploaded avatar; fails if another upload landed first."""
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        if (user.get("uploaded_avatar_object_id") or "") != expected_object_id:
+            return None
+        user["uploaded_avatar_url"] = url
+        user["uploaded_avatar_profile_id"] = profile_id
+        user["uploaded_avatar_object_id"] = object_id
+        user["uploaded_avatar_sha256"] = sha256
+        user["uploaded_avatar_updated_at"] = utc_now()
+        user["updated_at"] = utc_now()
+        return deepcopy(user)
+
+    def clear_user_uploaded_avatar(
+        self,
+        user_id: str,
+        *,
+        expected_object_id: str,
+    ) -> dict[str, Any] | None:
+        """Drop the uploaded avatar reference; the remote object is left for storage GC."""
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        if (user.get("uploaded_avatar_object_id") or "") != expected_object_id:
+            return None
+        user["uploaded_avatar_url"] = ""
+        user["uploaded_avatar_profile_id"] = ""
+        user["uploaded_avatar_object_id"] = ""
+        user["uploaded_avatar_sha256"] = ""
+        user["uploaded_avatar_updated_at"] = None
+        user["updated_at"] = utc_now()
+        return deepcopy(user)
+
     def merge_user_into_user(self, from_user_id: str, to_user_id: str) -> dict[str, Any] | None:
         source = self.get_user_by_id(from_user_id)
         target = self.get_user_by_id(to_user_id)
@@ -1719,6 +1763,17 @@ class InMemoryMarketStore:
         for user in self.state["users"]:
             if user.get("muted_by") == from_user_id:
                 user["muted_by"] = to_user_id
+        # An uploaded avatar is a first-class profile field: carry it over when the surviving
+        # account has none, so a merge never silently degrades the target to the fallback image.
+        if not (target.get("uploaded_avatar_object_id") or "") and source.get(
+            "uploaded_avatar_object_id"
+        ):
+            target["uploaded_avatar_url"] = source["uploaded_avatar_url"]
+            target["uploaded_avatar_profile_id"] = source["uploaded_avatar_profile_id"]
+            target["uploaded_avatar_object_id"] = source["uploaded_avatar_object_id"]
+            target["uploaded_avatar_sha256"] = source["uploaded_avatar_sha256"]
+            target["uploaded_avatar_updated_at"] = source.get("uploaded_avatar_updated_at")
+            target["updated_at"] = utc_now()
         self.state["users"] = [user for user in self.state["users"] if user["id"] != from_user_id]
         return deepcopy(target)
 
@@ -2175,6 +2230,11 @@ class InMemoryMarketStore:
             "email": user.get("email") or "",
             "email_verified_at": user.get("email_verified_at") or None,
             "session_version": int(user.get("session_version") or 1),
+            "uploaded_avatar_url": user.get("uploaded_avatar_url") or "",
+            "uploaded_avatar_profile_id": user.get("uploaded_avatar_profile_id") or "",
+            "uploaded_avatar_object_id": user.get("uploaded_avatar_object_id") or "",
+            "uploaded_avatar_sha256": user.get("uploaded_avatar_sha256") or "",
+            "uploaded_avatar_updated_at": user.get("uploaded_avatar_updated_at") or None,
             "password_hash": user.get("password_hash") or "",
             "auth_source": user.get("auth_source") or "github",
             "github_token": user.get("github_token") or "",
@@ -2730,6 +2790,18 @@ class LocalFileMarketStore(InMemoryMarketStore):
         with self._persist():
             return super().update_user_profile(user_id, profile)
 
+    def set_user_uploaded_avatar(self, user_id: str, **fields: Any) -> dict[str, Any] | None:
+        with self._persist():
+            return super().set_user_uploaded_avatar(user_id, **fields)
+
+    def clear_user_uploaded_avatar(
+        self, user_id: str, *, expected_object_id: str
+    ) -> dict[str, Any] | None:
+        with self._persist():
+            return super().clear_user_uploaded_avatar(
+                user_id, expected_object_id=expected_object_id
+            )
+
     def merge_user_into_user(self, from_user_id: str, to_user_id: str) -> dict[str, Any] | None:
         with self._persist():
             return super().merge_user_into_user(from_user_id, to_user_id)
@@ -3004,6 +3076,11 @@ CREATE TABLE IF NOT EXISTS market_users (
     email_notify_replies boolean NOT NULL DEFAULT false,
     email_notify_likes boolean NOT NULL DEFAULT false,
     email_notify_unlist boolean NOT NULL DEFAULT true,
+    uploaded_avatar_url text NOT NULL DEFAULT '',
+    uploaded_avatar_profile_id text NOT NULL DEFAULT '',
+    uploaded_avatar_object_id text NOT NULL DEFAULT '',
+    uploaded_avatar_sha256 text NOT NULL DEFAULT '',
+    uploaded_avatar_updated_at timestamptz,
     role text NOT NULL CHECK (role IN ('core_admin', 'admin', 'user')),
     muted_until timestamptz,
     muted_by text REFERENCES market_users(id) ON DELETE SET NULL,
@@ -3266,6 +3343,26 @@ class PgRedisMarketStore(InMemoryMarketStore):
             await connection.execute(
                 "ALTER TABLE market_notifications ADD COLUMN IF NOT EXISTS read boolean "
                 "NOT NULL DEFAULT false"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS uploaded_avatar_url text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "uploaded_avatar_profile_id text NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "uploaded_avatar_object_id text NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS uploaded_avatar_sha256 text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "uploaded_avatar_updated_at timestamptz"
             )
             await apply_schema_migrations(connection)
 
@@ -5045,6 +5142,64 @@ class PgRedisMarketStore(InMemoryMarketStore):
         )
         return self._user_from_record(row) if row else None
 
+    async def set_user_uploaded_avatar(
+        self,
+        user_id: str,
+        *,
+        url: str,
+        profile_id: str,
+        object_id: str,
+        sha256: str,
+        expected_object_id: str,
+    ) -> dict[str, Any] | None:
+        # The WHERE clause is the compare-and-set: a concurrent upload that already moved the
+        # pointer makes this no-op return None instead of overwriting the newer avatar.
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_users
+               SET uploaded_avatar_url = $3,
+                   uploaded_avatar_profile_id = $4,
+                   uploaded_avatar_object_id = $5,
+                   uploaded_avatar_sha256 = $6,
+                   uploaded_avatar_updated_at = now(),
+                   updated_at = now()
+             WHERE id = $1
+               AND COALESCE(uploaded_avatar_object_id, '') = $2
+         RETURNING *
+            """,
+            user_id,
+            expected_object_id,
+            url,
+            profile_id,
+            object_id,
+            sha256,
+        )
+        return self._user_from_record(row) if row else None
+
+    async def clear_user_uploaded_avatar(
+        self,
+        user_id: str,
+        *,
+        expected_object_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_users
+               SET uploaded_avatar_url = '',
+                   uploaded_avatar_profile_id = '',
+                   uploaded_avatar_object_id = '',
+                   uploaded_avatar_sha256 = '',
+                   uploaded_avatar_updated_at = NULL,
+                   updated_at = now()
+             WHERE id = $1
+               AND COALESCE(uploaded_avatar_object_id, '') = $2
+         RETURNING *
+            """,
+            user_id,
+            expected_object_id,
+        )
+        return self._user_from_record(row) if row else None
+
     @plugin_identity_write
     async def delete_user(
         self,
@@ -5311,6 +5466,23 @@ class PgRedisMarketStore(InMemoryMarketStore):
                       ) counts
                      WHERE c.id = counts.comment_id
                     """
+                )
+                # Keep the custom avatar when only the source account had one.
+                await connection.execute(
+                    """
+                    UPDATE market_users
+                       SET uploaded_avatar_url = source.uploaded_avatar_url,
+                           uploaded_avatar_profile_id = source.uploaded_avatar_profile_id,
+                           uploaded_avatar_object_id = source.uploaded_avatar_object_id,
+                           uploaded_avatar_sha256 = source.uploaded_avatar_sha256,
+                           uploaded_avatar_updated_at = source.uploaded_avatar_updated_at,
+                           updated_at = now()
+                      FROM (SELECT * FROM market_users WHERE id = $1) AS source
+                     WHERE market_users.id = $2
+                       AND COALESCE(market_users.uploaded_avatar_object_id, '') = ''
+                    """,
+                    from_user_id,
+                    to_user_id,
                 )
                 await connection.execute("DELETE FROM market_users WHERE id = $1", from_user_id)
                 return self._user_from_record(target)

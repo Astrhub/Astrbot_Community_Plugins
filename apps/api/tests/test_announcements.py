@@ -144,6 +144,26 @@ def test_announcement_image_upload_validation_and_public_read(tmp_path: Path) ->
     client = TestClient(app)
     _login(client, "owner")
 
+    # Avatar no longer inherits the plugin published profile; bind a dedicated test profile.
+    created = client.post(
+        "/v1/admin/storage/profiles",
+        json={
+            "id": "announcement-images",
+            "name": "Announcement Images",
+            "backend": "local",
+            "config": {
+                "mode": "filesystem",
+                "root": str(tmp_path / "announcement-images"),
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    bound = client.put(
+        "/v1/admin/storage/bindings/avatar",
+        json={"profile_id": "announcement-images"},
+    )
+    assert bound.status_code == 200, bound.text
+
     uploaded = client.post(
         "/v1/core/announcements/images",
         files={"image": ("pixel.png", PNG_1X1, "image/png")},
@@ -171,7 +191,7 @@ def test_announcement_image_upload_validation_and_public_read(tmp_path: Path) ->
     bindings = client.get("/v1/admin/storage/bindings")
     assert bindings.status_code == 200, bindings.text
     avatar = next(item for item in bindings.json()["items"] if item["purpose"] == "avatar")
-    assert avatar["profile_id"]
+    assert avatar["profile_id"] == "announcement-images"
 
     repository = app.state.storage_manager.repository
     original_upsert = repository.upsert_object

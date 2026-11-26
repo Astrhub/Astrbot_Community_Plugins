@@ -18,13 +18,16 @@ import {
   LinkOutline,
   LockClosedOutline,
   MailOutline,
+  CameraOutline,
   PersonCircleOutline,
   SaveOutline,
+  TrashOutline,
   UnlinkOutline,
 } from "@vicons/ionicons5";
+import AvatarCropperModal from "@/components/settings/AvatarCropperModal.vue";
 import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import { usePluginStore } from "@/stores/plugins";
-import { getGitProviderLabel, resolveMyAvatarUrl } from "@/utils/github";
+import { avatarVariantUrl, getGitProviderLabel, resolveMyAvatarUrl } from "@/utils/github";
 import type { AuthConfig, OAuthIdentity, OAuthProviderKey, User } from "@/types";
 
 const githubName = defineModel("githubName", { type: String, default: "" });
@@ -39,6 +42,7 @@ const props = withDefaults(
     passwordSaving?: boolean;
     emailSaving?: boolean;
     oauthBusyId?: string;
+    avatarBusy?: boolean;
   }>(),
   {
     currentUser: null,
@@ -47,14 +51,14 @@ const props = withDefaults(
     passwordSaving: false,
     emailSaving: false,
     oauthBusyId: "",
+    avatarBusy: false,
   },
 );
 
 const emit = defineEmits<{
   save: [];
-  "connect-github": [];
-  "connect-oauth": [provider: OAuthProviderKey];
-  "unbind-oauth": [identity: OAuthIdentity];
+  "upload-avatar": [payload: { file: File; onCompleted?: () => void }];
+  "remove-avatar": [];
   "update-password": [payload: { current_password?: string; new_password: string; email?: string }];
   "request-email-change": [
     payload: {
@@ -106,6 +110,45 @@ const oauthProviderRows = computed(() =>
     identity: oauthIdentities.value.find((item) => item.provider === provider) || null,
   })),
 );
+const avatarInputRef = shallowRef<HTMLInputElement | null>(null);
+const cropperOpen = shallowRef(false);
+const cropperFile = shallowRef<File | null>(null);
+
+function pickAvatar() {
+  avatarInputRef.value?.click();
+}
+
+function onAvatarChosen(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0] || null;
+  input.value = "";
+  if (!file) return;
+  cropperFile.value = file;
+  cropperOpen.value = true;
+}
+
+function onCropConfirm(payload: { file: File }) {
+  emit("upload-avatar", {
+    file: payload.file,
+    onCompleted: () => onAvatarUploaded(),
+  });
+}
+
+function onAvatarUploaded() {
+  cropperOpen.value = false;
+  cropperFile.value = null;
+}
+
+function confirmRemoveAvatar() {
+  dialog.warning({
+    title: "清除已上传头像",
+    content: "清除后将回退到 OAuth 账号提供的头像；如果没有任何 OAuth 头像，会显示默认占位图。",
+    positiveText: "确认清除",
+    negativeText: "取消",
+    onPositiveClick: () => emit("remove-avatar"),
+  });
+}
+
 function connectProvider(provider: OAuthProviderKey): void {
   if (provider === "github") emit("connect-github");
   emit("connect-oauth", provider);
@@ -135,9 +178,17 @@ const tierInfo = computed(() => {
 const avatarLoadFailed = shallowRef(false);
 const pluginStore = usePluginStore();
 const profileAvatarUrl = computed(() =>
-  resolveMyAvatarUrl(
-    String(props.currentUser?.avatar_url || props.currentUser?.avatar || "").trim(),
-    pluginStore.apiBaseUrl,
+  avatarVariantUrl(
+    resolveMyAvatarUrl(
+      String(
+        props.currentUser?.effective_avatar_url ||
+          props.currentUser?.avatar_url ||
+          props.currentUser?.avatar ||
+          "",
+      ).trim(),
+      pluginStore.apiBaseUrl,
+    ),
+    256,
   ),
 );
 const showProfileAvatar = computed(
@@ -281,17 +332,48 @@ function confirmUnbind(identity: OAuthIdentity): void {
 
       <div class="github-summary">
         <div class="github-main">
-          <span class="profile-avatar">
-            <img
-              v-if="showProfileAvatar"
-              :src="profileAvatarUrl"
-              :alt="`${publicUsername || '当前用户'}的头像`"
-              class="profile-avatar__image"
-              referrerpolicy="no-referrer"
-              @error="avatarLoadFailed = true"
+          <div class="profile-avatar-wrap">
+            <span class="profile-avatar">
+              <img
+                v-if="showProfileAvatar"
+                :src="profileAvatarUrl"
+                :alt="`${publicUsername || '当前用户'}的头像`"
+                class="profile-avatar__image"
+                referrerpolicy="no-referrer"
+                @error="avatarLoadFailed = true"
+              />
+              <NIcon v-else><PersonCircleOutline /></NIcon>
+            </span>
+            <div class="profile-avatar-actions">
+              <NButton size="tiny" secondary :loading="avatarBusy" @click="pickAvatar">
+                <template #icon>
+                  <NIcon><CameraOutline /></NIcon>
+                </template>
+                {{ props.currentUser?.avatar_backend === "uploaded" ? "更换头像" : "上传头像" }}
+              </NButton>
+              <NButton
+                v-if="props.currentUser?.avatar_backend === 'uploaded'"
+                size="tiny"
+                quaternary
+                type="error"
+                :disabled="avatarBusy"
+                @click="confirmRemoveAvatar"
+              >
+                <template #icon>
+                  <NIcon><TrashOutline /></NIcon>
+                </template>
+                清除
+              </NButton>
+            </div>
+            <input
+              ref="avatarInputRef"
+              class="profile-avatar-input"
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              :disabled="avatarBusy"
+              @change="onAvatarChosen"
             />
-            <NIcon v-else><PersonCircleOutline /></NIcon>
-          </span>
+          </div>
           <div class="github-copy">
             <span class="summary-label">公开用户名</span>
             <strong>@{{ publicUsername || "未设置" }}</strong>
@@ -354,6 +436,20 @@ function confirmUnbind(identity: OAuthIdentity): void {
           </NButton>
         </div>
       </NForm>
+      <AvatarCropperModal
+        v-model:show="cropperOpen"
+        :file="cropperFile"
+        :uploading="avatarBusy"
+        @confirm="onCropConfirm"
+        @update:show="
+          (value: boolean) => {
+            if (!value) {
+              cropperOpen = false;
+              cropperFile = null;
+            }
+          }
+        "
+      />
     </section>
 
     <section class="settings-section">
@@ -647,7 +743,6 @@ function confirmUnbind(identity: OAuthIdentity): void {
 
 .github-main,
 .oauth-info {
-  min-width: 0;
   gap: 10px;
 }
 
@@ -675,6 +770,7 @@ function confirmUnbind(identity: OAuthIdentity): void {
   height: 44px;
   display: inline-grid;
   flex: none;
+  min-width: 0;
   overflow: hidden;
   place-items: center;
   color: var(--text-color-3);
@@ -689,6 +785,25 @@ function confirmUnbind(identity: OAuthIdentity): void {
   height: 100%;
   display: block;
   object-fit: cover;
+}
+
+.profile-avatar-wrap {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: none;
+}
+
+.profile-avatar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+}
+
+.profile-avatar-input {
+  display: none;
 }
 
 .github-copy {

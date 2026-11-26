@@ -160,6 +160,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20261125_013_object_storage",
         "20261126_014_announcement_management",
         "20261126_015_download_tracking",
+        "20261127_016_user_uploaded_avatar",
     ]
     sql = migrations[0].sql
     for table in (
@@ -306,6 +307,7 @@ async def run_artifact_migrations(database_url: str) -> None:
             "20261125_013_object_storage",
             "20261126_014_announcement_management",
             "20261126_015_download_tracking",
+            "20261127_016_user_uploaded_avatar",
         ]
         assert second == []
         table_names = await connection.fetch(

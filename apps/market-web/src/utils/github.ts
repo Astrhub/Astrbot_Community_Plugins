@@ -109,6 +109,42 @@ export function resolveMyAvatarUrl(avatarUrl: string | null | undefined, apiBase
   return githubRawUrl(raw);
 }
 
+const AVATAR_VARIANT_SIZES = new Set([64, 128, 256]);
+const AVATAR_VARIANT_KEYS = new Set(["width", "height", "fit", "fallback"]);
+
+/**
+ * Build the display URL for an avatar rendered at the given pixel size.
+ *
+ * Only ImgBed `/file/` URLs support server-side resizing, so they gain width/height/fit=cover/
+ * fallback=original and a 44 px header chip downloads a 64 px variant instead of the stored
+ * 512 px original. Other URLs (same-origin `/v1/storage/public/`, OAuth proxy, external) are
+ * returned unchanged; the API stores uploaded avatar URLs with a `?v=` digest for cache busting.
+ */
+export function avatarVariantUrl(url: string | null | undefined, size: number): string {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  const isRelative = raw.startsWith("/");
+  let parsed: URL;
+  try {
+    parsed = new URL(raw, "https://avatar.invalid");
+  } catch {
+    return raw;
+  }
+  if (!parsed.pathname.startsWith("/file/")) return raw;
+
+  const normalizedSize = AVATAR_VARIANT_SIZES.has(size) ? size : 128;
+  const params = new URLSearchParams(parsed.search);
+  for (const key of AVATAR_VARIANT_KEYS) params.delete(key);
+  params.set("width", String(normalizedSize));
+  params.set("height", String(normalizedSize));
+  params.set("fit", "cover");
+  params.set("fallback", "original");
+  const query = params.toString();
+  const suffix = query ? `?${query}` : "";
+  if (isRelative) return parsed.pathname + suffix;
+  return `${parsed.protocol}//${parsed.host}${parsed.pathname}${suffix}`;
+}
+
 export function resolvePluginLogoUrl(plugin: PluginLogoSource, apiBaseUrl = ""): string {
   const logo = typeof plugin.logo === "string" ? plugin.logo.trim() : "";
   if (!logo) return DEFAULT_PLUGIN_LOGO_URL;
