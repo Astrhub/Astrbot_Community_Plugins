@@ -215,6 +215,7 @@ function isBusy(key) {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--card-color);
+  min-width: 0;
 }
 
 .section-heading,
@@ -293,6 +294,7 @@ function isBusy(key) {
   display: grid;
   gap: 10px;
   width: 100%;
+  min-width: 0;
 }
 
 .scope-option {
@@ -313,6 +315,7 @@ function isBusy(key) {
 .scope-copy span {
   color: var(--text-color-3);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .section-actions {
@@ -330,6 +333,7 @@ function isBusy(key) {
 .key-list {
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 
 .key-row {

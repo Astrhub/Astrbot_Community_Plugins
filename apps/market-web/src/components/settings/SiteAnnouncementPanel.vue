@@ -329,7 +329,12 @@ onMounted(async () => {
 
 <style scoped>
 .settings-section {
-  padding: 24px 0;
+  padding: 22px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-base);
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  min-width: 0;
 }
 
 .section-title {
@@ -364,12 +369,13 @@ onMounted(async () => {
 .announcement-item-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
 .image-url-input {
-  flex: 1;
-  min-width: 180px;
+  flex: 1 1 200px;
+  min-width: 0;
 }
 
 .form-hint {
@@ -386,6 +392,9 @@ onMounted(async () => {
   padding: 16px;
   border: 1px solid var(--border-color);
   border-radius: 12px;
+  min-width: 0;
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 .announcement-list-header,
@@ -394,6 +403,11 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+.announcement-item-header > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .announcement-list-header {
@@ -409,12 +423,15 @@ onMounted(async () => {
 .announcement-list {
   display: grid;
   gap: 16px;
+  min-width: 0;
 }
 
 .announcement-item {
   padding: 16px;
   border: 1px solid var(--border-color);
   border-radius: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .announcement-item time {
@@ -434,6 +451,9 @@ onMounted(async () => {
 }
 
 @media (max-width: 640px) {
+  .settings-section {
+    padding: 16px;
+  }
   .image-tools,
   .announcement-item-header {
     align-items: stretch;

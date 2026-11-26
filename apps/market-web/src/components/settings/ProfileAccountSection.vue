@@ -669,7 +669,9 @@ function confirmUnbind(identity: OAuthIdentity): void {
 <style scoped>
 .account-stack {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
+  min-width: 0;
 }
 
 .settings-section {
@@ -677,6 +679,7 @@ function confirmUnbind(identity: OAuthIdentity): void {
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--card-color);
+  min-width: 0;
 }
 
 .section-heading,
@@ -759,6 +762,12 @@ function confirmUnbind(identity: OAuthIdentity): void {
 .oauth-info > div {
   display: grid;
   gap: 2px;
+  min-width: 0;
+}
+
+.oauth-info strong,
+.summary-meta {
+  overflow-wrap: anywhere;
 }
 
 .lockout-hint {
@@ -869,6 +878,12 @@ function confirmUnbind(identity: OAuthIdentity): void {
 
   .section-actions :deep(.n-button) {
     width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .inline-code-row {
+    grid-template-columns: 1fr;
   }
 }
 </style>

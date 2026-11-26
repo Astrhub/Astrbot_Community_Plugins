@@ -476,7 +476,9 @@ function confirmDelete(user) {
 .user-management,
 .user-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
 }
 
 .settings-section {
@@ -485,6 +487,7 @@ function confirmDelete(user) {
   border: 1px solid var(--border-base);
   border-radius: 8px;
   box-shadow: var(--shadow-sm);
+  min-width: 0;
 }
 
 .section-title {
@@ -580,19 +583,31 @@ function confirmDelete(user) {
   width: 132px;
 }
 
-.management-modal {
+:global(.management-modal) {
   width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
 }
 
-.modal-form {
+:global(.management-modal .n-card__content) {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+:global(.management-modal .modal-form) {
   display: grid;
   gap: 14px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.modal-actions {
+:global(.management-modal .modal-actions) {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .full-width {
@@ -610,6 +625,9 @@ function confirmDelete(user) {
 }
 
 @media (max-width: 680px) {
+  .settings-section {
+    padding: 16px;
+  }
   .row-title,
   .user-toolbar {
     align-items: flex-start;

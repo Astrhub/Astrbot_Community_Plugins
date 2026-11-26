@@ -217,6 +217,7 @@ const emit = defineEmits(["save"]);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--card-color);
+  min-width: 0;
 }
 
 .section-heading,
@@ -264,6 +265,7 @@ const emit = defineEmits(["save"]);
 .preference-panel,
 .preference-group {
   display: grid;
+  min-width: 0;
 }
 
 .preference-panel {
@@ -333,7 +335,7 @@ const emit = defineEmits(["save"]);
   margin-top: 18px;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   .email-target {
     grid-template-columns: 32px minmax(0, 1fr);
   }
@@ -341,7 +343,9 @@ const emit = defineEmits(["save"]);
   .email-target :deep(.n-input) {
     grid-column: 1 / -1;
   }
+}
 
+@media (max-width: 640px) {
   .preference-row {
     align-items: flex-start;
   }
