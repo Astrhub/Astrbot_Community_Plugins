@@ -3344,16 +3344,26 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 "ALTER TABLE market_notifications ADD COLUMN IF NOT EXISTS read boolean "
                 "NOT NULL DEFAULT false"
             )
-            for column, definition in (
-                ("uploaded_avatar_url", "text NOT NULL DEFAULT ''"),
-                ("uploaded_avatar_profile_id", "text NOT NULL DEFAULT ''"),
-                ("uploaded_avatar_object_id", "text NOT NULL DEFAULT ''"),
-                ("uploaded_avatar_sha256", "text NOT NULL DEFAULT ''"),
-                ("uploaded_avatar_updated_at", "timestamptz"),
-            ):
-                await connection.execute(
-                    f"ALTER TABLE market_users ADD COLUMN IF NOT EXISTS {column} {definition}"
-                )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS uploaded_avatar_url text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "uploaded_avatar_profile_id text NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "uploaded_avatar_object_id text NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS uploaded_avatar_sha256 text "
+                "NOT NULL DEFAULT ''"
+            )
+            await connection.execute(
+                "ALTER TABLE market_users ADD COLUMN IF NOT EXISTS "
+                "uploaded_avatar_updated_at timestamptz"
+            )
             await apply_schema_migrations(connection)
 
     async def _apply_email_notification_defaults_migration(

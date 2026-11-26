@@ -5,7 +5,9 @@ import io
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -121,7 +123,9 @@ def test_normalize_avatar_orients_crops_strips_metadata_and_reencodes() -> None:
 
     transparent = io.BytesIO()
     Image.new("RGBA", (30, 30), (0, 0, 0, 0)).save(transparent, format="PNG")
-    assert Image.open(io.BytesIO(normalize_avatar(transparent.getvalue()).content)).mode == "RGBA"
+    normalized_transparent = normalize_avatar(transparent.getvalue())
+    decoded_transparent = Image.open(io.BytesIO(normalized_transparent.content))
+    assert decoded_transparent.mode == "RGBA"
 
 
 def test_normalize_avatar_preserves_palette_transparency() -> None:
@@ -147,17 +151,9 @@ def test_normalize_avatar_preserves_palette_transparency() -> None:
     opaque.putpalette([255, 0, 0] + [0] * 765)
     buf2 = io.BytesIO()
     opaque.save(buf2, format="PNG")
-    out2 = Image.open(io.BytesIO(normalize_avatar(buf2.getvalue()).content))
+    normalized_opaque = normalize_avatar(buf2.getvalue())
+    out2 = Image.open(io.BytesIO(normalized_opaque.content))
     assert out2.mode == "RGB"
-    large = normalize_avatar(_png(1024, 768))
-    assert (large.width, large.height) == (512, 512)
-
-    small = normalize_avatar(_png(64, 48))
-    assert (small.width, small.height) == (48, 48)
-
-    transparent = io.BytesIO()
-    Image.new("RGBA", (30, 30), (0, 0, 0, 0)).save(transparent, format="PNG")
-    assert Image.open(io.BytesIO(normalize_avatar(transparent.getvalue()).content)).mode == "RGBA"
 
 
 @pytest.mark.parametrize(
@@ -209,6 +205,51 @@ def test_upload_requires_login_and_feature_flag(tmp_path: Path) -> None:
     assert disabled.headers["cache-control"] == "private, no-store"
 
 
+def test_upload_rejects_before_multipart_parsing_when_gated_or_oversized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = _make_app(tmp_path)
+    owner = TestClient(app)
+    _login(owner, "owner")
+    _bind_avatar_profile(owner, tmp_path)
+
+    schema = app.openapi()["paths"]["/v1/me/avatar"]["post"]["requestBody"]["content"]
+    assert "multipart/form-data" in schema
+    assert schema["multipart/form-data"]["schema"]["properties"]["file"]["format"] == "binary"
+
+    def fail_form(*_args, **_kwargs):
+        raise AssertionError("multipart body must not be parsed before auth and size gates")
+
+    monkeypatch.setattr(Request, "form", fail_form)
+
+    anonymous = TestClient(app).post(
+        "/v1/me/avatar", files={"file": ("a.png", _png(8, 8), "image/png")}
+    )
+    assert anonymous.status_code == 401
+
+    client = TestClient(app)
+    _login(client, "alice")
+    oversized_declared = client.post(
+        "/v1/me/avatar",
+        files={"file": ("a.png", _png(8, 8), "image/png")},
+        headers={"Content-Length": str(MAX_AVATAR_SOURCE_BYTES + 1024 * 1024)},
+    )
+    assert oversized_declared.status_code == 413
+    assert oversized_declared.json()["code"] == "avatar_too_large"
+
+    disabled_app, _ = _make_app(tmp_path, avatar_upload_enabled=False)
+    disabled_client = TestClient(disabled_app)
+    _login(disabled_client, "alice")
+    disabled = _upload(disabled_client, _png(8, 8))
+    assert disabled.status_code == 403
+    assert disabled.json()["code"] == "avatar_upload_disabled"
+
+    monkeypatch.undo()
+    missing_file = client.post("/v1/me/avatar", data={"note": "no-file"})
+    assert missing_file.status_code == 422
+    assert missing_file.json()["code"] == "avatar_file_required"
+
+
 def test_upload_returns_503_when_avatar_purpose_is_unbound(tmp_path: Path) -> None:
     app, _ = _make_app(tmp_path)
     client = TestClient(app)
@@ -250,7 +291,8 @@ def test_upload_persists_avatar_and_public_read_serves_webp(tmp_path: Path) -> N
     assert public.status_code == 200
     assert public.headers["content-type"] == "image/webp"
     assert public.headers["cache-control"] == "public, max-age=3600"
-    assert Image.open(io.BytesIO(public.content)).size == (120, 120)
+    public_image = Image.open(io.BytesIO(public.content))
+    assert public_image.size == (120, 120)
 
     stored = store.get_user_by_id(user["id"])
     assert stored["uploaded_avatar_sha256"] == avatar["sha256"]
@@ -318,7 +360,8 @@ def test_upload_rejects_invalid_files_through_http(tmp_path: Path) -> None:
     gif = _upload(client, b"GIF89a" + b"0" * 32, name="a.gif", mime="image/gif")
     assert gif.status_code == 415
 
-    assert client.get("/v1/me").json()["uploaded_avatar_url"] == ""
+    me_after = client.get("/v1/me").json()
+    assert me_after["uploaded_avatar_url"] == ""
 
 
 def test_upload_rate_limit_counts_rejected_requests_too(tmp_path: Path) -> None:
@@ -352,27 +395,135 @@ def test_storage_failure_leaves_user_untouched_and_cleans_pending(tmp_path: Path
     _bind_avatar_profile(owner, tmp_path)
     client = TestClient(app)
     _login(client, "alice")
-    service = app.state.storage_manager.service
+    alice = next(user for user in store.list_users() if user["internal_username"] == "alice")
+    driver = app.state.storage_manager.service.driver_for_purpose(StoragePurpose.AVATAR)
+    original_driver_put = driver.put_object
+    written_target: dict[str, str] = {}
 
-    original_put = service.put_object
-
-    async def failing_put(*_args, **_kwargs):
+    async def write_then_fail(key: str, data: bytes, *, namespace: str = "", **kwargs):
+        await original_driver_put(key, data, namespace=namespace, **kwargs)
+        written_target["namespace"] = namespace
+        written_target["key"] = key
         raise ObjectStorageError("imgbed_capability_check_failed", "simulated")
 
-    service.put_object = failing_put
+    driver.put_object = write_then_fail  # type: ignore[method-assign]
     try:
         response = _upload(client, _png(50, 50))
     finally:
-        service.put_object = original_put
+        driver.put_object = original_driver_put  # type: ignore[method-assign]
     assert response.status_code == 503
     assert response.json()["code"] == "imgbed_capability_check_failed"
-    assert store.get_user_by_id(store.list_users()[1]["id"])["uploaded_avatar_url"] == ""
-    records = asyncio.run(
-        app.state.storage_manager.repository.list_objects(
+    alice_after = store.get_user_by_id(alice["id"])
+    assert alice_after is not None and alice_after["uploaded_avatar_url"] == ""
+    assert written_target
+
+    async def assert_cleaned() -> None:
+        active = await app.state.storage_manager.repository.list_objects(
             status=StorageObjectStatus.ACTIVE, purpose=StoragePurpose.AVATAR
         )
-    )
-    assert records == []
+        pending = await app.state.storage_manager.repository.list_objects(
+            status=StorageObjectStatus.PENDING, purpose=StoragePurpose.AVATAR
+        )
+        stat = await driver.stat_object(
+            written_target["key"], namespace=written_target["namespace"]
+        )
+        assert active == []
+        assert pending == []
+        assert stat is None
+
+    asyncio.run(assert_cleaned())
+
+
+def test_storage_failure_on_reupload_preserves_existing_active_avatar(tmp_path: Path) -> None:
+    app, store = _make_app(tmp_path)
+    owner = TestClient(app)
+    _login(owner, "owner")
+    _bind_avatar_profile(owner, tmp_path)
+    client = TestClient(app)
+    _login(client, "alice")
+    user_id = client.get("/v1/me").json()["id"]
+
+    payload = _png(52, 52)
+    first = _upload(client, payload)
+    assert first.status_code == 201, first.text
+    first_url = first.json()["avatar"]["url"]
+    first_sha = first.json()["avatar"]["sha256"]
+
+    service = app.state.storage_manager.service
+    original_put = service.put_object
+
+    async def failing_put(*_args, **_kwargs):
+        raise ObjectStorageError("imgbed_capability_check_failed", "transient outage")
+
+    service.put_object = failing_put  # type: ignore[method-assign]
+    try:
+        second = _upload(client, payload)
+    finally:
+        service.put_object = original_put  # type: ignore[method-assign]
+    assert second.status_code == 503
+    assert second.json()["code"] == "imgbed_capability_check_failed"
+
+    async def assert_existing_preserved() -> None:
+        driver = service.driver_for_purpose(StoragePurpose.AVATAR)
+        active = await app.state.storage_manager.repository.list_objects(
+            status=StorageObjectStatus.ACTIVE, purpose=StoragePurpose.AVATAR
+        )
+        stat = await driver.stat_object(f"{first_sha}.webp", namespace=f"users/{user_id}")
+        assert len(active) == 1
+        assert stat is not None
+
+    asyncio.run(assert_existing_preserved())
+    stored_user = store.get_user_by_id(user_id)
+    assert stored_user is not None and stored_user["uploaded_avatar_url"] == first_url
+    public = TestClient(app).get(first_url)
+    assert public.status_code == 200
+    assert public.headers["content-type"] == "image/webp"
+
+
+def test_verification_failure_cleans_newly_created_orphan_object(tmp_path: Path) -> None:
+    app, store = _make_app(tmp_path)
+    owner = TestClient(app)
+    _login(owner, "owner")
+    _bind_avatar_profile(owner, tmp_path)
+    client = TestClient(app)
+    _login(client, "alice")
+    user_id = client.get("/v1/me").json()["id"]
+    driver = app.state.storage_manager.service.driver_for_purpose(StoragePurpose.AVATAR)
+    original_driver_put = driver.put_object
+    written_target: dict[str, str] = {}
+
+    async def mismatched_put(key: str, data: bytes, *, namespace: str = "", **kwargs):
+        stored = await original_driver_put(key, data, namespace=namespace, **kwargs)
+        written_target["namespace"] = namespace
+        written_target["key"] = key
+        return replace(stored, size_bytes=stored.size_bytes + 1)
+
+    driver.put_object = mismatched_put  # type: ignore[method-assign]
+    try:
+        response = _upload(client, _png(56, 56))
+    finally:
+        driver.put_object = original_driver_put  # type: ignore[method-assign]
+    assert response.status_code == 503
+    assert response.json()["code"] == "avatar_verification_failed"
+    assert written_target
+
+    async def assert_orphan_discarded() -> None:
+        active = await app.state.storage_manager.repository.list_objects(
+            status=StorageObjectStatus.ACTIVE, purpose=StoragePurpose.AVATAR
+        )
+        pending = await app.state.storage_manager.repository.list_objects(
+            status=StorageObjectStatus.PENDING, purpose=StoragePurpose.AVATAR
+        )
+        stat = await driver.stat_object(
+            written_target["key"], namespace=written_target["namespace"]
+        )
+        assert active == []
+        assert pending == []
+        assert stat is None
+
+    asyncio.run(assert_orphan_discarded())
+    stored_user = store.get_user_by_id(user_id)
+    assert stored_user is not None and stored_user["uploaded_avatar_url"] == ""
 
 
 def test_database_failure_removes_uploaded_object(tmp_path: Path) -> None:
@@ -406,10 +557,12 @@ def test_database_failure_removes_uploaded_object(tmp_path: Path) -> None:
         )
         assert [record.owner_type for record in deleted] == ["user_avatar"]
         driver = app.state.storage_manager.service.driver_for_purpose(StoragePurpose.AVATAR)
-        assert await driver.stat_object(deleted[0].key, namespace=deleted[0].namespace) is None
+        stat = await driver.stat_object(deleted[0].key, namespace=deleted[0].namespace)
+        assert stat is None
 
     asyncio.run(assert_orphan_removed())
-    assert store.get_user_by_id(alice["id"])["uploaded_avatar_url"] == ""
+    alice_after = store.get_user_by_id(alice["id"])
+    assert alice_after is not None and alice_after["uploaded_avatar_url"] == ""
 
 
 def test_reuploaded_same_content_keeps_existing_object(tmp_path: Path) -> None:
@@ -444,11 +597,14 @@ def test_reuploaded_same_content_keeps_existing_object(tmp_path: Path) -> None:
             status=StorageObjectStatus.ACTIVE, purpose=StoragePurpose.AVATAR
         )
         assert len(active) == 1
-        assert await driver.stat_object(active[0].key, namespace=active[0].namespace) is not None
+        stat = await driver.stat_object(active[0].key, namespace=active[0].namespace)
+        assert stat is not None
 
     asyncio.run(assert_object_alive())
     # The first avatar is still fully intact on the user row.
-    assert store.get_user_by_id(stale["id"])["uploaded_avatar_url"] == stale["uploaded_avatar_url"]
+    stored_after = store.get_user_by_id(stale["id"])
+    assert stored_after is not None
+    assert stored_after["uploaded_avatar_url"] == stale["uploaded_avatar_url"]
 
 
 def test_ambiguous_commit_keeps_object(tmp_path: Path) -> None:
@@ -481,10 +637,12 @@ def test_ambiguous_commit_keeps_object(tmp_path: Path) -> None:
         )
         assert len(active) == 1
         driver = app.state.storage_manager.service.driver_for_purpose(StoragePurpose.AVATAR)
-        assert await driver.stat_object(active[0].key, namespace=active[0].namespace) is not None
+        stat = await driver.stat_object(active[0].key, namespace=active[0].namespace)
+        assert stat is not None
 
     asyncio.run(assert_kept())
-    assert store.get_user_by_id(user_id)["uploaded_avatar_url"]
+    stored_user = store.get_user_by_id(user_id)
+    assert stored_user is not None and stored_user["uploaded_avatar_url"]
 
 
 def test_concurrent_uploads_only_one_lands_and_other_reports_conflict(tmp_path: Path) -> None:
@@ -492,29 +650,90 @@ def test_concurrent_uploads_only_one_lands_and_other_reports_conflict(tmp_path: 
     owner = TestClient(app)
     _login(owner, "owner")
     _bind_avatar_profile(owner, tmp_path)
-    client = TestClient(app)
-    _login(client, "alice")
-    user_id = client.get("/v1/me").json()["id"]
 
-    first = _upload(client, _png(70, 70, color=(1, 2, 3))).json()
-    assert first["user"]["uploaded_avatar_url"]
+    loser_image = _png(70, 70, color=(200, 10, 10))
+    winner_image = _png(70, 70, color=(1, 2, 3))
+    loser_sha = normalize_avatar(loser_image).sha256
+    winner_sha = normalize_avatar(winner_image).sha256
 
-    # Simulate a second request that read the user before the first upload committed: the CAS in
-    # set_user_uploaded_avatar must reject it.
-    stale = store.set_user_uploaded_avatar(
-        user_id,
-        url="/v1/storage/public/stale",
-        profile_id="avatars",
-        object_id="stale",
-        sha256="stale",
-        expected_object_id="",
-    )
-    assert stale is None
-    assert store.get_user_by_id(user_id)["uploaded_avatar_object_id"] != "stale"
+    async def run_concurrent() -> tuple[httpx.Response, httpx.Response, str]:
+        service = app.state.storage_manager.service
+        original_put = service.put_object
+        loser_stored = asyncio.Event()
+        winner_committed = asyncio.Event()
 
-    conflict = _upload(client, _png(70, 70, color=(200, 10, 10)))
-    assert conflict.status_code == 201
-    assert conflict.json()["user"]["uploaded_avatar_url"] != first["user"]["uploaded_avatar_url"]
+        async def coordinated_put(*args, **kwargs):
+            stored = await original_put(*args, **kwargs)
+            if kwargs.get("key") == f"{loser_sha}.webp":
+                loser_stored.set()
+                await winner_committed.wait()
+            return stored
+
+        service.put_object = coordinated_put  # type: ignore[method-assign]
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as async_client:
+                login = await async_client.post(
+                    "/v1/auth/internal/login",
+                    json={"username": "alice", "password": "password123"},
+                )
+                assert login.status_code == 200, login.text
+                me = await async_client.get("/v1/me")
+                user_id = me.json()["id"]
+
+                async def run_loser() -> httpx.Response:
+                    return await async_client.post(
+                        "/v1/me/avatar",
+                        files={"file": ("loser.png", loser_image, "image/png")},
+                    )
+
+                async def run_winner() -> httpx.Response:
+                    await loser_stored.wait()
+                    try:
+                        return await async_client.post(
+                            "/v1/me/avatar",
+                            files={"file": ("winner.png", winner_image, "image/png")},
+                        )
+                    finally:
+                        winner_committed.set()
+
+                loser_resp, winner_resp = await asyncio.gather(run_loser(), run_winner())
+                return loser_resp, winner_resp, user_id
+        finally:
+            service.put_object = original_put  # type: ignore[method-assign]
+
+    loser_resp, winner_resp, user_id = asyncio.run(run_concurrent())
+    assert winner_resp.status_code == 201, winner_resp.text
+    assert loser_resp.status_code == 409, loser_resp.text
+    assert loser_resp.json()["code"] == "avatar_upload_conflict"
+
+    winner_url = winner_resp.json()["avatar"]["url"]
+    stored_user = store.get_user_by_id(user_id)
+    assert stored_user is not None
+    assert stored_user["uploaded_avatar_url"] == winner_url
+    assert stored_user["uploaded_avatar_sha256"] == winner_sha
+
+    async def assert_winner_kept_and_loser_removed() -> None:
+        driver = app.state.storage_manager.service.driver_for_purpose(StoragePurpose.AVATAR)
+        active = await app.state.storage_manager.repository.list_objects(
+            status=StorageObjectStatus.ACTIVE, purpose=StoragePurpose.AVATAR
+        )
+        deleted = await app.state.storage_manager.repository.list_objects(
+            status=StorageObjectStatus.DELETED, purpose=StoragePurpose.AVATAR
+        )
+        winner_stat = await driver.stat_object(f"{winner_sha}.webp", namespace=f"users/{user_id}")
+        loser_stat = await driver.stat_object(f"{loser_sha}.webp", namespace=f"users/{user_id}")
+        assert [record.sha256 for record in active] == [winner_sha]
+        assert [record.sha256 for record in deleted] == [loser_sha]
+        assert winner_stat is not None
+        assert loser_stat is None
+
+    asyncio.run(assert_winner_kept_and_loser_removed())
+    public = TestClient(app).get(winner_url)
+    assert public.status_code == 200
+    assert public.headers["content-type"] == "image/webp"
 
 
 def test_profile_patch_rejects_avatar_url(tmp_path: Path) -> None:
@@ -555,4 +774,5 @@ def test_merge_transfers_uploaded_avatar_when_target_has_none(tmp_path: Path) ->
     assert merged["uploaded_avatar_url"] == uploaded["user"]["uploaded_avatar_url"]
     assert merged["uploaded_avatar_object_id"]
     assert merged["uploaded_avatar_object_id"] != ""
-    assert store.get_user_by_id(alice_id) is None
+    alice_after_merge = store.get_user_by_id(alice_id)
+    assert alice_after_merge is None
