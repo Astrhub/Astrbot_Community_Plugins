@@ -1,16 +1,26 @@
 <script setup lang="ts">
+import { watch } from "vue";
 import { NButton, NModal } from "naive-ui";
 import AnnouncementBody from "./AnnouncementBody.vue";
 import type { Announcement } from "../types";
 
-defineProps<{
+const props = defineProps<{
   show: boolean;
   announcements: Announcement[];
 }>();
 
 const emit = defineEmits<{
   "update:show": [value: boolean];
+  presented: [];
 }>();
+
+watch(
+  () => [props.show, props.announcements] as const,
+  ([visible, items]) => {
+    if (visible && items.length > 0) emit("presented");
+  },
+  { immediate: true, flush: "post" },
+);
 
 function formatTime(value: string): string {
   const date = new Date(value);

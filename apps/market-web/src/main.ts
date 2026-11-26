@@ -23,6 +23,18 @@ const naive = create({
 });
 const app = createApp(App);
 const head = createHead();
+let isInitialMount = false;
+
+app.config.errorHandler = (error, _instance, info) => {
+  console.error(`Unhandled Vue error (${info}):`, error);
+  if (isChunkLoadError(error)) {
+    handleChunkLoadFailure(error);
+    return;
+  }
+  if (isInitialMount) {
+    window.__showBootError?.();
+  }
+};
 
 app.use(head);
 app.use(naive);
@@ -40,11 +52,14 @@ async function bootstrap(): Promise<void> {
     }
   }
 
+  isInitialMount = true;
   try {
     app.mount("#app");
   } catch (error) {
     console.error("Application mount failed", error);
     window.__showBootError?.();
+  } finally {
+    isInitialMount = false;
   }
 }
 

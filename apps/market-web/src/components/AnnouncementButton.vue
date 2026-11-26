@@ -34,6 +34,9 @@ try {
 function openAnnouncements(): void {
   modalLoaded.value = true;
   show.value = true;
+}
+
+function markAnnouncementsSeen(): void {
   seenRevision = revision.value;
   try {
     localStorage.setItem(storageKey, seenRevision);
@@ -70,7 +73,12 @@ onMounted(() => {
   >
     <n-icon><megaphone-outline /></n-icon>
   </button>
-  <AnnouncementModal v-if="modalLoaded" v-model:show="show" :announcements="announcements" />
+  <AnnouncementModal
+    v-if="modalLoaded"
+    v-model:show="show"
+    :announcements="announcements"
+    @presented="markAnnouncementsSeen"
+  />
 </template>
 
 <style scoped>

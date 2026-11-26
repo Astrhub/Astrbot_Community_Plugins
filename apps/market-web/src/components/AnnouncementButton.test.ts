@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { nextTick } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createTestingPinia } from "@pinia/testing";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -46,10 +47,13 @@ describe("AnnouncementButton", () => {
     const first = setup();
     expect(first.wrapper.find("button").exists()).toBe(false);
     first.store.announcements = [announcement];
+    await nextTick();
+    expect(localStorage.getItem("astrhub_announcements_seen_v1")).toBeNull();
     await flushPromises();
     await vi.dynamicImportSettled();
     await flushPromises();
     expect(first.wrapper.get('[role="dialog"]').text()).toContain(announcement.body);
+    expect(localStorage.getItem("astrhub_announcements_seen_v1")).not.toBeNull();
     await first.wrapper.get('[role="dialog"] button').trigger("click");
     expect(first.wrapper.find('[role="dialog"]').exists()).toBe(false);
     first.wrapper.unmount();

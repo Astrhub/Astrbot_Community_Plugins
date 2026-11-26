@@ -178,9 +178,12 @@ def build_site_seo_context(
         str(config.get("SITE_DESCRIPTION") or settings.site_description or "").strip()
         or DEFAULT_SITE_DESCRIPTION
     )
-    contact_email = str(
-        config.get("SITE_CONTACT_EMAIL") or settings.site_contact_email or ""
-    ).strip()
+    raw_contact_email = (
+        config["SITE_CONTACT_EMAIL"]
+        if "SITE_CONTACT_EMAIL" in config
+        else settings.site_contact_email
+    )
+    contact_email = str(raw_contact_email or "").strip()
     return SiteSeoContext(
         origin=origin,
         brand_name=brand_name,
