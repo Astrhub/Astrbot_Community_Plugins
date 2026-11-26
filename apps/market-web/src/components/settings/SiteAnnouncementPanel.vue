@@ -27,8 +27,16 @@
         </n-form-item>
       </div>
 
+      <n-form-item label="图片描述（替代文本）">
+        <n-input
+          v-model:value="imageAlt"
+          :maxlength="100"
+          show-count
+          placeholder="例如：11 月维护时间安排截图"
+        />
+      </n-form-item>
       <div class="image-tools">
-        <n-button :loading="uploading" @click="imageFileInput?.click()">
+        <n-button :loading="uploading" @click="openImagePicker">
           <template #icon
             ><n-icon><ImageOutline /></n-icon
           ></template>
@@ -138,6 +146,11 @@ import { CreateOutline, ImageOutline, LinkOutline, TrashOutline } from "@vicons/
 import AnnouncementBody from "@/components/AnnouncementBody.vue";
 import { usePluginStore } from "@/stores/plugins";
 import type { Announcement } from "@/types";
+import {
+  hasOnlyDescriptiveImages,
+  isDescriptiveImageAlt,
+  normalizeImageAlt,
+} from "@/utils/announcement";
 
 const store = usePluginStore();
 const { announcements } = storeToRefs(store);
@@ -146,7 +159,9 @@ const dialog = useDialog();
 
 const form = reactive({ title: "", body: "" });
 const editingId = shallowRef<Announcement["id"] | null>(null);
+const editingUpdatedAt = shallowRef<string>();
 const imageUrl = shallowRef("");
+const imageAlt = shallowRef("");
 const loading = shallowRef(false);
 const saving = shallowRef(false);
 const uploading = shallowRef(false);
@@ -164,14 +179,17 @@ function formatTime(value: string): string {
 
 function resetForm(): void {
   editingId.value = null;
+  editingUpdatedAt.value = undefined;
   form.title = "";
   form.body = "";
   imageUrl.value = "";
+  imageAlt.value = "";
   showPreview.value = false;
 }
 
 function startEdit(announcement: Announcement): void {
   editingId.value = announcement.id;
+  editingUpdatedAt.value = announcement.updated_at || announcement.created_at;
   form.title = announcement.title;
   form.body = announcement.body || "";
   showPreview.value = false;
@@ -188,6 +206,10 @@ async function saveAnnouncement(): Promise<void> {
     message.warning("请填写公告标题和内容");
     return;
   }
+  if (!hasOnlyDescriptiveImages(body)) {
+    message.warning("请为每张图片填写有描述性的替代文本");
+    return;
+  }
 
   saving.value = true;
   try {
@@ -195,7 +217,11 @@ async function saveAnnouncement(): Promise<void> {
       await store.publishAnnouncement({ title, body });
       message.success("公告已发布");
     } else {
-      await store.updateAnnouncement(editingId.value, { title, body });
+      await store.updateAnnouncement(editingId.value, {
+        title,
+        body,
+        expected_updated_at: editingUpdatedAt.value,
+      });
       message.success("公告已更新");
     }
     resetForm();
@@ -206,13 +232,29 @@ async function saveAnnouncement(): Promise<void> {
   }
 }
 
-function appendImage(url: string): void {
-  const markdown = `![公告图片](${url})`;
+function validateImageAlt(value: string): boolean {
+  if (isDescriptiveImageAlt(value)) return true;
+  message.warning("请先填写有描述性的图片替代文本");
+  return false;
+}
+
+function openImagePicker(): void {
+  if (validateImageAlt(imageAlt.value)) imageFileInput.value?.click();
+}
+
+function appendImage(url: string, altValue: string): boolean {
+  const alt = normalizeImageAlt(altValue);
+  if (!validateImageAlt(alt)) return false;
+  const markdown = `![${alt}](${url})`;
   form.body = form.body.trim() ? `${form.body.trimEnd()}\n\n${markdown}` : markdown;
   showPreview.value = true;
+  if (normalizeImageAlt(imageAlt.value) === alt) imageAlt.value = "";
+  return true;
 }
 
 function insertExternalImage(): void {
+  const alt = imageAlt.value;
+  if (!validateImageAlt(alt)) return;
   try {
     const parsed = new URL(imageUrl.value.trim());
     if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
@@ -220,8 +262,7 @@ function insertExternalImage(): void {
       return;
     }
     const safeUrl = parsed.href.replaceAll("(", "%28").replaceAll(")", "%29");
-    appendImage(safeUrl);
-    imageUrl.value = "";
+    if (appendImage(safeUrl, alt)) imageUrl.value = "";
   } catch {
     message.warning("请输入有效的 HTTPS 图片链接");
   }
@@ -231,6 +272,11 @@ async function uploadSelectedImage(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) return;
+  const alt = imageAlt.value;
+  if (!validateImageAlt(alt)) {
+    input.value = "";
+    return;
+  }
   if (file.size > 5 * 1024 * 1024) {
     message.warning("图片不能超过 5 MB");
     input.value = "";
@@ -240,7 +286,7 @@ async function uploadSelectedImage(event: Event): Promise<void> {
   uploading.value = true;
   try {
     const uploaded = await store.uploadAnnouncementImage(file);
-    appendImage(uploaded.url);
+    appendImage(uploaded.url, alt);
     message.success("图片已上传并插入");
   } catch (error) {
     message.error(error instanceof Error ? error.message : "图片上传失败");

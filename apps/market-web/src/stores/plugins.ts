@@ -346,6 +346,7 @@ export const usePluginStore = defineStore("plugins", () => {
   let mediaQuery: MediaQueryList | null = null;
   let pluginsLoaded = false;
   let announcementsLoaded = false;
+  let announcementsMutationVersion = 0;
   let currentUserLoaded = false;
   let loadPluginsPromise: Promise<Plugin[]> | null = null;
   let loadAnnouncementsPromise: Promise<Announcement[]> | null = null;
@@ -613,11 +614,14 @@ export const usePluginStore = defineStore("plugins", () => {
     const { force = false } = options;
     if (loadAnnouncementsPromise) return loadAnnouncementsPromise;
     if (announcementsLoaded && !force) return announcements.value;
+    const mutationVersion = announcementsMutationVersion;
     loadAnnouncementsPromise = (async () => {
       const response = await fetch(`${apiBaseUrl}/v1/announcements`, { cache: "no-store" });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "加载公告失败");
-      announcements.value = Array.isArray(data.items) ? data.items : [];
+      if (mutationVersion === announcementsMutationVersion) {
+        announcements.value = Array.isArray(data.items) ? data.items : [];
+      }
       announcementsLoaded = true;
       return announcements.value;
     })();
@@ -1283,6 +1287,7 @@ export const usePluginStore = defineStore("plugins", () => {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(apiErrorMessage(data, "发布公告失败"));
+    announcementsMutationVersion += 1;
     announcements.value = [data, ...announcements.value];
     announcementsLoaded = true;
     return data;
@@ -1290,7 +1295,7 @@ export const usePluginStore = defineStore("plugins", () => {
 
   async function updateAnnouncement(
     id: Announcement["id"],
-    payload: Partial<Pick<Announcement, "title" | "body">>,
+    payload: Partial<Pick<Announcement, "title" | "body">> & { expected_updated_at?: string },
   ): Promise<Announcement> {
     const response = await fetch(`${apiBaseUrl}/v1/core/announcements/${id}`, {
       method: "PATCH",
@@ -1300,6 +1305,7 @@ export const usePluginStore = defineStore("plugins", () => {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(apiErrorMessage(data, "更新公告失败"));
+    announcementsMutationVersion += 1;
     const index = announcements.value.findIndex((item) => String(item.id) === String(id));
     if (index >= 0) announcements.value.splice(index, 1, data);
     else announcements.value.unshift(data);
@@ -1313,7 +1319,9 @@ export const usePluginStore = defineStore("plugins", () => {
       credentials: "include",
     });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(apiErrorMessage(data, "删除公告失败"));
+    if (!response.ok && response.status !== 404)
+      throw new Error(apiErrorMessage(data, "删除公告失败"));
+    announcementsMutationVersion += 1;
     announcements.value = announcements.value.filter((item) => String(item.id) !== String(id));
     announcementsLoaded = true;
   }

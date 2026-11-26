@@ -61,8 +61,13 @@ def detect_safe_image_mime(data: bytes) -> str | None:
         return "image/gif"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
-    if data[4:8] == b"ftyp" and data[8:12] in {b"avif", b"avis", b"mif1"}:
-        return "image/avif"
+    if data[4:8] == b"ftyp":
+        major_brand = data[8:12]
+        compatible_brands = {data[offset : offset + 4] for offset in range(16, 64, 4)}
+        if major_brand in {b"avif", b"avis"}:
+            return "image/avif"
+        if major_brand == b"mif1" and compatible_brands & {b"avif", b"avis"}:
+            return "image/avif"
     return None
 
 

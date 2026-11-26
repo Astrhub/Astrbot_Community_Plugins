@@ -6,17 +6,23 @@
 import { computed } from "vue";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import { isDescriptiveImageAlt } from "@/utils/announcement";
 
 const props = defineProps<{ body: string }>();
 
 const renderedBody = computed(() => {
   const html = marked.parse(props.body, { async: false, gfm: true, breaks: true });
-  return DOMPurify.sanitize(html, {
+  const sanitized = DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
     FORBID_TAGS: ["style", "form", "input", "button", "iframe", "object", "embed", "svg", "math"],
     FORBID_ATTR: ["style"],
     ALLOWED_URI_REGEXP: /^(?:(?:https):|\/(?!\/)|#)/i,
   });
+  const parsed = new DOMParser().parseFromString(sanitized, "text/html");
+  for (const image of parsed.querySelectorAll("img")) {
+    if (!isDescriptiveImageAlt(image.getAttribute("alt") || "")) image.remove();
+  }
+  return parsed.body.innerHTML;
 });
 </script>
 

@@ -722,11 +722,38 @@ paths:
       summary: 编辑公告标题或正文
       security:
         - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                  maxLength: 80
+                body:
+                  type: string
+                  minLength: 1
+                  maxLength: 10000
+                expected_updated_at:
+                  type: string
+                  format: date-time
+                  description: 编辑时读取的更新时间，用于拒绝过期表单
+      parameters:
+        - in: path
+          name: announcement_id
+          required: true
+          schema:
+            type: string
       responses:
         "200":
           description: 公告已更新
         "403":
           description: 需要 core_admin
+        "409":
+          description: 公告已被其他管理员修改
         "404":
           description: 公告不存在
     delete:
@@ -734,6 +761,12 @@ paths:
       summary: 删除公告
       security:
         - cookieAuth: []
+      parameters:
+        - in: path
+          name: announcement_id
+          required: true
+          schema:
+            type: string
       responses:
         "200":
           description: 公告已删除
@@ -763,6 +796,8 @@ paths:
           description: 图片已上传，返回同源公开 URL
         "403":
           description: 需要 core_admin
+        "411":
+          description: 缺少 Content-Length
         "413":
           description: 图片超过 5 MB
         "415":

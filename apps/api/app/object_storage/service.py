@@ -8,6 +8,7 @@ import secrets
 import tempfile
 from collections.abc import AsyncIterable, Iterable, Mapping
 from pathlib import Path
+from dataclasses import replace
 from typing import Any
 
 from ..config import ArtifactSettings
@@ -557,6 +558,32 @@ class ObjectStorageService:
     ) -> list[ObjectListingEntry]:
         driver, _ = self._resolve_target(purpose=purpose, profile_id=profile_id)
         return await driver.list_objects(namespace=namespace, prefix=prefix)
+
+    async def discard_failed_object(
+        self,
+        *,
+        purpose: StoragePurpose,
+        namespace: str,
+        key: str,
+    ) -> None:
+        """Remove a failed announcement upload without leaving an active record."""
+        driver, resolved_purpose = self._resolve_target(purpose=purpose, profile_id="")
+        if resolved_purpose is None:
+            raise ObjectStorageError("storage_profile_missing", "Storage profile is not configured")
+        normalized_ns = validate_namespace(namespace)
+        record = self.find_object_record(
+            profile_id=driver.profile_id,
+            key=key,
+            namespace=normalized_ns,
+        )
+        try:
+            await driver.delete_object(key, namespace=normalized_ns)
+        finally:
+            if record is not None:
+                if record.status == StorageObjectStatus.ACTIVE:
+                    record = replace(record, status=StorageObjectStatus.PENDING, public_url="")
+                    self._objects[record.id] = record
+                await self._discard_pending_async(record.id)
 
     def get_object_record(self, object_id: str) -> StorageObjectRecord | None:
         return self._objects.get(object_id)

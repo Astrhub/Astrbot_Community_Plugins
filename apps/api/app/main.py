@@ -37,6 +37,10 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from redis.exceptions import RedisError
 
+from .announcement_upload import (
+    MAX_ANNOUNCEMENT_IMAGE_BYTES,
+    AnnouncementImageUploadMiddleware,
+)
 from .artifacts import build_artifact_runtime
 from .artifacts.archive import PrecheckError, parse_plugin_metadata_bytes
 from .artifacts.routes import build_artifact_router
@@ -173,7 +177,7 @@ from .schemas import (
     TestEmailPayload,
     UserProfileUpdate,
 )
-from .store import GithubIdentityConflict
+from .store import AnnouncementConflict, GithubIdentityConflict
 from .store import InMemoryMarketStore
 from .store import LocalFileMarketStore
 from .store import PgRedisMarketStore
@@ -419,6 +423,12 @@ def create_app(
     app.state.storage_manager = StorageManager(
         store=app.state.store,
         settings=app.state.settings,
+    )
+    app.add_middleware(
+        AnnouncementImageUploadMiddleware,
+        user_loader=require_user,
+        role_checker=can_publish_announcement,
+        settings_loader=lambda: app.state.settings,
     )
     app.state.artifact_runtime = build_artifact_runtime(
         app.state.settings,
@@ -2522,13 +2532,17 @@ def register_routes(app: FastAPI) -> None:
             raise error(400, "至少提供标题或正文")
         if payload.title == "" or payload.body == "":
             raise error(400, "公告标题和正文不能为空")
-        updated = await call_store(
-            request,
-            "update_announcement",
-            announcement_id,
-            title=payload.title,
-            body=payload.body,
-        )
+        try:
+            updated = await call_store(
+                request,
+                "update_announcement",
+                announcement_id,
+                title=payload.title,
+                body=payload.body,
+                expected_updated_at=payload.expected_updated_at,
+            )
+        except AnnouncementConflict as exc:
+            raise error(409, "公告已被其他管理员修改，请刷新后重试") from exc
         if updated is None:
             raise error(404, "Announcement not found")
         return updated
@@ -2564,12 +2578,11 @@ def register_routes(app: FastAPI) -> None:
         user = await require_user(request)
         if not can_publish_announcement(user):
             raise error(403, "Forbidden")
-        max_bytes = 5 * 1024 * 1024
         try:
-            content = await image.read(max_bytes + 1)
+            content = await image.read(MAX_ANNOUNCEMENT_IMAGE_BYTES + 1)
         finally:
             await image.close()
-        if len(content) > max_bytes:
+        if len(content) > MAX_ANNOUNCEMENT_IMAGE_BYTES:
             raise error(413, "图片不能超过 5 MB")
         content_type = detect_safe_image_mime(content)
         if content_type is None:
@@ -2583,9 +2596,22 @@ def register_routes(app: FastAPI) -> None:
             "image/avif": "avif",
         }[content_type]
         namespace = "announcements"
-        key = f"{uuid.uuid4().hex}.{extension}"
+        digest = hashlib.sha256(content).hexdigest()
+        key = f"{digest}.{extension}"
         manager = request.app.state.storage_manager
         await manager.initialize()
+        existing = manager.service.find_active_record_by_purpose_and_key(
+            purpose=StoragePurpose.AVATAR,
+            namespace=namespace,
+            key=key,
+        )
+        if existing is not None:
+            return {
+                "url": f"/v1/storage/public/{existing.id}",
+                "content_type": existing.content_type,
+                "size_bytes": existing.size_bytes,
+                "sha256": existing.sha256,
+            }
         try:
             stored = await manager.service.put_object(
                 purpose=StoragePurpose.AVATAR,
@@ -2593,11 +2619,20 @@ def register_routes(app: FastAPI) -> None:
                 key=key,
                 data=content,
                 content_type=content_type,
+                expected_sha256=digest,
                 owner_type="announcement_image",
                 owner_id=str(user["id"]),
                 if_absent=True,
             )
         except ObjectStorageError as exc:
+            try:
+                await manager.service.discard_failed_object(
+                    purpose=StoragePurpose.AVATAR,
+                    namespace=namespace,
+                    key=key,
+                )
+            except Exception:
+                LOGGER.exception("Failed to clean up announcement image %s/%s", namespace, key)
             raise HTTPException(
                 status_code=503,
                 detail={"code": exc.code, "error": str(exc)},

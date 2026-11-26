@@ -26,6 +26,10 @@ from .schema_migrations import apply_schema_migrations
 from .plugin_identity import PluginIdentityConflict
 
 
+class AnnouncementConflict(ValueError):
+    pass
+
+
 class GithubIdentityConflict(ValueError):
     pass
 
@@ -1742,9 +1746,15 @@ class InMemoryMarketStore:
         *,
         title: str | None = None,
         body: str | None = None,
+        expected_updated_at: str | None = None,
     ) -> dict[str, Any] | None:
         for announcement in self.state["announcements"]:
             if str(announcement["id"]) == str(announcement_id):
+                current_updated_at = announcement.get("updated_at") or announcement.get(
+                    "created_at"
+                )
+                if expected_updated_at is not None and current_updated_at != expected_updated_at:
+                    raise AnnouncementConflict("Announcement was updated by another administrator")
                 if title is not None:
                     announcement["title"] = title
                 if body is not None:
@@ -2738,9 +2748,15 @@ class LocalFileMarketStore(InMemoryMarketStore):
         *,
         title: str | None = None,
         body: str | None = None,
+        expected_updated_at: str | None = None,
     ) -> dict[str, Any] | None:
         with self._persist():
-            return super().update_announcement(announcement_id, title=title, body=body)
+            return super().update_announcement(
+                announcement_id,
+                title=title,
+                body=body,
+                expected_updated_at=expected_updated_at,
+            )
 
     def delete_announcement(self, announcement_id: str | int) -> bool:
         with self._persist():
@@ -5322,6 +5338,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
         *,
         title: str | None = None,
         body: str | None = None,
+        expected_updated_at: str | None = None,
     ) -> dict[str, Any] | None:
         row = await self._pool().fetchrow(
             """
@@ -5330,12 +5347,21 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 body = COALESCE($3, body),
                 updated_at = now()
             WHERE id = $1
+              AND ($4::text IS NULL OR updated_at = $4::timestamptz)
             RETURNING *
             """,
             announcement_id,
             title,
             body,
+            expected_updated_at,
         )
+        if row is None and expected_updated_at is not None:
+            exists = await self._pool().fetchval(
+                "SELECT EXISTS(SELECT 1 FROM market_announcements WHERE id = $1)",
+                announcement_id,
+            )
+            if exists:
+                raise AnnouncementConflict("Announcement was updated by another administrator")
         return self._announcement_from_record(row) if row is not None else None
 
     async def delete_announcement(self, announcement_id: str) -> bool:

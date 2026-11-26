@@ -67,6 +67,7 @@ describe("plugin store announcement actions", () => {
 
     await store.deleteAnnouncement(created.id);
     expect(store.announcements).toEqual([]);
+    expect(fetchMock.mock.calls[2]?.[0]).toContain("/v1/core/announcements/announcement-1");
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "DELETE" });
 
     const image = new File(["png"], "cover.png", { type: "image/png" });
@@ -76,5 +77,66 @@ describe("plugin store announcement actions", () => {
     expect(uploadInit.method).toBe("POST");
     expect(uploadInit.body).toBeInstanceOf(FormData);
     expect((uploadInit.body as FormData).get("image")).toBe(image);
+  });
+
+  it("does not let stale loads overwrite newer edits or deletes", async () => {
+    const created: Announcement = {
+      id: "announcement-1",
+      title: "旧标题",
+      body: "正文",
+      created_at: "2026-11-26T10:00:00Z",
+      updated_at: "2026-11-26T10:00:00Z",
+    };
+    const updated = { ...created, title: "新标题", updated_at: "2026-11-26T11:00:00Z" };
+    let resolveFirstLoad: ((response: Response) => void) | undefined;
+    let resolveSecondLoad: ((response: Response) => void) | undefined;
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirstLoad = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(jsonResponse(updated))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSecondLoad = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ deleted: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    const store = usePluginStore();
+    store.announcements = [created];
+
+    const firstLoad = store.loadAnnouncements({ force: true });
+    await store.updateAnnouncement(created.id, { title: "新标题" });
+    resolveFirstLoad?.(jsonResponse({ items: [created] }));
+    await firstLoad;
+    expect(store.announcements[0]?.title).toBe("新标题");
+
+    const secondLoad = store.loadAnnouncements({ force: true });
+    await store.deleteAnnouncement(created.id);
+    resolveSecondLoad?.(jsonResponse({ items: [updated] }));
+    await secondLoad;
+    expect(store.announcements).toEqual([]);
+  });
+
+  it("treats an already deleted announcement as a successful retry", async () => {
+    const created: Announcement = {
+      id: "announcement-1",
+      title: "标题",
+      body: "正文",
+      created_at: "2026-11-26T10:00:00Z",
+      updated_at: "2026-11-26T10:00:00Z",
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "not found" }, 404)));
+    const store = usePluginStore();
+    store.announcements = [created];
+
+    await store.deleteAnnouncement(created.id);
+
+    expect(store.announcements).toEqual([]);
   });
 });

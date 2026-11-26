@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .config import DEFAULT_EMAIL_FROM_NAME, normalize_smtp_auth_method, normalize_smtp_encryption
@@ -269,13 +270,25 @@ class AnnouncementCreate(BaseModel):
 
 
 class AnnouncementUpdate(BaseModel):
-    title: str | None = Field(default=None, max_length=80)
-    body: str | None = Field(default=None, max_length=10000)
+    title: str | None = Field(default=None, min_length=1, max_length=80)
+    body: str | None = Field(default=None, min_length=1, max_length=10000)
+    expected_updated_at: str | None = Field(default=None, max_length=64)
 
     @field_validator("title", "body")
     @classmethod
     def strip_fields(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
+
+    @field_validator("expected_updated_at")
+    @classmethod
+    def validate_expected_updated_at(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Invalid expected_updated_at") from exc
+        return value
 
 
 class ApiKeyCreate(BaseModel):

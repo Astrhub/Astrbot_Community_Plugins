@@ -69,7 +69,7 @@ describe("SiteAnnouncementPanel", () => {
       body: "公告 **正文**",
     });
 
-    await wrapper.unmount();
+    wrapper.unmount();
     const editView = mountPanel([baseAnnouncement]);
     await button(editView.wrapper, "编辑").trigger("click");
     await editView.wrapper.find('input[placeholder="例如：维护通知"]').setValue("修改后的标题");
@@ -80,6 +80,7 @@ describe("SiteAnnouncementPanel", () => {
     expect(editView.store.updateAnnouncement).toHaveBeenCalledWith("announcement-1", {
       title: "修改后的标题",
       body: "修改后的正文",
+      expected_updated_at: "2026-11-26T10:00:00Z",
     });
   });
 
@@ -108,6 +109,9 @@ describe("SiteAnnouncementPanel", () => {
       size_bytes: 3,
       sha256: "abc",
     });
+    await wrapper
+      .find('input[placeholder="例如：11 月维护时间安排截图"]')
+      .setValue("维护时间安排截图");
     const file = new File(["png"], "cover.png", { type: "image/png" });
     const fileInput = wrapper.find('input[type="file"]');
     Object.defineProperty(fileInput.element, "files", { configurable: true, value: [file] });
@@ -116,15 +120,29 @@ describe("SiteAnnouncementPanel", () => {
 
     expect(store.uploadAnnouncementImage).toHaveBeenCalledWith(file);
     expect((wrapper.find("textarea").element as HTMLTextAreaElement).value).toContain(
-      "![公告图片](/v1/storage/public/uploaded-image)",
+      "![维护时间安排截图](/v1/storage/public/uploaded-image)",
     );
 
+    await wrapper
+      .find('input[placeholder="例如：11 月维护时间安排截图"]')
+      .setValue("插件市场首页封面");
     await wrapper
       .find('input[placeholder="或输入 HTTPS 图片链接"]')
       .setValue("https://img.example.com/cover(1).png");
     await button(wrapper, "插入链接").trigger("click");
     const body = (wrapper.find("textarea").element as HTMLTextAreaElement).value;
-    expect(body).toContain("![公告图片](https://img.example.com/cover%281%29.png)");
+    expect(body).toContain("![插件市场首页封面](https://img.example.com/cover%281%29.png)");
     expect(wrapper.find(".announcement-preview").exists()).toBe(true);
+  });
+
+  it("rejects images without descriptive alt text", async () => {
+    const { wrapper, store } = mountPanel();
+    await wrapper.find('input[placeholder="例如：维护通知"]').setValue("图片公告");
+    await wrapper.find("textarea").setValue("![](/v1/storage/public/image-1)");
+    await button(wrapper, "发布公告").trigger("click");
+    await flushPromises();
+
+    expect(store.publishAnnouncement).not.toHaveBeenCalled();
+    expect(store.uploadAnnouncementImage).not.toHaveBeenCalled();
   });
 });
