@@ -344,10 +344,13 @@ def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(
         json={"username": "alice_local", "email": "alice@example.com", "password": "password123"},
     )
     assert reg.status_code == 201
-    client.patch(
-        "/v1/me/profile",
-        json={"github_name": "Custom Alice", "avatar_url": "https://example.com/custom.png"},
+    renamed = client.patch("/v1/me/profile", json={"github_name": "Custom Alice"})
+    assert renamed.status_code == 200
+    # avatar_url is owned by the OAuth login flow; hand-editing it through the profile API is refused.
+    avatar_rejected = client.patch(
+        "/v1/me/profile", json={"avatar_url": "https://example.com/custom.png"}
     )
+    assert avatar_rejected.status_code == 400
 
     # Check permissions for user tier
     perms = client.get("/v1/permissions").json()
@@ -397,7 +400,9 @@ def test_five_tier_lifecycle_oauth_binding_unbinding_and_api_keys(
     assert me_after_bind["auth_source"] == "email"
     assert me_after_bind["public_username"] == "alice_local"
     assert me_after_bind["github_name"] == "Custom Alice"
-    assert me_after_bind["avatar_url"] == "https://example.com/custom.png"
+    assert me_after_bind["avatar_url"] == "https://avatars.githubusercontent.com/u/42001"
+    assert me_after_bind["effective_avatar_url"] == me_after_bind["avatar_url"]
+    assert me_after_bind["avatar_backend"] == "oauth"
     assert me_after_bind["account_tier"] == "developer"
     assert me_after_bind["is_developer"] is True
     assert me_after_bind["has_oauth_binding"] is True

@@ -1971,27 +1971,7 @@ class StorageManager:
             )
             return err_msg
 
-    async def _ensure_default_avatar_binding(self) -> None:
-        if await self.repository.get_binding(StoragePurpose.AVATAR) is not None:
-            return
-        published = await self.repository.get_binding(StoragePurpose.ARTIFACT_PUBLISHED)
-        if published is None:
-            return
-        profile = await self.repository.get_profile(published.profile_id)
-        if profile is None or profile.status != StorageProfileStatus.ACTIVE:
-            return
-        await self.repository.upsert_binding(
-            StorageBinding(
-                purpose=StoragePurpose.AVATAR,
-                profile_id=published.profile_id,
-                generation=1,
-                updated_by="system",
-                updated_at=utc_now_iso(),
-            )
-        )
-
     async def _ensure_legacy_artifact_profiles(self) -> None:
-        await self._ensure_default_avatar_binding()
         artifact_cfg = self.settings.artifacts
         if not artifact_cfg.enabled:
             return
@@ -2123,8 +2103,6 @@ class StorageManager:
                     p_binding = saved_pb
                 except Exception as exc:
                     LOGGER.warning("Skipping legacy published profile bootstrap: %s", exc)
-
-        await self._ensure_default_avatar_binding()
 
         # Idempotently backfill pre-existing files on legacy profiles into market_storage_objects.
         if q_binding is not None and q_binding.profile_id == LEGACY_QUARANTINE_PROFILE_ID:

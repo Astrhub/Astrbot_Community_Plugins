@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_PLUGIN_LOGO_URL,
+  avatarVariantUrl,
   detectGitProvider,
   getGitProviderLabel,
   isGithubRepoUrl,
@@ -11,6 +12,37 @@ import {
   resolvePluginLogoUrl,
   setDefaultPluginLogo,
 } from "./github";
+
+describe("avatarVariantUrl", () => {
+  it("adds resize parameters to ImgBed /file/ URLs at the requested size", () => {
+    expect(avatarVariantUrl("https://img.example.com/file/abc.webp", 64)).toBe(
+      "https://img.example.com/file/abc.webp?width=64&height=64&fit=cover&fallback=original",
+    );
+    expect(avatarVariantUrl("https://img.example.com/file/abc.webp?width=999&junk=1", 256)).toBe(
+      "https://img.example.com/file/abc.webp?junk=1&width=256&height=256&fit=cover&fallback=original",
+    );
+  });
+
+  it("snaps unsupported sizes to 128 so the CDN only sees blessed variants", () => {
+    expect(avatarVariantUrl("/file/x.webp", 44)).toBe(
+      "/file/x.webp?width=128&height=128&fit=cover&fallback=original",
+    );
+  });
+
+  it("returns same-origin uploaded avatar URLs untouched, keeping the server digest", () => {
+    expect(avatarVariantUrl("/v1/storage/public/stobj_1?v=abcdef123456", 64)).toBe(
+      "/v1/storage/public/stobj_1?v=abcdef123456",
+    );
+  });
+
+  it("leaves OAuth proxy and external avatar URLs untouched", () => {
+    expect(avatarVariantUrl("https://avatars.githubusercontent.com/u/1", 64)).toBe(
+      "https://avatars.githubusercontent.com/u/1",
+    );
+    expect(avatarVariantUrl("/v1/me/avatar", 64)).toBe("/v1/me/avatar");
+    expect(avatarVariantUrl("", 64)).toBe("");
+  });
+});
 
 describe("resolvePluginLogoUrl", () => {
   it("uses an explicit plugin logo when one is provided", () => {

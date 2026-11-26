@@ -20,6 +20,8 @@ export interface UserPreview {
   login?: string;
   avatar?: string;
   avatar_url?: string;
+  effective_avatar_url?: string;
+  avatar_backend?: "uploaded" | "oauth";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -89,6 +91,8 @@ export function writeCachedUserPreview(user: User): UserPreview | null {
     login: optionalText(user.login),
     avatar: optionalText(user.avatar),
     avatar_url: optionalText(user.avatar_url),
+    effective_avatar_url: optionalText(user.effective_avatar_url),
+    avatar_backend: user.avatar_backend,
   };
   if (!Object.values(preview).some(Boolean)) {
     clearCachedUserPreview();

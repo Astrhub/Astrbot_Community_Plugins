@@ -31,6 +31,8 @@ const { currentUser, siteConfig } = storeToRefs(store);
 const {
   createMyApiKey,
   deleteMyApiKey,
+  uploadMyAvatar,
+  deleteMyAvatar,
   loadCurrentUser,
   loadMyApiKeys,
   loadMyPlugins,
@@ -56,6 +58,7 @@ const savingNotifications = shallowRef(false);
 const loadingPlugins = shallowRef(false);
 const loadingAccessKeys = shallowRef(false);
 const creatingAccessKey = shallowRef(false);
+const avatarBusy = shallowRef(false);
 const myPlugins = shallowRef([]);
 const accessKeys = shallowRef([]);
 const newAccessKey = shallowRef("");
@@ -111,6 +114,31 @@ function applyCurrentUser() {
   formData.email_notify_replies = currentUser.value?.email_notify_replies === true;
   formData.email_notify_likes = currentUser.value?.email_notify_likes === true;
   formData.email_notify_unlist = currentUser.value?.email_notify_unlist !== false;
+}
+
+async function handleUploadAvatar(payload: { file: File; onCompleted?: () => void }) {
+  avatarBusy.value = true;
+  try {
+    await uploadMyAvatar(payload.file);
+    payload.onCompleted?.();
+    message.success("头像已更新");
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "上传头像失败");
+  } finally {
+    avatarBusy.value = false;
+  }
+}
+
+async function handleRemoveAvatar() {
+  avatarBusy.value = true;
+  try {
+    await deleteMyAvatar();
+    message.success("已清除上传的头像");
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "清除头像失败");
+  } finally {
+    avatarBusy.value = false;
+  }
 }
 
 async function saveProfile() {
@@ -464,6 +492,9 @@ onMounted(async () => {
                 :password-saving="savingPassword"
                 :email-saving="savingEmail"
                 :oauth-busy-id="oauthBusyId"
+                :avatar-busy="avatarBusy"
+                @upload-avatar="handleUploadAvatar"
+                @remove-avatar="handleRemoveAvatar"
                 @save="saveProfile"
                 @connect-oauth="handleConnectOAuth"
                 @unbind-oauth="handleUnbindOAuth"

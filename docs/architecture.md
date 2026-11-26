@@ -71,6 +71,8 @@ flowchart LR
 | `github_authorization.py` | 多平台 OAuth 仓库管理权限核验、独立主密钥 Fernet 加密凭据读写与发布前仓库身份/绑定复核 |
 | `git_sources/` | 已知 OAuth 第三方 Git 平台适配器（`GitLab.com`、`Gitee`、`AtomGit / GitCode`、`Gitea`）、严格 HTTPS 域名白名单、持久化加密 `CredentialStore`（令牌刷新轮转）与 OAuth / 仓库绑定路由 |
 | `media_proxy.py` | 海外平台（`GitLab.com` / `Gitea`）插件 Logo、README 仓库内图片与海外用户头像受限代理（白名单校验、栅格图片魔数嗅探、Redis/内存短缓存与弱 `ETag`/`304`） |
+| `avatar_routes.py` | 用户头像上传与清除接口（登录、功能开关、每用户每小时 10 次配额、存储写入与 CAS 并发保护、失败清理） |
+| `avatar_upload.py` | 头像字节校验与规范化（5 MiB 上限、PNG/JPEG/WebP 白名单、16,000,000 像素上限、EXIF 方向矫正与元数据清除、1:1 居中裁剪、WebP 重编码） |
 | `plugin_identity.py` | 插件命名空间冲突异常与规范详情路径（`/plugin/{owner}/{name}`）生成 |
 | `openapi_filter.py` / `llms_txt.py` | 按当前登录角色过滤 `/openapi.json`（含 `components` 闭包）与生成 `/llms.txt` |
 | `env_file.py` | `.env` 文件解析与写回工具（供一次性 `/v1/setup` 使用） |
@@ -189,8 +191,9 @@ create_app(settings, store)
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` / `PATCH` | `/v1/me` · `/v1/me/profile` | 获取当前用户信息（含 `account_tier`、OAuth 绑定列表）/ 更新资料与通知偏好 |
+| `GET` / `PATCH` | `/v1/me` · `/v1/me/profile` | 获取当前用户信息（含 `account_tier`、OAuth 绑定列表）/ 更新资料与通知偏好（`avatar_url` 不可直接修改，头像走 `POST /v1/me/avatar`） |
 | `GET` | `/v1/me/avatar` | 代理当前登录用户的海外 OAuth 头像（`private, no-store`） |
+| `POST` / `DELETE` | `/v1/me/avatar` | 上传或清除用户上传的头像（服务端独立校验并重编码为 `512×512` 以内的 WebP，写入 `avatar` 用途 Profile；`private, no-store`） |
 | `POST` | `/v1/me/password` | 修改本地密码或 OAuth 用户首次设置本地密码 |
 | `POST` | `/v1/me/email/change/request` · `verify` | 修改或绑定登录邮箱（随 `EMAIL_VERIFICATION_REQUIRED` 开关决定是否需验证码） |
 | `GET` / `DELETE` | `/v1/me/oauth-identities[/{id}]` | 查看或解绑已绑定的 OAuth 身份（保留防锁死保护） |

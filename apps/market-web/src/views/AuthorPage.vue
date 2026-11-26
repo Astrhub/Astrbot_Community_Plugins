@@ -102,7 +102,7 @@ import AppFooter from "@/components/AppFooter.vue";
 import GitProviderIcon from "@/components/GitProviderIcon.vue";
 import PluginCard from "@/components/PluginCard.vue";
 import { useSeo, useSeoContext } from "@/composables/useSeo";
-import { getGitProviderLabel, resolveAuthorAvatarUrl } from "@/utils/github";
+import { avatarVariantUrl, getGitProviderLabel, resolveAuthorAvatarUrl } from "@/utils/github";
 import { usePluginStore } from "@/stores/plugins";
 import type { AuthorOAuthProfile, Plugin } from "@/types";
 
@@ -125,10 +125,13 @@ const authorDisplayName = computed(
   () => displayName.value || canonicalUsername.value || username.value,
 );
 const authorAvatarUrl = computed(() =>
-  resolveAuthorAvatarUrl(
-    avatarUrl.value,
-    canonicalUsername.value || username.value,
-    pluginStore.apiBaseUrl,
+  avatarVariantUrl(
+    resolveAuthorAvatarUrl(
+      avatarUrl.value,
+      canonicalUsername.value || username.value,
+      pluginStore.apiBaseUrl,
+    ),
+    128,
   ),
 );
 const externalProfiles = computed<AuthorOAuthProfile[]>(() => {

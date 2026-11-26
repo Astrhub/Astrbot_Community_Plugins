@@ -14,6 +14,7 @@
 - **GitHub 元数据同步**：后台任务周期性同步仓库星标、版本与 README，支持多 API Token 轮转应对速率限制；插件所有者与管理员也可手动触发刷新。
 - **社区互动与通知中心**：服务端持久化嵌套评论（Markdown + 语法高亮）、插件与评论点赞；回复、点赞、审核与下架事件自动触发站内通知，支持按维度配置站内与邮件通知偏好。
 - **身份、权限与 API Key**：内置核心管理员账号登录、邮箱注册与多平台 OAuth 登录（GitHub / GitLab.com / Gitee / AtomGit / Gitea）；五级身份层级（`core_admin` / `admin` / `developer` / `user` / `guest`）与受信任 GitHub 组织自动提权；支持全局静态 Key、管理员颁发 Key 与个人 Key（`sk-ah-` 前缀，明文仅展示一次），按 `scopes` 通过 `Bearer` 鉴权。
+- **用户头像上传**：登录用户可在个人设置页选择本地图片，经 1:1 裁剪弹窗调整后上传；服务端独立校验（真实 PNG/JPEG/WebP、5 MiB、1600 万像素上限）、按 EXIF 方向矫正并清除元数据，统一重编码为 `512×512` 以内的 WebP 写入 `avatar` 用途 Profile，同时刷新页眉、个人设置与作者页头像；清除后回退到 OAuth 头像或默认占位图。
 - **运行时配置与首次启动向导**：首次启动自动进入 `/setup` 分步初始化并热切换存储，无需重启进程；核心管理员可在 `/admin/settings` 热更新站点信息、GitHub OAuth、市场开关、邮件服务（SMTP / Cloudflare Email）与同步策略。
 - **API 文档与机器可读契约**：`/docs/rest` 提供内置 REST API 文档与在线试用；`/openapi.json` 和 `/llms.txt` 按当前登录角色动态过滤端点。
 
@@ -280,6 +281,7 @@ docker compose build
 | `EMAIL_REGISTRATION_ENABLED` | `false` | 是否开放普通用户邮箱注册 |
 | `EMAIL_VERIFICATION_REQUIRED` | `true` | 邮箱注册与换绑是否需要邮件验证码校验 |
 | `EMAIL_DAILY_LIMIT` / `EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER` | `0` / `5` | 全站每日邮件总额度（0 不限）与单邮箱每日验证码上限 |
+| `AVATAR_UPLOAD_ENABLED` | `true` | 是否开放用户头像上传；关闭后 `POST /v1/me/avatar` 返回 403，已上传头像继续展示。上传要求 `avatar` 用途已显式绑定存储 Profile（本地 / S3 / WebDAV / ImgBed），未绑定时返回 503 |
 | `SESSION_MAX_AGE_SECONDS` | `604800` | 登录会话有效期（默认 7 天） |
 | `COOKIE_SECURE` / `COOKIE_SAME_SITE` | `false` / `Lax` | Cookie 安全属性 |
 | `ENABLE_DEV_AUTH` | `false` | 开发调试登录头开关（`apps/api/.env.example` 为便于本地开发设为 `true`，生产必须 `false`） |
