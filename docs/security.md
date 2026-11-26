@@ -108,7 +108,7 @@ API Key 面向自动化工具与客户端接入，通过 `Authorization: Bearer 
 ### 存储边界
 
 - **PostgreSQL**：完整模式下持久化业务数据、OAuth 身份、由 `OAUTH_CREDENTIAL_KEY` 加密的 `market_oauth_credentials`（含刷新令牌与轮转状态）、仓库归属绑定 `market_git_repository_bindings`、artifact 状态机、结构化审查发现、人工决策、租约任务与通知 outbox。
-- **Redis**：存储登录会话 Token（带 TTL），以及用于 GitHub 仓库权限校验的加密短期 OAuth 授权凭据（密钥由 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生并用 Fernet 加密，TTL 不超过 8 小时，注销或会话失效时删除）。不保存明文 OAuth 令牌或长期业务数据。
+- **Redis**：存储登录会话 Token（带 TTL），以及用于 GitHub 仓库权限校验的加密短期 OAuth 授权缓存（密钥由 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生并用 Fernet 加密，TTL 不超过 8 小时，注销或会话失效时删除；缓存缺失时回退读取 PostgreSQL 中已绑定身份的 `market_oauth_credentials`，仅在解绑或 GitHub 返回 `401` 时撤销持久化凭据）。不保存明文 OAuth 令牌或长期业务数据。
 - **本地单文件存储**：仅在自用单进程模式（`MARKET_STORAGE_MODE=local`）启用，通过原子替换持久化市场状态与会话，并默认关闭 artifact 审查管线。
 - **隔离存储**：上传与抓取的插件 ZIP 以及审查提取的文本对象存放在绑定至 `artifact-quarantine` 用途的私有 Profile（本地目录、SQLite/PostgreSQL 分块表、私有 S3 桶或受控 WebDAV）中，不生成公开 URL；ImgBed 后端禁止绑定隔离区，且同源公开读取与 `/packages/*` 别名接口对隔离区对象一律返回 404。
 - **发布存储与头像存储**：`artifact-published` 与 `avatar` 分别独立绑定存储 Profile，支持本地文件系统、SQLite（禁止放在仓库目录或指向市场状态 JSON）、PostgreSQL、S3/R2、WebDAV 与 CloudFlare ImgBed。所有新增 Profile 的敏感凭据通过 `OAUTH_CREDENTIAL_KEY` 结合独立 HKDF 域（`astrhub/storage-credential/{profile_id}/v1`）派生 Fernet 密钥加密保存于 `market_storage_secrets`，编辑留空时保留原凭据且从不回显。

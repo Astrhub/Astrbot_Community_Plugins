@@ -864,6 +864,37 @@ class InMemoryMarketStore:
             self.state.setdefault("oauthCredentials", {}).pop(str(credential_ref), None) is not None
         )
 
+    def invalidate_oauth_credential(
+        self,
+        identity_id: str,
+        credential_ref: str,
+        *,
+        expected_ciphertext: str,
+        rotation_status: str = "reauth_required",
+    ) -> bool:
+        ref = str(credential_ref or "").strip()
+        if not ref or not expected_ciphertext:
+            return False
+        creds = self.state.setdefault("oauthCredentials", {})
+        record = creds.get(ref)
+        if not record or str(record.get("ciphertext") or "") != expected_ciphertext:
+            return False
+        creds.pop(ref, None)
+        target = next(
+            (
+                item
+                for item in self.state["oauthIdentities"]
+                if item.get("id") == identity_id
+                and str(item.get("credential_ref") or "").strip() == ref
+                and item.get("revoked_at") is None
+            ),
+            None,
+        )
+        if target is not None:
+            target["rotation_status"] = str(rotation_status or "reauth_required")
+            target["updated_at"] = utc_now()
+        return True
+
     def upsert_git_repository_binding(
         self,
         user_id: str,
@@ -2313,6 +2344,8 @@ class InMemoryMarketStore:
 
 
 def _parse_utc_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
     raw = str(value or "").strip()
     if not raw:
         return None
@@ -2323,14 +2356,19 @@ def _parse_utc_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def _oauth_timestamp(value: Any) -> datetime | None:
-    """Convert an optional OAuth timestamp for asyncpg."""
+def _pg_timestamp(value: Any, *, error_message: str = "Invalid timestamp") -> datetime | None:
+    """Convert an optional ISO timestamp or datetime into a UTC datetime for asyncpg."""
     if value in {None, ""}:
         return None
     parsed = _parse_utc_timestamp(value)
     if parsed is None:
-        raise ValueError("Invalid OAuth timestamp")
+        raise ValueError(error_message)
     return parsed
+
+
+def _oauth_timestamp(value: Any) -> datetime | None:
+    """Convert an optional OAuth timestamp for asyncpg."""
+    return _pg_timestamp(value, error_message="Invalid OAuth timestamp")
 
 
 class LocalFileMarketStore(InMemoryMarketStore):
@@ -2627,6 +2665,22 @@ class LocalFileMarketStore(InMemoryMarketStore):
     def delete_oauth_credential(self, credential_ref: str) -> bool:
         with self._persist():
             return super().delete_oauth_credential(credential_ref)
+
+    def invalidate_oauth_credential(
+        self,
+        identity_id: str,
+        credential_ref: str,
+        *,
+        expected_ciphertext: str,
+        rotation_status: str = "reauth_required",
+    ) -> bool:
+        with self._persist():
+            return super().invalidate_oauth_credential(
+                identity_id,
+                credential_ref,
+                expected_ciphertext=expected_ciphertext,
+                rotation_status=rotation_status,
+            )
 
     def upsert_git_repository_binding(
         self,
@@ -3795,7 +3849,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 new_id("user"),
                 clean_username,
                 clean_email,
-                email_verified_at,
+                _pg_timestamp(email_verified_at),
                 password_hash,
                 normalize_role(role).value,
             )
@@ -3924,7 +3978,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 user_id,
                 password_hash,
                 clean_email or "",
-                verify_email_at,
+                _pg_timestamp(verify_email_at),
                 bump_session_version,
                 expected,
             )
@@ -3958,7 +4012,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 """,
                 user_id,
                 clean_email,
-                email_verified_at,
+                _pg_timestamp(email_verified_at),
             )
         except asyncpg.UniqueViolationError as exc:
             if exc.constraint_name == "market_users_email_lower_idx":
@@ -4176,6 +4230,46 @@ class PgRedisMarketStore(InMemoryMarketStore):
         )
         return int(result.rsplit(" ", 1)[-1]) > 0
 
+    async def invalidate_oauth_credential(
+        self,
+        identity_id: str,
+        credential_ref: str,
+        *,
+        expected_ciphertext: str,
+        rotation_status: str = "reauth_required",
+    ) -> bool:
+        ref = str(credential_ref or "").strip()
+        if not ref or not expected_ciphertext:
+            return False
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                deleted = await connection.fetchval(
+                    """
+                    DELETE FROM market_oauth_credentials
+                     WHERE credential_ref = $1
+                       AND ciphertext = $2
+                 RETURNING credential_ref
+                    """,
+                    ref,
+                    str(expected_ciphertext),
+                )
+                if not deleted:
+                    return False
+                await connection.execute(
+                    """
+                    UPDATE market_oauth_identities
+                       SET rotation_status = $2,
+                           updated_at = now()
+                     WHERE id = $1
+                       AND credential_ref = $3
+                       AND revoked_at IS NULL
+                    """,
+                    identity_id,
+                    str(rotation_status or "reauth_required"),
+                    ref,
+                )
+                return True
+
     @plugin_identity_write
     async def upsert_git_repository_binding(
         self,
@@ -4251,7 +4345,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                         str(verification_method or "oauth"),
                         str(credential_ref or ""),
                         gen,
-                        verified_at,
+                        _oauth_timestamp(verified_at),
                     )
                     return serialize_value(dict(row))
 
@@ -4288,7 +4382,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     str(verification_method or "oauth"),
                     str(credential_ref or ""),
                     prior_max + 1,
-                    verified_at,
+                    _oauth_timestamp(verified_at),
                 )
                 return serialize_value(dict(row))
 
@@ -5118,7 +5212,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
          RETURNING *
             """,
             user_id,
-            muted_until,
+            _pg_timestamp(muted_until),
             by_user_id,
             reason,
         )

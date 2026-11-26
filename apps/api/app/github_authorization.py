@@ -180,41 +180,167 @@ class GithubRepositoryAccess:
         self._credential: dict[str, Any] | None = None
         self._organization_admin: dict[str, bool] = {}
 
+    async def _active_github_identities(self) -> list[dict[str, Any]] | None:
+        if (
+            not hasattr(self.store, "list_oauth_identities")
+            or getattr(self.store, "pool", True) is None
+        ):
+            return None
+        identities = await store_call(self.store, "list_oauth_identities", str(self.user["id"]))
+        return [
+            item
+            for item in identities
+            if str(item.get("provider") or "").lower() == "github" and not item.get("revoked_at")
+        ]
+
+    async def _load_persistent_credential(
+        self, identities: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        if (
+            not identities
+            or not hasattr(self.store, "get_oauth_credential")
+            or getattr(self.store, "pool", True) is None
+        ):
+            return None
+        preferred_github_id = str(self.user.get("github_id") or "")
+        ordered = sorted(
+            identities,
+            key=lambda item: (
+                bool(preferred_github_id)
+                and str(item.get("provider_user_id") or "") == preferred_github_id,
+                str(item.get("updated_at") or ""),
+                str(item.get("created_at") or ""),
+                str(item.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        cred_store = CredentialStore(self.store, getattr(self.settings, "oauth_credential_key", ""))
+        user_id = str(self.user["id"])
+        for identity in ordered:
+            cred_ref = str(identity.get("credential_ref") or "").strip()
+            if not cred_ref:
+                continue
+            token_set = await cred_store.load_token_set(
+                cred_ref,
+                expected_user_id=user_id,
+                expected_provider="github",
+            )
+            if token_set is None:
+                continue
+            github_id = str(token_set.provider_user_id or identity.get("provider_user_id") or "")
+            if not github_id:
+                continue
+            return {
+                "user_id": user_id,
+                "github_id": github_id,
+                "login": str(token_set.provider_login or identity.get("provider_login") or ""),
+                "access_token": token_set.access_token,
+                "credential_ref": cred_ref,
+                "identity_id": str(identity.get("id") or ""),
+            }
+        return None
+
+    async def _invalidate_credential(self, credential: Mapping[str, Any]) -> None:
+        self._credential = None
+        await store_call(self.store, "delete_github_authorization", self.reference)
+        identities = await self._active_github_identities()
+        if (
+            not identities
+            or not hasattr(self.store, "get_oauth_credential")
+            or not hasattr(self.store, "invalidate_oauth_credential")
+        ):
+            return
+        user_id = str(self.user["id"])
+        dead_token = str(credential.get("access_token") or "")
+        github_id = str(credential.get("github_id") or "")
+        cred_store = CredentialStore(self.store, getattr(self.settings, "oauth_credential_key", ""))
+        for identity in identities:
+            if github_id and str(identity.get("provider_user_id") or "") != github_id:
+                continue
+            cred_ref = str(identity.get("credential_ref") or "").strip()
+            if not cred_ref:
+                continue
+            record = await store_call(self.store, "get_oauth_credential", cred_ref)
+            if not record:
+                continue
+            expected_ciphertext = str(record.get("ciphertext") or "")
+            if not expected_ciphertext:
+                continue
+            # Let decryption errors surface so undecryptable rows remain intact for recovery.
+            stored = cred_store.decrypt_record(
+                record,
+                expected_user_id=user_id,
+                expected_provider="github",
+            )
+            if stored is None:
+                continue
+            if dead_token and stored.access_token != dead_token:
+                continue
+            await store_call(
+                self.store,
+                "invalidate_oauth_credential",
+                identity["id"],
+                cred_ref,
+                expected_ciphertext=expected_ciphertext,
+                rotation_status="reauth_required",
+            )
+
     async def credential(self) -> dict[str, Any]:
         if self._credential is not None:
             return self._credential
+        identities = await self._active_github_identities()
         encrypted = await store_call(self.store, "get_github_authorization", self.reference)
-        try:
-            if not encrypted:
-                raise InvalidToken()
-            payload = json.loads(
-                oauth_cipher(getattr(self.settings, "oauth_credential_key", "")).decrypt(
-                    encrypted.encode(), ttl=OAUTH_TTL
+        if encrypted:
+            try:
+                payload = json.loads(
+                    oauth_cipher(getattr(self.settings, "oauth_credential_key", "")).decrypt(
+                        encrypted.encode(), ttl=OAUTH_TTL
+                    )
                 )
-            )
-            if payload["user_id"] != str(self.user["id"]):
-                raise InvalidToken()
-            if hasattr(self.store, "list_oauth_identities"):
-                identities = await store_call(
-                    self.store, "list_oauth_identities", str(self.user["id"])
-                )
-                if not any(
-                    item.get("provider") == "github"
-                    and str(item.get("provider_user_id") or "") == str(payload["github_id"])
-                    for item in identities
-                ):
+                if payload["user_id"] != str(self.user["id"]):
                     raise InvalidToken()
-            else:
-                github_id = str(self.user.get("github_id") or self.user.get("id") or "")
-                if not self.user.get("github_login") or payload["github_id"] != github_id:
-                    raise InvalidToken()
-        except (InvalidToken, ValueError, KeyError):
-            await store_call(self.store, "delete_github_authorization", self.reference)
-            raise auth_error(
-                409, "github_authorization_required", "请连接 GitHub 后选择仓库"
-            ) from None
-        self._credential = payload
-        return payload
+                if identities is not None:
+                    matching = next(
+                        (
+                            item
+                            for item in identities
+                            if str(item.get("provider_user_id") or "") == str(payload["github_id"])
+                        ),
+                        None,
+                    )
+                    if matching is None:
+                        raise InvalidToken()
+                    cred_ref = str(matching.get("credential_ref") or "").strip()
+                    if cred_ref:
+                        payload = {
+                            **payload,
+                            "credential_ref": cred_ref,
+                            "identity_id": str(matching.get("id") or ""),
+                        }
+                else:
+                    github_id = str(self.user.get("github_id") or self.user.get("id") or "")
+                    if not self.user.get("github_login") or payload["github_id"] != github_id:
+                        raise InvalidToken()
+                self._credential = payload
+                return payload
+            except (InvalidToken, ValueError, KeyError):
+                await store_call(self.store, "delete_github_authorization", self.reference)
+
+        if identities is not None:
+            persisted = await self._load_persistent_credential(identities)
+            if persisted is not None:
+                self._credential = persisted
+                return persisted
+
+        has_github_binding = (
+            bool(identities) if identities is not None else bool(self.user.get("github_login"))
+        )
+        message = (
+            "GitHub 授权已失效，请重新连接"
+            if has_github_binding
+            else "请先连接 GitHub 账号后再操作"
+        )
+        raise auth_error(409, "github_authorization_required", message)
 
     async def request(self, path: str, *, params: dict | None = None) -> httpx.Response:
         credential = await self.credential()
@@ -244,7 +370,7 @@ class GithubRepositoryAccess:
                 503, "github_unavailable", "暂时无法验证 GitHub 权限，请稍后重试"
             ) from None
         if response.status_code == 401:
-            await store_call(self.store, "delete_github_authorization", self.reference)
+            await self._invalidate_credential(credential)
             raise auth_error(409, "github_authorization_required", "GitHub 授权已失效，请重新连接")
         if response.status_code == 429 or response.headers.get("x-ratelimit-remaining") == "0":
             raise auth_error(503, "github_rate_limited", "GitHub 请求额度暂时不足，请稍后重试")
@@ -361,6 +487,7 @@ class GithubRepositoryAccess:
             **self.public_repository(repository),
             "github_user_id": credential["github_id"],
             "auth_reference": self.reference,
+            "credential_ref": str(credential.get("credential_ref") or ""),
             "user_id": str(self.user["id"]),
             "verified_at": datetime.now(UTC).isoformat(),
         }

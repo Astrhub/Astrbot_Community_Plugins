@@ -141,7 +141,7 @@ create_app(settings, store)
 仅在 `PgRedisMarketStore` 中使用，存储两类带 TTL 的短期数据：
 
 - **登录会话**：Key 为 `astrbot_market:session:{token}`，Value 为 JSON 序列化的 `{token, user_id, created_at, last_seen_at}`；TTL 由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天），读取时自动续期。
-- **加密短期 GitHub OAuth 授权凭据**：用于仓库管理权限校验，使用独立部署环境变量 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生的 Fernet 密钥加密（不再回退 `GITHUB_CLIENT_SECRET`），TTL 不超过 8 小时，注销或会话失效时同步删除；多平台 OAuth 持久化访问与刷新令牌则以同一独立主密钥加密保存于 `market_oauth_credentials`。
+- **加密短期 GitHub OAuth 授权缓存**：用于加速仓库管理权限校验，使用独立部署环境变量 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生的 Fernet 密钥加密（不再回退 `GITHUB_CLIENT_SECRET`），TTL 不超过 8 小时，注销或会话失效时同步删除；缓存缺失或过期时回退读取 `market_oauth_credentials` 中以同一独立主密钥加密保存的多平台（含 GitHub）持久化 OAuth 凭据，仅在解绑或上游返回 `401` 时撤销。
 
 ### 本地单文件与内存存储
 
