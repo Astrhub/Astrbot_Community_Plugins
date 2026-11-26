@@ -615,6 +615,14 @@ class StorageManager:
                 if health_message == "连接与读写校验通过":
                     health_message = "部分存储能力校验未通过"
 
+        latest = await self.repository.get_profile(profile.id)
+        if latest is None:
+            raise ObjectStorageError("storage_profile_not_found", f"Unknown profile: {profile.id}")
+        if latest.updated_at != profile.updated_at or latest.config != profile.config:
+            raise ObjectStorageError(
+                "storage_profile_changed",
+                "Storage profile changed during the test; retry the connection test",
+            )
         checked_at = utc_now_iso()
         updated = StorageProfile(
             id=profile.id,
@@ -1449,6 +1457,44 @@ class StorageManager:
         await self.repository.upsert_profile(restored)
         self.service.register_profile(restored, driver)
 
+    async def _reconcile_expired_imgbed_objects(self, profile_id: str) -> int:
+        profile = await self.repository.get_profile(profile_id)
+        if profile is None or profile.backend != StorageBackend.IMGBED:
+            return 0
+        expire = str(profile.config.get("expire") or "")
+        if not expire or expire == "forever":
+            return 0
+
+        driver = self.service.driver_for_profile(profile.id)
+        records = await self.repository.list_objects(
+            profile_id=profile.id,
+            status=StorageObjectStatus.ACTIVE,
+        )
+        reconciled = 0
+        for record in records:
+            try:
+                stat = await driver.stat_object(record.key, namespace=record.namespace)
+            except ObjectStorageError as exc:
+                LOGGER.warning(
+                    "ImgBed expiry reconciliation stat failed for %s (%s): %s",
+                    record.id,
+                    record.key,
+                    exc,
+                )
+                continue
+            if stat is not None:
+                continue
+            deleted = replace(
+                record,
+                status=StorageObjectStatus.DELETED,
+                public_url="",
+                updated_at=utc_now_iso(),
+            )
+            await self.repository.upsert_object(deleted)
+            self.service.cache_object_record(deleted)
+            reconciled += 1
+        return reconciled
+
     async def _enforce_decommission_gates(self, profile_id: str) -> None:
         bindings = await self.repository.list_bindings()
         if any(binding.profile_id == profile_id for binding in bindings):
@@ -1456,6 +1502,7 @@ class StorageManager:
                 "storage_profile_still_bound",
                 "Storage profile still has an active purpose binding",
             )
+        await self._reconcile_expired_imgbed_objects(profile_id)
         active_count = await self.repository.count_objects(
             profile_id=profile_id,
             status=StorageObjectStatus.ACTIVE,
@@ -1531,6 +1578,7 @@ class StorageManager:
         binding_generation: int,
         actor_id: str,
     ) -> tuple[StorageProfile | None, StorageMigration | None, list[StorageMigrationItem]]:
+        await self._reconcile_expired_imgbed_objects(source_profile_id)
         all_purpose_active = await self.repository.list_objects(
             purpose=purpose,
             status=StorageObjectStatus.ACTIVE,

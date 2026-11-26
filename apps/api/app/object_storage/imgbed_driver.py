@@ -126,7 +126,14 @@ def validate_imgbed_folder(value: Any) -> str:
 
 def validate_imgbed_expire(value: Any) -> str:
     """Validate an ImgBed expire option using the upstream h/d and 3650-day contract."""
-    raw = str(value or "").strip()
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ObjectStorageError(
+            "imgbed_expire_invalid",
+            "ImgBed expire must be forever or a positive integer with h/d, up to 3650d",
+        )
+    raw = value.strip()
     if not raw:
         return ""
     if raw == "forever":
@@ -766,7 +773,7 @@ class ImgBedObjectStorageDriver:
         else:
             img_key = f"{probe_prefix}probe-{token}.png"
             img_sha = hashlib.sha256(_TINY_PNG_BYTES).hexdigest()
-            uploaded_img_key = ""
+            uploaded_img_key = img_key
             try:
                 stored = await self.put_object(
                     img_key,
@@ -829,7 +836,7 @@ class ImgBedObjectStorageDriver:
             zip_key = f"{probe_prefix}probe-plugin-{token}.zip"
             zip_bytes = _build_probe_zip_bytes()
             zip_sha = hashlib.sha256(zip_bytes).hexdigest()
-            uploaded_zip_key = ""
+            uploaded_zip_key = zip_key
             try:
                 stored_zip = await self.put_object(
                     zip_key,
