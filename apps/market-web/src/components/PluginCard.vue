@@ -24,11 +24,17 @@ const props = withDefaults(
     index?: number;
     seed?: number | string;
     masonry?: boolean;
+    showAdminActions?: boolean;
+    disableDetailLink?: boolean;
+    showSocialLink?: boolean;
   }>(),
   {
     index: 0,
     seed: 0,
     masonry: false,
+    showAdminActions: true,
+    disableDetailLink: false,
+    showSocialLink: true,
   },
 );
 
@@ -44,6 +50,12 @@ const showUnlistModal = shallowRef(false);
 const unlistReason = shallowRef("");
 const displayName = computed(() => props.plugin.display_name || props.plugin.name);
 const detailPath = computed(() => pluginDetailPath(props.plugin));
+const authorHandle = computed(() =>
+  String(props.plugin.owner_username || props.plugin.owner_github_login || "").trim(),
+);
+const authorProfilePath = computed(() =>
+  authorHandle.value ? `/author/${encodeURIComponent(authorHandle.value)}` : "",
+);
 const formattedVersion = computed(() => {
   const version = String(props.plugin.version || "1.0.0");
   return version.startsWith("v") ? version : `v${version}`;
@@ -125,7 +137,7 @@ async function unlistPlugin(): Promise<void> {
     :aria-label="`插件：${displayName}`"
   >
     <router-link
-      v-if="detailPath"
+      v-if="detailPath && !disableDetailLink"
       class="plugin-card__detail-link"
       :to="detailPath"
       :aria-label="`查看 ${displayName} 插件详情`"
@@ -146,24 +158,25 @@ async function unlistPlugin(): Promise<void> {
         <div class="plugin-title-row">
           <h2 class="plugin-name">{{ displayName }}</h2>
           <span v-if="isNew" class="new-badge" aria-label="新发布插件">NEW</span>
+          <slot name="title-extra" />
         </div>
         <p class="version-author">
           <span>{{ formattedVersion }}</span>
           <span aria-hidden="true">·</span>
           <router-link
-            v-if="plugin.owner_username || plugin.owner_github_login"
+            v-if="authorProfilePath"
             class="author-button"
-            :to="`/author/${encodeURIComponent(plugin.owner_username || plugin.owner_github_login || '')}`"
+            :to="authorProfilePath"
             @click.stop
           >
-            @{{ plugin.author || plugin.owner_username || plugin.owner_github_login }}
+            @{{ plugin.author || authorHandle }}
           </router-link>
           <span v-else class="author-button">@{{ plugin.author || "community" }}</span>
         </p>
       </div>
     </div>
 
-    <div v-if="isAdminUser" class="plugin-card__admin-actions">
+    <div v-if="showAdminActions && isAdminUser" class="plugin-card__admin-actions">
       <n-tooltip trigger="hover" placement="top">
         <template #trigger>
           <n-button
@@ -228,9 +241,35 @@ async function unlistPlugin(): Promise<void> {
           </template>
           {{ isCopied ? "已复制" : "复制仓库链接" }}
         </n-tooltip>
-        <n-tooltip v-if="plugin.social_link" trigger="hover" placement="top">
+        <n-tooltip
+          v-if="showSocialLink && (authorProfilePath || plugin.social_link)"
+          trigger="hover"
+          placement="top"
+        >
           <template #trigger>
+            <router-link
+              v-if="authorProfilePath"
+              v-slot="{ href, navigate }"
+              :to="authorProfilePath"
+              custom
+            >
+              <n-button
+                tag="a"
+                :href="href"
+                quaternary
+                circle
+                size="tiny"
+                class="author-profile-action"
+                :aria-label="`查看 ${plugin.author || authorHandle} 的个人主页`"
+                @click.stop="navigate($event)"
+              >
+                <template #icon
+                  ><n-icon><person-outline /></n-icon
+                ></template>
+              </n-button>
+            </router-link>
             <n-button
+              v-else
               quaternary
               circle
               size="tiny"
@@ -246,6 +285,10 @@ async function unlistPlugin(): Promise<void> {
         </n-tooltip>
       </div>
     </footer>
+
+    <div v-if="$slots['owner-actions']" class="plugin-card__owner-bar" @click.stop>
+      <slot name="owner-actions" />
+    </div>
   </article>
 
   <n-modal
@@ -537,5 +580,18 @@ async function unlistPlugin(): Promise<void> {
 .plugin-card.plugin-card--masonry {
   border: 1px solid var(--border-base);
   border-radius: 10px;
+}
+
+.plugin-card__owner-bar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-base);
 }
 </style>

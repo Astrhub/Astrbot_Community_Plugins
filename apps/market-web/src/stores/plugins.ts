@@ -273,6 +273,7 @@ export const usePluginStore = defineStore("plugins", () => {
   const announcements = ref<Announcement[]>([]);
   const currentUser = ref<User | null>(null);
   const currentUserPreview = shallowRef(readCachedUserPreview());
+  const currentUserError = shallowRef("");
   const unreadNotificationCount = shallowRef(0);
   const setupStatus = ref<SetupStatus>({
     required: false,
@@ -1389,25 +1390,29 @@ export const usePluginStore = defineStore("plugins", () => {
     loadCurrentUserPromise = (async () => {
       try {
         const response = await fetch(`${apiBaseUrl}/v1/me`, { credentials: "include" });
-        if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
           currentUser.value = null;
           currentUserPreview.value = null;
           clearCachedUserPreview();
           unreadNotificationCount.value = 0;
+          currentUserError.value = "";
           currentUserLoaded = true;
+          return;
+        }
+        if (!response.ok) {
+          currentUserError.value = `验证登录状态失败（HTTP ${response.status}）`;
           return;
         }
         const user = (await response.json()) as User;
         currentUser.value = user;
         currentUserPreview.value = writeCachedUserPreview(user);
+        currentUserError.value = "";
         currentUserLoaded = true;
-        await loadUnreadNotificationCount().catch(() => {
+        void loadUnreadNotificationCount().catch(() => {
           unreadNotificationCount.value = 0;
         });
       } catch {
-        currentUser.value = null;
-        unreadNotificationCount.value = 0;
-        currentUserLoaded = true;
+        currentUserError.value = "网络异常，暂时无法验证登录状态";
       }
     })();
     try {
@@ -1441,8 +1446,9 @@ export const usePluginStore = defineStore("plugins", () => {
     if (!response.ok) throw new Error(apiErrorMessage(data, "登录失败"));
     currentUser.value = data.user;
     currentUserPreview.value = writeCachedUserPreview(data.user);
+    currentUserError.value = "";
     currentUserLoaded = true;
-    await loadUnreadNotificationCount().catch(() => {
+    void loadUnreadNotificationCount().catch(() => {
       unreadNotificationCount.value = 0;
     });
     return data.user;
@@ -1451,8 +1457,9 @@ export const usePluginStore = defineStore("plugins", () => {
   async function applyAuthenticatedUser(user: User): Promise<User> {
     currentUser.value = user;
     currentUserPreview.value = writeCachedUserPreview(user);
+    currentUserError.value = "";
     currentUserLoaded = true;
-    await loadUnreadNotificationCount().catch(() => {
+    void loadUnreadNotificationCount().catch(() => {
       unreadNotificationCount.value = 0;
     });
     return user;
@@ -1647,6 +1654,7 @@ export const usePluginStore = defineStore("plugins", () => {
       currentUser.value = null;
       currentUserPreview.value = null;
       clearCachedUserPreview();
+      currentUserError.value = "";
       currentUserLoaded = true;
       unreadNotificationCount.value = 0;
     }
@@ -1805,6 +1813,7 @@ export const usePluginStore = defineStore("plugins", () => {
     announcements,
     currentUser,
     currentUserPreview,
+    currentUserError,
     unreadNotificationCount,
     setupStatus,
     siteConfig,

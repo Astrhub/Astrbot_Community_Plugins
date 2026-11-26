@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, h, shallowRef, watch } from "vue";
+import { computed, defineAsyncComponent, h, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { useRouter } from "vue-router";
+import { RouterLink, useRouter } from "vue-router";
 import { NDropdown, NIcon, useMessage } from "naive-ui";
 import {
+  ExtensionPuzzleOutline,
   LogOutOutline,
   NotificationsOutline,
   PersonOutline,
@@ -17,6 +18,8 @@ import { avatarVariantUrl, resolveMyAvatarUrl } from "../utils/github";
 
 const AuthModal = defineAsyncComponent(() => import("./AuthModal.vue"));
 
+const HOVER_CLOSE_DELAY_MS = 140;
+
 const router = useRouter();
 const message = useMessage();
 const store = usePluginStore();
@@ -26,6 +29,10 @@ const { logout } = store;
 const isLoginModalOpen = shallowRef(false);
 const authModalLoaded = shallowRef(false);
 const avatarLoadFailed = shallowRef(false);
+const userTriggerRef = ref<HTMLButtonElement | null>(null);
+const userMenuHovered = shallowRef(false);
+const userMenuPinned = shallowRef(false);
+let hoverCloseTimer: ReturnType<typeof window.setTimeout> | null = null;
 
 const headerUser = computed(() => currentUser.value || currentUserPreview.value);
 const siteName = computed(() => siteConfig.value.name || "Astrhub 插件市场");
@@ -38,6 +45,12 @@ const isAdminUser = computed(() =>
   ["core_admin", "admin"].includes(String(currentUser.value?.role || "")),
 );
 const hasUnreadNotifications = computed(() => unreadNotificationCount.value > 0);
+const myPublicUsername = computed(() =>
+  String(currentUser.value?.public_username || currentUser.value?.github_login || "").trim(),
+);
+const myAuthorPath = computed(() =>
+  myPublicUsername.value ? `/author/${encodeURIComponent(myPublicUsername.value)}` : "",
+);
 const displayUserName = computed(
   () =>
     headerUser.value?.public_username ||
@@ -62,22 +75,38 @@ const userAvatarUrl = computed(() =>
   ),
 );
 const showUserAvatar = computed(() => Boolean(userAvatarUrl.value) && !avatarLoadFailed.value);
+const userMenuOpen = computed(
+  () => Boolean(currentUser.value) && (userMenuPinned.value || userMenuHovered.value),
+);
 
 watch(userAvatarUrl, () => {
   avatarLoadFailed.value = false;
 });
 
+watch(currentUser, (user) => {
+  if (!user) closeUserMenu();
+});
+
 const userMenuOptions = computed(() => [
+  ...(myAuthorPath.value
+    ? [
+        {
+          key: "my-plugins",
+          label: renderMenuLink(myAuthorPath.value, "我的插件"),
+          icon: renderIcon(ExtensionPuzzleOutline),
+        },
+      ]
+    : []),
   {
     key: "profile",
-    label: "个人设置",
+    label: renderMenuLink("/settings/personal", "个人设置"),
     icon: renderIcon(PersonOutline),
   },
   ...(isAdminUser.value
     ? [
         {
           key: "workbench",
-          label: "审查工作台",
+          label: renderMenuLink("/plugin-workbench", "审查工作台"),
           icon: renderIcon(ShieldCheckmarkOutline),
         },
       ]
@@ -86,7 +115,7 @@ const userMenuOptions = computed(() => [
     ? [
         {
           key: "settings",
-          label: "系统设置",
+          label: renderMenuLink("/admin/settings", "系统设置"),
           icon: renderIcon(SettingsOutline),
         },
       ]
@@ -106,22 +135,103 @@ function renderIcon(icon: unknown) {
   return () => h(NIcon, null, { default: () => h(icon as never) });
 }
 
+function renderMenuLink(to: string, label: string) {
+  return () =>
+    h(
+      RouterLink,
+      {
+        to,
+        class: "user-menu-link",
+        style: { color: "inherit", textDecoration: "none", display: "block" },
+        onClick: closeUserMenu,
+      },
+      () => label,
+    );
+}
+
+function clearHoverCloseTimer(): void {
+  if (hoverCloseTimer !== null) {
+    window.clearTimeout(hoverCloseTimer);
+    hoverCloseTimer = null;
+  }
+}
+
+function closeUserMenu(): void {
+  clearHoverCloseTimer();
+  userMenuHovered.value = false;
+  userMenuPinned.value = false;
+}
+
+function handleTriggerMouseEnter(): void {
+  if (!currentUser.value) return;
+  clearHoverCloseTimer();
+  userMenuHovered.value = true;
+}
+
+function scheduleHoverClose(): void {
+  clearHoverCloseTimer();
+  hoverCloseTimer = window.setTimeout(() => {
+    hoverCloseTimer = null;
+    userMenuHovered.value = false;
+  }, HOVER_CLOSE_DELAY_MS);
+}
+
+function handleTriggerMouseLeave(): void {
+  if (!currentUser.value) return;
+  scheduleHoverClose();
+}
+
+function handleMenuMouseEnter(): void {
+  if (!currentUser.value) return;
+  clearHoverCloseTimer();
+  userMenuHovered.value = true;
+}
+
+function handleMenuMouseLeave(): void {
+  if (!currentUser.value) return;
+  scheduleHoverClose();
+}
+
+function handleTriggerClick(): void {
+  if (!currentUser.value) return;
+  clearHoverCloseTimer();
+  if (userMenuPinned.value) {
+    userMenuPinned.value = false;
+    userMenuHovered.value = false;
+    return;
+  }
+  userMenuPinned.value = true;
+}
+
+function handleUserMenuClickOutside(event: MouseEvent): void {
+  const target = event.target as Node | null;
+  if (target && userTriggerRef.value?.contains(target)) return;
+  closeUserMenu();
+}
+
+const userMenuProps = () => ({
+  onMouseenter: handleMenuMouseEnter,
+  onMouseleave: handleMenuMouseLeave,
+});
+
 function openLoginModal(): void {
   authModalLoaded.value = true;
   isLoginModalOpen.value = true;
 }
 
 async function handleUserMenuSelect(key: string): Promise<void> {
-  if (key === "profile") {
-    await router.push("/settings/personal");
-    return;
-  }
-  if (key === "workbench") {
-    await router.push("/plugin-workbench");
-    return;
-  }
-  if (key === "settings") {
-    await router.push("/admin/settings");
+  closeUserMenu();
+  const routeTargets: Record<string, string> = {
+    ...(myAuthorPath.value ? { "my-plugins": myAuthorPath.value } : {}),
+    profile: "/settings/personal",
+    workbench: "/plugin-workbench",
+    settings: "/admin/settings",
+  };
+  const targetPath = routeTargets[key];
+  if (targetPath) {
+    if (router.currentRoute.value.path !== targetPath) {
+      await router.push(targetPath);
+    }
     return;
   }
   if (key !== "logout") return;
@@ -134,6 +244,10 @@ async function handleUserMenuSelect(key: string): Promise<void> {
     message.error(error instanceof Error ? error.message : "退出失败");
   }
 }
+
+onBeforeUnmount(() => {
+  clearHoverCloseTimer();
+});
 </script>
 
 <template>
@@ -168,17 +282,28 @@ async function handleUserMenuSelect(key: string): Promise<void> {
 
         <n-dropdown
           v-if="headerUser"
+          :show="userMenuOpen"
           :options="userMenuOptions"
-          trigger="click"
+          :menu-props="userMenuProps"
+          trigger="manual"
+          @clickoutside="handleUserMenuClickOutside"
           @select="handleUserMenuSelect"
         >
           <button
+            ref="userTriggerRef"
             type="button"
             class="nav-link user-trigger auth-session-control"
+            :class="{ 'is-pinned': userMenuPinned }"
             :aria-label="`账户：${displayUserName}`"
+            :aria-expanded="userMenuOpen"
+            aria-haspopup="menu"
             :aria-busy="!currentUser"
             :disabled="!currentUser"
             :title="currentUser ? undefined : '正在验证登录状态'"
+            @mouseenter="handleTriggerMouseEnter"
+            @mouseleave="handleTriggerMouseLeave"
+            @click="handleTriggerClick"
+            @keydown.escape="closeUserMenu"
           >
             <span class="user-avatar" aria-hidden="true">
               <img
@@ -286,6 +411,10 @@ async function handleUserMenuSelect(key: string): Promise<void> {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+}
+
+.user-trigger.is-pinned {
+  color: var(--primary-color);
 }
 
 .user-trigger:disabled {

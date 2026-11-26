@@ -101,7 +101,7 @@ from .git_sources.registry import (
     get_provider_adapter,
     public_oauth_providers_config,
 )
-from .git_sources.routes import build_git_provider_router
+from .git_sources.routes import build_git_provider_router, normalize_oauth_return_path
 from .github_authorization import (
     access_for_request,
     require_repository_access,
@@ -1260,9 +1260,7 @@ def register_routes(app: FastAPI) -> None:
         )
         response = RedirectResponse(f"https://github.com/login/oauth/authorize?{params}")
         set_cookie(response, settings.oauth_state_cookie_name, state, settings, max_age=600)
-        destination = (
-            next if next in {"/submit", "/settings/personal", "/plugin-workbench"} else "/"
-        )
+        destination = normalize_oauth_return_path(next) or "/"
         set_cookie(response, "github_oauth_return_to", destination, settings, max_age=600)
         return response
 
@@ -1304,9 +1302,9 @@ def register_routes(app: FastAPI) -> None:
             profile["login"],
             access_token,
         )
-        destination = request.cookies.get("github_oauth_return_to", "/")
-        if destination not in {"/submit", "/settings/personal", "/plugin-workbench"}:
-            destination = ""
+        destination = (
+            normalize_oauth_return_path(request.cookies.get("github_oauth_return_to", "")) or ""
+        )
         response = RedirectResponse(settings.web_url.rstrip("/") + destination)
         set_cookie(response, settings.session_cookie_name, session["token"], settings)
         response.delete_cookie(settings.oauth_state_cookie_name, path="/")
@@ -1493,14 +1491,8 @@ def register_routes(app: FastAPI) -> None:
         responses={200: {"description": "插件列表"}, 404: {"description": "作者不存在"}},
     )
     async def list_author_plugins(request: Request, username: str) -> dict[str, Any]:
-        author = await call_store(request, "get_user_by_public_username", username)
-        if not author:
-            author = await call_store(request, "get_user_by_github_login", username)
-        canonical_username = (
-            str(author.get("public_username") or author.get("github_login") or username).strip()
-            if author
-            else username
-        )
+        author = await _resolve_author_by_username(request, username)
+        canonical_username = canonical_author_username(author, fallback=username)
         plugins = await _list_listed_plugins_for_author(request, author, canonical_username)
         plugins = await enrich_plugins_with_artifacts(request, plugins)
         if not author and not plugins:
@@ -2815,6 +2807,21 @@ async def _resolve_listed_plugin_for_web(
     return plugin
 
 
+async def _resolve_author_by_username(request: Request, username: str) -> dict[str, Any] | None:
+    author = await call_store(request, "get_user_by_public_username", username)
+    if not author:
+        author = await call_store(request, "get_user_by_github_login", username)
+    if not author:
+        internal = await call_store(request, "get_user_by_internal_username", username)
+        if (
+            internal
+            and not str(internal.get("public_username") or "").strip()
+            and not str(internal.get("github_login") or "").strip()
+        ):
+            author = internal
+    return author
+
+
 async def _list_listed_plugins_for_author(
     request: Request,
     author: dict[str, Any] | None,
@@ -2956,9 +2963,7 @@ def register_market_web_routes(app: FastAPI) -> None:
                     request, ctx, build_not_found_page(ctx), status_code=404
                 )
             username = unquote(segments[1])
-            author = await call_store(request, "get_user_by_public_username", username)
-            if not author:
-                author = await call_store(request, "get_user_by_github_login", username)
+            author = await _resolve_author_by_username(request, username)
             canonical_username = canonical_author_username(author, fallback=username)
             plugins = await _list_listed_plugins_for_author(request, author, canonical_username)
             if not author and not plugins:
