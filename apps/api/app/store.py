@@ -2215,6 +2215,7 @@ class InMemoryMarketStore:
         )
         return {
             **plugin,
+            "download_count": int(plugin.get("download_count") or 0),
             "repo_provider": str(plugin.get("repo_provider") or repo_provider),
             "repo_external_id": str(plugin.get("repo_external_id") or repo_external_id),
             "normalized_repo": str(plugin.get("normalized_repo") or normalized_repo).lower(),
@@ -5902,6 +5903,17 @@ return 0
             """,
             plugin_id,
         )
+
+    async def increment_plugin_downloads(self, plugin_id: str) -> bool:
+        result = await self._pool().execute(
+            """
+            UPDATE market_plugins
+               SET download_count = download_count + 1
+             WHERE id = $1
+            """,
+            plugin_id,
+        )
+        return result == "UPDATE 1"
 
     def _pool(self) -> asyncpg.Pool:
         if not self.pool:

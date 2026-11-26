@@ -39,6 +39,7 @@ def market(tmp_path, monkeypatch):
             "GITHUB_METADATA_SYNC_ENABLED": "false",
             "PLUGIN_AUTO_APPROVE_ENABLED": "true",
             "EMAIL_PROVIDER": "disabled",
+            "WEB_URL": "https://plugins.example.test",
         }
     )
     store = InMemoryMarketStore()
@@ -450,7 +451,7 @@ def test_feed_never_exposes_disabled_or_unreviewed_new_version(market):
     plugin_key = f"{plugin['author']}/{plugin['name']}"
     assert (
         client.get("/plugins.json").json()[plugin_key]["download_url"]
-        == publication["download_url"]
+        == f"{app.state.settings.web_url}/packages/{plugin['id']}/{publication['id']}"
     )
     published_md5 = client.get("/plugins-md5.json").json()["md5"]
     assert client.get("/v1/astrbot/plugins-md5.json").json()["md5"] == published_md5

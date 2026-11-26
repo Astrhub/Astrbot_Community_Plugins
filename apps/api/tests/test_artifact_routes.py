@@ -20,6 +20,7 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
             "ARTIFACTS_ENABLED": "true",
             "ARTIFACT_LOCAL_ROOT": str(tmp_path / "storage"),
             "ARTIFACT_CDN_BASE_URL": "https://cdn.example.test",
+            "WEB_URL": "https://plugins.example.test",
             "ARTIFACT_SUBMISSION_RPM": "2",
             "DATABASE_URL": "postgresql://example.invalid/market",
             "REDIS_URL": "redis://example.invalid/0",
@@ -204,7 +205,7 @@ def test_artifact_routes_enforce_ownership_and_publish_feed(tmp_path: Path) -> N
         plugin_key = f"{plugin['author']}/{plugin['name']}"
         assert feed[plugin_key]["version"] == "v1.0.0"
         assert feed[plugin_key]["download_url"].startswith(
-            f"https://cdn.example.test/{plugin['owner_user_id']}/astrbot_plugin_demo/v1.0.0/"
+            f"https://plugins.example.test/packages/{plugin['id']}/artifact_"
         )
         notifications = store.list_notifications(plugin["owner_user_id"])
         assert any("/plugin-workbench?artifact=" in item["body"] for item in notifications)

@@ -44,6 +44,7 @@ from .announcement_upload import (
 from .artifacts import build_artifact_runtime
 from .artifacts.archive import PrecheckError, parse_plugin_metadata_bytes
 from .artifacts.routes import build_artifact_router
+from .downloads import normalize_publication_download_url
 from .cdn import CdnSubscriptions, cdn_enabled, cdn_whitelist, process_cdn_reviews
 from .artifacts.github_source import (
     COMMIT_PATTERN,
@@ -352,6 +353,7 @@ PUBLIC_MARKET_PLUGIN_FIELDS: frozenset[str] = frozenset(
         "astrbot_version",
         "status",
         "download_url",
+        "download_count",
         "cdn_enabled",
         "readme_url",
         "changelog_url",
@@ -7049,7 +7051,7 @@ async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str,
         published_version = str(publication.get("version") or "").strip()
         published = publication.get("publication_status") == "published"
         gated_download_url = (
-            str(publication.get("download_url") or "").strip()
+            normalize_publication_download_url(publication, request.app.state.settings.web_url)
             if cdn_enabled(plugin) and published and versions_match(feed_version, published_version)
             else ""
         )

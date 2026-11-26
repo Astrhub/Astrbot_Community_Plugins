@@ -7,6 +7,7 @@ import {
   CheckmarkOutline,
   CloudOfflineOutline,
   HeartOutline,
+  CloudDownloadOutline,
   LinkOutline,
   PersonOutline,
   StarSharp,
@@ -201,6 +202,12 @@ async function unlistPlugin(): Promise<void> {
           :aria-label="`评论数：${plugin.comments_count || 0}`"
         >
           <n-icon><chatbubble-ellipses-outline /></n-icon>{{ plugin.comments_count || 0 }}
+        </span>
+        <span
+          class="metric-item metric-item--download"
+          :aria-label="`下载次数：${plugin.download_count || 0}`"
+        >
+          <n-icon><cloud-download-outline /></n-icon>{{ plugin.download_count || 0 }}
         </span>
       </div>
 

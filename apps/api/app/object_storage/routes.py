@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..downloads import record_download_success
+from .models import StoragePurpose
 from .manager import StorageManager
 from .models import ObjectStorageError, StorageObjectRecord
 
@@ -509,6 +511,42 @@ def build_object_storage_router(
         if ".." in alias_key or alias_key.startswith("/") or "\\" in alias_key:
             raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
         manager = _storage_manager(request)
+        if alias_key.count("/") == 1 and alias_key.split("/", 1)[1].startswith("artifact_"):
+            plugin_id, artifact_id = alias_key.split("/", 1)
+            runtime = getattr(request.app.state, "artifact_runtime", None)
+            repository = getattr(runtime, "repository", None)
+            if repository is None:
+                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+            artifact = await repository.get_artifact(artifact_id)
+            if artifact is None:
+                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+            if (
+                artifact.get("publication_status") != "published"
+                or str(artifact.get("plugin_id") or "") != plugin_id
+            ):
+                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+            record = await manager.repository.find_active_object_by_purpose_and_key(
+                purpose=StoragePurpose.ARTIFACT_PUBLISHED,
+                key=str(artifact.get("published_key") or ""),
+            )
+            if record is None:
+                raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})
+            try:
+                response = await _serve_public_object(request, manager, record)
+            except ObjectStorageError as exc:
+                raise _http_error_for_storage(exc) from exc
+            if request.method == "GET" and response.status_code in {200, 206}:
+                if hasattr(manager.store, "increment_plugin_downloads"):
+                    counted = await manager.store.increment_plugin_downloads(plugin_id)
+                    if counted:
+                        response.headers["X-Download-Count"] = "1"
+                else:
+                    record_download_success(manager.store.state.get("plugins", []), plugin_id)
+                    persist = getattr(manager.store, "persist_object_storage", None)
+                    if callable(persist):
+                        persist()
+                    response.headers["X-Download-Count"] = "1"
+            return response
         record = await manager.resolve_public_alias(f"/packages/{alias_key}")
         if record is None:
             raise HTTPException(404, {"code": "object_not_found", "error": "Package not found"})

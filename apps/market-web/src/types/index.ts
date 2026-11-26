@@ -105,6 +105,7 @@ export interface Plugin {
   stars: number;
   likes: number;
   comments_count: number;
+  download_count?: number;
   list_index: number;
   owner_user_id?: number | string | null;
   owner_username?: string;
