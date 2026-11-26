@@ -577,6 +577,7 @@ export const usePluginStore = defineStore("plugins", () => {
       stars: Number(plugin.stars || 0),
       likes: Number(plugin.likes || 0),
       comments_count: Number(plugin.comments_count || 0),
+      download_count: Number(plugin.download_count || 0),
       list_index: index,
     };
   }

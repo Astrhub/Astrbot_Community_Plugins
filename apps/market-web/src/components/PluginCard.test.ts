@@ -24,6 +24,7 @@ const plugin: Plugin = {
   stars: 12,
   likes: 7,
   comments_count: 3,
+  download_count: 42,
   list_index: 0,
   created_at: new Date().toISOString(),
 };
@@ -68,6 +69,7 @@ describe("PluginCard", () => {
     expect(wrapper.find(".metric-item--star").text()).toContain("12");
     expect(wrapper.find(".metric-item--like").text()).toContain("7");
     expect(wrapper.find(".metric-item--comment").text()).toContain("3");
+    expect(wrapper.find(".metric-item--download").text()).toContain("42");
     expect(wrapper.find(".new-badge").text()).toBe("NEW");
     expect(wrapper.get(".description").text()).toBe("卡片短描述");
     cardPlugin.value.short_desc = "";

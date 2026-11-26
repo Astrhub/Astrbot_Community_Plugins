@@ -44,6 +44,7 @@ from .announcement_upload import (
 from .artifacts import build_artifact_runtime
 from .artifacts.archive import PrecheckError, parse_plugin_metadata_bytes
 from .artifacts.routes import build_artifact_router
+from .downloads import normalize_publication_download_url
 from .cdn import CdnSubscriptions, cdn_enabled, cdn_whitelist, process_cdn_reviews
 from .artifacts.github_source import (
     COMMIT_PATTERN,
@@ -352,6 +353,7 @@ PUBLIC_MARKET_PLUGIN_FIELDS: frozenset[str] = frozenset(
         "astrbot_version",
         "status",
         "download_url",
+        "download_count",
         "cdn_enabled",
         "readme_url",
         "changelog_url",
@@ -1492,6 +1494,7 @@ def register_routes(app: FastAPI) -> None:
             else username
         )
         plugins = await _list_listed_plugins_for_author(request, author, canonical_username)
+        plugins = await enrich_plugins_with_artifacts(request, plugins)
         if not author and not plugins:
             raise error(404, "Author not found")
         identities = (
@@ -1795,6 +1798,8 @@ def register_routes(app: FastAPI) -> None:
     )
     async def plugin_detail_by_author(request: Request, username: str, name: str) -> dict[str, Any]:
         plugin = await call_store(request, "get_plugin_by_author", username, name)
+        if plugin:
+            plugin = (await enrich_plugins_with_artifacts(request, [plugin]))[0]
         if not plugin or plugin.get("status") != "listed":
             raise error(404, "Plugin not found")
         return await plugin_with_interaction_state(request, plugin, await current_user(request))
@@ -1808,6 +1813,7 @@ def register_routes(app: FastAPI) -> None:
     )
     async def plugin_detail(request: Request, plugin_id: str) -> dict[str, Any]:
         plugin = await get_plugin_or_404(request, plugin_id)
+        plugin = (await enrich_plugins_with_artifacts(request, [plugin]))[0]
         user = await current_user(request)
         return await plugin_with_interaction_state(request, plugin, user)
 
@@ -7026,17 +7032,13 @@ def build_astrbot_plugin_source(
     return feed
 
 
-async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str, Any]]:
-    plugins = await call_store(request, "list_public_plugins")
+async def enrich_plugins_with_artifacts(
+    request: Request,
+    plugins: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     runtime = request.app.state.artifact_runtime
-    if not runtime.config.enabled:
-        plugins = [
-            {**plugin, "download_url": ""} if not cdn_enabled(plugin) else plugin
-            for plugin in plugins
-        ]
-        return plugins
     publications: dict[str, dict[str, Any]] = {}
-    if runtime.repository is not None:
+    if runtime.config.enabled and runtime.repository is not None:
         publications = await runtime.repository.list_current_publications(
             [str(plugin.get("id") or "") for plugin in plugins]
         )
@@ -7047,23 +7049,34 @@ async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str,
             plugin.get("repo_version") or plugin.get("version") or publication.get("version") or ""
         ).strip()
         published_version = str(publication.get("version") or "").strip()
-        published = publication.get("publication_status") == "published"
-        gated_download_url = (
-            str(publication.get("download_url") or "").strip()
-            if cdn_enabled(plugin) and published and versions_match(feed_version, published_version)
+        download_url = (
+            normalize_publication_download_url(publication, request.app.state.settings.web_url)
+            if runtime.config.enabled
+            and cdn_enabled(plugin)
+            and publication.get("publication_status") == "published"
+            and versions_match(feed_version, published_version)
             else ""
         )
         enriched.append(
             {
                 **plugin,
                 "_artifact_publication_checked": True,
-                "download_url": gated_download_url,
+                "download_url": download_url,
                 "published_version": published_version,
-                "artifact_download_url": gated_download_url,
+                "artifact_download_url": download_url,
                 "artifact_publication_status": publication.get("publication_status") or "",
             }
         )
     return enriched
+
+
+async def list_public_plugins_with_artifacts(request: Request) -> list[dict[str, Any]]:
+    plugins = await call_store(request, "list_public_plugins")
+    runtime = request.app.state.artifact_runtime
+    plugins = [{**plugin, "download_url": ""} for plugin in plugins]
+    if not runtime.config.enabled:
+        return plugins
+    return await enrich_plugins_with_artifacts(request, plugins)
 
 
 def public_market_plugin(plugin: dict[str, Any]) -> dict[str, Any]:

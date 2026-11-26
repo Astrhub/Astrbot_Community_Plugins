@@ -159,6 +159,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20261124_012_git_providers_and_oauth_credentials",
         "20261125_013_object_storage",
         "20261126_014_announcement_management",
+        "20261126_015_download_tracking",
     ]
     sql = migrations[0].sql
     for table in (
@@ -303,6 +304,8 @@ async def run_artifact_migrations(database_url: str) -> None:
             "20261124_011_email_accounts_and_oauth_identities",
             "20261124_012_git_providers_and_oauth_credentials",
             "20261125_013_object_storage",
+            "20261126_014_announcement_management",
+            "20261126_015_download_tracking",
         ]
         assert second == []
         table_names = await connection.fetch(
@@ -332,6 +335,7 @@ async def run_artifact_migrations(database_url: str) -> None:
             "review_policy_events",
             "artifact_sboms",
             "market_schema_migrations",
+            "market_plugin_download_windows",
         } <= tables
         plugin_columns = await connection.fetch(
             """
@@ -350,6 +354,7 @@ async def run_artifact_migrations(database_url: str) -> None:
             "suggested_category",
             "category_confidence",
             "category_reason",
+            "download_count",
         } <= columns
 
         artifact_columns = await connection.fetch(

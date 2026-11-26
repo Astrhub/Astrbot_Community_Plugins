@@ -6,6 +6,7 @@ import { NAlert, NButton, NCard, NIcon, NResult, NSpin, NTag, useMessage } from 
 import {
   ArrowBackOutline,
   ChatbubbleEllipsesOutline,
+  CloudDownloadOutline,
   CopyOutline,
   HeartOutline,
   StarSharp,
@@ -86,6 +87,11 @@ const jsonLd = computed(() => {
         "@type": "InteractionCounter",
         interactionType: "https://schema.org/CommentAction",
         userInteractionCount: plugin.value.comments_count || 0,
+      },
+      {
+        "@type": "InteractionCounter",
+        interactionType: "https://schema.org/DownloadAction",
+        userInteractionCount: plugin.value.download_count || 0,
       },
     ],
   };
@@ -270,6 +276,9 @@ function updatePlugin(updated: PluginDetail): void {
               </span>
               <span class="plugin-metric plugin-metric--comment">
                 <n-icon><chatbubble-ellipses-outline /></n-icon>{{ plugin.comments_count || 0 }}
+              </span>
+              <span class="plugin-metric plugin-metric--download">
+                <n-icon><cloud-download-outline /></n-icon>{{ plugin.download_count || 0 }}
               </span>
             </div>
 

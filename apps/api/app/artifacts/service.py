@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..auth import is_admin
+from ..downloads import build_package_download_url
 from .archive import (
     PrecheckError,
     normalize_github_repo,
@@ -857,6 +858,10 @@ def public_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
         or result.get("publication_status") != PublicationStatus.PUBLISHED.value
     ):
         result["download_url"] = None
+    else:
+        result["download_url"] = (
+            build_package_download_url(result.get("plugin_id"), result.get("id")) or None
+        )
     if "review_coverage" in result:
         result["review_coverage"] = _public_report_value(result["review_coverage"])
     return result

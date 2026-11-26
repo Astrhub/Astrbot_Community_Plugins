@@ -164,7 +164,7 @@ create_app(settings, store)
 | `GET` | `/v1/plugins/{id}/logo` · `/v1/plugins/{id}/readme-asset` | 代理海外平台（`GitLab.com` / `Gitea`）插件 Logo 与 README 仓库内图片（`public, max-age=3600`） |
 | `GET` | `/v1/authors` | 获取公开作者名及是否有已上架插件 |
 | `GET` | `/v1/authors/{username}/plugins` | 获取指定作者的已上架插件列表 |
-| `GET` / `HEAD` | `/v1/storage/public/{object_id}` · `/packages/{alias_key}` | 同源公开对象与历史插件包别名读取（支持 `Range`、`ETag` 与 `public, max-age=3600`，拒绝隔离区与路径穿越） |
+| `GET` / `HEAD` | `/v1/storage/public/{object_id}` · `/packages/{alias_key}` | 同源公开对象与插件包读取（支持 `Range`、`ETag`，拒绝隔离区与路径穿越；普通公开对象使用 `public, max-age=3600`，插件包使用 `public, max-age=0, must-revalidate`） |
 | `GET` | `/v1/authors/{username}/avatar` | 代理海外来源公开作者头像（严格域名白名单与栅格图片校验，`public, max-age=3600`） |
 | `GET` | `/v1/announcements` | 公告列表 |
 | `GET` | `/plugins.json` · `/plugins-md5.json` | AstrBot 插件源 Feed 与 MD5 摘要 |
@@ -379,4 +379,6 @@ GitHub Actions（`.github/workflows/ci.yml`）仅按变更代码路径运行质�
 
 ## AstrBot 集成
 
-AstrBot 客户端通过 `/plugins.json`（及等价 `/v1/astrbot/plugins(.json)` 与 `*-md5.json`）消费插件列表。Feed 遵循 AstrBot `2026-06-27` 规范（Schema Version 1），顶层包含 `$meta` 市场元数据并以 `${author}/${name}` 作为插件键，不输出客户端保留字段 `market_plugin_id`。条目保留归一化后的公开 HTTPS 仓库地址 `repo`（`gitcode.com` 统一归一化为 `atomgit.com`），`version` 优先同步仓库的 `repo_version`（未同步时为空字符串，不虚构默认版本号），后台元数据同步还会采集根目录的 `logo.png`、README 与 CHANGELOG 的 HTTPS raw 地址（`readme_url`、`changelog_url`）以及 `.astrbot-plugin/i18n/<locale>.json` 中的 `metadata` 翻译。仅当当前已发布 artifact 的规范化版本与 `repo_version` 一致时才输出 HTTPS CDN `download_url`；否则省略 `download_url`，客户端仍可通过原仓库直连安装（非 GitHub 仓库关闭 CDN 直连安装需 AstrBot `v4.27.0` 及以上版本），旧的稳定 CDN 对象也不会被未过审的新版本覆盖或冒充。
+AstrBot 客户端通过 `/plugins.json`（及等价 `/v1/astrbot/plugins(.json)` 与 `*-md5.json`）消费插件列表。Feed 遵循 AstrBot `2026-06-27` 规范（Schema Version 1），顶层包含 `$meta` 市场元数据并以 `${author}/${name}` 作为插件键，不输出客户端保留字段 `market_plugin_id`。条目保留归一化后的公开 HTTPS 仓库地址 `repo`（`gitcode.com` 统一归一化为 `atomgit.com`），`version` 优先同步仓库的 `repo_version`（未同步时为空字符串，不虚构默认版本号），后台元数据同步还会采集根目录的 `logo.png`、README 与 CHANGELOG 的 HTTPS raw 地址（`readme_url`、`changelog_url`）以及 `.astrbot-plugin/i18n/<locale>.json` 中的 `metadata` 翻译。仅当当前已发布 artifact 的规范化版本与 `repo_version` 一致时才输出 `download_url`；URL 始终由运行时 `WEB_URL` 和 `/packages/{plugin_id}/{artifact_id}` 组成，所有存储后端都经 API 读取，不输出图床或对象存储直连地址，也不信任历史 URL。成功 GET（含 Range）在内容读取后复核发布状态，同一来源 IP 对同一插件在 1 分钟内只原子累加一次 `download_count`，HEAD 与失败响应不计数；计数不改变插件更新时间。新旧插件包地址均使用 `public, max-age=0, must-revalidate`，旧 `/packages/{published_key}` 别名继续兼容并计数。插件卡片和详情页展示累计下载次数，结构化数据同步包含下载交互计数。
+
+滚动部署此版本时，必须先切断旧 API 实例流量并完成全部实例升级，再恢复 Feed 与下载流量；新旧实例同时服务会使新插件包地址在旧实例返回 404。

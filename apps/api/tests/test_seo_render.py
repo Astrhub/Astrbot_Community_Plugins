@@ -106,6 +106,7 @@ def test_public_private_and_error_route_seo_matrix(tmp_path: Path, monkeypatch: 
         if stored_plugin["id"] == plugin["id"]:
             stored_plugin["owner_username"] = "AlicePublic"
             stored_plugin["owner_github_login"] = "AliceGH"
+            stored_plugin["download_count"] = 17
             break
     store.update_plugin_status(plugin["id"], "listed", None)
 
@@ -154,6 +155,12 @@ def test_public_private_and_error_route_seo_matrix(tmp_path: Path, monkeypatch: 
     assert detail_ld["@type"] == "SoftwareApplication"
     assert detail_ld["name"] == "天气助手"
     assert detail_ld["softwareVersion"] == "1.2.3"
+    assert "<span>下载：17</span>" in detail.text
+    assert {
+        "@type": "InteractionCounter",
+        "interactionType": "https://schema.org/DownloadAction",
+        "userInteractionCount": 17,
+    } in detail_ld["interactionStatistic"]
     assert (
         detail_ld["url"] == "https://market.example.org/plugin/AlicePublic/astrbot_plugin_weather"
     )

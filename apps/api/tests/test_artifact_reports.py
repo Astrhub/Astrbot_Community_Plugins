@@ -186,3 +186,17 @@ def test_public_report_models_reject_unprojected_extra_fields() -> None:
             assert "extra_forbidden" in str(exc)
         else:
             raise AssertionError("unprojected report field was accepted")
+
+
+def test_public_artifact_normalizes_legacy_and_empty_download_urls() -> None:
+    for stored_url in ("https://imgbed.example.test/private/plugin.zip", None, ""):
+        artifact = public_artifact(
+            {
+                "id": "artifact-public-1",
+                "plugin_id": "astrbot_plugin_demo",
+                "review_status": "approved",
+                "publication_status": "published",
+                "download_url": stored_url,
+            }
+        )
+        assert artifact["download_url"] == ("/packages/astrbot_plugin_demo/artifact-public-1")

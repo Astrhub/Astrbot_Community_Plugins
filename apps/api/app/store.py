@@ -2215,6 +2215,7 @@ class InMemoryMarketStore:
         )
         return {
             **plugin,
+            "download_count": int(plugin.get("download_count") or 0),
             "repo_provider": str(plugin.get("repo_provider") or repo_provider),
             "repo_external_id": str(plugin.get("repo_external_id") or repo_external_id),
             "normalized_repo": str(plugin.get("normalized_repo") or normalized_repo).lower(),
@@ -2932,6 +2933,7 @@ PLUGIN_COLUMN_KEYS = {
     "stars",
     "likes",
     "comments_count",
+    "download_count",
     "moderated_by",
     "repo_version",
     "current_artifact_id",
@@ -5902,6 +5904,34 @@ return 0
             """,
             plugin_id,
         )
+
+    async def record_plugin_download(self, plugin_id: str, requester_hash: str) -> bool:
+        async with self._pool().acquire() as connection:
+            async with connection.transaction():
+                inserted = await connection.fetchval(
+                    """
+                    INSERT INTO market_plugin_download_windows (plugin_id, requester_hash)
+                    SELECT id, $2 FROM market_plugins WHERE id = $1
+                    ON CONFLICT (plugin_id, requester_hash) DO UPDATE
+                       SET window_started_at = now()
+                     WHERE market_plugin_download_windows.window_started_at
+                           <= now() - interval '1 minute'
+                    RETURNING 1
+                    """,
+                    plugin_id,
+                    requester_hash,
+                )
+                if inserted is None:
+                    return False
+                result = await connection.execute(
+                    """
+                    UPDATE market_plugins
+                       SET download_count = download_count + 1
+                     WHERE id = $1
+                    """,
+                    plugin_id,
+                )
+                return result == "UPDATE 1"
 
     def _pool(self) -> asyncpg.Pool:
         if not self.pool:

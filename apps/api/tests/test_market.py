@@ -2319,6 +2319,7 @@ def test_astrbot_plugin_source_matches_core_custom_registry_format() -> None:
         "pinned": False,
         "astrbot_version": "",
         "category": "",
+        "download_count": 0,
         "support_platforms": [],
     }
 
