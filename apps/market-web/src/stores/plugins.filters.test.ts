@@ -75,4 +75,25 @@ describe("multi-tag filtering", () => {
     store.searchQuery = "alice";
     expect(store.filteredPlugins).toHaveLength(1);
   });
+
+  it("reuses HTTP cache for default loadPlugins and bypasses cache only when force is true", async () => {
+    setActivePinia(createPinia());
+    const fetchMock = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ items: [] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const store = usePluginStore();
+      await store.loadPlugins();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[1]).toBeUndefined();
+
+      await store.loadPlugins({ force: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1]?.[1]).toEqual({ cache: "no-store" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

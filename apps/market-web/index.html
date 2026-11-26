@@ -29,6 +29,7 @@
     <meta name="author" content="Astrhub" />
     <meta name="theme-color" content="#f59e0b" />
     <meta name="application-name" content="Astrhub 插件市场" />
+    <meta name="astrhub-repo-url" content="https://github.com/Astrhub/Astrbot_Community_Plugins" />
     <link rel="preload" href="/font/lexend.woff2" as="font" type="font/woff2" crossorigin />
     <link
       rel="preload"
@@ -57,6 +58,191 @@
 
       .auth-session-loading #app .auth-session-control {
         visibility: hidden;
+      }
+
+      html.js .ssr-shell {
+        display: none;
+      }
+
+      html:not(.js) #boot-overlay {
+        display: none;
+      }
+
+      #app[data-v-app] ~ #boot-overlay:not(.is-error) {
+        display: none;
+      }
+
+      #boot-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background-color: #ffffff;
+        color: #18181b;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      }
+
+      html.dark #boot-overlay {
+        background-color: #0f1115;
+        color: #f4f4f5;
+      }
+
+      .boot-loading-dots {
+        display: flex;
+        gap: 7px;
+      }
+
+      .boot-loading-dots span {
+        width: 7px;
+        height: 7px;
+        background: #2563eb;
+        border-radius: 50%;
+        animation: boot-loading-pulse 1.1s ease-in-out infinite alternate;
+      }
+
+      html.dark .boot-loading-dots span {
+        background: #60a5fa;
+      }
+
+      .boot-loading-dots span:nth-child(2) {
+        animation-delay: 160ms;
+      }
+
+      .boot-loading-dots span:nth-child(3) {
+        animation-delay: 320ms;
+      }
+
+      @keyframes boot-loading-pulse {
+        to {
+          opacity: 0.25;
+          transform: translateY(-4px);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .boot-loading-dots span {
+          animation: none;
+        }
+      }
+
+      #boot-overlay.is-error .boot-loading-dots {
+        display: none;
+      }
+
+      .boot-error-card {
+        width: 100%;
+        max-width: 420px;
+        box-sizing: border-box;
+        padding: 28px 24px;
+        border-radius: 12px;
+        border: 1px solid #dfe3e8;
+        background-color: #ffffff;
+        box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+        text-align: center;
+      }
+
+      html.dark .boot-error-card {
+        border-color: #2d323b;
+        background-color: #13161b;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.36);
+      }
+
+      .boot-error-logo {
+        display: block;
+        width: 40px;
+        height: 40px;
+        margin: 0 auto 14px;
+        object-fit: contain;
+      }
+
+      .boot-error-title {
+        margin: 0 0 10px;
+        font-size: 18px;
+        font-weight: 600;
+        line-height: 1.35;
+        color: #18181b;
+      }
+
+      html.dark .boot-error-title {
+        color: #f4f4f5;
+      }
+
+      .boot-error-desc {
+        margin: 0 0 20px;
+        font-size: 14px;
+        line-height: 1.65;
+        color: #52525b;
+      }
+
+      html.dark .boot-error-desc {
+        color: #a1a1aa;
+      }
+
+      .boot-error-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 120px;
+        height: 38px;
+        padding: 0 18px;
+        border: 0;
+        border-radius: 8px;
+        background-color: #2563eb;
+        color: #ffffff;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .boot-error-action:hover,
+      .boot-error-action:focus-visible {
+        background-color: #1d4ed8;
+        outline: 2px solid #93c5fd;
+        outline-offset: 2px;
+      }
+
+      html.dark .boot-error-action {
+        background-color: #3b82f6;
+      }
+
+      html.dark .boot-error-action:hover,
+      html.dark .boot-error-action:focus-visible {
+        background-color: #2563eb;
+      }
+
+      .boot-error-links {
+        margin-top: 20px;
+        padding-top: 16px;
+        border-top: 1px solid #e4e4e7;
+        display: grid;
+        gap: 8px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: #52525b;
+      }
+
+      html.dark .boot-error-links {
+        border-top-color: #27272a;
+        color: #a1a1aa;
+      }
+
+      .boot-error-contact {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .boot-error-link {
+        color: #2563eb;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+
+      html.dark .boot-error-link {
+        color: #60a5fa;
       }
 
       .ssr-shell {
@@ -107,6 +293,8 @@
     </style>
     <script data-cfasync="false">
       (() => {
+        document.documentElement.classList.add("js");
+
         let themeMode = "system";
         try {
           const savedTheme = localStorage.getItem("theme-mode");
@@ -122,30 +310,157 @@
         document.documentElement.classList.toggle("dark", isDark);
         document.documentElement.style.colorScheme = isDark ? "dark" : "light";
 
-        const readCache = (key, maxAge) => {
+        const readCachedRecord = (key, maxAge) => {
           try {
             const raw = localStorage.getItem(key);
-            if (!raw) return false;
+            if (!raw) return null;
             const cached = JSON.parse(raw);
             if (cached?.version !== 1 || !cached.value || !Number.isFinite(cached.savedAt)) {
-              return false;
+              return null;
             }
-            return !maxAge || Date.now() - cached.savedAt <= maxAge;
+            if (maxAge && Date.now() - cached.savedAt > maxAge) return null;
+            return cached.value;
           } catch {
-            return false;
+            return null;
           }
         };
-        if (!readCache("astrhub_site_config_v1")) {
+
+        const cachedSiteConfig = readCachedRecord("astrhub_site_config_v1");
+        if (!cachedSiteConfig) {
           document.documentElement.classList.add("site-config-loading");
         }
-        if (!readCache("astrhub_user_preview_v1", 7 * 24 * 60 * 60 * 1000)) {
+        if (!readCachedRecord("astrhub_user_preview_v1", 7 * 24 * 60 * 60 * 1000)) {
           document.documentElement.classList.add("auth-session-loading");
         }
+
+        const hasMounted = () => Boolean(document.querySelector("#app[data-v-app]"));
+
+        const resolveRepoIssuesUrl = () => {
+          const fallback = "https://github.com/Astrhub/Astrbot_Community_Plugins";
+          const meta = document.querySelector('meta[name="astrhub-repo-url"]');
+          const raw = (meta?.getAttribute("content") || fallback).trim();
+          const normalized = /^https?:\/\//i.test(raw) ? raw.replace(/\/+$/, "") : fallback;
+          return `${normalized}/issues`;
+        };
+
+        const resolveContactEmail = () => {
+          const meta = document.querySelector('meta[name="astrhub-contact-email"]');
+          const fromMeta = (meta?.getAttribute("content") || "").trim();
+          const fromCache =
+            cachedSiteConfig && typeof cachedSiteConfig.contact_email === "string"
+              ? cachedSiteConfig.contact_email.trim()
+              : "";
+          const candidate = fromMeta || fromCache;
+          return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(candidate) ? candidate : "";
+        };
+
+        const renderBootError = () => {
+          const overlay = document.getElementById("boot-overlay");
+          if (!overlay) {
+            document.addEventListener("DOMContentLoaded", renderBootError, { once: true });
+            return;
+          }
+          if (overlay.classList.contains("is-error")) return;
+
+          const card = document.createElement("div");
+          card.className = "boot-error-card";
+
+          const logo = document.createElement("img");
+          logo.className = "boot-error-logo";
+          logo.src = "/logo.webp?v=20260725";
+          logo.alt = "";
+          logo.width = 40;
+          logo.height = 40;
+          card.appendChild(logo);
+
+          const title = document.createElement("p");
+          title.className = "boot-error-title";
+          title.textContent = "页面暂时无法加载";
+          card.appendChild(title);
+
+          const desc = document.createElement("p");
+          desc.className = "boot-error-desc";
+          desc.textContent =
+            "应用资源未能正常加载，这通常是网络波动或站点刚完成更新导致的。请先刷新页面重试；如果问题持续出现，欢迎向我们反馈。";
+          card.appendChild(desc);
+
+          const retryButton = document.createElement("button");
+          retryButton.type = "button";
+          retryButton.className = "boot-error-action";
+          retryButton.textContent = "刷新页面";
+          retryButton.addEventListener("click", () => window.location.reload());
+          card.appendChild(retryButton);
+
+          const links = document.createElement("div");
+          links.className = "boot-error-links";
+
+          const issueLink = document.createElement("a");
+          issueLink.className = "boot-error-link";
+          issueLink.href = resolveRepoIssuesUrl();
+          issueLink.target = "_blank";
+          issueLink.rel = "noopener noreferrer";
+          issueLink.textContent = "前往 GitHub 仓库反馈";
+          links.appendChild(issueLink);
+
+          const email = resolveContactEmail();
+          if (email) {
+            const contact = document.createElement("p");
+            contact.className = "boot-error-contact";
+            contact.textContent = "联系邮箱：";
+            const mailLink = document.createElement("a");
+            mailLink.className = "boot-error-link";
+            mailLink.href = `mailto:${email}`;
+            mailLink.textContent = email;
+            contact.appendChild(mailLink);
+            links.appendChild(contact);
+          }
+
+          card.appendChild(links);
+          overlay.appendChild(card);
+          overlay.classList.add("is-error");
+          overlay.setAttribute("role", "alert");
+          overlay.removeAttribute("aria-hidden");
+        };
+
+        window.__showBootError = renderBootError;
+
+        window.addEventListener(
+          "error",
+          (event) => {
+            if (hasMounted()) return;
+            const target = event.target;
+            if (target instanceof HTMLScriptElement && target.type === "module") {
+              console.error("Failed to load entry module script:", target.src);
+              renderBootError();
+              return;
+            }
+            if (event instanceof ErrorEvent) {
+              const sameOrigin =
+                (typeof event.filename === "string" &&
+                  event.filename.startsWith(window.location.origin)) ||
+                (!event.filename && Boolean(event.error) && event.message !== "Script error.");
+              if (sameOrigin) {
+                console.error("Fatal boot error:", event.error || event.message);
+                renderBootError();
+              }
+            }
+          },
+          true,
+        );
+
+        window.addEventListener("unhandledrejection", (event) => {
+          if (hasMounted()) return;
+          console.error("Unhandled boot rejection:", event.reason);
+          renderBootError();
+        });
       })();
     </script>
   </head>
   <body>
     <div id="app"><!-- SSR_BODY --></div>
+    <div id="boot-overlay" class="boot-overlay" aria-hidden="true">
+      <div class="boot-loading-dots"><span></span><span></span><span></span></div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -5,7 +5,18 @@ import { create, NConfigProvider } from "naive-ui";
 import App from "./App.vue";
 import "./assets/theme.css";
 import router from "./router";
-import "./plugins/highlight";
+import { handleChunkLoadFailure, isChunkLoadError } from "./utils/bootRecovery";
+
+window.addEventListener("vite:preloadError", (event) => {
+  event.preventDefault();
+  handleChunkLoadFailure((event as Event & { payload?: unknown }).payload ?? event);
+});
+
+router.onError((error) => {
+  if (isChunkLoadError(error)) {
+    handleChunkLoadFailure(error);
+  }
+});
 
 const naive = create({
   components: [NConfigProvider],
@@ -23,9 +34,18 @@ async function bootstrap(): Promise<void> {
     await router.isReady();
   } catch (error) {
     console.error("Initial route resolution failed", error);
+    if (isChunkLoadError(error)) {
+      handleChunkLoadFailure(error);
+      return;
+    }
   }
 
-  app.mount("#app");
+  try {
+    app.mount("#app");
+  } catch (error) {
+    console.error("Application mount failed", error);
+    window.__showBootError?.();
+  }
 }
 
 void bootstrap();

@@ -589,7 +589,10 @@ export const usePluginStore = defineStore("plugins", () => {
     isLoading.value = true;
     loadPluginsPromise = (async () => {
       try {
-        const response = await fetch(`${apiBaseUrl}/v1/plugins`, { cache: "no-store" });
+        const response = await fetch(
+          `${apiBaseUrl}/v1/plugins`,
+          force ? { cache: "no-store" } : undefined,
+        );
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         const items: unknown[] = Array.isArray(data) ? data : data.items || [];

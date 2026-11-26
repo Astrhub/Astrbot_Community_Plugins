@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, shallowRef, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, shallowRef, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { NButton, NIcon, NModal } from "naive-ui";
+import { NIcon } from "naive-ui";
 import { MegaphoneOutline } from "@vicons/ionicons5";
-import AnnouncementBody from "./AnnouncementBody.vue";
 import { usePluginStore } from "../stores/plugins";
+
+const AnnouncementModal = defineAsyncComponent(() => import("./AnnouncementModal.vue"));
 
 const store = usePluginStore();
 const { announcements } = storeToRefs(store);
 const show = shallowRef(false);
+const modalLoaded = shallowRef(false);
 const storageKey = "astrhub_announcements_seen_v1";
 const revision = computed(() =>
   announcements.value.length
@@ -30,6 +32,7 @@ try {
 }
 
 function openAnnouncements(): void {
+  modalLoaded.value = true;
   show.value = true;
   seenRevision = revision.value;
   try {
@@ -52,11 +55,6 @@ onMounted(() => {
     console.error("Error loading announcements:", error);
   });
 });
-
-function formatTime(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour12: false });
-}
 </script>
 
 <template>
@@ -72,24 +70,7 @@ function formatTime(value: string): string {
   >
     <n-icon><megaphone-outline /></n-icon>
   </button>
-  <n-modal v-model:show="show" preset="card" title="站点公告" class="announcement-modal">
-    <div class="announcement-list">
-      <article
-        v-for="announcement in announcements"
-        :key="announcement.id"
-        class="announcement-item"
-      >
-        <h2>{{ announcement.title }}</h2>
-        <time v-if="announcement.created_at" :datetime="announcement.created_at">{{
-          formatTime(announcement.created_at)
-        }}</time>
-        <AnnouncementBody v-if="announcement.body" :body="announcement.body" />
-      </article>
-    </div>
-    <template #footer>
-      <n-button type="primary" @click="show = false">知道了</n-button>
-    </template>
-  </n-modal>
+  <AnnouncementModal v-if="modalLoaded" v-model:show="show" :announcements="announcements" />
 </template>
 
 <style scoped>
@@ -112,32 +93,5 @@ function formatTime(value: string): string {
 .announcement-trigger:focus-visible {
   color: var(--primary-color);
   background: var(--bg-hover);
-}
-
-:global(.announcement-modal) {
-  width: min(560px, calc(100vw - 32px));
-  border-radius: 12px;
-}
-
-.announcement-list {
-  max-height: 60vh;
-  overflow-y: auto;
-  overflow-wrap: anywhere;
-}
-
-.announcement-item + .announcement-item {
-  margin-top: 20px;
-  padding-top: 20px;
-  border-top: 1px solid var(--border-base);
-}
-
-.announcement-item h2 {
-  margin: 0 0 6px;
-  font-size: 17px;
-}
-
-.announcement-item time {
-  color: var(--text-tertiary);
-  font-size: 12px;
 }
 </style>

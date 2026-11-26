@@ -47,6 +47,8 @@ describe("AnnouncementButton", () => {
     expect(first.wrapper.find("button").exists()).toBe(false);
     first.store.announcements = [announcement];
     await flushPromises();
+    await vi.dynamicImportSettled();
+    await flushPromises();
     expect(first.wrapper.get('[role="dialog"]').text()).toContain(announcement.body);
     await first.wrapper.get('[role="dialog"] button').trigger("click");
     expect(first.wrapper.find('[role="dialog"]').exists()).toBe(false);
@@ -57,6 +59,8 @@ describe("AnnouncementButton", () => {
     await flushPromises();
     expect(second.wrapper.find('[role="dialog"]').exists()).toBe(false);
     await second.wrapper.get('button[aria-label="查看站点公告"]').trigger("click");
+    await vi.dynamicImportSettled();
+    await flushPromises();
     expect(second.wrapper.get('[role="dialog"]').text()).toContain(announcement.body);
     second.wrapper.unmount();
   });
@@ -64,6 +68,8 @@ describe("AnnouncementButton", () => {
   it("opens again for edited content or a newly published announcement", async () => {
     const { wrapper, store } = setup();
     store.announcements = [announcement];
+    await flushPromises();
+    await vi.dynamicImportSettled();
     await flushPromises();
     await wrapper.get('[role="dialog"] button').trigger("click");
     store.announcements = [{ ...announcement, body: "更新后的公告" }];
