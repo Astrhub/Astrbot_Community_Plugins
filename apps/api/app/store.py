@@ -2313,6 +2313,8 @@ class InMemoryMarketStore:
 
 
 def _parse_utc_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
     raw = str(value or "").strip()
     if not raw:
         return None
@@ -2323,14 +2325,19 @@ def _parse_utc_timestamp(value: Any) -> datetime | None:
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def _oauth_timestamp(value: Any) -> datetime | None:
-    """Convert an optional OAuth timestamp for asyncpg."""
+def _pg_timestamp(value: Any, *, error_message: str = "Invalid timestamp") -> datetime | None:
+    """Convert an optional ISO timestamp or datetime into a UTC datetime for asyncpg."""
     if value in {None, ""}:
         return None
     parsed = _parse_utc_timestamp(value)
     if parsed is None:
-        raise ValueError("Invalid OAuth timestamp")
+        raise ValueError(error_message)
     return parsed
+
+
+def _oauth_timestamp(value: Any) -> datetime | None:
+    """Convert an optional OAuth timestamp for asyncpg."""
+    return _pg_timestamp(value, error_message="Invalid OAuth timestamp")
 
 
 class LocalFileMarketStore(InMemoryMarketStore):
@@ -3795,7 +3802,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 new_id("user"),
                 clean_username,
                 clean_email,
-                email_verified_at,
+                _pg_timestamp(email_verified_at),
                 password_hash,
                 normalize_role(role).value,
             )
@@ -3924,7 +3931,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 user_id,
                 password_hash,
                 clean_email or "",
-                verify_email_at,
+                _pg_timestamp(verify_email_at),
                 bump_session_version,
                 expected,
             )
@@ -3958,7 +3965,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 """,
                 user_id,
                 clean_email,
-                email_verified_at,
+                _pg_timestamp(email_verified_at),
             )
         except asyncpg.UniqueViolationError as exc:
             if exc.constraint_name == "market_users_email_lower_idx":
@@ -4251,7 +4258,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                         str(verification_method or "oauth"),
                         str(credential_ref or ""),
                         gen,
-                        verified_at,
+                        _oauth_timestamp(verified_at),
                     )
                     return serialize_value(dict(row))
 
@@ -4288,7 +4295,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                     str(verification_method or "oauth"),
                     str(credential_ref or ""),
                     prior_max + 1,
-                    verified_at,
+                    _oauth_timestamp(verified_at),
                 )
                 return serialize_value(dict(row))
 
@@ -5118,7 +5125,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
          RETURNING *
             """,
             user_id,
-            muted_until,
+            _pg_timestamp(muted_until),
             by_user_id,
             reason,
         )

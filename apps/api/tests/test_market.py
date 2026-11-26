@@ -1699,12 +1699,34 @@ def test_plugin_submission_accepts_only_official_categories() -> None:
     legacy_payload["repo"] = "https://github.com/alice/astrbot_plugin_legacy"
     legacy = client.post("/v1/plugins/submissions", json=legacy_payload)
 
+    other_payload = plugin_payload(name="astrbot_plugin_other")
+    other_payload["repo"] = "https://github.com/alice/astrbot_plugin_other"
+    other_payload["category"] = "Other"
+    other_accepted = client.post("/v1/plugins/submissions", json=other_payload)
+
+    patched_other = client.patch(
+        f"/v1/plugins/{other_accepted.json()['id']}",
+        json={"desc": "Updated desc", "category": "other"},
+    )
+    patched_invalid = client.patch(
+        f"/v1/plugins/{other_accepted.json()['id']}",
+        json={"category": "chatbot"},
+    )
+
     assert accepted.status_code == 201
     assert accepted.json()["category"] == "ai_tools"
     assert rejected.status_code == 400
     assert rejected.json()["error"] == "Plugin category is invalid"
     assert legacy.status_code == 201
     assert legacy.json().get("category", "") == ""
+    assert other_accepted.status_code == 201
+    assert other_accepted.json()["category"] == "other"
+    assert patched_other.status_code == 200
+    assert patched_other.json()["category"] == "other"
+    assert patched_other.json()["desc"] == "Updated desc"
+    assert patched_invalid.status_code == 400
+    assert patched_invalid.json()["error"] == "Plugin category is invalid"
+    assert main_module.normalize_plugin_metadata_field("category", "OTHER") == "other"
 
 
 def test_cors_allows_browser_session_cookies_and_dev_auth_header() -> None:

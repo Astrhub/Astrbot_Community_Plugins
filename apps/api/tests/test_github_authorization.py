@@ -115,7 +115,7 @@ def test_org_owner_fallback_and_removed_repository_permission(tmp_path):
     asyncio.run(run())
 
 
-def test_oauth_is_encrypted_revocable_and_expires_without_site_token_fallback(tmp_path):
+def test_oauth_is_encrypted_revocable_and_falls_back_to_persistent_credential(tmp_path):
     calls = []
 
     def handler(request):
@@ -126,11 +126,29 @@ def test_oauth_is_encrypted_revocable_and_expires_without_site_token_fallback(tm
         store, cfg, user, session, access = await authorized(tmp_path, handler)
         ciphertext = store.get_github_authorization(access.reference)
         assert "user-oauth-token" not in ciphertext
+        identity = store.list_oauth_identities(user["id"])[0]
+        assert store.get_oauth_credential(identity["credential_ref"]) is not None
+
         with pytest.raises(HTTPException) as error:
             await access.verify("https://github.com/my-org/astrbot_plugin_demo")
+        assert error.value.status_code == 409
         assert error.value.detail["code"] == "github_authorization_required"
+        assert error.value.detail["error"] == "GitHub 授权已失效，请重新连接"
         assert store.get_github_authorization(access.reference) is None
+        assert store.get_oauth_credential(identity["credential_ref"]) is None
+        assert store.list_oauth_identities(user["id"])[0]["rotation_status"] == "reauth_required"
         assert len(calls) == 1
+
+        # After 401 invalidation, subsequent calls fail without hitting GitHub or site-token fallback.
+        with pytest.raises(HTTPException) as after_401:
+            await GithubRepositoryAccess(
+                store, cfg, user, access.reference, transport=httpx.MockTransport(handler)
+            ).verify("https://github.com/my-org/astrbot_plugin_demo")
+        assert after_401.value.status_code == 409
+        assert after_401.value.detail["code"] == "github_authorization_required"
+        assert after_401.value.detail["error"] == "GitHub 授权已失效，请重新连接"
+        assert len(calls) == 1
+
         await save_authorization(
             store, cfg, session["token"], user["id"], "1", "alice", "user-oauth-token"
         )
@@ -147,8 +165,68 @@ def test_oauth_is_encrypted_revocable_and_expires_without_site_token_fallback(tm
             .decode()
         )
         store.set_github_authorization(access.reference, expired, 300)
-        with pytest.raises(HTTPException):
+        # Expired Redis cache cleans up and falls back to the persistent CredentialStore entry.
+        recovered = await GithubRepositoryAccess(store, cfg, user, access.reference).credential()
+        assert recovered["access_token"] == "user-oauth-token"
+        assert store.get_github_authorization(access.reference) is None
+
+        # Without a persistent credential, an expired Redis cache fails with 409.
+        ref = store.list_oauth_identities(user["id"])[0]["credential_ref"]
+        store.delete_oauth_credential(ref)
+        store.set_github_authorization(access.reference, expired, 300)
+        with pytest.raises(HTTPException) as missing:
             await GithubRepositoryAccess(store, cfg, user, access.reference).credential()
+        assert missing.value.status_code == 409
+        assert missing.value.detail["code"] == "github_authorization_required"
+        assert missing.value.detail["error"] == "GitHub 授权已失效，请重新连接"
+
+    asyncio.run(run())
+
+
+def test_github_401_does_not_revoke_newer_rotated_persistent_credential(tmp_path):
+    async def run():
+        store, cfg, user, session, access = await authorized(
+            tmp_path, lambda request: httpx.Response(401, json={})
+        )
+        # Load the stale token into this request's access instance, then simulate a newer login.
+        stale = await access.credential()
+        assert stale["access_token"] == "user-oauth-token"
+        new_session = store.create_session(user["id"])
+        await save_authorization(
+            store, cfg, new_session["token"], user["id"], "1", "alice", "fresh-oauth-token"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await access.verify("https://github.com/my-org/astrbot_plugin_demo")
+        assert exc_info.value.status_code == 409
+
+        # The newer persistent credential remains intact for future requests.
+        store.delete_github_authorization(authorization_reference(new_session["token"]))
+        fresh = await GithubRepositoryAccess(
+            store, cfg, user, authorization_reference(new_session["token"])
+        ).credential()
+        assert fresh["access_token"] == "fresh-oauth-token"
+
+    asyncio.run(run())
+
+
+def test_github_409_message_distinguishes_unbound_vs_expired_user(tmp_path):
+    async def run():
+        store = InMemoryMarketStore()
+        cfg = settings(tmp_path)
+        email_user = store.create_email_user(
+            username="bob",
+            email="bob@example.com",
+            password_hash="hash",
+        )
+        session = store.create_session(email_user["id"])
+        with pytest.raises(HTTPException) as unbound:
+            await GithubRepositoryAccess(
+                store, cfg, email_user, authorization_reference(session["token"])
+            ).credential()
+        assert unbound.value.status_code == 409
+        assert unbound.value.detail["code"] == "github_authorization_required"
+        assert unbound.value.detail["error"] == "请先连接 GitHub 账号后再操作"
 
     asyncio.run(run())
 
@@ -226,7 +304,12 @@ def test_publication_rechecks_identity_and_can_use_a_new_authorization(tmp_path)
         )
         request = SimpleNamespace(app=SimpleNamespace(state=state))
         assert (await verify_publication_access(request, "a1"))["artifact_id"] == "a1"
+        # Session logout still allows publication via persistent GitHub credential.
         store.revoke_session(session["token"])
+        assert (await verify_publication_access(request, "a1"))["artifact_id"] == "a1"
+        # Deleting the persistent credential blocks publication until re-authorized.
+        identity = store.list_oauth_identities(user["id"])[0]
+        store.delete_oauth_credential(identity["credential_ref"])
         with pytest.raises(HTTPException):
             await verify_publication_access(request, "a1")
         new_session = store.create_session(user["id"])
@@ -375,6 +458,17 @@ def test_revoking_one_github_identity_preserves_other_credentials(tmp_path):
         first_reference = authorization_reference(first_session["token"])
         second_reference = authorization_reference(second_session["token"])
 
+        first_cred_ref = next(
+            item["credential_ref"]
+            for item in store.list_oauth_identities(user["id"])
+            if item["id"] == first_identity["id"]
+        )
+        second_identity = next(
+            item
+            for item in store.list_oauth_identities(user["id"])
+            if item["id"] != first_identity["id"]
+        )
+
         revoked = store.revoke_oauth_identity(user["id"], first_identity["id"])
         assert revoked is not None
         deleted = await revoke_github_identity_authorizations(store, cfg, user["id"], "111")
@@ -383,12 +477,22 @@ def test_revoking_one_github_identity_preserves_other_credentials(tmp_path):
         assert user["github_login"] == "second_gh"
         assert user["github_email"] == "second@example.com"
         assert store.get_github_authorization(first_reference) is None
+        assert store.get_oauth_credential(first_cred_ref) is None
         assert store.get_latest_github_authorization(user["id"]) == second_reference
         credential = await GithubRepositoryAccess(store, cfg, user, second_reference).credential()
         assert credential["access_token"] == "token-2"
+        # Revoking the first identity removes token-1 and falls back to the remaining active identity.
+        fallback = await GithubRepositoryAccess(store, cfg, user, first_reference).credential()
+        assert fallback["access_token"] == "token-2"
+        assert fallback["github_id"] == "222"
+
+        # Revoking the remaining GitHub identity blocks access with 409.
+        assert store.revoke_oauth_identity(user["id"], second_identity["id"]) is not None
+        await revoke_github_identity_authorizations(store, cfg, user["id"], "222")
         with pytest.raises(HTTPException) as denied:
             await GithubRepositoryAccess(store, cfg, user, first_reference).credential()
         assert denied.value.status_code == 409
+        assert denied.value.detail["error"] == "请先连接 GitHub 账号后再操作"
 
     asyncio.run(run())
 
@@ -465,3 +569,37 @@ def test_legacy_store_credential_uses_shared_github_fields(tmp_path):
         assert credential["access_token"] == "legacy-token"
 
     asyncio.run(run())
+
+
+def test_cdn_enable_succeeds_after_redis_github_cache_expires(tmp_path):
+    def handler(request):
+        return httpx.Response(200, json=repo())
+
+    store, cfg, user, session, access = asyncio.run(authorized(tmp_path, handler))
+    # Simulate 8-hour Redis cache expiry while persistent CredentialStore entry remains valid.
+    store.delete_github_authorization(access.reference)
+    store.state["plugins"].append(
+        {
+            "id": "astrbot_plugin_demo",
+            "name": "astrbot_plugin_demo",
+            "display_name": "Demo",
+            "desc": "Demo plugin",
+            "author": "alice",
+            "repo": "https://github.com/my-org/astrbot_plugin_demo",
+            "owner_user_id": user["id"],
+            "owner_github_login": "alice",
+            "status": "listed",
+            "cdn_enabled": False,
+        }
+    )
+    app = create_app(cfg, store)
+    app.state.github_access_factory = lambda *args: GithubRepositoryAccess(
+        *args, transport=httpx.MockTransport(handler)
+    )
+    app.state.artifact_runtime = SimpleNamespace(available=True, service=object())
+    client = TestClient(app)
+    client.cookies.set(cfg.session_cookie_name, session["token"])
+
+    response = client.patch("/v1/plugins/astrbot_plugin_demo/cdn", json={"enabled": True})
+    assert response.status_code == 200
+    assert response.json()["cdn_enabled"] is True

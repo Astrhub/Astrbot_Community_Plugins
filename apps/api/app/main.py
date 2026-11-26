@@ -390,6 +390,7 @@ OFFICIAL_PLUGIN_CATEGORIES = {
     "productivity",
     "utilities",
 }
+ALLOWED_PLUGIN_CATEGORIES = OFFICIAL_PLUGIN_CATEGORIES | {"other"}
 
 
 def create_app(
@@ -3979,7 +3980,7 @@ def normalize_plugin_category(value: Any) -> str:
 
 def validate_plugin_category(value: Any) -> str:
     category = normalize_plugin_category(value)
-    if category and category not in OFFICIAL_PLUGIN_CATEGORIES:
+    if category and category not in ALLOWED_PLUGIN_CATEGORIES:
         raise error(400, "Plugin category is invalid")
     return category
 
@@ -5252,7 +5253,7 @@ def normalize_plugin_metadata_field(field: str, value: Any) -> Any:
         return cleaned if is_valid_plugin_author(cleaned) else ""
     if field == "category":
         category = normalize_plugin_category(value)
-        return category if category in OFFICIAL_PLUGIN_CATEGORIES else ""
+        return category if category in ALLOWED_PLUGIN_CATEGORIES else ""
     if field in {"tags", "support_platforms"}:
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item).strip()]
