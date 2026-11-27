@@ -282,7 +282,8 @@ docker compose build
 | `EMAIL_VERIFICATION_REQUIRED` | `true` | 邮箱注册与换绑是否需要邮件验证码校验 |
 | `EMAIL_DAILY_LIMIT` / `EMAIL_VERIFICATION_DAILY_LIMIT_PER_USER` | `0` / `5` | 全站每日邮件总额度（0 不限）与单邮箱每日验证码上限 |
 | `AVATAR_UPLOAD_ENABLED` | `true` | 是否开放用户头像上传；关闭后 `POST /v1/me/avatar` 返回 403，已上传头像继续展示。上传要求 `avatar` 用途已显式绑定存储 Profile（本地 / S3 / WebDAV / ImgBed），未绑定时返回 503 |
-| `SESSION_MAX_AGE_SECONDS` | `604800` | 登录会话有效期（默认 7 天） |
+| `SESSION_MAX_AGE_SECONDS` | `604800` | 常规登录会话有效期（默认 7 天，固定绝对过期） |
+| `TRUSTED_SESSION_MAX_AGE_SECONDS` | `31536000` | 勾选“信任此设备”时的会话有效期（默认 365 天，上限 400 天） |
 | `COOKIE_SECURE` / `COOKIE_SAME_SITE` | `false` / `Lax` | Cookie 安全属性 |
 | `ENABLE_DEV_AUTH` | `false` | 开发调试登录头开关（`apps/api/.env.example` 为便于本地开发设为 `true`，生产必须 `false`） |
 | `MARKET_API_KEYS` | 空 | 全局静态 API Key，格式 `name:key:scope1\|scope2`，逗号分隔多个 |

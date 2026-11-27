@@ -33,6 +33,9 @@ DEFAULT_ARTIFACT_LOCAL_ROOT = "/var/lib/astrbot-market/artifacts"
 DEFAULT_ARTIFACT_MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 DEFAULT_ARTIFACT_MAX_UNPACKED_BYTES = 128 * 1024 * 1024
 DEFAULT_ARTIFACT_MAX_FILE_BYTES = 8 * 1024 * 1024
+DEFAULT_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
+DEFAULT_TRUSTED_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 365
+MAX_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 400
 
 
 @dataclass(frozen=True)
@@ -321,6 +324,7 @@ class Settings:
     session_max_age_seconds: int
     api_keys: tuple[ApiKey, ...]
     artifacts: ArtifactSettings
+    trusted_session_max_age_seconds: int = DEFAULT_TRUSTED_SESSION_MAX_AGE_SECONDS
     artifact_authorization_url: str = ""
     artifact_authorization_token: str = field(default="", repr=False)
     storage_mode: str = DEFAULT_STORAGE_MODE
@@ -505,7 +509,18 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         cookie_same_site=merged.get("COOKIE_SAME_SITE", "Lax"),
         cookie_secure=_bool(merged.get("COOKIE_SECURE")),
         enable_dev_auth=_bool(merged.get("ENABLE_DEV_AUTH")),
-        session_max_age_seconds=_int(merged.get("SESSION_MAX_AGE_SECONDS"), 60 * 60 * 24 * 7),
+        session_max_age_seconds=_bounded_int(
+            merged.get("SESSION_MAX_AGE_SECONDS"),
+            DEFAULT_SESSION_MAX_AGE_SECONDS,
+            1,
+            MAX_COOKIE_MAX_AGE_SECONDS,
+        ),
+        trusted_session_max_age_seconds=_bounded_int(
+            merged.get("TRUSTED_SESSION_MAX_AGE_SECONDS"),
+            DEFAULT_TRUSTED_SESSION_MAX_AGE_SECONDS,
+            1,
+            MAX_COOKIE_MAX_AGE_SECONDS,
+        ),
         api_keys=parse_api_keys(merged.get("MARKET_API_KEYS", "")),
         artifacts=ArtifactSettings(
             enabled=_bool(merged.get("ARTIFACTS_ENABLED")),

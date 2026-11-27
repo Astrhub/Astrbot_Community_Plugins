@@ -279,6 +279,18 @@ export interface ApiKey {
   [key: string]: unknown;
 }
 
+/** 个人账号活跃登录设备 / 信任设备会话。 */
+export interface UserSession {
+  id: string;
+  trusted: boolean;
+  device_label: string;
+  ip_address: string;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  is_current: boolean;
+}
+
 /** 后台用户列表项。 */
 export interface AdminUser extends User {
   muted_until?: string | null;

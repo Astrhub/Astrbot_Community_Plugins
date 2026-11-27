@@ -228,6 +228,10 @@ def test_pg_store_converts_iso_timestamps_for_asyncpg() -> None:
             self.calls.append((query, args))
             return 0
 
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            self.calls.append((query, args))
+            return []
+
         async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
             self.calls.append((query, args))
             if "FROM market_git_repository_bindings" in query and "FOR UPDATE" in query:
@@ -294,7 +298,14 @@ def test_pg_store_converts_iso_timestamps_for_asyncpg() -> None:
         async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
             return await self.conn.fetchrow(query, *args)
 
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            self.conn.calls.append((query, args))
+            return []
+
     class FakeRedis:
+        async def get(self, key: str) -> str | None:
+            return None
+
         async def delete(self, key: str) -> int:
             return 1
 

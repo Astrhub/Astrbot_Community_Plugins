@@ -161,6 +161,7 @@ def test_artifact_foundation_migration_declares_required_schema() -> None:
         "20261126_014_announcement_management",
         "20261126_015_download_tracking",
         "20261127_016_user_uploaded_avatar",
+        "20261127_017_user_sessions",
     ]
     sql = migrations[0].sql
     for table in (

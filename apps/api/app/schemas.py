@@ -169,6 +169,7 @@ class InternalUserCreate(BaseModel):
 class InternalLoginPayload(BaseModel):
     username: str
     password: str
+    trust_device: bool = False
 
     @field_validator("username", "password")
     @classmethod
@@ -180,6 +181,7 @@ class EmailRegisterPayload(BaseModel):
     username: str
     email: str
     password: str
+    trust_device: bool = False
 
     @field_validator("username", "email", "password", mode="before")
     @classmethod
@@ -201,6 +203,7 @@ class EmailRegisterRequestPayload(BaseModel):
 class EmailRegisterVerifyPayload(BaseModel):
     registration_id: str
     code: str
+    trust_device: bool = False
 
     @field_validator("registration_id", "code", mode="before")
     @classmethod

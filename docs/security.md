@@ -32,13 +32,13 @@
 
 ## 会话与 Cookie
 
-系统采用服务端有状态 Cookie 会话（`astrbot_market_session`，非 JWT），支持随时在服务端吊销：
+系统采用服务端有状态 Cookie 会话（`astrbot_market_session`，非 JWT），支持按设备区分普通会话与受信任设备，并可随时在服务端单设备或全量吊销：
 
-- **Token 格式**：`sess_{token_urlsafe(24)}`（生成逻辑位于 `apps/api/app/store.py`）。
-- **存储方式**：完整模式下存入 Redis（键格式为 `astrbot_market:session:{token}`，值为 `{token, user_id, session_version, created_at, last_seen_at}`）；本地单进程模式（`MARKET_STORAGE_MODE=local`）存入本地持久化 JSON 文件并按 TTL 清理。
-- **会话版本吊销**：`market_users.session_version` 在密码重置时递增并同步清理该用户的所有已有会话；旧会话读取时若 `session_version` 不匹配会立即失效。重置码绑定申请时的邮箱，换绑邮箱后旧重置码不能修改密码或验证新邮箱。
-- **过期与续期**：有效期由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天）；每次 `get_user_by_session()` 校验会话时自动刷新活跃时间。
-- **注销**：`POST /v1/auth/logout` 同时清除浏览器 Cookie、服务端会话及关联的短期 GitHub 仓库授权凭据。
+- **Token 格式与哈希存储**：浏览器 Cookie 持有随机令牌 `sess_{token_urlsafe(24)}`；服务端在 PostgreSQL 与本地 JSON 中均只保存 `SHA-256` 摘要（`token_hash`），不保存明文令牌，登录/注册 JSON 响应体也不回传明文令牌。升级前的本地明文会话会在启动加载时立即哈希化并落盘清除；升级前遗留的旧版 Redis 会话会在首次校验通过时自动迁入 PostgreSQL 并删除旧明文键。注意升级期间不应让旧版本 API 实例与新版本混跑提供流量，以免旧实例无法识别新版本签发的持久化会话。
+- **单一事实源与容错**：完整模式下，活跃会话与设备元数据（`device_label`、`user_agent`、`ip_address`、`trusted`、`expires_at`）以 PostgreSQL `market_user_sessions` 为唯一权威存储，每次鉴权按 `token_hash` 唯一索引单次 `JOIN` 查出会话与用户，不依赖 Redis 会话缓存，避免已吊销会话的缓存回写竞态；Redis 临时不可用时登录、鉴权、下线与改密均可正常完成，并在创建新会话时自动清理该用户已过期或已吊销的历史会话行。本地单进程模式（`MARKET_STORAGE_MODE=local`）保存在本地持久化 JSON 文件中并按 `expires_at` 清理。
+- **固定有效期与信任设备**：未勾选“信任此设备”时会话有效期由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天）；勾选“信任此设备”时由 `TRUSTED_SESSION_MAX_AGE_SECONDS` 控制（默认 365 天，上限钳制在 400 天以内以符合主流浏览器限制）。全部角色（含后台核心管理员）均可按需勾选。会话采用自登录起计算的固定绝对过期时间，活跃访问仅更新 `last_seen_at`，不滑动延后过期时间。已登录用户绑定新 OAuth 身份时保留原会话及其信任状态；修改本地密码时在同一数据库事务内递增 `session_version` 并仅吊销旧版本设备，随后为当前浏览器按原信任状态重签新会话。
+- **会话版本、单设备管理与同源保护**：`market_users.session_version` 在改密与找回密码时递增并同步吊销全部旧版本会话；用户可在个人设置页通过 `GET /v1/me/sessions`、`DELETE /v1/me/sessions/{session_id}` 与 `POST /v1/me/sessions/revoke-others` 查看活跃/受信任设备并单点或批量下线，其中设备吊销写接口额外校验 `Origin` / `Referer` / `Sec-Fetch-Site` 属于受信任站点来源，防止跨站请求伪造下线其他设备。重置码绑定申请时的邮箱，换绑邮箱后旧重置码不能修改密码或验证新邮箱。
+- **注销**：`POST /v1/auth/logout` 同时清除浏览器 Cookie（携带一致的 `HttpOnly`、`Secure`、`SameSite` 属性）、当前服务端会话记录，并尽力清理关联的短期 GitHub 仓库授权凭据。
 
 Cookie 安全属性如下：
 

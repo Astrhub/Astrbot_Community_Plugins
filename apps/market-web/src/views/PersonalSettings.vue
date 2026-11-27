@@ -16,8 +16,9 @@ import { ArrowBack } from "@vicons/ionicons5";
 import AccessKeyManager from "@/components/settings/AccessKeyManager.vue";
 import NotificationPreferencesSection from "@/components/settings/NotificationPreferencesSection.vue";
 import ProfileAccountSection from "@/components/settings/ProfileAccountSection.vue";
+import SessionDeviceManager from "@/components/settings/SessionDeviceManager.vue";
 import { usePluginStore } from "@/stores/plugins";
-import type { ApiKey, OAuthIdentity, OAuthProviderKey } from "@/types";
+import type { ApiKey, OAuthIdentity, OAuthProviderKey, UserSession } from "@/types";
 
 const router = useRouter();
 const message = useMessage();
@@ -31,8 +32,11 @@ const {
   deleteMyAvatar,
   loadCurrentUser,
   loadMyApiKeys,
+  loadMySessions,
   loginWithOAuth,
   requestEmailChange,
+  revokeMySession,
+  revokeOtherSessions,
   unbindMyOAuthIdentity,
   updateMyPassword,
   updateProfile,
@@ -47,10 +51,14 @@ const oauthBusyId = shallowRef("");
 const savingNotifications = shallowRef(false);
 const loadingAccessKeys = shallowRef(false);
 const creatingAccessKey = shallowRef(false);
+const loadingSessions = shallowRef(false);
+const revokingOtherSessions = shallowRef(false);
 const avatarBusy = shallowRef(false);
 const accessKeys = shallowRef<ApiKey[]>([]);
 const newAccessKey = shallowRef("");
 const accessKeyBusyIds = reactive<Record<string, string>>({});
+const sessions = shallowRef<UserSession[]>([]);
+const sessionBusyIds = reactive<Record<string, string>>({});
 const formData = reactive({
   github_name: "",
   github_token: "",
@@ -185,6 +193,70 @@ async function refreshAccessKeys() {
   }
 }
 
+async function refreshSessions() {
+  loadingSessions.value = true;
+  try {
+    sessions.value = await loadMySessions();
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : "登录设备列表加载失败");
+  } finally {
+    loadingSessions.value = false;
+  }
+}
+
+function confirmRevokeSession(session: UserSession) {
+  dialog.warning({
+    title: session.is_current ? "退出当前设备" : "下线该登录设备",
+    content: session.is_current
+      ? "退出后当前浏览器需要重新登录。"
+      : `确认下线“${session.device_label || "未知设备"}”吗？该设备将立即失去登录状态。`,
+    positiveText: session.is_current ? "退出" : "下线",
+    negativeText: "取消",
+    onPositiveClick: async () => {
+      sessionBusyIds[session.id] = "revoke";
+      try {
+        const result = await revokeMySession(session.id);
+        if (result.is_current) {
+          message.success("已退出当前设备");
+          router.replace("/");
+          return;
+        }
+        sessions.value = sessions.value.filter((item) => item.id !== session.id);
+        message.success("已下线该设备");
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : "下线设备失败");
+      } finally {
+        delete sessionBusyIds[session.id];
+      }
+    },
+  });
+}
+
+function confirmRevokeOtherSessions() {
+  dialog.warning({
+    title: "注销其他所有设备",
+    content: "除当前设备外，其他所有已登录和受信任设备都会立即下线。",
+    positiveText: "全部下线",
+    negativeText: "取消",
+    onPositiveClick: async () => {
+      revokingOtherSessions.value = true;
+      try {
+        const result = await revokeOtherSessions();
+        sessions.value = sessions.value.filter((item) => item.is_current);
+        message.success(
+          result.revoked_count > 0
+            ? `已注销 ${result.revoked_count} 台其他设备`
+            : "当前没有其他活跃设备",
+        );
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : "注销其他设备失败");
+      } finally {
+        revokingOtherSessions.value = false;
+      }
+    },
+  });
+}
+
 async function createAccessKey(payload: Record<string, unknown>) {
   creatingAccessKey.value = true;
   newAccessKey.value = "";
@@ -239,7 +311,8 @@ async function handleUpdatePassword(payload: {
   savingPassword.value = true;
   try {
     await updateMyPassword(payload);
-    message.success("登录密码已更新");
+    await refreshSessions();
+    message.success("登录密码已更新，其他设备已自动下线");
   } catch (error) {
     message.error(error instanceof Error ? error.message : "更新密码失败");
   } finally {
@@ -318,7 +391,7 @@ onMounted(async () => {
     return;
   }
   applyCurrentUser();
-  await refreshAccessKeys();
+  await Promise.allSettled([refreshAccessKeys(), refreshSessions()]);
   loading.value = false;
 });
 </script>
@@ -406,6 +479,20 @@ onMounted(async () => {
                 @delete="deleteAccessKey"
                 @copy-key="copyAccessKey"
                 @clear-new-key="newAccessKey = ''"
+              />
+            </div>
+          </NTabPane>
+
+          <NTabPane name="sessions" tab="登录设备" display-directive="show">
+            <div class="profile-tab-content">
+              <SessionDeviceManager
+                :sessions="sessions"
+                :loading="loadingSessions"
+                :revoking-others="revokingOtherSessions"
+                :busy-ids="sessionBusyIds"
+                @refresh="refreshSessions"
+                @revoke="confirmRevokeSession"
+                @revoke-others="confirmRevokeOtherSessions"
               />
             </div>
           </NTabPane>

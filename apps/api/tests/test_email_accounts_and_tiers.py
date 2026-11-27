@@ -559,7 +559,10 @@ def test_password_reset_verifies_unverified_email_and_revokes_all_sessions(
     )
     assert reg.status_code == 201
     assert reg.json()["user"]["email_verified"] is False
-    session1_token = reg.json()["session"]["token"]
+    assert "token" not in reg.json()["session"]
+    cookie_name = client.app.state.settings.session_cookie_name
+    session1_token = reg.cookies.get(cookie_name)
+    assert session1_token
 
     # Create a second session on another client
     client2 = TestClient(client.app)
@@ -568,7 +571,9 @@ def test_password_reset_verifies_unverified_email_and_revokes_all_sessions(
         json={"username": "reset@example.com", "password": "oldpassword123"},
     )
     assert login2.status_code == 200
-    session2_token = login2.json()["session"]["token"]
+    assert "token" not in login2.json()["session"]
+    session2_token = login2.cookies.get(cookie_name)
+    assert session2_token
 
     # Request password reset (works even for unverified email!)
     req = client.post(
