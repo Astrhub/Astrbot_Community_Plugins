@@ -6,7 +6,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -14,6 +14,11 @@ from pydantic import BaseModel, Field
 
 from ..auth import can_moderate_plugins
 from ..config import Settings
+from ..sessions import (
+    extract_request_client_ip,
+    extract_request_user_agent,
+    session_ttl_for,
+)
 from .credentials import CredentialStore, require_oauth_credential_key
 from .models import (
     PROVIDER_LABELS,
@@ -73,6 +78,10 @@ def _return_cookie_name(provider: str) -> str:
     return f"oauth_return_to_{provider}"
 
 
+def _trust_cookie_name(provider: str) -> str:
+    return f"oauth_trust_device_{provider}"
+
+
 def _safe_normalized_repo_key(repo_url: str) -> str:
     try:
         return normalize_git_repo_key(repo_url)
@@ -87,10 +96,23 @@ def build_git_provider_router(
     current_user: Callable[[Request], Awaitable[dict[str, Any] | None]],
     require_user: Callable[[Request], Awaitable[dict[str, Any]]],
     set_cookie: Callable[..., None],
+    delete_cookie: Callable[..., None] | None = None,
     enforce_user_rpm_limit: Callable[[Request, str, dict[str, Any], int], Awaitable[None]],
     github_list_repositories: Callable[[Request, dict[str, Any], int], Awaitable[dict[str, Any]]],
 ) -> APIRouter:
     router = APIRouter()
+
+    def _clear_cookie(response: Response, name: str, settings: Settings) -> None:
+        if delete_cookie is not None:
+            delete_cookie(response, name, settings)
+            return
+        response.delete_cookie(
+            name,
+            path="/",
+            httponly=True,
+            secure=settings.cookie_secure,
+            samesite=settings.cookie_same_site.lower(),
+        )
 
     def _adapter_for(request: Request, settings: Settings, provider: str) -> Any:
         factory = getattr(request.app.state, "git_provider_adapter_factory", None)
@@ -115,11 +137,17 @@ def build_git_provider_router(
         request: Request,
         provider: str,
         next: str = "",
+        trust_device: bool = False,
     ) -> Response:
         key = provider.strip().lower()
         if key == "github":
             safe_next = normalize_oauth_return_path(next)
-            query = f"?next={quote(safe_next, safe='')}" if safe_next else ""
+            query_params: dict[str, str] = {}
+            if safe_next:
+                query_params["next"] = safe_next
+            if trust_device:
+                query_params["trust_device"] = "1"
+            query = f"?{urlencode(query_params)}" if query_params else ""
             return RedirectResponse(f"/v1/auth/github/login{query}", status_code=302)
         if key not in THIRD_PARTY_PROVIDERS:
             raise HTTPException(
@@ -150,6 +178,13 @@ def build_git_provider_router(
         set_cookie(response, _state_cookie_name(settings, key), state, settings, max_age=600)
         destination = normalize_oauth_return_path(next) or "/"
         set_cookie(response, _return_cookie_name(key), destination, settings, max_age=600)
+        set_cookie(
+            response,
+            _trust_cookie_name(key),
+            "1" if trust_device else "0",
+            settings,
+            max_age=600,
+        )
         return response
 
     @router.get(
@@ -287,14 +322,39 @@ def build_git_provider_router(
             else:
                 raise
 
-        session = await call_store(request, "create_session", user["id"])
+        existing_token = request.cookies.get(settings.session_cookie_name) or ""
+        existing_session = (
+            await call_store(request, "get_session_by_token", existing_token)
+            if (logged_in and existing_token)
+            else None
+        )
+        preserve_existing = bool(
+            logged_in
+            and existing_session
+            and str(existing_session.get("user_id") or "") == str(user["id"])
+        )
         destination = (
             normalize_oauth_return_path(request.cookies.get(_return_cookie_name(key), "")) or ""
         )
         response = RedirectResponse(settings.web_url.rstrip("/") + destination, status_code=302)
-        set_cookie(response, settings.session_cookie_name, session["token"], settings)
-        response.delete_cookie(_state_cookie_name(settings, key), path="/")
-        response.delete_cookie(_return_cookie_name(key), path="/")
+        if not preserve_existing:
+            requested_trust = request.cookies.get(_trust_cookie_name(key)) == "1"
+            ttl = session_ttl_for(settings, trusted=requested_trust)
+            session = await call_store(
+                request,
+                "create_session",
+                user["id"],
+                trusted=requested_trust,
+                ttl_seconds=ttl,
+                user_agent=extract_request_user_agent(request),
+                ip_address=extract_request_client_ip(request),
+            )
+            set_cookie(
+                response, settings.session_cookie_name, session["token"], settings, max_age=ttl
+            )
+        _clear_cookie(response, _state_cookie_name(settings, key), settings)
+        _clear_cookie(response, _return_cookie_name(key), settings)
+        _clear_cookie(response, _trust_cookie_name(key), settings)
         return response
 
     @router.get(

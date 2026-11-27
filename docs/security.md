@@ -32,13 +32,13 @@
 
 ## 会话与 Cookie
 
-系统采用服务端有状态 Cookie 会话（`astrbot_market_session`，非 JWT），支持随时在服务端吊销：
+系统采用服务端有状态 Cookie 会话（`astrbot_market_session`，非 JWT），支持按设备区分普通会话与受信任设备，并可随时在服务端单设备或全量吊销：
 
-- **Token 格式**：`sess_{token_urlsafe(24)}`（生成逻辑位于 `apps/api/app/store.py`）。
-- **存储方式**：完整模式下存入 Redis（键格式为 `astrbot_market:session:{token}`，值为 `{token, user_id, session_version, created_at, last_seen_at}`）；本地单进程模式（`MARKET_STORAGE_MODE=local`）存入本地持久化 JSON 文件并按 TTL 清理。
-- **会话版本吊销**：`market_users.session_version` 在密码重置时递增并同步清理该用户的所有已有会话；旧会话读取时若 `session_version` 不匹配会立即失效。重置码绑定申请时的邮箱，换绑邮箱后旧重置码不能修改密码或验证新邮箱。
-- **过期与续期**：有效期由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天）；每次 `get_user_by_session()` 校验会话时自动刷新活跃时间。
-- **注销**：`POST /v1/auth/logout` 同时清除浏览器 Cookie、服务端会话及关联的短期 GitHub 仓库授权凭据。
+- **Token 格式与哈希存储**：浏览器 Cookie 持有随机令牌 `sess_{token_urlsafe(24)}`；服务端在 PostgreSQL、Redis 与本地 JSON 中均只保存 `SHA-256` 摘要（`token_hash`），不保存明文令牌，登录/注册 JSON 响应体也不回传明文令牌。
+- **持久化与缓存分层**：完整模式下，活跃会话与设备元数据（`device_label`、`user_agent`、`ip_address`、`trusted`、`expires_at`）持久化在 PostgreSQL `market_user_sessions` 表中，Redis（键格式 `astrbot_market:session:h:{token_hash}`）仅作为最长 1 小时的热读缓存；Redis 重启或驱逐缓存时自动回源 PostgreSQL，1 年期信任设备不会丢失登录态。本地单进程模式（`MARKET_STORAGE_MODE=local`）保存在本地持久化 JSON 文件中并按 `expires_at` 清理。
+- **固定有效期与信任设备**：未勾选“信任此设备”时会话有效期由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天）；勾选“信任此设备”时由 `TRUSTED_SESSION_MAX_AGE_SECONDS` 控制（默认 365 天，上限钳制在 400 天以内以符合主流浏览器限制）。全部角色（含后台核心管理员）均可按需勾选。会话采用自登录起计算的固定绝对过期时间，活跃访问仅更新 `last_seen_at`，不滑动延后过期时间。已登录用户绑定新 OAuth 身份时保留原会话及其信任状态；修改本地密码时自动吊销其他全部设备，并为当前浏览器按原信任状态重签新会话。
+- **会话版本与单设备管理**：`market_users.session_version` 在改密与找回密码时递增并同步吊销全部已有会话（同时清理 Redis 缓存）；用户可在个人设置页通过 `GET /v1/me/sessions`、`DELETE /v1/me/sessions/{session_id}` 与 `POST /v1/me/sessions/revoke-others` 查看活跃/受信任设备并单点或批量下线。重置码绑定申请时的邮箱，换绑邮箱后旧重置码不能修改密码或验证新邮箱。
+- **注销**：`POST /v1/auth/logout` 同时清除浏览器 Cookie（携带一致的 `HttpOnly`、`Secure`、`SameSite` 属性）、当前服务端会话记录、Redis 缓存及关联的短期 GitHub 仓库授权凭据。
 
 Cookie 安全属性如下：
 

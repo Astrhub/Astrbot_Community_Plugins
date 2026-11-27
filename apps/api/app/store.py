@@ -24,6 +24,15 @@ from .auth import Role, normalize_role
 from .git_sources.models import GitSourceError, parse_repository_ref
 from .schema_migrations import apply_schema_migrations
 from .plugin_identity import PluginIdentityConflict
+from .sessions import (
+    MAX_IP_ADDRESS_LENGTH,
+    MAX_USER_AGENT_LENGTH,
+    hash_session_token,
+    parse_device_label,
+)
+
+SESSION_REDIS_CACHE_TTL_SECONDS = 3600
+SESSION_LAST_SEEN_SYNC_SECONDS = 900
 
 
 class AnnouncementConflict(ValueError):
@@ -78,8 +87,12 @@ def plugin_identity_write(method: Any) -> Any:
     return wrapped
 
 
+def _format_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 def utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return _format_utc(datetime.now(UTC))
 
 
 def generate_access_key() -> str:
@@ -137,7 +150,12 @@ USER_PROFILE_FIELDS = (
 class InMemoryMarketStore:
     """Development store. Production will persist data in PostgreSQL and Redis."""
 
-    def __init__(self, seed: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        seed: dict[str, Any] | None = None,
+        session_ttl_seconds: int = 60 * 60 * 24 * 7,
+    ) -> None:
+        self.session_ttl_seconds = max(1, int(session_ttl_seconds))
         state = deepcopy(seed or {})
         self.state: dict[str, Any] = {
             "users": state.get("users", []),
@@ -162,6 +180,9 @@ class InMemoryMarketStore:
         }
         self.state["users"] = [self._normalize_user(user) for user in self.state["users"]]
         self.state["plugins"] = [self._normalize_plugin(plugin) for plugin in self.state["plugins"]]
+        self.state["sessions"] = [
+            self._normalize_session_record(session) for session in self.state["sessions"]
+        ]
         self._backfill_seeded_identities()
 
     def persist_object_storage(self) -> None:
@@ -1080,11 +1101,13 @@ class InMemoryMarketStore:
         return deepcopy(new_record)
 
     def list_github_authorization_references(self, user_id: str) -> list[str]:
-        references = [
-            hashlib.sha256(str(session["token"]).encode()).hexdigest()
-            for session in self.state["sessions"]
-            if session.get("user_id") == user_id
-        ]
+        references: list[str] = []
+        for session in self.state["sessions"]:
+            if session.get("user_id") != user_id or session.get("revoked_at"):
+                continue
+            token_hash = self._session_token_hash(session)
+            if token_hash:
+                references.append(token_hash)
         latest = self.get_latest_github_authorization(user_id)
         if latest:
             references.append(latest)
@@ -1669,7 +1692,8 @@ class InMemoryMarketStore:
         for target in self.state["users"]:
             if target.get("muted_by") == user_id:
                 target["muted_by"] = None
-        for collection in ("notifications", "apiKeys", "sessions", "oauthIdentities"):
+        self._revoke_sessions_for_user_locked(user_id)
+        for collection in ("notifications", "apiKeys", "oauthIdentities"):
             self.state[collection] = [
                 item for item in self.state[collection] if item.get("user_id") != user_id
             ]
@@ -1983,21 +2007,124 @@ class InMemoryMarketStore:
         ]
         return before - len(self.state["apiKeys"])
 
-    def create_session(self, user_id: str, token: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _session_token_hash(session: dict[str, Any]) -> str:
+        token_hash = str(session.get("token_hash") or "").strip()
+        if token_hash:
+            return token_hash
+        raw_token = str(session.get("token") or "").strip()
+        return hash_session_token(raw_token) if raw_token else ""
+
+    def _normalize_session_record(self, session: dict[str, Any]) -> dict[str, Any]:
+        record = deepcopy(session)
+        token_hash = self._session_token_hash(record)
+        record.pop("token", None)
+        user_agent = str(record.get("user_agent") or "").strip()[:MAX_USER_AGENT_LENGTH]
+        created_at = str(record.get("created_at") or utc_now())
+        last_seen_at = str(record.get("last_seen_at") or created_at)
+        normalized = {
+            "id": str(record.get("id") or new_id("sess")),
+            "token_hash": token_hash,
+            "user_id": str(record.get("user_id") or ""),
+            "trusted": bool(record.get("trusted", False)),
+            "session_version": int(record.get("session_version") or 1),
+            "device_label": str(record.get("device_label") or "").strip()
+            or parse_device_label(user_agent),
+            "user_agent": user_agent,
+            "ip_address": str(record.get("ip_address") or "").strip()[:MAX_IP_ADDRESS_LENGTH],
+            "created_at": created_at,
+            "last_seen_at": last_seen_at,
+            "expires_at": record.get("expires_at"),
+            "revoked_at": record.get("revoked_at"),
+        }
+        return normalized
+
+    def _session_expires_at_dt(self, session: dict[str, Any]) -> datetime | None:
+        explicit = _parse_utc_timestamp(session.get("expires_at"))
+        if explicit is not None:
+            return explicit
+        seen = _parse_utc_timestamp(session.get("last_seen_at") or session.get("created_at"))
+        if seen is None:
+            return None
+        return seen + timedelta(seconds=self.session_ttl_seconds)
+
+    def _is_session_expired(self, session: dict[str, Any], now: datetime | None = None) -> bool:
+        if session.get("revoked_at"):
+            return True
+        expires_at = self._session_expires_at_dt(session)
+        return expires_at is None or expires_at <= (now or datetime.now(UTC))
+
+    def _find_session_by_token_hash(self, token_hash: str) -> dict[str, Any] | None:
+        for session in self.state["sessions"]:
+            if session.get("revoked_at"):
+                continue
+            if self._session_token_hash(session) == token_hash:
+                return session
+        return None
+
+    def create_session(
+        self,
+        user_id: str,
+        token: str | None = None,
+        *,
+        trusted: bool = False,
+        ttl_seconds: int | None = None,
+        user_agent: str = "",
+        ip_address: str = "",
+    ) -> dict[str, Any]:
         user = self.get_user_by_id(user_id)
+        raw_token = token or f"sess_{secrets.token_urlsafe(24)}"
+        token_hash = hash_session_token(raw_token)
+        effective_ttl = max(
+            1,
+            int(ttl_seconds if ttl_seconds is not None else self.session_ttl_seconds),
+        )
+        now_dt = datetime.now(UTC)
+        created_at = _format_utc(now_dt)
+        expires_at = _format_utc(now_dt + timedelta(seconds=effective_ttl))
+        clean_ua = str(user_agent or "").strip()[:MAX_USER_AGENT_LENGTH]
+        clean_ip = str(ip_address or "").strip()[:MAX_IP_ADDRESS_LENGTH]
         session = {
-            "token": token or f"sess_{secrets.token_urlsafe(24)}",
+            "id": new_id("sess"),
+            "token_hash": token_hash,
             "user_id": user_id,
+            "trusted": bool(trusted),
             "session_version": int((user or {}).get("session_version") or 1),
-            "created_at": utc_now(),
-            "last_seen_at": utc_now(),
+            "device_label": parse_device_label(clean_ua),
+            "user_agent": clean_ua,
+            "ip_address": clean_ip,
+            "created_at": created_at,
+            "last_seen_at": created_at,
+            "expires_at": expires_at,
+            "revoked_at": None,
         }
         self.state["sessions"].append(session)
+        return {**deepcopy(session), "token": raw_token, "max_age_seconds": effective_ttl}
+
+    def get_session_by_token(self, token: str) -> dict[str, Any] | None:
+        token_hash = hash_session_token(token)
+        session = self._find_session_by_token_hash(token_hash)
+        if not session:
+            return None
+        if self._is_session_expired(session):
+            self.revoke_session(token)
+            return None
+        user = self.get_user_by_id(session["user_id"])
+        if not user:
+            return None
+        expected_version = int(user.get("session_version") or 1)
+        if int(session.get("session_version") or 1) != expected_version:
+            self.revoke_session(token)
+            return None
         return deepcopy(session)
 
     def get_user_by_session(self, token: str) -> dict[str, Any] | None:
-        session = self._find("sessions", "token", token)
+        token_hash = hash_session_token(token)
+        session = self._find_session_by_token_hash(token_hash)
         if not session:
+            return None
+        if self._is_session_expired(session):
+            self.revoke_session(token)
             return None
         user = self.get_user_by_id(session["user_id"])
         if not user:
@@ -2009,23 +2136,93 @@ class InMemoryMarketStore:
         session["last_seen_at"] = utc_now()
         return user
 
+    def list_user_sessions(self, user_id: str) -> list[dict[str, Any]]:
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return []
+        expected_version = int(user.get("session_version") or 1)
+        now_dt = datetime.now(UTC)
+        kept: list[dict[str, Any]] = []
+        active: list[dict[str, Any]] = []
+        for session in self.state["sessions"]:
+            if session.get("user_id") != user_id:
+                kept.append(session)
+                continue
+            if (
+                self._is_session_expired(session, now_dt)
+                or int(session.get("session_version") or 1) != expected_version
+            ):
+                token_hash = self._session_token_hash(session)
+                if token_hash:
+                    self.delete_github_authorization(token_hash)
+                continue
+            kept.append(session)
+            active.append(deepcopy(session))
+        self.state["sessions"] = kept
+        active.sort(
+            key=lambda item: (
+                str(item.get("last_seen_at") or ""),
+                str(item.get("created_at") or ""),
+                str(item.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        return active
+
     def revoke_session(self, token: str) -> bool:
-        self.delete_github_authorization(hashlib.sha256(token.encode()).hexdigest())
+        token_hash = hash_session_token(token)
+        self.delete_github_authorization(token_hash)
         sessions = self.state["sessions"]
-        index = next((i for i, item in enumerate(sessions) if item["token"] == token), -1)
+        index = next(
+            (i for i, item in enumerate(sessions) if self._session_token_hash(item) == token_hash),
+            -1,
+        )
         if index == -1:
             return False
         sessions.pop(index)
         return True
+
+    def revoke_user_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
+        sessions = self.state["sessions"]
+        index = next(
+            (
+                i
+                for i, item in enumerate(sessions)
+                if item.get("user_id") == user_id and item.get("id") == session_id
+            ),
+            -1,
+        )
+        if index == -1:
+            return None
+        removed = sessions.pop(index)
+        token_hash = self._session_token_hash(removed)
+        if token_hash:
+            self.delete_github_authorization(token_hash)
+        return deepcopy(removed)
+
+    def revoke_other_user_sessions(self, user_id: str, keep_token: str) -> int:
+        keep_hash = hash_session_token(keep_token) if keep_token else ""
+        kept: list[dict[str, Any]] = []
+        removed = 0
+        for session in self.state["sessions"]:
+            token_hash = self._session_token_hash(session)
+            if session.get("user_id") == user_id and token_hash != keep_hash:
+                if token_hash:
+                    self.delete_github_authorization(token_hash)
+                removed += 1
+            else:
+                kept.append(session)
+        self.state["sessions"] = kept
+        return removed
 
     def _revoke_sessions_for_user_locked(self, user_id: str) -> int:
         kept = []
         removed = 0
         for session in self.state["sessions"]:
             if session.get("user_id") == user_id:
-                self.delete_github_authorization(
-                    hashlib.sha256(str(session["token"]).encode()).hexdigest()
-                )
+                token_hash = self._session_token_hash(session)
+                if token_hash:
+                    self.delete_github_authorization(token_hash)
                 removed += 1
             else:
                 kept.append(session)
@@ -2380,9 +2577,8 @@ class LocalFileMarketStore(InMemoryMarketStore):
         session_ttl_seconds: int = 60 * 60 * 24 * 7,
         seed: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(seed=seed)
+        super().__init__(seed=seed, session_ttl_seconds=session_ttl_seconds)
         self.data_path = Path(data_path)
-        self.session_ttl_seconds = max(1, int(session_ttl_seconds))
         self._lock = threading.RLock()
         self._write_depth = 0
         self._session_persisted_at: dict[str, float] = {}
@@ -2443,23 +2639,24 @@ class LocalFileMarketStore(InMemoryMarketStore):
                 str(key): str(value) for key, value in dict(data.get("options", {})).items()
             },
             "objectStorage": deepcopy(data.get("objectStorage", {})),
-            "sessions": list(data.get("sessions", [])),
+            "sessions": [
+                self._normalize_session_record(session) for session in data.get("sessions", [])
+            ],
             "nextNumericId": max(1, int(data.get("nextNumericId") or 1)),
         }
         self._backfill_seeded_identities()
 
     def _prune_expired_sessions_locked(self) -> bool:
-        cutoff = datetime.now(UTC) - timedelta(seconds=self.session_ttl_seconds)
+        now_dt = datetime.now(UTC)
         kept = []
         pruned = False
         for session in self.state["sessions"]:
-            seen = _parse_utc_timestamp(session.get("last_seen_at") or session.get("created_at"))
-            if seen is None or seen < cutoff:
+            if self._is_session_expired(session, now_dt):
                 pruned = True
-                token = str(session.get("token") or "")
-                if token:
-                    self._session_persisted_at.pop(token, None)
-                    self.delete_github_authorization(hashlib.sha256(token.encode()).hexdigest())
+                token_hash = self._session_token_hash(session)
+                if token_hash:
+                    self._session_persisted_at.pop(token_hash, None)
+                    self.delete_github_authorization(token_hash)
                 continue
             kept.append(session)
         if pruned:
@@ -2954,20 +3151,39 @@ class LocalFileMarketStore(InMemoryMarketStore):
         with self._persist():
             return super().delete_api_key(user_id, key_id)
 
-    def create_session(self, user_id: str, token: str | None = None) -> dict[str, Any]:
+    def create_session(
+        self,
+        user_id: str,
+        token: str | None = None,
+        *,
+        trusted: bool = False,
+        ttl_seconds: int | None = None,
+        user_agent: str = "",
+        ip_address: str = "",
+    ) -> dict[str, Any]:
         with self._persist():
-            session = super().create_session(user_id, token)
-            self._session_persisted_at[session["token"]] = time.monotonic()
+            session = super().create_session(
+                user_id,
+                token,
+                trusted=trusted,
+                ttl_seconds=ttl_seconds,
+                user_agent=user_agent,
+                ip_address=ip_address,
+            )
+            self._session_persisted_at[session["token_hash"]] = time.monotonic()
             return session
+
+    def get_session_by_token(self, token: str) -> dict[str, Any] | None:
+        with self._lock:
+            return super().get_session_by_token(token)
 
     def get_user_by_session(self, token: str) -> dict[str, Any] | None:
         with self._lock:
-            session = self._find("sessions", "token", token)
+            token_hash = hash_session_token(token)
+            session = self._find_session_by_token_hash(token_hash)
             if not session:
                 return None
-            seen = _parse_utc_timestamp(session.get("last_seen_at") or session.get("created_at"))
-            cutoff = datetime.now(UTC) - timedelta(seconds=self.session_ttl_seconds)
-            if seen is None or seen < cutoff:
+            if self._is_session_expired(session):
                 self.revoke_session(token)
                 return None
             user = self.get_user_by_id(session["user_id"])
@@ -2979,21 +3195,45 @@ class LocalFileMarketStore(InMemoryMarketStore):
                 return None
             session["last_seen_at"] = utc_now()
             now_mono = time.monotonic()
-            if now_mono - self._session_persisted_at.get(token, 0.0) >= 60.0:
-                self._session_persisted_at[token] = now_mono
+            if now_mono - self._session_persisted_at.get(token_hash, 0.0) >= 60.0:
+                self._session_persisted_at[token_hash] = now_mono
                 self._save_locked()
             return deepcopy(user)
 
+    def list_user_sessions(self, user_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            before = len(self.state["sessions"])
+            active = super().list_user_sessions(user_id)
+            if len(self.state["sessions"]) != before:
+                self._save_locked()
+            return active
+
     def revoke_session(self, token: str) -> bool:
         with self._persist():
-            self._session_persisted_at.pop(token, None)
+            self._session_persisted_at.pop(hash_session_token(token), None)
             return super().revoke_session(token)
+
+    def revoke_user_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
+        with self._persist():
+            removed = super().revoke_user_session(user_id, session_id)
+            if removed:
+                self._session_persisted_at.pop(self._session_token_hash(removed), None)
+            return removed
+
+    def revoke_other_user_sessions(self, user_id: str, keep_token: str) -> int:
+        with self._persist():
+            keep_hash = hash_session_token(keep_token) if keep_token else ""
+            for session in list(self.state["sessions"]):
+                token_hash = self._session_token_hash(session)
+                if session.get("user_id") == user_id and token_hash != keep_hash:
+                    self._session_persisted_at.pop(token_hash, None)
+            return super().revoke_other_user_sessions(user_id, keep_token)
 
     def revoke_all_user_sessions(self, user_id: str) -> int:
         with self._persist():
             for session in list(self.state["sessions"]):
                 if session.get("user_id") == user_id:
-                    self._session_persisted_at.pop(str(session.get("token") or ""), None)
+                    self._session_persisted_at.pop(self._session_token_hash(session), None)
             return super().revoke_all_user_sessions(user_id)
 
     def save_email_challenge(
@@ -3276,10 +3516,9 @@ class PgRedisMarketStore(InMemoryMarketStore):
     """Production store backed by PostgreSQL for durable data and Redis for sessions."""
 
     def __init__(self, database_url: str, redis_url: str, session_ttl_seconds: int) -> None:
-        super().__init__()
+        super().__init__(session_ttl_seconds=session_ttl_seconds)
         self.database_url = database_url
         self.redis_url = redis_url
-        self.session_ttl_seconds = session_ttl_seconds
         self.pool: asyncpg.Pool | None = None
         self.redis: redis_asyncio.Redis | None = None
 
@@ -3989,7 +4228,7 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 ) from exc
             raise
         if row and bump_session_version:
-            await self._redis().delete(f"astrbot_market:github_oauth_user:{user_id}")
+            await self._purge_pg_user_sessions(user_id)
         return self._user_from_record(row) if row else None
 
     async def update_user_email(
@@ -5318,6 +5557,17 @@ class PgRedisMarketStore(InMemoryMarketStore):
                 )
                 if not target:
                     return None
+                session_rows = await connection.fetch(
+                    """
+                    SELECT token_hash
+                      FROM market_user_sessions
+                     WHERE user_id = $1 AND revoked_at IS NULL
+                    """,
+                    user_id,
+                )
+                revoked_hashes = [
+                    str(row["token_hash"]) for row in session_rows if row["token_hash"]
+                ]
                 await connection.execute(
                     """
                     UPDATE market_plugins
@@ -5389,7 +5639,14 @@ class PgRedisMarketStore(InMemoryMarketStore):
                      WHERE p.id = counts.id
                     """
                 )
-                return self._user_from_record(target)
+        for token_hash in revoked_hashes:
+            await self._evict_session_cache(token_hash)
+        latest_ref = await self.get_latest_github_authorization(user_id)
+        if latest_ref:
+            await self.delete_github_authorization(latest_ref)
+        if self.redis is not None:
+            await self.redis.delete(f"astrbot_market:github_oauth_user:{user_id}")
+        return self._user_from_record(target)
 
     async def update_user_profile(
         self,
@@ -5888,27 +6145,139 @@ class PgRedisMarketStore(InMemoryMarketStore):
     return {'ok', payload or '{}'}
     """
 
-    async def create_session(self, user_id: str, token: str | None = None) -> dict[str, Any]:
-        user = await self.get_user_by_id(user_id)
-        session = {
-            "token": token or f"sess_{secrets.token_urlsafe(24)}",
-            "user_id": user_id,
-            "session_version": int((user or {}).get("session_version") or 1),
-            "created_at": utc_now(),
-            "last_seen_at": utc_now(),
-        }
-        await self._redis().set(
-            self._session_key(session["token"]),
+    async def _cache_session_in_redis(self, session: dict[str, Any]) -> None:
+        token_hash = str(session.get("token_hash") or "").strip()
+        if not token_hash or self.redis is None:
+            return
+        expires_dt = self._session_expires_at_dt(session)
+        if expires_dt is None:
+            return
+        remaining = int((expires_dt - datetime.now(UTC)).total_seconds())
+        if remaining <= 0:
+            await self.redis.delete(self._session_key(token_hash))
+            return
+        cache_ttl = max(1, min(remaining, SESSION_REDIS_CACHE_TTL_SECONDS))
+        await self.redis.set(
+            self._session_key(token_hash),
             serialize_json(session),
-            ex=self.session_ttl_seconds,
+            ex=cache_ttl,
         )
-        return deepcopy(session)
 
-    async def get_user_by_session(self, token: str) -> dict[str, Any] | None:
-        payload = await self._redis().get(self._session_key(token))
-        if not payload:
+    async def _evict_session_cache(self, token_hash: str) -> None:
+        if not token_hash:
+            return
+        await self.delete_github_authorization(token_hash)
+        if self.redis is not None:
+            await self.redis.delete(self._session_key(token_hash))
+
+    async def _purge_pg_user_sessions(self, user_id: str) -> int:
+        rows = await self._pool().fetch(
+            """
+            UPDATE market_user_sessions
+               SET revoked_at = now()
+             WHERE user_id = $1 AND revoked_at IS NULL
+         RETURNING token_hash
+            """,
+            user_id,
+        )
+        for row in rows:
+            await self._evict_session_cache(str(row["token_hash"] or ""))
+        latest_ref = await self.get_latest_github_authorization(user_id)
+        if latest_ref:
+            await self.delete_github_authorization(latest_ref)
+        if self.redis is not None:
+            await self.redis.delete(f"astrbot_market:github_oauth_user:{user_id}")
+        return len(rows)
+
+    async def create_session(
+        self,
+        user_id: str,
+        token: str | None = None,
+        *,
+        trusted: bool = False,
+        ttl_seconds: int | None = None,
+        user_agent: str = "",
+        ip_address: str = "",
+    ) -> dict[str, Any]:
+        user = await self.get_user_by_id(user_id)
+        raw_token = token or f"sess_{secrets.token_urlsafe(24)}"
+        token_hash = hash_session_token(raw_token)
+        effective_ttl = max(
+            1,
+            int(ttl_seconds if ttl_seconds is not None else self.session_ttl_seconds),
+        )
+        now_dt = datetime.now(UTC)
+        expires_dt = now_dt + timedelta(seconds=effective_ttl)
+        clean_ua = str(user_agent or "").strip()[:MAX_USER_AGENT_LENGTH]
+        clean_ip = str(ip_address or "").strip()[:MAX_IP_ADDRESS_LENGTH]
+        session_id = new_id("sess")
+        session_version = int((user or {}).get("session_version") or 1)
+        device_label = parse_device_label(clean_ua)
+        row = await self._pool().fetchrow(
+            """
+            INSERT INTO market_user_sessions (
+                id, user_id, token_hash, trusted, session_version,
+                device_label, user_agent, ip_address,
+                created_at, last_seen_at, expires_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)
+            RETURNING *
+            """,
+            session_id,
+            user_id,
+            token_hash,
+            bool(trusted),
+            session_version,
+            device_label,
+            clean_ua,
+            clean_ip,
+            now_dt,
+            expires_dt,
+        )
+        session = self._session_from_record(row)
+        await self._cache_session_in_redis(session)
+        return {**session, "token": raw_token, "max_age_seconds": effective_ttl}
+
+    async def _load_active_session_by_token(
+        self, token: str
+    ) -> tuple[dict[str, Any], dict[str, Any], bool, bool] | None:
+        token_hash = hash_session_token(token)
+        now_dt = datetime.now(UTC)
+        session: dict[str, Any] | None = None
+        from_redis = False
+        is_legacy = False
+
+        if self.redis is not None:
+            cached = await self.redis.get(self._session_key(token_hash))
+            if cached:
+                session = parse_json(cached)
+                from_redis = True
+
+        if session is None and self.pool is not None:
+            row = await self.pool.fetchrow(
+                """
+                SELECT *
+                  FROM market_user_sessions
+                 WHERE token_hash = $1 AND revoked_at IS NULL
+                """,
+                token_hash,
+            )
+            if row:
+                session = self._session_from_record(row)
+
+        if session is None and self.redis is not None:
+            legacy_payload = await self.redis.get(self._legacy_session_key(token))
+            if legacy_payload:
+                session = self._normalize_session_record(parse_json(legacy_payload))
+                from_redis = True
+                is_legacy = True
+
+        if not session:
             return None
-        session = parse_json(payload)
+        if self._is_session_expired(session, now_dt):
+            await self.revoke_session(token)
+            return None
+
         user = await self.get_user_by_id(session["user_id"])
         if not user:
             return None
@@ -5916,17 +6285,117 @@ class PgRedisMarketStore(InMemoryMarketStore):
         if int(session.get("session_version") or 1) != expected_version:
             await self.revoke_session(token)
             return None
-        session["last_seen_at"] = utc_now()
-        await self._redis().set(
-            self._session_key(token),
-            serialize_json(session),
-            ex=self.session_ttl_seconds,
-        )
+        return (session, user, from_redis, is_legacy)
+
+    async def get_session_by_token(self, token: str) -> dict[str, Any] | None:
+        loaded = await self._load_active_session_by_token(token)
+        if not loaded:
+            return None
+        session, _user, _from_redis, _is_legacy = loaded
+        return deepcopy(session)
+
+    async def get_user_by_session(self, token: str) -> dict[str, Any] | None:
+        loaded = await self._load_active_session_by_token(token)
+        if not loaded:
+            return None
+        session, user, from_redis, is_legacy = loaded
+        now_dt = datetime.now(UTC)
+        if not is_legacy:
+            seen_dt = _parse_utc_timestamp(session.get("last_seen_at"))
+            stale = (
+                seen_dt is None
+                or (now_dt - seen_dt).total_seconds() >= SESSION_LAST_SEEN_SYNC_SECONDS
+            )
+            if stale:
+                session["last_seen_at"] = _format_utc(now_dt)
+                if self.pool is not None and session.get("id"):
+                    await self.pool.execute(
+                        """
+                        UPDATE market_user_sessions
+                           SET last_seen_at = $2
+                         WHERE id = $1 AND revoked_at IS NULL
+                        """,
+                        session["id"],
+                        now_dt,
+                    )
+            if stale or not from_redis:
+                await self._cache_session_in_redis(session)
         return user
 
+    async def list_user_sessions(self, user_id: str) -> list[dict[str, Any]]:
+        user = await self.get_user_by_id(user_id)
+        if not user:
+            return []
+        expected_version = int(user.get("session_version") or 1)
+        rows = await self._pool().fetch(
+            """
+            SELECT *
+              FROM market_user_sessions
+             WHERE user_id = $1
+               AND revoked_at IS NULL
+               AND expires_at > now()
+               AND session_version = $2
+          ORDER BY last_seen_at DESC, created_at DESC
+            """,
+            user_id,
+            expected_version,
+        )
+        return [self._session_from_record(row) for row in rows]
+
     async def revoke_session(self, token: str) -> bool:
-        await self.delete_github_authorization(hashlib.sha256(token.encode()).hexdigest())
-        return bool(await self._redis().delete(self._session_key(token)))
+        token_hash = hash_session_token(token)
+        await self.delete_github_authorization(token_hash)
+        deleted_redis = 0
+        if self.redis is not None:
+            deleted_redis += int(await self.redis.delete(self._session_key(token_hash)))
+            deleted_redis += int(await self.redis.delete(self._legacy_session_key(token)))
+        updated_pg = False
+        if self.pool is not None:
+            result = await self.pool.execute(
+                """
+                UPDATE market_user_sessions
+                   SET revoked_at = now()
+                 WHERE token_hash = $1 AND revoked_at IS NULL
+                """,
+                token_hash,
+            )
+            updated_pg = result != "UPDATE 0"
+        return bool(deleted_redis or updated_pg)
+
+    async def revoke_user_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
+        row = await self._pool().fetchrow(
+            """
+            UPDATE market_user_sessions
+               SET revoked_at = now()
+             WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+         RETURNING *
+            """,
+            session_id,
+            user_id,
+        )
+        if not row:
+            return None
+        session = self._session_from_record(row)
+        await self._evict_session_cache(str(session.get("token_hash") or ""))
+        return session
+
+    async def revoke_other_user_sessions(self, user_id: str, keep_token: str) -> int:
+        keep_hash = hash_session_token(keep_token) if keep_token else ""
+        rows = await self._pool().fetch(
+            """
+            UPDATE market_user_sessions
+               SET revoked_at = now()
+             WHERE user_id = $1
+               AND revoked_at IS NULL
+               AND token_hash <> $2
+         RETURNING token_hash
+            """,
+            user_id,
+            keep_hash,
+        )
+        for row in rows:
+            await self._evict_session_cache(str(row["token_hash"] or ""))
+        return len(rows)
 
     async def revoke_all_user_sessions(self, user_id: str) -> int:
         await self._pool().execute(
@@ -5938,11 +6407,8 @@ class PgRedisMarketStore(InMemoryMarketStore):
             """,
             user_id,
         )
-        latest_ref = await self.get_latest_github_authorization(user_id)
-        if latest_ref:
-            await self.delete_github_authorization(latest_ref)
-        await self._redis().delete(f"astrbot_market:github_oauth_user:{user_id}")
-        return 1
+        revoked = await self._purge_pg_user_sessions(user_id)
+        return max(1, revoked)
 
     async def save_email_challenge(
         self, challenge_id: str, record: dict[str, Any], ttl_seconds: int
@@ -6089,18 +6555,38 @@ return 0
 
     async def list_github_authorization_references(self, user_id: str) -> list[str]:
         references: list[str] = []
-        async for key in self._redis().scan_iter(match="astrbot_market:session:*", count=200):
-            payload = await self._redis().get(key)
-            if not payload:
-                continue
-            session = parse_json(payload)
-            if str(session.get("user_id") or "") != str(user_id):
-                continue
-            token = str(session.get("token") or "")
-            if not token:
-                decoded = key.decode() if isinstance(key, bytes) else str(key)
-                token = decoded.rsplit(":", 1)[-1]
-            references.append(hashlib.sha256(token.encode()).hexdigest())
+        if self.pool is not None:
+            rows = await self.pool.fetch(
+                """
+                SELECT token_hash
+                  FROM market_user_sessions
+                 WHERE user_id = $1
+                   AND revoked_at IS NULL
+                   AND expires_at > now()
+                """,
+                user_id,
+            )
+            for row in rows:
+                token_hash = str(row["token_hash"] or "").strip()
+                if token_hash:
+                    references.append(token_hash)
+        if self.redis is not None:
+            async for key in self.redis.scan_iter(match="astrbot_market:session:*", count=200):
+                payload = await self.redis.get(key)
+                if not payload:
+                    continue
+                session = parse_json(payload)
+                if str(session.get("user_id") or "") != str(user_id):
+                    continue
+                token_hash = str(session.get("token_hash") or "").strip()
+                if token_hash:
+                    references.append(token_hash)
+                    continue
+                token = str(session.get("token") or "")
+                if not token:
+                    decoded = key.decode() if isinstance(key, bytes) else str(key)
+                    token = decoded.rsplit(":", 1)[-1]
+                references.append(hash_session_token(token))
         latest = await self.get_latest_github_authorization(user_id)
         if latest:
             references.append(latest)
@@ -6219,8 +6705,14 @@ return 0
             raise RuntimeError("Redis store is not connected")
         return self.redis
 
-    def _session_key(self, token: str) -> str:
+    def _session_key(self, token_hash: str) -> str:
+        return f"astrbot_market:session:h:{token_hash}"
+
+    def _legacy_session_key(self, token: str) -> str:
         return f"astrbot_market:session:{token}"
+
+    def _session_from_record(self, row: asyncpg.Record) -> dict[str, Any]:
+        return serialize_value(dict(row))
 
     def _user_from_record(self, row: asyncpg.Record) -> dict[str, Any]:
         return self._normalize_user(serialize_value(dict(row)))

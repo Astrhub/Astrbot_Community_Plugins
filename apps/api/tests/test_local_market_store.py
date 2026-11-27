@@ -89,9 +89,12 @@ def test_local_file_store_prunes_expired_sessions(tmp_path) -> None:
     store.close()
 
     raw = json.loads(data_path.read_text(encoding="utf-8"))
+    assert "token" not in raw["sessions"][0]
+    assert raw["sessions"][0]["token_hash"]
     expired_time = (datetime.now(UTC) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
     raw["sessions"][0]["created_at"] = expired_time
     raw["sessions"][0]["last_seen_at"] = expired_time
+    raw["sessions"][0]["expires_at"] = expired_time
     data_path.write_text(json.dumps(raw), encoding="utf-8")
 
     reloaded = LocalFileMarketStore(data_path, session_ttl_seconds=60)

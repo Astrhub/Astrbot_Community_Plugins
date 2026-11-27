@@ -28,6 +28,7 @@ import type {
   Submission,
   ThemeMode,
   User,
+  UserSession,
 } from "@/types";
 import {
   clearCachedUserPreview,
@@ -1422,20 +1423,35 @@ export const usePluginStore = defineStore("plugins", () => {
     }
   }
 
-  function loginWithOAuth(provider: OAuthProviderKey, destination?: unknown): void {
-    const next = typeof destination === "string" ? `?next=${encodeURIComponent(destination)}` : "";
+  function loginWithOAuth(
+    provider: OAuthProviderKey,
+    destination?: unknown,
+    options?: { trustDevice?: boolean },
+  ): void {
+    const params = new URLSearchParams();
+    if (typeof destination === "string" && destination) {
+      params.set("next", destination);
+    }
+    if (options?.trustDevice) {
+      params.set("trust_device", "1");
+    }
+    const query = params.toString() ? `?${params.toString()}` : "";
     if (provider === "github") {
-      window.location.href = `${apiBaseUrl}/v1/auth/github/login${next}`;
+      window.location.href = `${apiBaseUrl}/v1/auth/github/login${query}`;
       return;
     }
-    window.location.href = `${apiBaseUrl}/v1/auth/oauth/${encodeURIComponent(provider)}/login${next}`;
+    window.location.href = `${apiBaseUrl}/v1/auth/oauth/${encodeURIComponent(provider)}/login${query}`;
   }
 
-  function loginWithGithub(destination?: unknown): void {
-    loginWithOAuth("github", destination);
+  function loginWithGithub(destination?: unknown, options?: { trustDevice?: boolean }): void {
+    loginWithOAuth("github", destination, options);
   }
 
-  async function loginWithPassword(payload: { username: string; password: string }): Promise<User> {
+  async function loginWithPassword(payload: {
+    username: string;
+    password: string;
+    trust_device?: boolean;
+  }): Promise<User> {
     const response = await fetch(`${apiBaseUrl}/v1/auth/internal/login`, {
       method: "POST",
       credentials: "include",
@@ -1469,6 +1485,7 @@ export const usePluginStore = defineStore("plugins", () => {
     username: string;
     email: string;
     password: string;
+    trust_device?: boolean;
   }): Promise<User> {
     const response = await fetch(`${apiBaseUrl}/v1/auth/email/register`, {
       method: "POST",
@@ -1502,6 +1519,7 @@ export const usePluginStore = defineStore("plugins", () => {
   async function verifyEmailRegisterCode(payload: {
     registration_id: string;
     code: string;
+    trust_device?: boolean;
   }): Promise<User> {
     const response = await fetch(`${apiBaseUrl}/v1/auth/email/register/verify`, {
       method: "POST",
@@ -1644,6 +1662,51 @@ export const usePluginStore = defineStore("plugins", () => {
     return currentUser.value as User;
   }
 
+  function clearLocalAuthState(): void {
+    currentUser.value = null;
+    currentUserPreview.value = null;
+    clearCachedUserPreview();
+    currentUserError.value = "";
+    currentUserLoaded = true;
+    unreadNotificationCount.value = 0;
+  }
+
+  async function loadMySessions(): Promise<UserSession[]> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/sessions`, {
+      credentials: "include",
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "加载登录设备失败"));
+    return Array.isArray(data.items) ? (data.items as UserSession[]) : [];
+  }
+
+  async function revokeMySession(
+    sessionId: string,
+  ): Promise<{ revoked: boolean; is_current: boolean }> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "下线设备失败"));
+    const isCurrent = Boolean(data.is_current);
+    if (isCurrent) {
+      clearLocalAuthState();
+    }
+    return { revoked: Boolean(data.revoked), is_current: isCurrent };
+  }
+
+  async function revokeOtherSessions(): Promise<{ revoked_count: number }> {
+    const response = await fetch(`${apiBaseUrl}/v1/me/sessions/revoke-others`, {
+      method: "POST",
+      credentials: "include",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiErrorMessage(data, "注销其他设备失败"));
+    return { revoked_count: Number(data.revoked_count || 0) };
+  }
+
   async function logout(): Promise<void> {
     try {
       await fetch(`${apiBaseUrl}/v1/auth/logout`, {
@@ -1651,12 +1714,7 @@ export const usePluginStore = defineStore("plugins", () => {
         credentials: "include",
       });
     } finally {
-      currentUser.value = null;
-      currentUserPreview.value = null;
-      clearCachedUserPreview();
-      currentUserError.value = "";
-      currentUserLoaded = true;
-      unreadNotificationCount.value = 0;
+      clearLocalAuthState();
     }
   }
 
@@ -1861,6 +1919,9 @@ export const usePluginStore = defineStore("plugins", () => {
     verifyEmailChange,
     loadMyOAuthIdentities,
     unbindMyOAuthIdentity,
+    loadMySessions,
+    revokeMySession,
+    revokeOtherSessions,
     logout,
     updateProfile,
     saveSetupConfig,

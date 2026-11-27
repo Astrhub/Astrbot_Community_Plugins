@@ -47,6 +47,12 @@ from .schemas import (
     PasswordResetRequestPayload,
     PasswordResetVerifyPayload,
 )
+from .sessions import (
+    extract_request_client_ip,
+    extract_request_user_agent,
+    public_session_info,
+    session_ttl_for,
+)
 from .store import UserIdentityConflict
 
 LOGGER = logging.getLogger(__name__)
@@ -169,10 +175,25 @@ def build_email_account_router(
             password_hash=hash_password(payload.password),
             email_verified_at=None,
         )
-        session = await call_store(request, "create_session", user["id"])
+        ttl = session_ttl_for(settings, trusted=payload.trust_device)
+        session = await call_store(
+            request,
+            "create_session",
+            user["id"],
+            trusted=payload.trust_device,
+            ttl_seconds=ttl,
+            user_agent=extract_request_user_agent(request),
+            ip_address=extract_request_client_ip(request),
+        )
         enriched = await enrich_private_user(request, user)
-        response = JSONResponse({"user": enriched, "session": session}, status_code=201)
-        set_cookie(response, settings.session_cookie_name, session["token"], settings)
+        response = JSONResponse(
+            {
+                "user": enriched,
+                "session": public_session_info(session, current_token_hash=session["token_hash"]),
+            },
+            status_code=201,
+        )
+        set_cookie(response, settings.session_cookie_name, session["token"], settings, max_age=ttl)
         return response
 
     @router.post(
@@ -305,10 +326,25 @@ def build_email_account_router(
             raise
 
         await complete_email_challenge(request.app.state.store, payload.registration_id)
-        session = await call_store(request, "create_session", user["id"])
+        ttl = session_ttl_for(settings, trusted=payload.trust_device)
+        session = await call_store(
+            request,
+            "create_session",
+            user["id"],
+            trusted=payload.trust_device,
+            ttl_seconds=ttl,
+            user_agent=extract_request_user_agent(request),
+            ip_address=extract_request_client_ip(request),
+        )
         enriched = await enrich_private_user(request, user)
-        response = JSONResponse({"user": enriched, "session": session}, status_code=201)
-        set_cookie(response, settings.session_cookie_name, session["token"], settings)
+        response = JSONResponse(
+            {
+                "user": enriched,
+                "session": public_session_info(session, current_token_hash=session["token_hash"]),
+            },
+            status_code=201,
+        )
+        set_cookie(response, settings.session_cookie_name, session["token"], settings, max_age=ttl)
         return response
 
     @router.post(
@@ -449,6 +485,14 @@ def build_email_account_router(
                 raise _http_error(400, "invalid_email", "请输入有效的邮箱地址")
             next_email = cleaned
 
+        existing_token = request.cookies.get(settings.session_cookie_name) or ""
+        existing_session = (
+            await call_store(request, "get_session_by_token", existing_token)
+            if existing_token
+            else None
+        )
+        was_trusted = bool((existing_session or {}).get("trusted", False))
+
         updated = await call_store(
             request,
             "set_user_password",
@@ -459,10 +503,19 @@ def build_email_account_router(
         )
         if not updated:
             raise _http_error(404, "user_not_found", "用户不存在")
-        session = await call_store(request, "create_session", updated["id"])
+        ttl = session_ttl_for(settings, trusted=was_trusted)
+        session = await call_store(
+            request,
+            "create_session",
+            updated["id"],
+            trusted=was_trusted,
+            ttl_seconds=ttl,
+            user_agent=extract_request_user_agent(request),
+            ip_address=extract_request_client_ip(request),
+        )
         enriched = await enrich_private_user(request, updated)
         response = JSONResponse({"updated": True, "user": enriched})
-        set_cookie(response, settings.session_cookie_name, session["token"], settings)
+        set_cookie(response, settings.session_cookie_name, session["token"], settings, max_age=ttl)
         return response
 
     @router.post(

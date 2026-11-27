@@ -42,6 +42,7 @@ const {
 } = store;
 
 const agreementAccepted = shallowRef(false);
+const trustDevice = shallowRef(false);
 const authTab = shallowRef<"login" | "register">("login");
 const showResetPassword = shallowRef(false);
 const authSubmitting = shallowRef(false);
@@ -167,17 +168,19 @@ watch(
   (visible) => {
     if (!visible) return;
     agreementAccepted.value = false;
+    trustDevice.value = false;
     resetModalForms();
   },
   { immediate: true },
 );
 
 function handleOAuthLogin(provider: OAuthProviderKey): void {
+  const options = trustDevice.value ? { trustDevice: true } : undefined;
   if (provider === "github") {
-    loginWithGithub();
+    loginWithGithub(undefined, options);
     return;
   }
-  loginWithOAuth(provider);
+  loginWithOAuth(provider, undefined, options);
 }
 
 async function handlePasswordLogin(): Promise<void> {
@@ -191,6 +194,7 @@ async function handlePasswordLogin(): Promise<void> {
     await loginWithPassword({
       username: loginForm.username.trim(),
       password: loginForm.password,
+      trust_device: trustDevice.value,
     });
     emit("update:show", false);
     message.success("登录成功");
@@ -217,6 +221,7 @@ async function handleDirectRegister(): Promise<void> {
       username: registerForm.username.trim(),
       email: registerForm.email.trim(),
       password: registerForm.password,
+      trust_device: trustDevice.value,
     });
     emit("update:show", false);
     message.success("注册成功并已自动登录");
@@ -266,6 +271,7 @@ async function handleVerifyRegisterCode(): Promise<void> {
     await verifyEmailRegisterCode({
       registration_id: registerForm.registrationId,
       code: registerForm.code.trim(),
+      trust_device: trustDevice.value,
     });
     emit("update:show", false);
     message.success("注册成功并已自动登录");
@@ -418,6 +424,7 @@ async function handleVerifyPasswordReset(): Promise<void> {
                 />
               </n-form-item>
               <div class="auth-helper-row">
+                <n-checkbox v-model:checked="trustDevice">信任此设备（保持登录 1 年）</n-checkbox>
                 <n-button
                   v-if="emailServiceEnabled"
                   text
@@ -428,6 +435,7 @@ async function handleVerifyPasswordReset(): Promise<void> {
                   忘记密码？
                 </n-button>
               </div>
+              <p class="trust-device-hint">未勾选默认 7 天过期，请勿在公共设备上勾选</p>
               <n-button
                 type="primary"
                 block
@@ -483,6 +491,11 @@ async function handleVerifyPasswordReset(): Promise<void> {
                 />
               </n-form-item>
 
+              <div class="trust-device-block">
+                <n-checkbox v-model:checked="trustDevice">信任此设备（保持登录 1 年）</n-checkbox>
+                <p class="trust-device-hint">未勾选默认 7 天过期，请勿在公共设备上勾选</p>
+              </div>
+
               <template v-if="emailVerificationRequired">
                 <n-form-item label="邮箱验证码">
                   <div class="inline-code-row">
@@ -534,6 +547,10 @@ async function handleVerifyPasswordReset(): Promise<void> {
         </n-divider>
 
         <div v-if="enabledOAuthProviders.length" class="oauth-login-list">
+          <div v-if="!passwordLoginEnabled && !emailRegisterEnabled" class="trust-device-block">
+            <n-checkbox v-model:checked="trustDevice">信任此设备（保持登录 1 年）</n-checkbox>
+            <p class="trust-device-hint">未勾选默认 7 天过期，请勿在公共设备上勾选</p>
+          </div>
           <n-button
             v-for="(item, index) in enabledOAuthProviders"
             :key="item.provider"
@@ -600,8 +617,20 @@ async function handleVerifyPasswordReset(): Promise<void> {
 }
 
 .auth-helper-row {
-  justify-content: flex-end;
-  margin: -8px 0 10px;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -4px 0 4px;
+}
+
+.trust-device-block {
+  margin-bottom: 10px;
+}
+
+.trust-device-hint {
+  margin: 2px 0 10px;
+  color: var(--text-color-3);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .inline-code-row {

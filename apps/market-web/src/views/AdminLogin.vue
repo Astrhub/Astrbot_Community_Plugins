@@ -30,6 +30,12 @@
               @keyup.enter="submitInternalLogin"
             />
           </n-form-item>
+          <div class="trust-device-field">
+            <n-checkbox v-model:checked="loginForm.trustDevice">
+              信任此设备（保持登录 1 年）
+            </n-checkbox>
+            <p class="trust-device-hint">未勾选默认 7 天过期，请勿在公共设备上勾选</p>
+          </div>
           <n-button
             type="primary"
             block
@@ -49,7 +55,16 @@
 import { computed, onMounted, ref } from "vue";
 import { storeToRefs } from "pinia";
 import { useRouter } from "vue-router";
-import { NButton, NForm, NFormItem, NIcon, NInput, NLayoutHeader, useMessage } from "naive-ui";
+import {
+  NButton,
+  NCheckbox,
+  NForm,
+  NFormItem,
+  NIcon,
+  NInput,
+  NLayoutHeader,
+  useMessage,
+} from "naive-ui";
 import { ArrowBack } from "@vicons/ionicons5";
 import ThemeModeButton from "@/components/ThemeModeButton.vue";
 import { usePluginStore } from "@/stores/plugins";
@@ -61,7 +76,7 @@ const { currentUser } = storeToRefs(store);
 const { loadCurrentUser, loginWithPassword } = store;
 
 const isLoggingIn = ref(false);
-const loginForm = ref({ username: "admin", password: "" });
+const loginForm = ref({ username: "admin", password: "", trustDevice: false });
 const canSubmit = computed(() =>
   Boolean(loginForm.value.username.trim() && loginForm.value.password),
 );
@@ -73,6 +88,7 @@ async function submitInternalLogin() {
     const user = await loginWithPassword({
       username: loginForm.value.username.trim(),
       password: loginForm.value.password,
+      trust_device: loginForm.value.trustDevice,
     });
     if (user.role !== "core_admin") {
       await store.logout();
@@ -151,5 +167,16 @@ h1 {
   margin: 0;
   color: var(--text-primary);
   font-size: 26px;
+}
+
+.trust-device-field {
+  margin: -4px 0 16px;
+}
+
+.trust-device-hint {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
 }
 </style>

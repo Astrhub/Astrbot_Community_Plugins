@@ -79,6 +79,13 @@ from .config import (
     normalize_smtp_encryption,
 )
 from .email_account_routes import build_email_account_router
+from .sessions import (
+    extract_request_client_ip,
+    extract_request_user_agent,
+    hash_session_token,
+    public_session_info,
+    session_ttl_for,
+)
 from .email_challenges import (
     EmailChallengeError,
     record_site_email_sent,
@@ -495,6 +502,7 @@ def create_app(
             current_user=current_user,
             require_user=require_user,
             set_cookie=set_cookie,
+            delete_cookie=delete_cookie,
             enforce_user_rpm_limit=enforce_user_rpm_limit,
             github_list_repositories=lambda request, user, page: access_for_request(
                 request, user
@@ -566,7 +574,7 @@ def create_store(
             settings.redis_url,
             settings.session_max_age_seconds,
         )
-    return InMemoryMarketStore()
+    return InMemoryMarketStore(session_ttl_seconds=settings.session_max_age_seconds)
 
 
 @asynccontextmanager
@@ -1218,11 +1226,23 @@ def register_routes(app: FastAPI) -> None:
             raise error(401, "Invalid username or password")
         if not settings.public_login_enabled and not is_core_admin(user):
             raise error(403, "Login is closed")
-        session = await call_store(request, "create_session", user["id"])
-        response = JSONResponse(
-            {"user": await enrich_private_user(request, user), "session": session}
+        ttl = session_ttl_for(settings, trusted=payload.trust_device)
+        session = await call_store(
+            request,
+            "create_session",
+            user["id"],
+            trusted=payload.trust_device,
+            ttl_seconds=ttl,
+            user_agent=extract_request_user_agent(request),
+            ip_address=extract_request_client_ip(request),
         )
-        set_cookie(response, settings.session_cookie_name, session["token"], settings)
+        response = JSONResponse(
+            {
+                "user": await enrich_private_user(request, user),
+                "session": public_session_info(session, current_token_hash=session["token_hash"]),
+            }
+        )
+        set_cookie(response, settings.session_cookie_name, session["token"], settings, max_age=ttl)
         return response
 
     @app.get(
@@ -1236,7 +1256,11 @@ def register_routes(app: FastAPI) -> None:
             501: {"description": "GitHub OAuth 未配置"},
         },
     )
-    async def github_login(request: Request, next: str = "") -> Response:
+    async def github_login(
+        request: Request,
+        next: str = "",
+        trust_device: bool = False,
+    ) -> Response:
         settings = await runtime_settings_for_app(request.app)
         if not settings.github_login_enabled:
             return JSONResponse(status_code=403, content={"error": "GitHub login is disabled"})
@@ -1263,6 +1287,13 @@ def register_routes(app: FastAPI) -> None:
         set_cookie(response, settings.oauth_state_cookie_name, state, settings, max_age=600)
         destination = normalize_oauth_return_path(next) or "/"
         set_cookie(response, "github_oauth_return_to", destination, settings, max_age=600)
+        set_cookie(
+            response,
+            "github_oauth_trust_device",
+            "1" if trust_device else "0",
+            settings,
+            max_age=600,
+        )
         return response
 
     @app.get(
@@ -1293,11 +1324,40 @@ def register_routes(app: FastAPI) -> None:
         else:
             user = await call_store(request, "upsert_github_user", profile_payload)
         await promote_org_admin_if_needed(request, user, access_token)
-        session = await call_store(request, "create_session", user["id"])
+
+        existing_token = request.cookies.get(settings.session_cookie_name) or ""
+        existing_session = (
+            await call_store(request, "get_session_by_token", existing_token)
+            if (current and existing_token)
+            else None
+        )
+        preserve_existing = bool(
+            current
+            and existing_session
+            and str(existing_session.get("user_id") or "") == str(user["id"])
+        )
+        if preserve_existing:
+            auth_session_token = existing_token
+            new_session = None
+            new_ttl = 0
+        else:
+            requested_trust = request.cookies.get("github_oauth_trust_device") == "1"
+            new_ttl = session_ttl_for(settings, trusted=requested_trust)
+            new_session = await call_store(
+                request,
+                "create_session",
+                user["id"],
+                trusted=requested_trust,
+                ttl_seconds=new_ttl,
+                user_agent=extract_request_user_agent(request),
+                ip_address=extract_request_client_ip(request),
+            )
+            auth_session_token = new_session["token"]
+
         await save_authorization(
             request.app.state.store,
             settings,
-            session["token"],
+            auth_session_token,
             user["id"],
             str(profile["id"]),
             profile["login"],
@@ -1307,9 +1367,17 @@ def register_routes(app: FastAPI) -> None:
             normalize_oauth_return_path(request.cookies.get("github_oauth_return_to", "")) or ""
         )
         response = RedirectResponse(settings.web_url.rstrip("/") + destination)
-        set_cookie(response, settings.session_cookie_name, session["token"], settings)
-        response.delete_cookie(settings.oauth_state_cookie_name, path="/")
-        response.delete_cookie("github_oauth_return_to", path="/")
+        if new_session is not None:
+            set_cookie(
+                response,
+                settings.session_cookie_name,
+                new_session["token"],
+                settings,
+                max_age=new_ttl,
+            )
+        delete_cookie(response, settings.oauth_state_cookie_name, settings)
+        delete_cookie(response, "github_oauth_return_to", settings)
+        delete_cookie(response, "github_oauth_trust_device", settings)
         return response
 
     @app.get(
@@ -1347,7 +1415,7 @@ def register_routes(app: FastAPI) -> None:
         session_token = request.cookies.get(settings.session_cookie_name)
         if session_token:
             await call_store(request, "revoke_session", session_token)
-        response.delete_cookie(settings.session_cookie_name, path="/")
+        delete_cookie(response, settings.session_cookie_name, settings)
 
     @app.get(
         "/v1/auth/debug-login",
@@ -1361,7 +1429,11 @@ def register_routes(app: FastAPI) -> None:
             400: {"description": "缺少 login 参数"},
         },
     )
-    async def debug_login(request: Request, login: str = "") -> Response:
+    async def debug_login(
+        request: Request,
+        login: str = "",
+        trust_device: bool = False,
+    ) -> Response:
         settings = await runtime_settings_for_app(request.app)
         if not settings.enable_dev_auth:
             raise error(403, "Dev auth is disabled")
@@ -1370,11 +1442,23 @@ def register_routes(app: FastAPI) -> None:
         user = await call_store(
             request, "upsert_github_user", {"login": login.strip(), "name": login.strip()}
         )
-        session = await call_store(request, "create_session", user["id"])
-        response = JSONResponse(
-            {"user": await enrich_private_user(request, user), "session": session}
+        ttl = session_ttl_for(settings, trusted=trust_device)
+        session = await call_store(
+            request,
+            "create_session",
+            user["id"],
+            trusted=trust_device,
+            ttl_seconds=ttl,
+            user_agent=extract_request_user_agent(request),
+            ip_address=extract_request_client_ip(request),
         )
-        set_cookie(response, settings.session_cookie_name, session["token"], settings)
+        response = JSONResponse(
+            {
+                "user": await enrich_private_user(request, user),
+                "session": public_session_info(session, current_token_hash=session["token_hash"]),
+            }
+        )
+        set_cookie(response, settings.session_cookie_name, session["token"], settings, max_age=ttl)
         return response
 
     @app.get(
@@ -1385,10 +1469,83 @@ def register_routes(app: FastAPI) -> None:
         responses={200: {"description": "已登录"}, 401: {"description": "未登录"}},
     )
     async def auth_session(request: Request) -> dict[str, Any]:
-        return {
+        user = await require_user(request)
+        settings = get_settings(request)
+        session_token = request.cookies.get(settings.session_cookie_name) or ""
+        active_session = (
+            await call_store(request, "get_session_by_token", session_token)
+            if session_token
+            else None
+        )
+        payload: dict[str, Any] = {
             "authenticated": True,
-            "user": await enrich_private_user(request, await require_user(request)),
+            "user": await enrich_private_user(request, user),
         }
+        if active_session:
+            payload["session"] = public_session_info(
+                active_session,
+                current_token_hash=hash_session_token(session_token),
+            )
+        return payload
+
+    @app.get(
+        "/v1/me/sessions",
+        tags=["user"],
+        summary="查看当前账号活跃登录设备",
+        description="列出当前账号所有未过期的登录设备与信任设备，不返回明文会话令牌。",
+        responses={401: {"description": "未登录"}},
+    )
+    async def list_my_sessions(request: Request) -> dict[str, Any]:
+        user = await require_user(request)
+        settings = get_settings(request)
+        session_token = request.cookies.get(settings.session_cookie_name) or ""
+        current_hash = hash_session_token(session_token) if session_token else ""
+        sessions = await call_store(request, "list_user_sessions", user["id"])
+        return {
+            "items": [
+                public_session_info(item, current_token_hash=current_hash) for item in sessions
+            ]
+        }
+
+    @app.delete(
+        "/v1/me/sessions/{session_id}",
+        tags=["user"],
+        summary="注销指定登录设备",
+        description="立即吊销当前账号下指定的登录设备或信任设备；如果目标是当前设备，同时清除本地登录 Cookie。",
+        responses={401: {"description": "未登录"}, 404: {"description": "设备记录不存在"}},
+    )
+    async def revoke_my_session(request: Request, session_id: str) -> Response:
+        user = await require_user(request)
+        settings = await runtime_settings_for_app(request.app)
+        session_token = request.cookies.get(settings.session_cookie_name) or ""
+        current_hash = hash_session_token(session_token) if session_token else ""
+        removed = await call_store(request, "revoke_user_session", user["id"], session_id)
+        if not removed:
+            raise HTTPException(
+                404,
+                {"code": "session_not_found", "error": "登录设备记录不存在或已失效"},
+            )
+        is_current = bool(current_hash and str(removed.get("token_hash") or "") == current_hash)
+        response = JSONResponse({"revoked": True, "is_current": is_current})
+        if is_current:
+            delete_cookie(response, settings.session_cookie_name, settings)
+        return response
+
+    @app.post(
+        "/v1/me/sessions/revoke-others",
+        tags=["user"],
+        summary="注销其他所有登录设备",
+        description="吊销当前账号除当前设备之外的所有其他活跃会话与信任设备。",
+        responses={401: {"description": "未登录"}},
+    )
+    async def revoke_my_other_sessions(request: Request) -> dict[str, int]:
+        user = await require_user(request)
+        settings = get_settings(request)
+        session_token = request.cookies.get(settings.session_cookie_name) or ""
+        revoked_count = await call_store(
+            request, "revoke_other_user_sessions", user["id"], session_token
+        )
+        return {"revoked_count": int(revoked_count)}
 
     @app.get(
         "/v1/admin/check",
@@ -7241,6 +7398,16 @@ def set_cookie(
         samesite=settings.cookie_same_site.lower(),
         max_age=max_age or settings.session_max_age_seconds,
         path="/",
+    )
+
+
+def delete_cookie(response: Response, name: str, settings: Settings) -> None:
+    response.delete_cookie(
+        name,
+        path="/",
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite=settings.cookie_same_site.lower(),
     )
 
 
