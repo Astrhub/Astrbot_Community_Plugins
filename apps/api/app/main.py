@@ -85,6 +85,7 @@ from .sessions import (
     hash_session_token,
     public_session_info,
     session_ttl_for,
+    verify_trusted_mutation_origin,
 )
 from .email_challenges import (
     EmailChallengeError,
@@ -1339,7 +1340,6 @@ def register_routes(app: FastAPI) -> None:
         if preserve_existing:
             auth_session_token = existing_token
             new_session = None
-            new_ttl = 0
         else:
             requested_trust = request.cookies.get("github_oauth_trust_device") == "1"
             new_ttl = session_ttl_for(settings, trusted=requested_trust)
@@ -1373,7 +1373,7 @@ def register_routes(app: FastAPI) -> None:
                 settings.session_cookie_name,
                 new_session["token"],
                 settings,
-                max_age=new_ttl,
+                max_age=int(new_session["max_age_seconds"]),
             )
         delete_cookie(response, settings.oauth_state_cookie_name, settings)
         delete_cookie(response, "github_oauth_return_to", settings)
@@ -1512,11 +1512,16 @@ def register_routes(app: FastAPI) -> None:
         tags=["user"],
         summary="注销指定登录设备",
         description="立即吊销当前账号下指定的登录设备或信任设备；如果目标是当前设备，同时清除本地登录 Cookie。",
-        responses={401: {"description": "未登录"}, 404: {"description": "设备记录不存在"}},
+        responses={
+            401: {"description": "未登录"},
+            403: {"description": "请求来源不受信任"},
+            404: {"description": "设备记录不存在"},
+        },
     )
     async def revoke_my_session(request: Request, session_id: str) -> Response:
         user = await require_user(request)
         settings = await runtime_settings_for_app(request.app)
+        verify_trusted_mutation_origin(request, settings)
         session_token = request.cookies.get(settings.session_cookie_name) or ""
         current_hash = hash_session_token(session_token) if session_token else ""
         removed = await call_store(request, "revoke_user_session", user["id"], session_id)
@@ -1536,11 +1541,15 @@ def register_routes(app: FastAPI) -> None:
         tags=["user"],
         summary="注销其他所有登录设备",
         description="吊销当前账号除当前设备之外的所有其他活跃会话与信任设备。",
-        responses={401: {"description": "未登录"}},
+        responses={
+            401: {"description": "未登录"},
+            403: {"description": "请求来源不受信任"},
+        },
     )
     async def revoke_my_other_sessions(request: Request) -> dict[str, int]:
         user = await require_user(request)
-        settings = get_settings(request)
+        settings = await runtime_settings_for_app(request.app)
+        verify_trusted_mutation_origin(request, settings)
         session_token = request.cookies.get(settings.session_cookie_name) or ""
         revoked_count = await call_store(
             request, "revoke_other_user_sessions", user["id"], session_token

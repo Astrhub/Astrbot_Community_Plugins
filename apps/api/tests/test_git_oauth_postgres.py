@@ -228,6 +228,10 @@ def test_pg_store_converts_iso_timestamps_for_asyncpg() -> None:
             self.calls.append((query, args))
             return 0
 
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            self.calls.append((query, args))
+            return []
+
         async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
             self.calls.append((query, args))
             if "FROM market_git_repository_bindings" in query and "FOR UPDATE" in query:

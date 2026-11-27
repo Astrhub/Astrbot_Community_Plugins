@@ -9,6 +9,8 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from redis.exceptions import RedisError
+
 import app.main as main_module
 from app.auth import Role, hash_password
 from app.config import (
@@ -18,7 +20,7 @@ from app.config import (
     load_settings,
 )
 from app.git_sources.models import OAuthTokenSet, OAuthUserProfile
-from app.sessions import hash_session_token, parse_device_label
+from app.sessions import hash_session_token, parse_device_label, session_ttl_for
 from app.store import InMemoryMarketStore, LocalFileMarketStore, PgRedisMarketStore
 
 TEST_CREDENTIAL_KEY = "trusted-session-test-master-key-123456"
@@ -85,6 +87,15 @@ def test_parse_device_label_and_config_bounds() -> None:
     clamped = load_settings({"TRUSTED_SESSION_MAX_AGE_SECONDS": str(60 * 60 * 24 * 999)})
     assert clamped.session_max_age_seconds == DEFAULT_SESSION_MAX_AGE_SECONDS
     assert clamped.trusted_session_max_age_seconds == MAX_COOKIE_MAX_AGE_SECONDS
+
+    shorter_trusted = load_settings(
+        {
+            "SESSION_MAX_AGE_SECONDS": "604800",
+            "TRUSTED_SESSION_MAX_AGE_SECONDS": "86400",
+        }
+    )
+    assert session_ttl_for(shorter_trusted, trusted=False) == 604800
+    assert session_ttl_for(shorter_trusted, trusted=True) == 86400
 
 
 def test_password_login_cookie_duration_regular_vs_trusted_and_core_admin() -> None:
@@ -320,16 +331,51 @@ def test_session_management_endpoints_ownership_cache_headers_and_openapi() -> N
     assert forbidden.status_code == 404
     assert client_a2.get("/v1/me").status_code == 200
 
+    # Cross-site requests to session-revocation endpoints are rejected even with valid cookies
+    evil_revoke_others = client_a1.post(
+        "/v1/me/sessions/revoke-others",
+        headers={"origin": "https://evil.example"},
+    )
+    assert evil_revoke_others.status_code == 403
+    assert evil_revoke_others.json()["code"] == "untrusted_origin"
+
+    null_origin_revoke = client_a1.post(
+        "/v1/me/sessions/revoke-others",
+        headers={"origin": "null"},
+    )
+    assert null_origin_revoke.status_code == 403
+
+    cross_site_fetch = client_a1.delete(
+        f"/v1/me/sessions/{a2_id}",
+        headers={"sec-fetch-site": "cross-site"},
+    )
+    assert cross_site_fetch.status_code == 403
+    assert client_a2.get("/v1/me").status_code == 200
+
+    # Trusted origin matching WEB_URL succeeds, and expired sessions are excluded from revoked_count
+    expired_session = store.create_session(alice["id"], ttl_seconds=60)
+    expired_record = store._find_session_by_token_hash(expired_session["token_hash"])
+    assert expired_record is not None
+    expired_record["expires_at"] = (
+        (datetime.now(UTC) - timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+    )
+
     # Alice revokes device 2
-    revoked_other = client_a1.delete(f"/v1/me/sessions/{a2_id}")
+    revoked_other = client_a1.delete(
+        f"/v1/me/sessions/{a2_id}",
+        headers={"origin": "https://market.example.com"},
+    )
     assert revoked_other.status_code == 200
     assert revoked_other.headers["cache-control"] == "private, no-store"
     assert revoked_other.json() == {"revoked": True, "is_current": False}
     assert client_a2.get("/v1/me").status_code == 401
     assert client_a1.get("/v1/me").status_code == 200
 
-    # Alice revokes all other sessions (kicks device 3, keeps device 1)
-    revoked_others = client_a1.post("/v1/me/sessions/revoke-others")
+    # Alice revokes all other sessions (kicks device 3, excludes already-expired session from count)
+    revoked_others = client_a1.post(
+        "/v1/me/sessions/revoke-others",
+        headers={"origin": "https://market.example.com"},
+    )
     assert revoked_others.status_code == 200
     assert revoked_others.headers["cache-control"] == "private, no-store"
     assert revoked_others.json() == {"revoked_count": 1}
@@ -391,29 +437,48 @@ def test_local_file_store_migrates_legacy_sessions_and_persists_trusted_devices(
 
     # Inject a legacy plaintext session without expires_at to verify migration on load.
     raw = json.loads(data_path.read_text(encoding="utf-8"))
-    now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    created_iso = (datetime.now(UTC) - timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
     raw["sessions"].append(
         {
             "token": "sess_legacy_token_abc",
             "user_id": admin["id"],
             "session_version": 1,
-            "created_at": now_iso,
-            "last_seen_at": now_iso,
+            "created_at": created_iso,
+            "last_seen_at": created_iso,
         }
     )
     data_path.write_text(json.dumps(raw), encoding="utf-8")
 
+    # connect() must immediately scrub plaintext tokens and persist fixed expires_at on disk.
     reloaded = LocalFileMarketStore(data_path, session_ttl_seconds=3600)
     reloaded.connect()
+    scrubbed_on_boot = json.loads(data_path.read_text(encoding="utf-8"))
+    assert all("token" not in item for item in scrubbed_on_boot["sessions"])
+    assert all(item.get("expires_at") for item in scrubbed_on_boot["sessions"])
+
     assert reloaded.get_user_by_session(trusted["token"]) is not None
     assert reloaded.get_user_by_session("sess_legacy_token_abc") is not None
     listed = reloaded.list_user_sessions(admin["id"])
     assert len(listed) == 2
     assert any(item["trusted"] is True for item in listed)
 
+    # Legacy session expires based on immutable created_at even if last_seen_at is fresh.
+    legacy_record = reloaded._find_session_by_token_hash(
+        hash_session_token("sess_legacy_token_abc")
+    )
+    assert legacy_record is not None
+    legacy_record.pop("expires_at", None)
+    legacy_record["created_at"] = (
+        (datetime.now(UTC) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    )
+    legacy_record["last_seen_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    assert reloaded.get_user_by_session("sess_legacy_token_abc") is None
+
+    # Re-create an active second session and confirm revoke_other_user_sessions removes only it.
+    extra = reloaded.create_session(admin["id"], trusted=False, ttl_seconds=3600)
     revoked_count = reloaded.revoke_other_user_sessions(admin["id"], trusted["token"])
     assert revoked_count == 1
-    assert reloaded.get_user_by_session("sess_legacy_token_abc") is None
+    assert reloaded.get_user_by_session(extra["token"]) is None
     assert reloaded.get_user_by_session(trusted["token"]) is not None
 
     persisted = json.loads(data_path.read_text(encoding="utf-8"))
@@ -422,35 +487,82 @@ def test_local_file_store_migrates_legacy_sessions_and_persists_trusted_devices(
     assert persisted["sessions"][0]["token_hash"] == hash_session_token(trusted["token"])
 
 
-def test_pg_redis_store_recovers_trusted_session_from_pg_when_redis_is_flushed() -> None:
+def test_pg_redis_store_pg_authoritative_sessions_legacy_migration_and_redis_outage() -> None:
     class FakeRedis:
-        def __init__(self) -> None:
+        def __init__(self, *, fail: bool = False) -> None:
             self.data: dict[str, str] = {}
-            self.ttls: dict[str, int | None] = {}
+            self.fail = fail
 
         async def get(self, key: str) -> str | None:
+            if self.fail:
+                raise RedisError("redis unavailable")
             return self.data.get(key)
 
         async def set(self, key: str, value: str, ex: int | None = None) -> None:
+            if self.fail:
+                raise RedisError("redis unavailable")
             self.data[key] = value
-            self.ttls[key] = ex
 
         async def delete(self, key: str) -> int:
-            self.ttls.pop(key, None)
+            if self.fail:
+                raise RedisError("redis unavailable")
             return int(self.data.pop(key, None) is not None)
 
         async def scan_iter(self, match: str, count: int = 200):
+            if self.fail:
+                raise RedisError("redis unavailable")
             prefix = match.removesuffix("*")
             for key in list(self.data):
                 if key.startswith(prefix):
                     yield key
 
+    class FakeTransaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeConnection:
+        def __init__(self, pool: FakePool) -> None:
+            self.pool = pool
+
+        def transaction(self) -> FakeTransaction:
+            return FakeTransaction()
+
+        async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+            return await self.pool.fetchrow(query, *args)
+
+        async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+            return await self.pool.fetch(query, *args)
+
+        async def execute(self, query: str, *args: Any) -> str:
+            return await self.pool.execute(query, *args)
+
+    class FakeAcquire:
+        def __init__(self, pool: FakePool) -> None:
+            self.pool = pool
+
+        async def __aenter__(self) -> FakeConnection:
+            return FakeConnection(self.pool)
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
     class FakePool:
         def __init__(self, user_row: dict[str, Any]) -> None:
             self.user_row = dict(user_row)
             self.sessions: dict[str, dict[str, Any]] = {}
+            self.fail_next_last_seen_update = False
+
+        def acquire(self) -> FakeAcquire:
+            return FakeAcquire(self)
 
         async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+            if "SELECT session_version FROM market_users" in query:
+                if args[0] == self.user_row["id"]:
+                    return {"session_version": self.user_row["session_version"]}
+                return None
             if "INSERT INTO market_user_sessions" in query:
                 row = {
                     "id": args[0],
@@ -468,10 +580,11 @@ def test_pg_redis_store_recovers_trusted_session_from_pg_when_redis_is_flushed()
                 }
                 self.sessions[row["id"]] = row
                 return dict(row)
-            if "FROM market_user_sessions" in query and "WHERE token_hash = $1" in query:
+            if "to_jsonb(s) AS session_row" in query:
                 for row in self.sessions.values():
                     if row["token_hash"] == args[0] and row["revoked_at"] is None:
-                        return dict(row)
+                        if row["user_id"] == self.user_row["id"]:
+                            return {"session_row": dict(row), "user_row": dict(self.user_row)}
                 return None
             if "UPDATE market_user_sessions" in query and "WHERE id = $1 AND user_id = $2" in query:
                 row = self.sessions.get(args[0])
@@ -479,13 +592,44 @@ def test_pg_redis_store_recovers_trusted_session_from_pg_when_redis_is_flushed()
                     row["revoked_at"] = datetime.now(UTC)
                     return dict(row)
                 return None
+            if "UPDATE market_users" in query and "SET password_hash = $2" in query:
+                if args[0] != self.user_row["id"]:
+                    return None
+                self.user_row["password_hash"] = args[1]
+                if args[4]:
+                    self.user_row["session_version"] = int(self.user_row["session_version"]) + 1
+                return dict(self.user_row)
             if "FROM market_users WHERE id = $1" in query:
                 return dict(self.user_row) if args[0] == self.user_row["id"] else None
             raise AssertionError(f"Unexpected fetchrow query: {query}")
 
         async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+            now = datetime.now(UTC)
+            if "UPDATE market_user_sessions" in query and "AND session_version < $2" in query:
+                revoked: list[dict[str, Any]] = []
+                for row in self.sessions.values():
+                    if (
+                        row["user_id"] == args[0]
+                        and row["revoked_at"] is None
+                        and row["session_version"] < args[1]
+                    ):
+                        row["revoked_at"] = now
+                        revoked.append({"token_hash": row["token_hash"]})
+                return revoked
+            if "UPDATE market_user_sessions" in query and "AND token_hash <> $2" in query:
+                revoked = []
+                for row in self.sessions.values():
+                    if (
+                        row["user_id"] == args[0]
+                        and row["revoked_at"] is None
+                        and row["token_hash"] != args[1]
+                        and row["expires_at"] > now
+                        and row["session_version"] == args[2]
+                    ):
+                        row["revoked_at"] = now
+                        revoked.append({"token_hash": row["token_hash"]})
+                return revoked
             if "FROM market_user_sessions" in query and "WHERE user_id = $1" in query:
-                now = datetime.now(UTC)
                 return [
                     dict(row)
                     for row in self.sessions.values()
@@ -497,7 +641,37 @@ def test_pg_redis_store_recovers_trusted_session_from_pg_when_redis_is_flushed()
             raise AssertionError(f"Unexpected fetch query: {query}")
 
         async def execute(self, query: str, *args: Any) -> str:
+            now = datetime.now(UTC)
+            if "DELETE FROM market_user_sessions" in query:
+                for sid in list(self.sessions):
+                    row = self.sessions[sid]
+                    if row["user_id"] == args[0] and (
+                        row["expires_at"] <= now or row["revoked_at"] is not None
+                    ):
+                        self.sessions.pop(sid)
+                return "DELETE"
+            if "INSERT INTO market_user_sessions" in query and "ON CONFLICT" in query:
+                if any(item["token_hash"] == args[2] for item in self.sessions.values()):
+                    return "INSERT 0 0"
+                self.sessions[args[0]] = {
+                    "id": args[0],
+                    "user_id": args[1],
+                    "token_hash": args[2],
+                    "trusted": False,
+                    "session_version": args[3],
+                    "device_label": args[4],
+                    "user_agent": args[5],
+                    "ip_address": args[6],
+                    "created_at": args[7],
+                    "last_seen_at": args[8],
+                    "expires_at": args[9],
+                    "revoked_at": None,
+                }
+                return "INSERT 0 1"
             if "UPDATE market_user_sessions" in query and "SET last_seen_at" in query:
+                if self.fail_next_last_seen_update:
+                    self.fail_next_last_seen_update = False
+                    return "UPDATE 0"
                 row = self.sessions.get(args[0])
                 if row and row["revoked_at"] is None:
                     row["last_seen_at"] = args[1]
@@ -506,7 +680,7 @@ def test_pg_redis_store_recovers_trusted_session_from_pg_when_redis_is_flushed()
             if "UPDATE market_user_sessions" in query and "WHERE token_hash = $1" in query:
                 for row in self.sessions.values():
                     if row["token_hash"] == args[0] and row["revoked_at"] is None:
-                        row["revoked_at"] = datetime.now(UTC)
+                        row["revoked_at"] = now
                         return "UPDATE 1"
                 return "UPDATE 0"
             raise AssertionError(f"Unexpected execute query: {query}")
@@ -536,29 +710,66 @@ def test_pg_redis_store_recovers_trusted_session_from_pg_when_redis_is_flushed()
         store.redis = FakeRedis()
         store.pool = FakePool(user_row)
 
-        session = await store.create_session(
+        # 1. Pre-upgrade legacy Redis session auto-migrates into PG and deletes legacy key.
+        legacy_token = "sess_legacy_redis_token"
+        now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        store.redis.data[store._legacy_session_key(legacy_token)] = json.dumps(
+            {
+                "token": legacy_token,
+                "user_id": "usr_1",
+                "session_version": 1,
+                "created_at": now_iso,
+                "last_seen_at": now_iso,
+            }
+        )
+        migrated_user = await store.get_user_by_session(legacy_token)
+        assert migrated_user is not None and migrated_user["id"] == "usr_1"
+        assert store._legacy_session_key(legacy_token) not in store.redis.data
+        assert len(await store.list_user_sessions("usr_1")) == 1
+
+        # 2. Redis outage must not break PG-backed session creation, auth, revocation, or password change.
+        store.redis.fail = True
+        trusted = await store.create_session(
             "usr_1",
             trusted=True,
             ttl_seconds=DEFAULT_TRUSTED_SESSION_MAX_AGE_SECONDS,
             user_agent="Mozilla/5.0 (Windows NT 10.0) Chrome/131.0.0.0",
             ip_address="203.0.113.10",
         )
-        redis_key = store._session_key(session["token_hash"])
-        assert redis_key in store.redis.data
-        assert store.redis.ttls[redis_key] == 3600
-        assert session["token"] not in store.redis.data[redis_key]
+        assert store.redis.data == {}
+        assert (await store.get_user_by_session(trusted["token"]))["id"] == "usr_1"
 
-        # Simulate Redis flush / eviction: 1-year trusted session must recover from PG!
-        store.redis.data.clear()
-        store.redis.ttls.clear()
-        recovered = await store.get_user_by_session(session["token"])
-        assert recovered is not None and recovered["id"] == "usr_1"
-        assert redis_key in store.redis.data
+        # 3. Revoking other sessions includes the migrated legacy session and excludes expired ones.
+        expired_row_id = "sess_expired_inert"
+        store.pool.sessions[expired_row_id] = {
+            "id": expired_row_id,
+            "user_id": "usr_1",
+            "token_hash": hash_session_token("sess_expired_raw"),
+            "trusted": False,
+            "session_version": 1,
+            "device_label": "未知设备",
+            "user_agent": "",
+            "ip_address": "",
+            "created_at": datetime.now(UTC) - timedelta(days=10),
+            "last_seen_at": datetime.now(UTC) - timedelta(days=10),
+            "expires_at": datetime.now(UTC) - timedelta(days=1),
+            "revoked_at": None,
+        }
+        assert await store.revoke_other_user_sessions("usr_1", trusted["token"]) == 1
+        assert await store.get_user_by_session(legacy_token) is None
 
-        # Revoking by session ID removes both PG active state and Redis cache immediately.
-        revoked = await store.revoke_user_session("usr_1", session["id"])
-        assert revoked is not None
-        assert redis_key not in store.redis.data
-        assert await store.get_user_by_session(session["token"]) is None
+        # 4. Concurrent revocation during stale last_seen_at sync immediately denies access.
+        store.pool.sessions[trusted["id"]]["last_seen_at"] = datetime.now(UTC) - timedelta(hours=1)
+        store.pool.fail_next_last_seen_update = True
+        assert await store.get_user_by_session(trusted["token"]) is None
+
+        # 5. Password change succeeds even during Redis outage and only revokes older session_version.
+        updated_user = await store.set_user_password("usr_1", "new-hash", bump_session_version=True)
+        assert updated_user is not None and updated_user["session_version"] == 2
+        assert await store.get_user_by_session(trusted["token"]) is None
+
+        # 6. Creating a new session cleans up expired and revoked historical rows for this user.
+        fresh = await store.create_session("usr_1", trusted=True, ttl_seconds=3600)
+        assert list(store.pool.sessions.keys()) == [fresh["id"]]
 
     asyncio.run(run())

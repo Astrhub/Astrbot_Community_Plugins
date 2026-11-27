@@ -25,8 +25,8 @@ flowchart LR
     end
 
     subgraph Infra["基础设施"]
-        PG[("PostgreSQL (业务与审查数据)")]
-        Redis[("Redis (会话与加密短期 OAuth 凭据)")]
+        PG[("PostgreSQL (业务、会话与审查数据)")]
+        Redis[("Redis (限流、验证码与加密短期 OAuth 缓存)")]
         LocalFile[("本地 JSON 数据文件 (单进程模式)")]
         GH["GitHub API (OAuth / 元数据 / Release)"]
         Private[("私有隔离存储")]
@@ -107,8 +107,8 @@ create_app(settings, store)
 
 `create_store()`（位于 `apps/api/app/main.py`）按配置选择存储后端：
 
-- `MARKET_STORAGE_MODE=local`：`LocalFileMarketStore`，单进程线程锁保护，以临时文件 `fsync` + `os.replace` 原子写入单个 JSON 文件，持久化所有市场数据与带 TTL 的会话，无需 PostgreSQL 和 Redis。
-- `MARKET_STORAGE_MODE=postgres`（默认）且同时配置 `DATABASE_URL` 与 `REDIS_URL`：`PgRedisMarketStore`，PostgreSQL 存业务数据，Redis 存会话和加密短期 OAuth 凭据。
+- `MARKET_STORAGE_MODE=local`：`LocalFileMarketStore`，单进程线程锁保护，以临时文件 `fsync` + `os.replace` 原子写入单个 JSON 文件，持久化所有市场数据与哈希化会话（按固定过期时间清理），无需 PostgreSQL 和 Redis。
+- `MARKET_STORAGE_MODE=postgres`（默认）且同时配置 `DATABASE_URL` 与 `REDIS_URL`：`PgRedisMarketStore`，PostgreSQL 持久化业务数据与用户会话（`market_user_sessions`），Redis 存加密短期 OAuth 授权缓存、邮件验证码挑战与速率限制计数。
 - `MARKET_STORAGE_MODE=postgres` 且缺少数据库连接：回退 `InMemoryMarketStore`（不持久化），仅用于开发调试或首次打开 `/setup`。
 
 通过 `/v1/setup` 完成首次初始化后，后端调用 `activate_setup_store()` 在当前进程内热切换至持久化存储，无需重启服务。
@@ -132,16 +132,17 @@ create_app(settings, store)
 | `market_api_keys` | `id` | `name`、`user_id`（FK）、`scopes`（`jsonb`）、`key`（UNIQUE） |
 | `market_options` | `option_key` | `option_value`，存储运行时站点、OAuth、市场策略与邮件配置 |
 
-版本化迁移另建账号扩展、通用对象存储与插件包审查体系表，包括 `market_oauth_identities`、`market_oauth_credentials`（由 `OAUTH_CREDENTIAL_KEY` 加密保存各平台 OAuth 访问与刷新令牌）、`market_git_repository_bindings`（记录第三方仓库归属绑定、代次与撤销/转移审计）、`market_storage_secrets`、`market_storage_profiles`、`market_storage_bindings`、`market_storage_objects`、`market_storage_url_aliases`、`market_storage_migrations`、`market_storage_migration_items`、`market_storage_blob_objects` / `market_storage_blob_chunks`（分块对象表）、`plugin_artifacts`（`source_type` 支持 `upload` / `github` / `git`）、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`review_comments`、`review_policies`、`plugin_cdn_subscriptions`、`artifact_jobs`、`outbox_events` 与 `market_schema_migrations`。`market_plugins.repo_version` 随仓库元数据更新，`current_artifact_id` 仅由发布或下架事务更新。历史迁移脚本的 checksum 一旦被篡改，服务将拒绝启动。
+版本化迁移另建账号扩展、持久化会话、通用对象存储与插件包审查体系表，包括 `market_oauth_identities`、`market_oauth_credentials`（由 `OAUTH_CREDENTIAL_KEY` 加密保存各平台 OAuth 访问与刷新令牌）、`market_user_sessions`（仅存会话令牌 SHA-256 哈希、信任设备标记、设备标签与固定绝对过期时间）、`market_git_repository_bindings`（记录第三方仓库归属绑定、代次与撤销/转移审计）、`market_storage_secrets`、`market_storage_profiles`、`market_storage_bindings`、`market_storage_objects`、`market_storage_url_aliases`、`market_storage_migrations`、`market_storage_migration_items`、`market_storage_blob_objects` / `market_storage_blob_chunks`（分块对象表）、`plugin_artifacts`（`source_type` 支持 `upload` / `github` / `git`）、`artifact_files`、`review_runs`、`review_findings`、`review_decisions`、`review_comments`、`review_policies`、`plugin_cdn_subscriptions`、`artifact_jobs`、`outbox_events` 与 `market_schema_migrations`。`market_plugins.repo_version` 随仓库元数据更新，`current_artifact_id` 仅由发布或下架事务更新。历史迁移脚本的 checksum 一旦被篡改，服务将拒绝启动。
 
 关键不变式包括：`(plugin_id, archive_sha256)` 幂等、已发布 `(plugin_id, normalized_version)` 唯一、隔离与发布对象 key 唯一、人工决策与任务 `idempotency_key` 唯一。发布事务提交前会再次锁定插件与 artifact 记录，并校验仓库版本与 CDN 开关。
 
 ### Redis
 
-仅在 `PgRedisMarketStore` 中使用，存储两类带 TTL 的短期数据：
+仅在 `PgRedisMarketStore` 中使用，承担短期缓存与限流状态（会话主存储位于 PostgreSQL `market_user_sessions`，Redis 不可用时不影响会话鉴权与登录）：
 
-- **登录会话**：Key 为 `astrbot_market:session:{token}`，Value 为 JSON 序列化的 `{token, user_id, created_at, last_seen_at}`；TTL 由 `SESSION_MAX_AGE_SECONDS` 控制（默认 7 天），读取时自动续期。
-- **加密短期 GitHub OAuth 授权缓存**：用于加速仓库管理权限校验，使用独立部署环境变量 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生的 Fernet 密钥加密（不再回退 `GITHUB_CLIENT_SECRET`），TTL 不超过 8 小时，注销或会话失效时同步删除；缓存缺失或过期时回退读取 `market_oauth_credentials` 中以同一独立主密钥加密保存的多平台（含 GitHub）持久化 OAuth 凭据，仅在解绑或上游返回 `401` 时撤销。
+- **加密短期 GitHub OAuth 授权缓存**：用于加速仓库管理权限校验，使用独立部署环境变量 `OAUTH_CREDENTIAL_KEY` 经 HKDF-SHA256 派生的 Fernet 密钥加密（不再回退 `GITHUB_CLIENT_SECRET`），TTL 不超过 8 小时，注销或会话失效时尽力同步删除；缓存缺失或过期时回退读取 `market_oauth_credentials` 中以同一独立主密钥加密保存的多平台（含 GitHub）持久化 OAuth 凭据，仅在解绑或上游返回 `401` 时撤销。
+- **验证码挑战与限流配额**：保存邮箱验证码挑战、重发冷却、每日邮件配额与接口速率限制窗口。
+- **旧版会话一次性迁移**：升级前遗留的明文 Redis 会话键（`astrbot_market:session:{token}`）在首次校验通过时自动迁入 PostgreSQL `market_user_sessions` 并立即删除旧键。
 
 ### 本地单文件与内存存储
 
@@ -272,7 +273,7 @@ create_app(settings, store)
 2. **多平台 OAuth**：支持 `GitHub`（`/v1/auth/github/login`）以及 `GitLab.com`、`Gitee`、`AtomGit / GitCode` 与 `Gitea (gitea.com)`（`/v1/auth/oauth/{provider}/login`）。游客可直接登录/注册，已登录用户则非破坏性绑定到 `market_oauth_identities` 并升级为开发者；仅当 GitHub 用户属于 `GITHUB_ADMIN_ORG` 且当前非管理员时自动提权为 `admin`。启用任意 OAuth 平台均要求配置独立主加密密钥 `OAUTH_CREDENTIAL_KEY`。
 3. **开发调试**：仅当 `ENABLE_DEV_AUTH=true` 时开放 `/v1/auth/debug-login`，通过 `X-Dev-GitHub-Login` 请求头快速模拟登录，生产环境必须关闭。
 
-会话基于 `HttpOnly` Cookie（`astrbot_market_session`，非 JWT），Token 格式为 `sess_{token_urlsafe(24)}`，可在服务端即时吊销。详细安全机制见 [security.md](security.md)。
+会话基于 `HttpOnly` Cookie（`astrbot_market_session`，非 JWT），Token 格式为 `sess_{token_urlsafe(24)}`；服务端仅存储 SHA-256 哈希，支持普通会话（默认 7 天）与信任设备（默认 365 天）固定绝对有效期，并可通过 `/v1/me/sessions*` 实时查看和吊销单个或其他全部设备。详细安全机制见 [security.md](security.md)。
 
 ## 关键机制
 

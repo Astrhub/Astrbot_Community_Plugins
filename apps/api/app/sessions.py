@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from .config import Settings
 
@@ -20,11 +21,53 @@ def hash_session_token(token: str) -> str:
 
 def session_ttl_for(settings: Settings, *, trusted: bool) -> int:
     """Return the fixed session lifetime in seconds for regular or trusted devices."""
-    base_ttl = max(1, int(settings.session_max_age_seconds))
-    if not trusted:
-        return base_ttl
-    trusted_ttl = max(1, int(settings.trusted_session_max_age_seconds))
-    return max(base_ttl, trusted_ttl)
+    if trusted:
+        return max(1, int(settings.trusted_session_max_age_seconds))
+    return max(1, int(settings.session_max_age_seconds))
+
+
+def trusted_request_origins(settings: Settings) -> set[str]:
+    """Return normalized scheme+host origins trusted for cookie-authenticated mutations."""
+    origins: set[str] = set()
+    for candidate in (settings.web_url, *settings.cors_origins):
+        parsed = urlsplit(str(candidate or "").strip())
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            origins.add(f"{parsed.scheme}://{parsed.netloc}".lower())
+    return origins
+
+
+def verify_trusted_mutation_origin(request: Request, settings: Settings) -> None:
+    """Reject cross-site browser requests on cookie-authenticated session mutations."""
+    allowed = trusted_request_origins(settings)
+    origin = request.headers.get("origin")
+    if origin is not None:
+        if origin.strip().lower() not in allowed:
+            raise HTTPException(
+                403,
+                {"code": "untrusted_origin", "error": "请求来源不受信任"},
+            )
+        return
+
+    sec_fetch_site = str(request.headers.get("sec-fetch-site") or "").strip().lower()
+    if sec_fetch_site == "cross-site":
+        raise HTTPException(
+            403,
+            {"code": "untrusted_origin", "error": "请求来源不受信任"},
+        )
+
+    referer = str(request.headers.get("referer") or "").strip()
+    if referer:
+        parsed = urlsplit(referer)
+        referer_origin = (
+            f"{parsed.scheme}://{parsed.netloc}".lower()
+            if parsed.scheme in {"http", "https"} and parsed.netloc
+            else ""
+        )
+        if referer_origin not in allowed:
+            raise HTTPException(
+                403,
+                {"code": "untrusted_origin", "error": "请求来源不受信任"},
+            )
 
 
 def extract_request_client_ip(request: Request) -> str:
